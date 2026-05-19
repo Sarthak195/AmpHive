@@ -1,0 +1,49 @@
+# Context Files (Local prototype references)
+/chargehub_context/
+
+# Environments
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Dependency directories
+node_modules/
+jspm_packages/
+venv/
+.venv/
+env/
+.env/
+
+# Build outputs
+dist/
+build/
+out/
+.next/
+
+# IDEs and Editors
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+.DS_Store
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pip-log.txt
+*.log
+
+# Docker
+.dockerignore
+docker-compose.override.yml
+
+# Databases
+*.db
+*.sqlite
+pgdata/
