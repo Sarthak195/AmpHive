@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: amphive
+  labels:
+    app: backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      containers:
+        - name: backend
+          image: sarthak195/amphive-backend:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: DATABASE_URL
+              value: "postgresql+asyncpg://postgres:postgres@db.amphive.svc.cluster.local:5432/amphive"
+            - name: MQTT_BROKER_HOST
+              value: "mqtt.amphive.svc.cluster.local"
+            - name: MQTT_BROKER_PORT
+              value: "1883"
+          ports:
+            - containerPort: 8000
+              name: api
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend-service
+  namespace: amphive
+spec:
+  ports:
+    - port: 8000
+      targetPort: 8000
+      name: api
+  selector:
+    app: backend
