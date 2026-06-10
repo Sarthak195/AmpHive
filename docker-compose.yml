@@ -1,50 +1,64 @@
-version: '3.8'
+# =============================================================================
+# AmpHive — Local Development Shortcut
+#
+# This is a convenience wrapper so `docker compose up` works from the project root.
+# It mirrors the dev compose at deploy/docker/docker-compose.dev.yml.
+#
+# For production deployment, see: deploy/docker/docker-compose.prod.yml
+# For the deploy script, see:     deploy/scripts/deploy.ps1
+# =============================================================================
+version: '3.7'
 
 services:
   db:
     image: postgres:15-alpine
-    container_name: amphive-db
-    restart: always
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: amphive
+    container_name: amphive-db-dev
+    restart: unless-stopped
     ports:
       - "5432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: amphive_dev
+      POSTGRES_DB: amphive
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - pg_dev_data:/var/lib/postgresql/data
 
   mqtt:
     image: eclipse-mosquitto:2.0
-    container_name: amphive-mqtt
-    restart: always
+    container_name: amphive-mqtt-dev
+    restart: unless-stopped
     ports:
       - "1883:1883"
       - "9001:9001"
     volumes:
-      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf
-      - mosquitto_data:/mosquitto/data
-      - mosquitto_log:/mosquitto/log
-    depends_on:
-      - db
+      - ./deploy/config/mosquitto.conf:/mosquitto/config/mosquitto.conf
 
   backend:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    container_name: amphive-backend
-    restart: always
+    container_name: amphive-backend-dev
+    restart: unless-stopped
     ports:
       - "8000:8000"
     environment:
-      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/amphive
+      - DATABASE_URL=postgresql+asyncpg://postgres:amphive_dev@db:5432/amphive
       - MQTT_BROKER_HOST=mqtt
       - MQTT_BROKER_PORT=1883
     depends_on:
       - db
       - mqtt
 
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: amphive-frontend-dev
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+
 volumes:
-  postgres_data:
-  mosquitto_data:
-  mosquitto_log:
+  pg_dev_data:

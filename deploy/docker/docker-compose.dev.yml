@@ -1,0 +1,59 @@
+# =============================================================================
+# AmpHive Local Development Docker Compose
+# Run from the project root:  docker compose -f deploy/docker/docker-compose.dev.yml up --build
+# =============================================================================
+version: '3.7'
+
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: amphive-db-dev
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: amphive_dev
+      POSTGRES_DB: amphive
+    volumes:
+      - pg_dev_data:/var/lib/postgresql/data
+
+  mqtt:
+    image: eclipse-mosquitto:2.0
+    container_name: amphive-mqtt-dev
+    restart: unless-stopped
+    ports:
+      - "1883:1883"
+      - "9001:9001"
+    volumes:
+      - ../../mosquitto.conf:/mosquitto/config/mosquitto.conf
+
+  backend:
+    build:
+      context: ../../backend
+      dockerfile: Dockerfile
+    container_name: amphive-backend-dev
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:amphive_dev@db:5432/amphive
+      - MQTT_BROKER_HOST=mqtt
+      - MQTT_BROKER_PORT=1883
+    depends_on:
+      - db
+      - mqtt
+
+  frontend:
+    build:
+      context: ../../frontend
+      dockerfile: Dockerfile
+    container_name: amphive-frontend-dev
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+
+volumes:
+  pg_dev_data:

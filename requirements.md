@@ -83,6 +83,19 @@ Data security is implemented at two distinct layers: the **Local Physical Networ
 ### 3.1. Local Site Isolation: VLAN Segmentation (Physical Security)
 Charging Point Operators (CPOs) install smart plugs and gateways on a dedicated physical network segment to prevent lateral movement to private corporate or residential devices.
 
+### Plug Availability Options
+
+- **Publicly Available Plugs** – Plugs that can be discovered and used by any registered user. Their location is shown on a map and they are listed in the marketplace.
+
+- **Private Plugs** – Restricted to specific groups:
+  - *Personal*: Owned by an individual user.
+  - *Society*: Shared within a residential society or community.
+  - *Office*: Limited to a corporate office environment.
+
+> **Note:** No QR code scanning is required. Users simply enter the printed Plug ID into the mobile app or web portal to start a charging session.
+
+> **Mapping:** Operators can upload photos of the plug installation and its exact address. The app displays the plug location using **OpenStreetMap**, allowing users to navigate to the site with visual instructions.
+
 ```
                   ┌──────────────────────┐
                   │  CPO Internet Router │
@@ -96,6 +109,16 @@ Charging Point Operators (CPOs) install smart plugs and gateways on a dedicated 
   └───────────────────┘             └───────────────────┘
             │                                 │
             └── [ Firewall Blocks Traffic ] ◄─┘
+```
+
+### Operator Account Types
+
+- **Super Admin** – Full read/write access to all CPOs, plug inventories, and system configurations.
+- **CPO Admin** – Manage plugs, users, and billing within their own organization. Can create, edit, and deactivate private plug groups (Personal, Society, Office).
+- **Operator** – Limited to viewing plug status and performing start/stop actions. Cannot modify configurations.
+- **Viewer** – Read‑only access to dashboards and analytics.
+
+> Operators can easily switch between account types via the web portal settings, enabling rapid updates to permissions without code changes.
 ```
 
 #### Local VLAN Rules
@@ -147,7 +170,26 @@ Once the ESP32 gateway connects to the Headscale VPN, it receives a virtual priv
 
 ## 4. Architectural Suggestions & Refinements
 
-To ensure AmpHive is a robust, reliable, and commercially viable platform, the following design improvements are highly recommended:
+To ensure AmpHive is a robust, reliable, and commercially viable platform, the following design improvements are highly recommended (excluding third‑party integrations & AI):
+
+- **Push / SMS notifications** for session start‑stop, low‑balance alerts, and fault conditions.
+- **QR‑free plug lookup** within the app (search by Plug ID, map view, autocomplete).
+- **Responsive mobile‑first UI** built with **React + Vite**, featuring dark‑mode and theming.
+- **Real‑time energy dashboards** using **Grafana + TimescaleDB**.
+- **Historical usage reports** with CSV/Excel export.
+- **Dynamic pricing** (time‑of‑day / zone‑based rates) and **load‑balancing throttling**.
+- **Expanded payment gateways** (Adyen, PayPal, local UPI) and automated invoicing.
+- **Role‑Based Access Control (RBAC)** UI for flexible permission management.
+- **Audit log service** stored in Cloud Logging for compliance.
+- **Over‑the‑air firmware updates** for ESP32 gateways and Wi‑Fi onboarding captive portal.
+- **Support for additional plug models** (Shelly, Sonoff, etc.).
+- **OpenStreetMap integration** with photo uploads, plug clustering, and “find nearest plug” API.
+- **Geofencing alerts** when a vehicle enters/exits a plug zone.
+- **Bulk plug provisioning** via CSV upload.
+- **Automated health checks** for VPN, MQTT, and database with Slack/Email alerts.
+- **SLA dashboard** (uptime, latency, error rates).
+- **Self‑service CI/CD pipeline** (GitHub Actions → Cloud Build) and versioned runbooks.
+- **Feature‑flag framework** for safe rollout of new capabilities.
 
 ### Suggestion A: MQTT Bidirectional Messaging (Instead of HTTP over VPN)
 Exposing an HTTP Web Server directly on the ESP32 (as seen in some basic setups) consumes significant RAM and makes the firmware vulnerable to request-overflow crashes.
