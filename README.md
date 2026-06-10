@@ -165,7 +165,6 @@ This script waits for Cloud SQL, generates `.env` with the DB IP, SCPs files to 
 * [deploy_guide.md](deploy/docs/deploy_guide.md) — Cloud hosting & VPN networking guide
 * [deployment_checklist.md](deploy/docs/deployment_checklist.md) — Step-by-step site deployment checklist
 * [gcp_migration_runbook.md](deploy/docs/gcp_migration_runbook.md) — Full log of AWS→GCP migration and India region migration
-* [ec2_deployment_runbook.md](deploy/docs/ec2_deployment_runbook.md) — Historical AWS EC2 setup log
 
 ---
 
@@ -213,21 +212,7 @@ cd AmpHive
 git submodule update --init --recursive
 ```
 
-### Step 2: Restore and Secure the EC2 Private Key
-1. Securely copy the private key `AmpHive EC2.pem` from your old device or backups and place it in the root folder of this project.
-2. **Restrict Key Permissions (Required for OpenSSH):**
-   * **On Windows (PowerShell):** Open SSH requires tight key permissions to work. Run these commands to restrict access only to your Windows user:
-     ```powershell
-     icacls.exe ".\AmpHive EC2.pem" /reset
-     icacls.exe ".\AmpHive EC2.pem" /grant:r "$($env:USERNAME):(R)"
-     icacls.exe ".\AmpHive EC2.pem" /inheritance:r
-     ```
-   * **On Linux / macOS:** Run:
-     ```bash
-     chmod 400 "AmpHive EC2.pem"
-     ```
-
-### Step 3: Setup Local Python Virtual Environment
+### Step 2: Setup Local Python Virtual Environment
 Initialize a local environment for backend script editing and testing:
 ```bash
 # Create the virtual environment

@@ -23,9 +23,6 @@ MQTT_BROKER_PORT=1883
 ```
 *Note: The database URL points directly to the live production Cloud SQL instance. Keep this secure.*
 
-### 1.2. AWS EC2 Private PEM Key (`AmpHive EC2.pem`)
-If you still need access to historical AWS servers, copy `AmpHive EC2.pem` to the root folder. *Note: GCP Compute Engine connections are handled automatically via Google Cloud SDK keys, so this PEM key is not needed for current production deployments.*
-
 ---
 
 ## 2. Setting Up the Local Codebase & Submodules

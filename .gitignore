@@ -47,6 +47,3 @@ docker-compose.override.yml
 *.db
 *.sqlite
 pgdata/
-
-#AWS EC2 instance pem key
-*.pem

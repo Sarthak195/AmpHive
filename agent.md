@@ -73,7 +73,6 @@ AmpHive is a shared EV charging PaaS connecting 3rd-party smart plugs to a centr
   * `/deploy/config/.env.template`: Environment variable template.
   * `/deploy/docs/new_device_setup.md`: Setup instructions for configuring developer tools and code on a new workstation.
   * `/deploy/docs/deploy_guide.md`: Public cloud hosting, dynamic DNS, and VPN network setup manual.
-  * `/deploy/docs/ec2_deployment_runbook.md`: Historical command log of the old AWS EC2 K3s setup.
   * `/deploy/docs/deployment_checklist.md`: Step-by-step physical deployment guide.
   * `/deploy/docs/gcp_migration_runbook.md`: Full log of AWS→GCP migration and India region migration commands.
   * `/deploy/k8s/`: Kubernetes manifests (namespace, postgres, mosquitto, headscale, backend).
@@ -158,8 +157,7 @@ For detailed technical specifications, integration paths, and step-by-step instr
 
 When editing code or performing deployments in this repository:
 1. **⛔ NEVER Deploy or Test on the Local Machine:** This Windows machine is a **development workstation only**. Do NOT run `docker compose up`, `deploy.ps1`, database migrations, or any deployment/testing commands locally. All deployment and testing must be performed on the **remote GCP VM** (`amphive-vm-in`) via `gcloud compute ssh` or the deploy script. If you need to verify something, SSH into the VM — never spin up containers or services on this machine.
-2. **Do Not Stage the PEM Key:** Ensure `AmpHive EC2.pem` is never added to Git commits.
-3. **Docker Image Updates:** When updating the backend or frontend code:
+2. **Docker Image Updates:** When updating the backend or frontend code:
    * Run `deploy/scripts/deploy.ps1` which handles uploading and rebuilding containers directly on the GCP VM.
 4. **Headscale Config Changes:** Any changes to Headscale configurations must satisfy validation parameters for both the nested `noise.private_key_path` and `dns.nameservers` blocks.
 5. **VLAN and Thread Safety on ESP32:** Keep the ESP32 stack tasks separated. The `microlink` VPN task requires a large stack size (32KB) and should be allocated in external PSRAM using the appropriate Spiram settings to avoid internal DRAM crashes.

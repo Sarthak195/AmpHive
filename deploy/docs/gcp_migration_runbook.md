@@ -186,6 +186,5 @@ Later in the same session, the deployment files were reorganized from a flat roo
 | _(new)_ | `deploy/docker/docker-compose.dev.yml` (local dev with Postgres) |
 | `deploy/deploy_guide.md` | `deploy/docs/deploy_guide.md` |
 | `deploy/deployment_checklist.md` | `deploy/docs/deployment_checklist.md` |
-| `deploy/ec2_deployment_runbook.md` | `deploy/docs/ec2_deployment_runbook.md` |
 
 The root `docker-compose.yml` was converted into a local development convenience file that includes a local Postgres container and references configs from `deploy/config/`.
