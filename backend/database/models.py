@@ -73,7 +73,7 @@ class User(Base):
     email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
     hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
     full_name: Mapped[str] = mapped_column(String(150), nullable=False)
-    role: Mapped[UserRole] = mapped_column(SQLEnum(UserRole), default=UserRole.DRIVER, nullable=False)
+    role: Mapped[UserRole] = mapped_column(SQLEnum(UserRole, name="user_role", values_callable=lambda x: [e.value for e in x]), default=UserRole.DRIVER, nullable=False)
     coin_balance: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
 
@@ -92,7 +92,7 @@ class Gateway(Base):
     tenant_id: Mapped[int] = mapped_column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     vpn_ip: Mapped[str] = mapped_column(String(45), unique=True, nullable=False)
-    status: Mapped[GatewayStatus] = mapped_column(SQLEnum(GatewayStatus), default=GatewayStatus.OFFLINE, nullable=False)
+    status: Mapped[GatewayStatus] = mapped_column(SQLEnum(GatewayStatus, name="gateway_status", values_callable=lambda x: [e.value for e in x]), default=GatewayStatus.OFFLINE, nullable=False)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), onupdate=datetime.now, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
 
@@ -109,7 +109,7 @@ class Plug(Base):
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     local_ip: Mapped[str] = mapped_column(String(45), nullable=False) # VLAN 20 IP
     plug_model: Mapped[str] = mapped_column(String(50), default="tapo_p110", nullable=False)
-    status: Mapped[PlugStatus] = mapped_column(SQLEnum(PlugStatus), default=PlugStatus.OFFLINE, nullable=False)
+    status: Mapped[PlugStatus] = mapped_column(SQLEnum(PlugStatus, name="plug_status", values_callable=lambda x: [e.value for e in x]), default=PlugStatus.OFFLINE, nullable=False)
     current_power_w: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
@@ -135,7 +135,7 @@ class ChargingSession(Base):
     energy_kwh: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     peak_power_w: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     coins_spent: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
-    status: Mapped[SessionStatus] = mapped_column(SQLEnum(SessionStatus), default=SessionStatus.ACTIVE, nullable=False)
+    status: Mapped[SessionStatus] = mapped_column(SQLEnum(SessionStatus, name="session_status", values_callable=lambda x: [e.value for e in x]), default=SessionStatus.ACTIVE, nullable=False)
 
     # Relationships
     tenant: Mapped[Tenant] = relationship("Tenant", back_populates="sessions")
@@ -151,7 +151,7 @@ class LedgerTransaction(Base):
     user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     session_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("charging_sessions.id", ondelete="SET NULL"), nullable=True)
     amount: Mapped[float] = mapped_column(Float, nullable=False) # positive (topup), negative (debit)
-    transaction_type: Mapped[TransactionType] = mapped_column(SQLEnum(TransactionType), nullable=False)
+    transaction_type: Mapped[TransactionType] = mapped_column(SQLEnum(TransactionType, name="tx_type", values_callable=lambda x: [e.value for e in x]), nullable=False)
     description: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     balance_after: Mapped[float] = mapped_column(Float, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)

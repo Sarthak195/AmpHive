@@ -9,6 +9,7 @@ pydantic>=2.0.0
 python-jose[cryptography]>=3.3.0
 # Password hashing (bcrypt) — industry standard for user credential storage
 passlib[bcrypt]>=1.7.4
+bcrypt==4.0.1
 # Load .env files for local development (DATABASE_URL, JWT_SECRET_KEY, etc.)
 python-dotenv>=1.0.0
 # Razorpay payment gateway SDK for India (UPI, cards, wallets, net banking)

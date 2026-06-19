@@ -73,7 +73,7 @@ const TopUp = () => {
 
       // Step 2: Open Razorpay Checkout modal
       const razorpayOptions = {
-        key: RAZORPAY_KEY_ID,
+        key: orderData.key_id,
         amount: orderData.amount,         // Amount in paise (from backend)
         currency: orderData.currency,     // "INR"
         order_id: orderData.order_id,     // Razorpay order ID
