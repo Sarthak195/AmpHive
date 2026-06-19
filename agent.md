@@ -137,13 +137,13 @@ For detailed technical specifications, integration paths, and step-by-step instr
 - **Docker Compose Cloud Stack:** Distributed multi-container production stack fully deployed and verified on the GCP Compute Engine VM.
 
 ### [ ] Phase 2: Frontend & Driver Interfaces (REMAINING)
-- **Prepaid Driver Wallet Application:** Web or mobile interface allowing drivers to check wallet balance, top up credits via payment gateway, and scan QR codes on charging bays to start/stop sessions.
-- **CPO Administration Dashboard:** Property management portal to register new gateways, pair smart plugs, define custom utility rates (per minute/kWh), and review carbon credits and revenue streams.
+- **Prepaid Driver Wallet Application:** Web or mobile interface allowing drivers to check wallet balance, top up credits via Razorpay (UPI, cards, wallets), and enter Plug IDs on charging bays to start/stop sessions. Supports public chargers (open to all) and private groups (gated by access code).
+- **CPO Administration Dashboard:** Property management portal to register new gateways, pair smart plugs, define custom utility rates (per minute/kWh), manage private charger groups (generate access codes), and review carbon credits and revenue streams.
 - **Visual Charging Analytics:** Real-time charging speed and historical energy telemetry graphs rendering inside the dashboard (leveraging TimescaleDB/Clickhouse).
 
 ### [ ] Phase 3: Financial & Third-Party Integrations (REMAINING)
-- **Stripe / Adyen Top-Ups:** Secure credit card billing hookups.
-- **Stripe Webhooks Handler:** Backend listener to credit the user's `coin_balance` automatically upon checkout success.
+- **Razorpay Top-Ups:** UPI, cards, wallets, and net banking via Razorpay (India-compatible gateway, no business entity needed for test/MVP mode).
+- **Razorpay Webhooks Handler:** Backend listener to credit the user's `coin_balance` automatically upon `payment.captured` event, with HMAC SHA256 signature verification.
 - **Virtual Ledger Audits:** Logging all database credits/debits to `ledger_transactions` with double-entry security validation.
 
 ### [ ] Phase 4: Hardware & Optimization Scaling (REMAINING)

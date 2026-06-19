@@ -8,7 +8,7 @@ AmpHive is an enterprise-grade Software-as-a-Service (SaaS) and Platform-as-a-Se
 
 The AmpHive platform consists of four core components:
 1. **Central API Server:** A FastAPI application orchestrating user wallets, charging session states, database transactions, and client-gateway message routing.
-2. **Driver Web App:** A React + Vite single-page application providing EV drivers with a QR-code-driven interface to start/stop charging, monitor live sessions, and manage prepaid wallets.
+2. **Driver Web App:** A React + Vite single-page application providing EV drivers with a Plug-ID-driven interface to start/stop charging, monitor live sessions, manage prepaid wallets, and join private charger groups via access codes.
 3. **Overlay VPN Plane:** A self-hosted Headscale control server that configures secure, encrypted WireGuard overlay tunnels between the server and the gateways, bypassing local firewalls/CGNATs completely.
 4. **ESP32 Edge Gateway:** A microcontroller gateway deployed at the charging site that connects to the private VPN, receives MQTT commands, and controls/polls local smart plugs over a dedicated physical VLAN.
 
@@ -101,9 +101,9 @@ AmpHive/
 * **Lifespan-Managed MQTT Client:** Async context manager ensuring clean broker connect/disconnect on server start/stop.
 
 ### Frontend (React + Vite)
-* **QR-Code Landing Page (`/`):** Drivers scan a QR code on the charging outlet to land on the app with their plug pre-selected.
+* **Plug ID Landing Page (`/`):** Drivers enter the Plug ID (printed on the charging outlet) to start a session. Supports public chargers and access-code-gated private groups.
 * **Live Session Monitor (`/session`):** Real-time telemetry display (charging power, current, duration, energy consumed, cost).
-* **Wallet Top-Up (`/topup`):** Prepaid coin balance management and top-up interface.
+* **Wallet Top-Up (`/topup`):** Prepaid coin balance management and top-up interface (Razorpay: UPI, cards, wallets, net banking).
 * **Context-Based State Management:** `AuthContext`, `SessionContext`, and `WalletContext` providers for global state.
 * **Glassmorphic Dark Theme:** Modern, mobile-responsive UI with frosted-glass aesthetics.
 
@@ -254,5 +254,5 @@ To modify or flash the ESP32 gateway firmware, install the **ESP-IDF** extension
 ## 10. References & Specifications
 
 * **Product Requirements Document:** See [requirements.md](requirements.md) for functional/non-functional requirements, data security frameworks, and CPO-level security designs.
-* **Features Roadmap:** See [features_list.md](features_list.md) for the detailed implementation catalog covering Stripe billing, CPO admin portal, captive portal WiFi provisioning, OTA firmware updates, and dynamic load balancing.
+* **Features Roadmap:** See [features_list.md](features_list.md) for the detailed implementation catalog covering Razorpay billing, CPO admin portal, captive portal WiFi provisioning, OTA firmware updates, and dynamic load balancing.
 * **Firmware Source:** View [main.c](firmware/main/main.c) to inspect how the ESP32 manages WiFi, connects to the Headscale VPN task, receives broker commands, and runs local session watchdog fail-safes.

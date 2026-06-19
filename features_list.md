@@ -9,13 +9,17 @@ This catalog contains the specifications, workflows, and implementation details 
 ### 1.1. Prepaid Driver Wallet Web Application (End-User App)
 * **Goal:** A mobile-responsive web app (React or Next.js) for EV drivers to top up wallets, start/stop charging, and check session progress.
 * **Key Workflows:**
-  * **QR Code Scan Landing Page:** User scans a QR code label on the charging outlet (`amphive.com/charge?plug_id=X`). The app parses `plug_id`, checks if the user is authenticated, and checks their wallet balance.
+  * **Plug ID Entry Page:** User enters the Plug ID (printed on the physical plug label) into the app. The app resolves the plug, checks if the user is authenticated, verifies group access (if private), and checks their wallet balance.
+  * **Charger Access Model:**
+    * **Public Chargers:** Visible and usable by any registered user. Users enter the Plug ID directly to start a session.
+    * **Private Groups:** CPOs create named groups (e.g., "Sunrise Apartments", "TechPark Office") and generate an **access code**. Users enter this code in the app to join the group and unlock its chargers. Once joined, the group's plugs appear in the user's dashboard.
   * **Interactive Session Monitor:** Displays real-time charging telemetry: active charging speed (kW), current drawn (Amps), elapsed duration, energy added (kWh), and the real-time cost debited from their balance.
-  * **Wallet Top-Up Screen:** Displays their current coin balance. Exposes a Stripe/Apple Pay/Google Pay payment checkout interface to purchase additional virtual coins.
+  * **Wallet Top-Up Screen:** Displays their current coin balance. Exposes a Razorpay payment checkout interface (supporting UPI, cards, wallets, and net banking) to purchase additional virtual coins.
 * **Implementation Steps:**
   1. Build a responsive, dark-mode glassmorphic frontend utilizing React + Vite.
   2. Implement state management using React Context (`AuthContext` and `SessionContext`).
   3. Integrate SSE (Server-Sent Events) or WebSockets connecting to the backend API (`/api/sessions/live`) for real-time telemetry updates.
+  4. Build group management UI: join group via access code, view joined groups, browse group plugs.
 
 ### 1.2. Charging Point Operator (CPO) Administrative Portal
 * **Goal:** A Next.js web dashboard for property managers and operators to configure their locations and manage assets.
@@ -34,19 +38,22 @@ This catalog contains the specifications, workflows, and implementation details 
 
 ---
 
-## Feature Category 2: Financial & Stripe Billing Integrations
+## Feature Category 2: Financial & Razorpay Billing Integrations
 
-### 2.1. Stripe Checkout Integration
-* **Goal:** Implement credit card payments to buy virtual coins.
+### 2.1. Razorpay Checkout Integration
+* **Goal:** Implement payments via UPI, cards, wallets, and net banking to buy virtual coins. Razorpay is used as the payment gateway since it is fully supported in India without requiring a registered business entity for test/MVP mode.
 * **Key Workflows:**
-  * **Checkout Session Creation:** The driver requests a top-up (e.g., "$10 for 100 coins"). The backend calls Stripe's API to create a `CheckoutSession` and returns the payment URL.
-  * **Secure Webhook Handler:** A backend endpoint (`/api/payments/webhook`) receiving Stripe event signals.
-  * **Automated Ledger Credits:** When Stripe reports `checkout.session.completed`, the webhook parses the user ID and credit amount, updates `users.coin_balance` in a thread-safe database transaction, and inserts an audit log into `ledger_transactions`.
+  * **Order Creation:** The driver requests a top-up (e.g., "₹100 for 100 coins"). The backend calls Razorpay's Orders API to create an `order` and returns the `order_id` to the frontend.
+  * **Client-Side Checkout:** The frontend opens the Razorpay Checkout modal (JS SDK) with the `order_id`. The user pays via UPI, card, wallet, or net banking.
+  * **Secure Webhook Handler:** A backend endpoint (`/api/payments/webhook`) receiving Razorpay webhook event signals (e.g., `payment.captured`).
+  * **Payment Verification:** The backend verifies the payment signature using the Razorpay Key Secret (HMAC SHA256) to ensure authenticity.
+  * **Automated Ledger Credits:** Upon verified `payment.captured`, the webhook parses the user ID and credit amount, updates `users.coin_balance` in a thread-safe database transaction, and inserts an audit log into `ledger_transactions`.
 * **Implementation Steps:**
-  1. Install `stripe` Python SDK in `backend/requirements.txt`.
-  2. Implement `/api/payments/checkout` generating Stripe session URLs.
-  3. Implement the webhook receiver verifying signatures using your Stripe Webhook Secret.
-  4. Build database lock validations to prevent coin duplication or race conditions.
+  1. Install `razorpay` Python SDK in `backend/requirements.txt`.
+  2. Implement `/api/payments/create-order` generating Razorpay order IDs.
+  3. Integrate the Razorpay Checkout JS SDK in the frontend top-up page.
+  4. Implement the webhook receiver verifying signatures using the Razorpay Webhook Secret.
+  5. Build database lock validations to prevent coin duplication or race conditions.
 
 ---
 
