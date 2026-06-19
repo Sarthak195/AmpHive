@@ -1,59 +1,206 @@
-import React, { useState } from 'react';
+/**
+ * AmpHive Home Page
+ * =================
+ * Dashboard showing wallet balance, plug ID entry, and available charger list.
+ * Replaces the Phase 1 QR code flow with Plug ID entry + group-based access.
+ */
+
+import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import WalletCard from '../components/WalletCard';
 import { useAuth } from '../contexts/AuthContext';
 import { useSession } from '../contexts/SessionContext';
+import api from '../api/client';
 
 const Home = () => {
   const { user } = useAuth();
-  const { startSession } = useSession();
+  const { startSession, error: sessionError } = useSession();
   const navigate = useNavigate();
-  const [plugId, setPlugId] = useState('');
 
-  const handleStartSession = (e) => {
-    e.preventDefault();
-    if (!plugId.trim()) return;
-    
-    // Simulate scanning a QR code and redirecting to the session page
-    startSession(plugId);
-    navigate('/session');
+  const [plugId, setPlugId] = useState('');
+  const [plugs, setPlugs] = useState([]);
+  const [loadingPlugs, setLoadingPlugs] = useState(false);
+  const [startError, setStartError] = useState('');
+  const [starting, setStarting] = useState(false);
+
+  // Fetch available plugs when user is logged in
+  useEffect(() => {
+    if (!user) return;
+    fetchPlugs();
+  }, [user]);
+
+  const fetchPlugs = async () => {
+    setLoadingPlugs(true);
+    try {
+      const data = await api.get('/api/plugs/available');
+      setPlugs(data);
+    } catch (err) {
+      console.error('Failed to fetch plugs:', err);
+    } finally {
+      setLoadingPlugs(false);
+    }
+  };
+
+  const handleStartSession = async (e, targetPlugId = null) => {
+    if (e) e.preventDefault();
+    const pid = targetPlugId || plugId.trim();
+    if (!pid) return;
+
+    setStartError('');
+    setStarting(true);
+
+    try {
+      await startSession(pid);
+      navigate('/session');
+    } catch (err) {
+      setStartError(err.message);
+    } finally {
+      setStarting(false);
+    }
+  };
+
+  // Status badge color mapping
+  const statusColor = (status) => {
+    switch (status) {
+      case 'available': return 'badge-success';
+      case 'occupied': return 'badge-warning';
+      case 'offline': return 'badge-danger';
+      default: return 'badge-primary';
+    }
   };
 
   return (
-    <div className="container flex flex-col gap-6" style={{ maxWidth: '600px', marginTop: '2rem' }}>
-      <header style={{ textAlign: 'center', marginBottom: '2rem' }}>
-        <h1 style={{ color: 'var(--color-primary)', fontSize: '2.5rem', marginBottom: '0.5rem' }}>AmpHive</h1>
-        <p style={{ fontSize: '1.2rem', color: 'var(--color-text-secondary)' }}>Shared EV Charging Network</p>
+    <div className="page-container animate-fade-in">
+      {/* Header */}
+      <header className="text-center" style={{ marginBottom: '2rem' }}>
+        <h1 style={{ color: 'var(--color-primary)', fontSize: '2.2rem', marginBottom: '0.25rem' }}>
+          ⚡ AmpHive
+        </h1>
+        <p style={{ fontSize: '1.05rem' }}>Shared EV Charging Network</p>
       </header>
 
-      <WalletCard />
+      {/* Wallet Card */}
+      <div style={{ marginBottom: '1.5rem' }}>
+        <WalletCard />
+      </div>
 
+      {/* Start Charging Section */}
       {user && (
-        <div className="glass glass-panel flex flex-col gap-4">
-          <h3>Start Charging</h3>
-          <p>Scan a QR code or enter a Plug ID to begin.</p>
-          
-          <form onSubmit={handleStartSession} className="flex gap-4">
-            <input 
-              type="text" 
-              placeholder="Enter Plug ID (e.g. plug_1)" 
+        <div className="glass glass-panel animate-slide-up" style={{ marginBottom: '1.5rem' }}>
+          <h3 style={{ marginBottom: '0.25rem' }}>Start Charging</h3>
+          <p style={{ marginBottom: '1.25rem', fontSize: '0.9rem' }}>
+            Enter a Plug ID to begin charging your vehicle.
+          </p>
+
+          <form onSubmit={handleStartSession} className="flex gap-3">
+            <input
+              type="text"
+              className="input"
+              placeholder="Enter Plug ID (e.g. 1)"
               value={plugId}
               onChange={(e) => setPlugId(e.target.value)}
-              style={{
-                flex: 1,
-                padding: '0.75rem 1rem',
-                borderRadius: 'var(--radius-md)',
-                border: '1px solid var(--color-surface-border)',
-                background: 'hsla(220, 20%, 10%, 0.5)',
-                color: 'white',
-                fontSize: '1rem',
-                outline: 'none'
-              }}
+              style={{ flex: 1 }}
             />
-            <button type="submit" className="btn btn-accent" disabled={!plugId.trim()}>
-              Start
+            <button
+              type="submit"
+              className="btn btn-accent"
+              disabled={!plugId.trim() || starting}
+            >
+              {starting ? '...' : 'Start'}
             </button>
           </form>
+
+          {(startError || sessionError) && (
+            <div className="error-text mt-2">{startError || sessionError}</div>
+          )}
+        </div>
+      )}
+
+      {/* Available Chargers */}
+      {user && (
+        <div className="animate-slide-up" style={{ animationDelay: '0.15s' }}>
+          <div className="flex justify-between items-center" style={{ marginBottom: '1rem' }}>
+            <h3 style={{ margin: 0 }}>Available Chargers</h3>
+            <button className="btn btn-ghost btn-sm" onClick={fetchPlugs}>
+              Refresh
+            </button>
+          </div>
+
+          {loadingPlugs ? (
+            <div className="flex flex-col gap-3">
+              {[1, 2, 3].map(i => (
+                <div key={i} className="skeleton" style={{ height: '72px', width: '100%' }} />
+              ))}
+            </div>
+          ) : plugs.length === 0 ? (
+            <div className="glass glass-panel text-center" style={{ padding: '2.5rem 2rem' }}>
+              <p style={{ fontSize: '1.5rem', marginBottom: '0.5rem' }}>🔌</p>
+              <p>No chargers available yet.</p>
+              <p style={{ fontSize: '0.85rem', marginTop: '0.5rem' }}>
+                Join a charger group to see available plugs, or enter a Plug ID directly above.
+              </p>
+              <button
+                className="btn btn-primary btn-sm mt-4"
+                onClick={() => navigate('/groups')}
+              >
+                Browse Groups
+              </button>
+            </div>
+          ) : (
+            <div className="flex flex-col gap-3">
+              {plugs.map((plug, index) => (
+                <div
+                  key={plug.id}
+                  className="glass glass-card flex justify-between items-center animate-slide-up"
+                  style={{ animationDelay: `${index * 0.06}s` }}
+                  onClick={() => {
+                    if (plug.status === 'available') {
+                      handleStartSession(null, plug.id);
+                    }
+                  }}
+                >
+                  <div>
+                    <div className="flex items-center gap-2" style={{ marginBottom: '0.25rem' }}>
+                      <span style={{ fontWeight: 600 }}>{plug.name}</span>
+                      <span className={`badge ${statusColor(plug.status)}`}>
+                        {plug.status}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-3" style={{ fontSize: '0.85rem', color: 'var(--color-text-secondary)' }}>
+                      <span>ID: {plug.id}</span>
+                      <span>•</span>
+                      <span>{plug.plug_model}</span>
+                      {plug.group_name && (
+                        <>
+                          <span>•</span>
+                          <span>{plug.group_name}</span>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                  {plug.status === 'available' && (
+                    <span style={{ color: 'var(--color-primary)', fontWeight: 600, fontSize: '0.9rem' }}>
+                      Charge →
+                    </span>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Not logged in */}
+      {!user && (
+        <div className="glass glass-panel text-center animate-slide-up" style={{ padding: '3rem 2rem' }}>
+          <p style={{ fontSize: '1.5rem', marginBottom: '0.75rem' }}>🔐</p>
+          <h2 style={{ marginBottom: '0.5rem' }}>Sign in to get started</h2>
+          <p style={{ marginBottom: '1.5rem' }}>
+            Create an account to top up your wallet and start charging.
+          </p>
+          <button className="btn btn-primary btn-lg" onClick={() => navigate('/login')}>
+            Sign In
+          </button>
         </div>
       )}
     </div>

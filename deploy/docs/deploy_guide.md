@@ -96,3 +96,70 @@ When deploying stateful, distributed systems (like databases and VPNs), you will
 ### 4. The Public Wi-Fi & Mobile Network Trap
 * **The Problem:** When deploying on a public coffee shop Wi-Fi or a mobile hotspot (CGNAT), the Headscale VPN will successfully bypass the firewall and connect to the cloud. However, public Wi-Fi networks usually enable **Client Isolation (AP Isolation)**, preventing the ESP32 from talking to the Tapo plug locally. Furthermore, exposing the smart plug on a public network is a security risk.
 * **The Solution:** For mobile or public deployments, use a low-cost **4G LTE router** or a travel router acting as a Wi-Fi repeater. Have it broadcast a hidden, private SSID. Connect the ESP32 and Tapo plugs to this private network. This isolates your hardware from public users and ensures local communication succeeds, while the VPN seamlessly punches out through the LTE connection.
+
+---
+
+## 5. DuckDNS Dynamic DNS Setup (amphive.duckdns.org)
+
+AmpHive uses **DuckDNS** (free dynamic DNS) to provide a stable hostname for the GCP VM.
+This allows the frontend and users to reach the platform at `amphive.duckdns.org` instead of a raw IP that may change.
+
+### Prerequisites (on the GCP VM)
+```bash
+# 1. Verify cron is running
+ps -ef | grep cr[o]n
+# If nothing returns, install cron for your distro (e.g. apt install cron)
+
+# 2. Verify curl is installed
+curl --version
+# If not found: apt install curl
+```
+
+### Setup Steps
+All commands below must be run **on the GCP VM** via SSH:
+```bash
+gcloud compute ssh amphive-vm-in --zone=asia-south1-a
+```
+
+#### Step 1: Create the update script
+```bash
+mkdir -p ~/duckdns
+cat > ~/duckdns/duck.sh << 'EOF'
+#!/bin/bash
+# DuckDNS update script for amphive.duckdns.org
+# Sends the VM's current public IP to DuckDNS every 5 minutes.
+# The token is stored in this script on the VM only — never commit it to git.
+echo url="https://www.duckdns.org/update?domains=amphive&token=YOUR_DUCKDNS_TOKEN&ip=" | curl -k -o ~/duckdns/duck.log -K -
+EOF
+chmod 700 ~/duckdns/duck.sh
+```
+
+> **Security Note:** Replace `YOUR_DUCKDNS_TOKEN` with the actual token from your DuckDNS account. This token is a secret — it lives only on the VM, never in the git repo.
+
+#### Step 2: Add the cron job (runs every 5 minutes)
+```bash
+# Open the crontab editor
+crontab -e
+
+# Add this line at the bottom:
+*/5 * * * * ~/duckdns/duck.sh >/dev/null 2>&1
+```
+
+#### Step 3: Test and verify
+```bash
+# Run the script manually
+~/duckdns/duck.sh
+
+# Check the result — should say "OK"
+cat ~/duckdns/duck.log
+```
+If it shows `KO`, verify the token and domain name in `duck.sh`.
+
+### Result
+| Property | Value |
+|----------|-------|
+| **Domain** | `amphive.duckdns.org` |
+| **Points to** | GCP VM public IP (auto-updated) |
+| **Update Frequency** | Every 5 minutes via crontab |
+| **Script Location** | `~/duckdns/duck.sh` (on VM) |
+| **Log File** | `~/duckdns/duck.log` (on VM) |

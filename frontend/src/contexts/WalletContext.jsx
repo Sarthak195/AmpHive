@@ -1,36 +1,35 @@
-import React, { createContext, useState, useEffect, useContext } from 'react';
+/**
+ * AmpHive Wallet Context
+ * ======================
+ * Manages the user's coin balance, sourced from the backend.
+ * Replaces the Phase 1 localStorage mock with real API-driven state.
+ *
+ * Balance is derived from the user object in AuthContext.
+ * Top-up triggers a Razorpay checkout flow and refreshes the balance
+ * after successful payment verification.
+ */
+
+import React, { createContext, useContext, useCallback } from 'react';
+import { useAuth } from './AuthContext';
 
 const WalletContext = createContext();
 
 export const WalletProvider = ({ children }) => {
-  const [balance, setBalance] = useState(0);
+  const { user, refreshUser } = useAuth();
 
-  useEffect(() => {
-    // Mock fetch balance from localStorage
-    const storedBalance = localStorage.getItem('amphive_wallet_balance');
-    if (storedBalance) {
-      setBalance(parseInt(storedBalance, 10));
-    } else {
-      // Default starting balance for testing
-      setBalance(150);
-      localStorage.setItem('amphive_wallet_balance', '150');
-    }
-  }, []);
+  // Balance comes from the user object (updated from backend)
+  const balance = user?.coin_balance ?? 0;
 
-  const topUp = (amount) => {
-    const newBalance = balance + amount;
-    setBalance(newBalance);
-    localStorage.setItem('amphive_wallet_balance', newBalance.toString());
-  };
-
-  const deduct = (amount) => {
-    const newBalance = Math.max(0, balance - amount);
-    setBalance(newBalance);
-    localStorage.setItem('amphive_wallet_balance', newBalance.toString());
-  };
+  /**
+   * Refresh the wallet balance from the backend.
+   * Called after a successful payment verification to show the updated balance.
+   */
+  const refreshBalance = useCallback(async () => {
+    await refreshUser();
+  }, [refreshUser]);
 
   return (
-    <WalletContext.Provider value={{ balance, topUp, deduct }}>
+    <WalletContext.Provider value={{ balance, refreshBalance }}>
       {children}
     </WalletContext.Provider>
   );

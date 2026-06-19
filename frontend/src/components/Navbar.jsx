@@ -1,45 +1,82 @@
+/**
+ * AmpHive Navbar
+ * ==============
+ * Top navigation bar with glassmorphic styling.
+ * Shows nav links, coin balance, and auth state.
+ * Responsive: hides desktop nav items on mobile.
+ */
+
 import React from 'react';
-import { Link, useLocation } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { useWallet } from '../contexts/WalletContext';
 
 const Navbar = () => {
-  const { user, login, logout } = useAuth();
+  const { user, logout } = useAuth();
   const { balance } = useWallet();
   const location = useLocation();
+  const navigate = useNavigate();
 
   const handleAuth = () => {
     if (user) {
       logout();
+      navigate('/');
     } else {
-      login({ name: 'EV Driver', id: 'usr_123' });
+      navigate('/login');
     }
   };
 
   return (
     <nav className="glass navbar flex justify-between items-center">
+      {/* Logo */}
       <div className="flex items-center gap-4">
-        <Link to="/" className="nav-link" style={{ fontSize: '1.25rem', fontWeight: '700', color: 'var(--color-primary)' }}>
+        <Link
+          to="/"
+          className="nav-link"
+          style={{ fontSize: '1.2rem', fontWeight: 700, color: 'var(--color-primary)' }}
+        >
           ⚡ AmpHive
         </Link>
       </div>
 
+      {/* Navigation Links + Auth */}
       <div className="flex items-center gap-6">
-        <Link to="/" className={`nav-link ${location.pathname === '/' ? 'active' : ''}`}>Home</Link>
-        <Link to="/topup" className={`nav-link ${location.pathname === '/topup' ? 'active' : ''}`}>Top Up</Link>
-        
+        {/* Desktop nav links */}
+        <div className="flex items-center gap-4 nav-desktop">
+          <Link to="/" className={`nav-link ${location.pathname === '/' ? 'active' : ''}`}>
+            Home
+          </Link>
+          <Link to="/topup" className={`nav-link ${location.pathname === '/topup' ? 'active' : ''}`}>
+            Top Up
+          </Link>
+          <Link to="/groups" className={`nav-link ${location.pathname === '/groups' ? 'active' : ''}`}>
+            Groups
+          </Link>
+        </div>
+
+        {/* User info + balance */}
         {user && (
-          <div className="flex items-center gap-4" style={{ borderLeft: '1px solid var(--color-surface-border)', paddingLeft: '1.5rem' }}>
-            <span style={{ fontWeight: '600', color: 'var(--color-accent)' }}>
-              🪙 {balance} Coins
+          <div
+            className="flex items-center gap-3"
+            style={{
+              borderLeft: '1px solid var(--color-surface-border)',
+              paddingLeft: '1rem',
+            }}
+          >
+            <span style={{ fontWeight: 600, color: 'var(--color-accent)', fontSize: '0.9rem' }}>
+              🪙 {balance}
             </span>
-            <span style={{ color: 'var(--color-text-secondary)' }}>
-              {user.name}
+            <span style={{ color: 'var(--color-text-muted)', fontSize: '0.85rem' }}>
+              {user.full_name || user.email}
             </span>
           </div>
         )}
-        
-        <button onClick={handleAuth} className="btn btn-primary" style={{ padding: '0.5rem 1rem', fontSize: '0.9rem' }}>
+
+        {/* Auth button */}
+        <button
+          onClick={handleAuth}
+          className="btn btn-primary btn-sm"
+        >
           {user ? 'Sign Out' : 'Sign In'}
         </button>
       </div>

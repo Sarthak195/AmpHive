@@ -4,3 +4,14 @@ paho-mqtt>=2.1.0
 sqlalchemy>=2.0.0
 asyncpg>=0.28.0
 pydantic>=2.0.0
+# --- Phase 2 additions ---
+# JWT token generation and validation (HS256 symmetric signing)
+python-jose[cryptography]>=3.3.0
+# Password hashing (bcrypt) — industry standard for user credential storage
+passlib[bcrypt]>=1.7.4
+# Load .env files for local development (DATABASE_URL, JWT_SECRET_KEY, etc.)
+python-dotenv>=1.0.0
+# Razorpay payment gateway SDK for India (UPI, cards, wallets, net banking)
+razorpay>=1.4.0
+# Server-Sent Events support for FastAPI (real-time telemetry streaming)
+sse-starlette>=1.6.0

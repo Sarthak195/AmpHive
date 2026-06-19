@@ -1,3 +1,10 @@
+/**
+ * AmpHive Session Page
+ * ====================
+ * Displays the live charging session monitor.
+ * Redirects to home if no session is active.
+ */
+
 import React, { useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import SessionMonitor from '../components/SessionMonitor';
@@ -15,18 +22,12 @@ const Session = () => {
   }, [isActive, sessionData, navigate]);
 
   return (
-    <div className="container" style={{ maxWidth: '800px', marginTop: '2rem' }}>
-      <header style={{ marginBottom: '2rem' }}>
-        <button 
+    <div className="page-container" style={{ maxWidth: '800px' }}>
+      <header style={{ marginBottom: '1.5rem' }}>
+        <button
           onClick={() => navigate('/')}
-          style={{ 
-            background: 'none', 
-            border: 'none', 
-            color: 'var(--color-primary)', 
-            cursor: 'pointer',
-            fontSize: '1rem',
-            marginBottom: '1rem'
-          }}
+          className="btn btn-ghost btn-sm"
+          style={{ marginBottom: '0.5rem' }}
         >
           ← Back to Dashboard
         </button>
