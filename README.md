@@ -40,24 +40,43 @@ The AmpHive platform consists of four core components:
 
 ```
 AmpHive/
+├── docs/                     # ⭐ Technical reference docs (verified vs source)
+│   ├── ARCHITECTURE.md       #    System architecture & the two operating modes
+│   ├── API_REFERENCE.md      #    All 22 REST endpoints
+│   ├── DATA_MODEL.md         #    DB tables, models, enums, schema drift
+│   ├── MQTT_CONTRACT.md      #    Backend↔gateway MQTT topic/payload contract
+│   ├── FIRMWARE.md           #    ESP32 firmware + microlink Tailscale client
+│   ├── DEPLOYMENT.md         #    Compose, deploy scripts, K8s, tools
+│   ├── IMPLEMENTATION_STATUS.md  # What works / stub / aspirational + discrepancies
+│   └── SECURITY.md           #    Committed secrets, open broker, auth gaps
 ├── backend/                  # FastAPI Backend Server Code
-│   ├── database/             # PostgreSQL schemas (schema.sql) & SQLAlchemy models
-│   ├── services/             # Background services (MQTT connection manager)
-│   ├── main.py               # FastAPI app entry point & REST endpoints
-│   ├── Dockerfile            # Container build specification
-│   └── requirements.txt      # Python backend dependencies
+│   ├── database/
+│   │   ├── db.py             #    Async engine + init_db (create_all)
+│   │   ├── init_db.py        #    Standalone DB-init helper
+│   │   ├── models.py         #    SQLAlchemy ORM models (runtime source of truth)
+│   │   ├── schema.sql        #    Reference SQL (NOT executed by the app)
+│   │   └── schema_v2.sql     #    Migration delta: charger groups + memberships
+│   ├── services/
+│   │   ├── auth.py           #    JWT (HS256) + bcrypt + get_current_user dep
+│   │   ├── mqtt_manager.py   #    paho-mqtt bridge (publish cmds; inbound = stub)
+│   │   ├── payments.py       #    Razorpay orders/verify/webhook
+│   │   ├── tapo_direct.py    #    Direct-Mode Tapo driver (lib or HTTP relay)
+│   │   └── telemetry.py      #    In-memory TelemetryStore + SSE generator
+│   ├── main.py               #    FastAPI app, lifespan, all 22 REST routes
+│   ├── Dockerfile            #    python:3.11-slim
+│   └── requirements.txt
 ├── frontend/                 # React + Vite Driver Web Application
 │   ├── src/
-│   │   ├── api/              # Backend API client functions
-│   │   ├── components/       # Reusable UI (Navbar, SessionMonitor, WalletCard)
-│   │   ├── contexts/         # React Context providers (Auth, Session, Wallet)
-│   │   ├── pages/            # Route pages (Home, Session, TopUp)
-│   │   ├── styles/           # CSS stylesheets (glassmorphic dark theme)
-│   │   ├── App.jsx           # Router & layout shell
-│   │   └── main.jsx          # React DOM entry point
-│   ├── Dockerfile            # Multi-stage build (Node → Nginx)
-│   ├── nginx.conf            # Reverse proxy config for SPA routing
-│   └── package.json          # Node dependencies (React 19, React Router 6)
+│   │   ├── api/              #    client.js (fetch wrapper) + mockSse.js (dead)
+│   │   ├── components/       #    Navbar, SessionMonitor, WalletCard
+│   │   ├── contexts/         #    Auth, Session (real SSE), Wallet
+│   │   ├── pages/            #    Home, Login, Session, TopUp, Groups
+│   │   ├── styles/           #    global.css (glassmorphic dark theme)
+│   │   ├── App.jsx           #    Router & layout shell
+│   │   └── main.jsx          #    React DOM entry point
+│   ├── Dockerfile            #    Multi-stage build (Node → Nginx)
+│   ├── nginx.conf            #    Serves SPA + proxies /api/ → backend:8000
+│   └── package.json          #    React 19, React Router 6 (Vite 8)
 ├── firmware/                 # ESP32-S3 Gateway Firmware (ESP-IDF v5.x)
 │   ├── components/           # External submodules (MicroLink Tailscale client)
 │   ├── main/                 # C source files (main loop, Tapo drivers, CMake)
@@ -85,10 +104,35 @@ AmpHive/
 │       ├── mosquitto.yaml
 │       ├── headscale.yaml
 │       └── postgres.yaml
+├── tools/                    # Direct-Mode helpers (run on the home PC)
+│   ├── relay_server.py       #   HTTP relay the backend's TAPO_RELAY_URL calls
+│   ├── local_tapo_test.py    #   Tapo connection self-test
+│   └── turn_on.py / turn_off.py  # Manual plug on/off
+├── *.bat                     # GCP VM/container helper scripts (start-vm, logs, …)
+├── setup_duckdns.sh          # DuckDNS dynamic-DNS updater
 ├── docker-compose.yml        # Convenience local dev compose (runs from root)
+├── agent.md                  # AI-agent context, file map & progress log
 ├── features_list.md          # Detailed features roadmap & specifications
 └── requirements.md           # Product Requirements Document (PRD) & Design Spec
 ```
+
+---
+
+> ### 📖 Technical Documentation
+> The [`docs/`](docs/) folder is the **technical reference** describing what the
+> code actually does today (verified against source):
+> [Architecture](docs/ARCHITECTURE.md) ·
+> [API Reference](docs/API_REFERENCE.md) ·
+> [Data Model](docs/DATA_MODEL.md) ·
+> [MQTT Contract](docs/MQTT_CONTRACT.md) ·
+> [Firmware](docs/FIRMWARE.md) ·
+> [Deployment](docs/DEPLOYMENT.md) ·
+> [Implementation Status](docs/IMPLEMENTATION_STATUS.md) ·
+> [Security Notes](docs/SECURITY.md).
+>
+> This README and [requirements.md](requirements.md) / [features_list.md](features_list.md)
+> describe the *product vision*; for the gap between vision and current code, see
+> [Implementation Status](docs/IMPLEMENTATION_STATUS.md).
 
 ---
 
@@ -165,22 +209,31 @@ This script waits for Cloud SQL, generates `.env` with the DB IP, SCPs files to 
 * [deploy_guide.md](deploy/docs/deploy_guide.md) — Cloud hosting & VPN networking guide
 * [deployment_checklist.md](deploy/docs/deployment_checklist.md) — Step-by-step site deployment checklist
 * [gcp_migration_runbook.md](deploy/docs/gcp_migration_runbook.md) — Full log of AWS→GCP migration and India region migration
+* [wireguard_tunnel_setup.md](deploy/docs/wireguard_tunnel_setup.md) — Direct-Mode WireGuard tunnel setup
+* [phase2_walkthrough.md](deploy/docs/phase2_walkthrough.md) — Phase-2 work log
+* [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) — Consolidated deployment reference (compose, scripts, K8s)
 
 ---
 
 ## 7. API Reference
 
-The FastAPI backend exposes the following REST endpoints:
+The FastAPI backend exposes **22 REST endpoints** across auth, charger groups,
+plugs, gateways, sessions (incl. an SSE live stream), Razorpay payments, and a
+Direct-Mode Tapo control surface.
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/api/health` | Service health check |
-| `POST` | `/api/gateways/register` | Register a new ESP32 gateway |
-| `POST` | `/api/plugs/register` | Register a smart plug on a gateway's VLAN |
-| `POST` | `/api/sessions/start` | Start a charging session (sends MQTT ON command) |
-| `POST` | `/api/sessions/stop` | Stop a charging session (sends MQTT OFF command) |
+| Group | Endpoints |
+|-------|-----------|
+| Health | `GET /api/health` |
+| Auth | `POST /api/auth/register`, `POST /api/auth/login`, `GET /api/auth/me` |
+| Groups | `POST /api/groups/join`, `GET /api/groups/my` |
+| Plugs | `GET /api/plugs/available`, `GET /api/plugs/{id}`, `POST /api/plugs/register` |
+| Gateways | `POST /api/gateways/register` |
+| Sessions | `POST /api/sessions/start`, `POST /api/sessions/stop`, `GET /api/sessions/live/{id}` (SSE), `GET /api/sessions/history` |
+| Payments | `POST /api/payments/create-order`, `POST /api/payments/verify`, `POST /api/payments/webhook` |
+| Direct Mode | `POST /api/direct/plug/on`, `POST /api/direct/plug/off`, `GET /api/direct/plug/info`, `GET /api/direct/plug/energy`, `GET /api/direct/plug/health` |
 
-Full interactive documentation is available at the [Swagger UI](http://localhost:8000/docs) when running locally.
+**Full request/response details:** see [docs/API_REFERENCE.md](docs/API_REFERENCE.md).
+Interactive Swagger UI: `http://localhost:8000/docs` when running locally.
 
 ---
 
@@ -189,7 +242,7 @@ Full interactive documentation is available at the [Swagger UI](http://localhost
 | Layer | Technology |
 |-------|------------|
 | **Frontend** | React 19, Vite 8, React Router 6, CSS (Glassmorphism) |
-| **Backend** | Python 3.12, FastAPI, Uvicorn, SQLAlchemy, Pydantic |
+| **Backend** | Python 3.11, FastAPI, Uvicorn, SQLAlchemy 2.0 (async), Pydantic |
 | **Database** | PostgreSQL 15 (Cloud SQL in production) |
 | **Messaging** | Eclipse Mosquitto 2.0 (MQTT) |
 | **VPN** | Headscale + WireGuard (Tailscale-compatible) |

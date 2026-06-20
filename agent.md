@@ -60,11 +60,22 @@ AmpHive is a shared EV charging PaaS connecting 3rd-party smart plugs to a centr
 
 ## 2. File Directory Map
 
-* `/backend/`: FastAPI server files.
-  * `/backend/main.py`: REST routes and application startup/shutdown lifecycles.
-  * `/backend/services/mqtt_manager.py`: Bidirectional MQTT publisher/subscriber client.
-  * `/backend/services/tapo_direct.py`: [Direct Mode] Tapo P110 direct control driver (bypasses ESP32/MQTT).
-  * `/backend/database/schema.sql` & `models.py`: PostgreSQL relational tables and SQLAlchemy ORM models.
+> **📖 Verified technical reference lives in [`/docs/`](file:///c:/Users/Sarthak/Documents/AmpHive/docs/).**
+> Start with [docs/IMPLEMENTATION_STATUS.md](file:///c:/Users/Sarthak/Documents/AmpHive/docs/IMPLEMENTATION_STATUS.md)
+> for what actually works vs. what is a stub/aspirational, and
+> [docs/SECURITY.md](file:///c:/Users/Sarthak/Documents/AmpHive/docs/SECURITY.md) for committed-secret/auth gaps.
+> Other refs: ARCHITECTURE, API_REFERENCE, DATA_MODEL, MQTT_CONTRACT, FIRMWARE, DEPLOYMENT.
+
+* `/backend/`: FastAPI server files (single-module app; all 22 routes in `main.py`).
+  * `/backend/main.py`: REST routes (auth, groups, plugs, gateways, sessions+SSE, payments, direct) and lifespan startup/shutdown.
+  * `/backend/services/auth.py`: JWT (HS256, 7-day) + bcrypt password hashing + `get_current_user` dependency.
+  * `/backend/services/mqtt_manager.py`: MQTT client. Publishes ON/OFF commands; **inbound telemetry/status handlers are stubs (log only)**.
+  * `/backend/services/payments.py`: Razorpay create-order / verify / webhook (webhook only logs, no auto-credit yet).
+  * `/backend/services/telemetry.py`: In-memory `TelemetryStore` singleton + SSE generator. **No TimescaleDB** anywhere.
+  * `/backend/services/tapo_direct.py`: [Direct Mode] Tapo P110 driver (local `tapo` lib or HTTP relay via `TAPO_RELAY_URL`).
+  * `/backend/database/models.py`: SQLAlchemy ORM models — **runtime source of truth** (`init_db` calls `create_all`).
+  * `/backend/database/db.py` & `init_db.py`: async engine + DB initialization helpers.
+  * `/backend/database/schema.sql` & `schema_v2.sql`: reference SQL **(not executed by the app)**; v2 adds charger groups + memberships.
 * `/deploy/`: All deployment infrastructure.
   * `/deploy/scripts/deploy.ps1`: Main GCP VM deployment script.
   * `/deploy/scripts/startup.sh`: One-time VM bootstrap (installs Docker).
@@ -79,10 +90,13 @@ AmpHive is a shared EV charging PaaS connecting 3rd-party smart plugs to a centr
   * `/deploy/docs/gcp_migration_runbook.md`: Full log of AWS→GCP migration and India region migration commands.
   * `/deploy/docs/wireguard_tunnel_setup.md`: WireGuard tunnel setup guide for direct Tapo P110 control.
   * `/deploy/k8s/`: Kubernetes manifests (namespace, postgres, mosquitto, headscale, backend).
+* `/frontend/`: React 19 + Vite SPA. Pages: Home, Login, Session, TopUp, Groups. Contexts: Auth/Session(real SSE)/Wallet. `api/mockSse.js` is dead leftover code.
 * `/firmware/`: ESP32 gateway codebase.
-  * `/firmware/main/main.c`: Main loop managing STA WiFi, VPN connection, MQTT subscriber, and telemetry watchdogs.
-  * `/firmware/main/tapo_protocol.c`: Local network driver to control and poll TP-Link Tapo P110 smart plugs.
-  * `/firmware/components/`: Submodules containing the Tailscale client (`microlink`) and WireGuard layers.
+  * `/firmware/main/main.c`: Main loop managing STA WiFi, captive portal, VPN connection, MQTT subscriber, and telemetry watchdogs (duration/energy/75°C thermal). Active session is RAM-only.
+  * `/firmware/main/tapo_protocol.c`: **MOCK** Tapo P110 driver — no KLAP/AES; returns simulated telemetry. Must be replaced for real plug control.
+  * `/firmware/components/microlink/`: Substantial from-scratch Tailscale-protocol client (Noise/ts2021, DERP, DISCO, STUN, WireGuard).
+  * `/firmware/components/wireguard_lwip/`: Vendored WireGuard-over-lwIP library.
+* `/tools/`: Direct-Mode helpers run on the home PC (`relay_server.py`, `local_tapo_test.py`, `turn_on/off.py`).
 
 ---
 
@@ -154,15 +168,15 @@ For detailed technical specifications, integration paths, and step-by-step instr
 - **WireGuard Setup Guide:** Complete documentation at `deploy/docs/wireguard_tunnel_setup.md` with pre-generated keys and configs.
 - **Note:** This is a temporary development/testing feature. Will be replaced by the ESP32 gateway path once the board arrives.
 
-### [ ] Phase 2: Frontend & Driver Interfaces (REMAINING)
-- **Prepaid Driver Wallet Application:** Web or mobile interface allowing drivers to check wallet balance, top up credits via Razorpay (UPI, cards, wallets), and enter Plug IDs on charging bays to start/stop sessions. Supports public chargers (open to all) and private groups (gated by access code).
-- **CPO Administration Dashboard:** Property management portal to register new gateways, pair smart plugs, define custom utility rates (per minute/kWh), manage private charger groups (generate access codes), and review carbon credits and revenue streams.
-- **Visual Charging Analytics:** Real-time charging speed and historical energy telemetry graphs rendering inside the dashboard (leveraging TimescaleDB/Clickhouse).
+### [~] Phase 2: Frontend & Driver Interfaces (MOSTLY DONE)
+- **[x] Prepaid Driver Wallet Application:** React 19 + Vite SPA is built — login/register, Plug-ID start/stop, live SSE session monitor, wallet top-up, and private-group join via access code. (See [docs/ARCHITECTURE.md](file:///c:/Users/Sarthak/Documents/AmpHive/docs/ARCHITECTURE.md#frontend).)
+- **[ ] CPO Administration Dashboard:** Not built. There is also **no role enforcement** in the backend yet (all users are `driver`), so CPO/admin workflows are unsupported.
+- **[~] Visual Charging Analytics:** A live SSE session monitor exists, but there is **no TimescaleDB** and the MQTT inbound telemetry handlers are stubs — so historical analytics and real live power/energy over the ESP32 path are not yet functional. See [docs/IMPLEMENTATION_STATUS.md](file:///c:/Users/Sarthak/Documents/AmpHive/docs/IMPLEMENTATION_STATUS.md).
 
-### [ ] Phase 3: Financial & Third-Party Integrations (REMAINING)
-- **Razorpay Top-Ups:** UPI, cards, wallets, and net banking via Razorpay (India-compatible gateway, no business entity needed for test/MVP mode).
-- **Razorpay Webhooks Handler:** Backend listener to credit the user's `coin_balance` automatically upon `payment.captured` event, with HMAC SHA256 signature verification.
-- **Virtual Ledger Audits:** Logging all database credits/debits to `ledger_transactions` with double-entry security validation.
+### [~] Phase 3: Financial & Third-Party Integrations (MOSTLY DONE)
+- **[x] Razorpay Top-Ups:** `/api/payments/create-order` + `/api/payments/verify` (HMAC-verified) credit coins; frontend uses the Razorpay CDN checkout. 
+- **[~] Razorpay Webhooks Handler:** `/api/payments/webhook` verifies the HMAC signature but **currently only logs** — it does not auto-credit `coin_balance`. (Top-ups are credited via the synchronous `/verify` path instead.)
+- **[x] Virtual Ledger Audits:** Credits/debits are logged to `ledger_transactions`. ⚠️ Wallet updates are **not atomic/row-locked** (race-prone) — see [docs/SECURITY.md](file:///c:/Users/Sarthak/Documents/AmpHive/docs/SECURITY.md).
 
 ### [ ] Phase 4: Hardware & Optimization Scaling (REMAINING)
 - **WiFi Onboarding Captive Portal:** ESP32 AP Captive Portal page allowing property staff to input local WiFi credentials, the Headscale Auth Key, and plug IPs without re-flashing code.
