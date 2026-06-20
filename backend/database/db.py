@@ -56,3 +56,19 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
             yield session
         finally:
             await session.close()
+
+
+async def init_db():
+    """
+    Creates all database tables defined in the SQLAlchemy models.
+    Called during application startup.
+    """
+    from backend.database.models import Base
+    import logging
+    logger = logging.getLogger("amphive.db")
+    
+    logger.info("Initializing database tables...")
+    async with engine.begin() as conn:
+        # Create all tables if they don't exist
+        await conn.run_sync(Base.metadata.create_all)
+    logger.info("Database tables initialized.")

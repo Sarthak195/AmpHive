@@ -29,7 +29,7 @@ from sqlalchemy import select, or_, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 
-from backend.database.db import get_db
+from backend.database.db import get_db, init_db
 from backend.database.models import (
     User, UserRole, Plug, PlugStatus, Gateway,
     ChargingSession, SessionStatus, LedgerTransaction, TransactionType,
@@ -40,6 +40,8 @@ from backend.services.auth import (
 )
 from backend.services.mqtt_manager import MQTTManager
 from backend.services.telemetry import TelemetryStore
+# [Direct Mode] Import the Tapo direct driver for ESP32-bypass plug control
+from backend.services.tapo_direct import TapoDirectDriver
 from backend.services import payments as payment_service
 
 # Load environment variables from .env file (for local development)
@@ -54,14 +56,29 @@ MQTT_BROKER_PORT = int(os.getenv("MQTT_BROKER_PORT", 1883))
 MQTT_USERNAME = os.getenv("MQTT_USERNAME", None)
 MQTT_PASSWORD = os.getenv("MQTT_PASSWORD", None)
 
+# --- [Direct Mode] Tapo P110 Configuration ---
+# When DIRECT_MODE=true, the backend can control the plug directly via the
+# `tapo` Python library, bypassing the ESP32 gateway and MQTT broker.
+# This is used for development/testing before the ESP32 board is available.
+DIRECT_MODE = os.getenv("DIRECT_MODE", "false").lower() == "true"
+TAPO_USERNAME = os.getenv("TAPO_USERNAME", "")
+TAPO_PASSWORD = os.getenv("TAPO_PASSWORD", "")
+TAPO_PLUG_IP = os.getenv("TAPO_PLUG_IP", "")
+
 # --- App Lifespan ---
 mqtt_manager = None
+# [Direct Mode] Global reference to the Tapo direct driver (initialized in lifespan)
+tapo_driver: Optional[TapoDirectDriver] = None
 telemetry_store = TelemetryStore()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Manage MQTT connection lifecycle with the FastAPI application."""
-    global mqtt_manager
+    """Manage MQTT and Tapo Direct connection lifecycles with the FastAPI application."""
+    global mqtt_manager, tapo_driver
+    
+    # Initialize the database tables
+    await init_db()
+    
     # Initialize and start the MQTT connection
     mqtt_manager = MQTTManager(
         broker_host=MQTT_BROKER_HOST,
@@ -70,6 +87,20 @@ async def lifespan(app: FastAPI):
         password=MQTT_PASSWORD,
     )
     mqtt_manager.start()
+
+    # [Direct Mode] Initialize the Tapo direct driver if enabled.
+    # This allows controlling the plug without an ESP32 gateway, useful for
+    # development/testing. The plug is reached via a WireGuard tunnel to
+    # the developer's home network.
+    if DIRECT_MODE and TAPO_USERNAME and TAPO_PASSWORD:
+        tapo_driver = TapoDirectDriver(
+            tapo_email=TAPO_USERNAME,
+            tapo_password=TAPO_PASSWORD,
+        )
+        logger.info(f"🔌 Direct Mode ENABLED — Tapo plug target: {TAPO_PLUG_IP}")
+    else:
+        logger.info("Direct Mode DISABLED — using standard ESP32/MQTT path")
+
     yield
     # Stop the MQTT connection during shutdown
     if mqtt_manager:
@@ -903,3 +934,194 @@ async def razorpay_webhook(request: Request):
     # For MVP, we log it and rely on the client-side flow.
 
     return {"status": "ok"}
+
+
+# ===========================================================================
+# [Direct Mode] Tapo P110 Direct Control Endpoints
+# ===========================================================================
+# These endpoints bypass the ESP32 gateway and MQTT broker, controlling the
+# Tapo P110 smart plug directly via the `tapo` Python library through a
+# WireGuard tunnel to the developer's home network.
+#
+# Architecture:
+#   Cloud Backend (GCP VM) → WireGuard Tunnel → Dev PC → Home LAN → Tapo P110
+#
+# These are development/testing-only endpoints. In production, the normal
+# ESP32/MQTT session flow is used instead.
+#
+# All endpoints require JWT authentication.
+# ===========================================================================
+
+
+class DirectPlugRequest(BaseModel):
+    """Optional request body for direct plug control. If plug_ip is not provided,
+    falls back to the TAPO_PLUG_IP environment variable."""
+    plug_ip: Optional[str] = None
+
+
+def _get_plug_ip(req_ip: Optional[str] = None) -> str:
+    """
+    Resolve the target plug IP address.
+    Priority: request body plug_ip > TAPO_PLUG_IP env var.
+    Raises 400 if neither is set.
+    """
+    ip = req_ip or TAPO_PLUG_IP
+    if not ip:
+        raise HTTPException(
+            status_code=400,
+            detail="No plug IP specified. Set TAPO_PLUG_IP env var or pass plug_ip in the request body.",
+        )
+    return ip
+
+
+@app.post("/api/direct/plug/on")
+async def direct_plug_on(
+    req: DirectPlugRequest = DirectPlugRequest(),
+    user: User = Depends(get_current_user),
+):
+    """
+    [Direct Mode] Turn the Tapo P110 plug ON.
+    Bypasses ESP32/MQTT and sends the command directly to the plug via
+    the WireGuard tunnel. Requires DIRECT_MODE=true in environment.
+    """
+    if not DIRECT_MODE or not tapo_driver:
+        raise HTTPException(
+            status_code=503,
+            detail="Direct mode is not enabled. Set DIRECT_MODE=true and provide Tapo credentials.",
+        )
+
+    plug_ip = _get_plug_ip(req.plug_ip)
+    success = await tapo_driver.turn_on(plug_ip)
+
+    if not success:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to turn ON plug at {plug_ip}. Check WireGuard tunnel and plug connectivity.",
+        )
+
+    return {
+        "status": "on",
+        "plug_ip": plug_ip,
+        "message": f"Plug at {plug_ip} turned ON via direct mode.",
+        "mode": "direct",
+    }
+
+
+@app.post("/api/direct/plug/off")
+async def direct_plug_off(
+    req: DirectPlugRequest = DirectPlugRequest(),
+    user: User = Depends(get_current_user),
+):
+    """
+    [Direct Mode] Turn the Tapo P110 plug OFF.
+    Bypasses ESP32/MQTT and sends the command directly to the plug via
+    the WireGuard tunnel. Requires DIRECT_MODE=true in environment.
+    """
+    if not DIRECT_MODE or not tapo_driver:
+        raise HTTPException(
+            status_code=503,
+            detail="Direct mode is not enabled. Set DIRECT_MODE=true and provide Tapo credentials.",
+        )
+
+    plug_ip = _get_plug_ip(req.plug_ip)
+    success = await tapo_driver.turn_off(plug_ip)
+
+    if not success:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to turn OFF plug at {plug_ip}. Check WireGuard tunnel and plug connectivity.",
+        )
+
+    return {
+        "status": "off",
+        "plug_ip": plug_ip,
+        "message": f"Plug at {plug_ip} turned OFF via direct mode.",
+        "mode": "direct",
+    }
+
+
+@app.get("/api/direct/plug/info")
+async def direct_plug_info(
+    plug_ip: Optional[str] = None,
+    user: User = Depends(get_current_user),
+):
+    """
+    [Direct Mode] Get device information from the Tapo P110 plug.
+    Returns power state, model, nickname, firmware version, etc.
+    """
+    if not DIRECT_MODE or not tapo_driver:
+        raise HTTPException(
+            status_code=503,
+            detail="Direct mode is not enabled. Set DIRECT_MODE=true and provide Tapo credentials.",
+        )
+
+    target_ip = _get_plug_ip(plug_ip)
+    info = await tapo_driver.get_device_info(target_ip)
+
+    if info is None:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to get device info from {target_ip}. Check WireGuard tunnel and plug connectivity.",
+        )
+
+    return {
+        "plug_ip": target_ip,
+        "device_info": info,
+        "mode": "direct",
+    }
+
+
+@app.get("/api/direct/plug/energy")
+async def direct_plug_energy(
+    plug_ip: Optional[str] = None,
+    user: User = Depends(get_current_user),
+):
+    """
+    [Direct Mode] Get energy usage data from the Tapo P110 plug.
+    Returns current power draw, today's energy consumption, monthly stats.
+    """
+    if not DIRECT_MODE or not tapo_driver:
+        raise HTTPException(
+            status_code=503,
+            detail="Direct mode is not enabled. Set DIRECT_MODE=true and provide Tapo credentials.",
+        )
+
+    target_ip = _get_plug_ip(plug_ip)
+    usage = await tapo_driver.get_energy_usage(target_ip)
+
+    if usage is None:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to get energy data from {target_ip}. Check WireGuard tunnel and plug connectivity.",
+        )
+
+    return {
+        "plug_ip": target_ip,
+        "energy_usage": usage,
+        "mode": "direct",
+    }
+
+
+@app.get("/api/direct/plug/health")
+async def direct_plug_health(
+    plug_ip: Optional[str] = None,
+    user: User = Depends(get_current_user),
+):
+    """
+    [Direct Mode] Health check — verify the plug is reachable through
+    the WireGuard tunnel and responding to commands.
+    """
+    if not DIRECT_MODE or not tapo_driver:
+        raise HTTPException(
+            status_code=503,
+            detail="Direct mode is not enabled. Set DIRECT_MODE=true and provide Tapo credentials.",
+        )
+
+    target_ip = _get_plug_ip(plug_ip)
+    health = await tapo_driver.health_check(target_ip)
+
+    return {
+        "plug_ip": target_ip,
+        "health": health,
+        "mode": "direct",
+    }

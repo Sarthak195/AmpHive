@@ -63,6 +63,7 @@ AmpHive is a shared EV charging PaaS connecting 3rd-party smart plugs to a centr
 * `/backend/`: FastAPI server files.
   * `/backend/main.py`: REST routes and application startup/shutdown lifecycles.
   * `/backend/services/mqtt_manager.py`: Bidirectional MQTT publisher/subscriber client.
+  * `/backend/services/tapo_direct.py`: [Direct Mode] Tapo P110 direct control driver (bypasses ESP32/MQTT).
   * `/backend/database/schema.sql` & `models.py`: PostgreSQL relational tables and SQLAlchemy ORM models.
 * `/deploy/`: All deployment infrastructure.
   * `/deploy/scripts/deploy.ps1`: Main GCP VM deployment script.
@@ -70,11 +71,13 @@ AmpHive is a shared EV charging PaaS connecting 3rd-party smart plugs to a centr
   * `/deploy/docker/docker-compose.prod.yml`: Production Docker Compose for the VM.
   * `/deploy/docker/docker-compose.dev.yml`: Local development Docker Compose (includes local Postgres).
   * `/deploy/config/mosquitto.conf`: MQTT broker configuration.
+  * `/deploy/config/amphive_tunnel.conf`: WireGuard client config for the developer's PC.
   * `/deploy/config/.env.template`: Environment variable template.
   * `/deploy/docs/new_device_setup.md`: Setup instructions for configuring developer tools and code on a new workstation.
   * `/deploy/docs/deploy_guide.md`: Public cloud hosting, dynamic DNS, and VPN network setup manual.
   * `/deploy/docs/deployment_checklist.md`: Step-by-step physical deployment guide.
   * `/deploy/docs/gcp_migration_runbook.md`: Full log of AWS→GCP migration and India region migration commands.
+  * `/deploy/docs/wireguard_tunnel_setup.md`: WireGuard tunnel setup guide for direct Tapo P110 control.
   * `/deploy/k8s/`: Kubernetes manifests (namespace, postgres, mosquitto, headscale, backend).
 * `/firmware/`: ESP32 gateway codebase.
   * `/firmware/main/main.c`: Main loop managing STA WiFi, VPN connection, MQTT subscriber, and telemetry watchdogs.
@@ -92,7 +95,7 @@ AmpHive is a shared EV charging PaaS connecting 3rd-party smart plugs to a centr
 | **Zone** | `asia-south1-a` (Mumbai) |
 | **Machine Type** | `e2-highcpu-4` (4 vCPU, 4GB RAM) |
 | **Boot Disk** | 50GB Balanced Persistent Disk |
-| **Public IP** | `35.200.131.98` |
+| **Public IP** | `34.100.200.152` (ephemeral — may change on VM restart) |
 | **OS** | Debian 11 |
 
 ### Cloud SQL Database
@@ -115,6 +118,14 @@ AmpHive is a shared EV charging PaaS connecting 3rd-party smart plugs to a centr
 ### Firewall Rule: `allow-amphive-ports`
 Open ports: `TCP 80`, `TCP 8000`, `TCP 1883` from `0.0.0.0/0`.
 
+### Firewall Rule: `allow-amphive-wireguard`
+Open port: `UDP 51820` from `0.0.0.0/0` (WireGuard tunnel for direct plug control).
+
+### WireGuard Tunnel (Direct Mode)
+A WireGuard VPN tunnel runs between the VM (`10.10.0.1`) and the developer's
+PC (`10.10.0.2`) to allow the cloud backend to control a Tapo P110 smart plug
+on the home LAN without an ESP32 gateway. See [wireguard_tunnel_setup.md](file:///c:/Users/Sarthak/Documents/AmpHive/deploy/docs/wireguard_tunnel_setup.md).
+
 ### Deployment Method
 The application is deployed via `deploy/scripts/deploy.ps1` which copies the code via `gcloud compute scp` and builds using `docker-compose up -d --build` directly on the VM.
 
@@ -135,6 +146,13 @@ For detailed technical specifications, integration paths, and step-by-step instr
 - **Local Smart Plug Driver:** ESP32 driver to switch ON/OFF and extract real-time power metrics from TP-Link Tapo P110 smart plugs over local network.
 - **Edge Failsafe Watchdogs:** Microcontroller-level session watchdogs that auto-disconnect the plug if max session duration, energy capacity, or thermal limits (75°C) are breached.
 - **Docker Compose Cloud Stack:** Distributed multi-container production stack fully deployed and verified on the GCP Compute Engine VM.
+
+### [x] Phase 1.5: Direct Mode — ESP32 Bypass (COMPLETED)
+- **WireGuard Tunnel:** Encrypted VPN tunnel from GCP VM to developer's home PC, allowing the cloud backend to reach the Tapo P110 plug on the home LAN directly.
+- **Tapo Direct Driver:** Python service (`backend/services/tapo_direct.py`) using the `tapo` library to control the plug directly via HTTP, bypassing ESP32 and MQTT.
+- **Direct Control Endpoints:** REST API endpoints under `/api/direct/` for ON/OFF control, device info, energy usage, and health checks.
+- **WireGuard Setup Guide:** Complete documentation at `deploy/docs/wireguard_tunnel_setup.md` with pre-generated keys and configs.
+- **Note:** This is a temporary development/testing feature. Will be replaced by the ESP32 gateway path once the board arrives.
 
 ### [ ] Phase 2: Frontend & Driver Interfaces (REMAINING)
 - **Prepaid Driver Wallet Application:** Web or mobile interface allowing drivers to check wallet balance, top up credits via Razorpay (UPI, cards, wallets), and enter Plug IDs on charging bays to start/stop sessions. Supports public chargers (open to all) and private groups (gated by access code).

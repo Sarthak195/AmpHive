@@ -39,6 +39,12 @@ services:
       - RAZORPAY_KEY_ID=${RAZORPAY_KEY_ID}
       - RAZORPAY_KEY_SECRET=${RAZORPAY_KEY_SECRET}
       - COINS_PER_RUPEE=${COINS_PER_RUPEE}
+      # [Direct Mode] Tapo P110 control via WireGuard tunnel (bypasses ESP32)
+      - DIRECT_MODE=${DIRECT_MODE:-false}
+      - TAPO_USERNAME=${TAPO_USERNAME:-}
+      - TAPO_PASSWORD=${TAPO_PASSWORD:-}
+      - TAPO_PLUG_IP=${TAPO_PLUG_IP:-}
+      - TAPO_RELAY_URL=${TAPO_RELAY_URL:-}
     depends_on:
       - mqtt
 
