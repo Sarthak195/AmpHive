@@ -52,6 +52,28 @@ const Navbar = () => {
           <Link to="/groups" className={`nav-link ${location.pathname === '/groups' ? 'active' : ''}`}>
             Groups
           </Link>
+
+          {/* CPO Portal link — only for users with the 'cpo' role */}
+          {user && (user.role === 'cpo' || user.role === 'admin') && (
+            <Link
+              to="/cpo/dashboard"
+              className={`nav-link ${location.pathname.startsWith('/cpo') ? 'active' : ''}`}
+              style={{ color: location.pathname.startsWith('/cpo') ? 'var(--color-cpo-accent)' : undefined }}
+            >
+              ⚡ CPO Portal
+            </Link>
+          )}
+
+          {/* Become a Host link — for authenticated drivers who aren't CPOs yet */}
+          {user && user.role === 'driver' && (
+            <Link
+              to="/cpo"
+              className="nav-link"
+              style={{ color: 'var(--color-cpo-accent)' }}
+            >
+              🏢 Become a Host
+            </Link>
+          )}
         </div>
 
         {/* User info + balance */}

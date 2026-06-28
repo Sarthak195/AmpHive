@@ -1,0 +1,443 @@
+/**
+ * AmpHive CPO Plugs Management Page
+ * ====================================
+ * CRUD interface for managing smart plugs across the CPO's gateways.
+ * Features: plug table with status filters, add/edit modals, inline
+ * status toggling between Available and Maintenance.
+ *
+ * Data source: /api/cpo/plugs, /api/cpo/gateways, /api/cpo/groups
+ */
+
+import React, { useState, useEffect, useCallback } from 'react';
+import CpoLayout from '../../components/CpoLayout';
+import api from '../../api/client';
+
+/**
+ * Status filter options matching the PlugStatus enum.
+ */
+const STATUS_FILTERS = [
+  { value: '', label: 'All Statuses' },
+  { value: 'available', label: 'Available' },
+  { value: 'occupied', label: 'Occupied' },
+  { value: 'offline', label: 'Offline' },
+  { value: 'maintenance', label: 'Maintenance' },
+];
+
+/**
+ * Map plug status to badge CSS class.
+ */
+const STATUS_BADGE = {
+  available: 'badge-success',
+  occupied: 'badge-warning',
+  offline: 'badge-danger',
+  maintenance: 'badge-primary',
+};
+
+const CpoPlugs = () => {
+  const [plugs, setPlugs] = useState([]);
+  const [gateways, setGateways] = useState([]);
+  const [groups, setGroups] = useState([]);
+  const [tenantName, setTenantName] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [statusFilter, setStatusFilter] = useState('');
+
+  // Modal state
+  const [showAddModal, setShowAddModal] = useState(false);
+  const [showEditModal, setShowEditModal] = useState(false);
+  const [editingPlug, setEditingPlug] = useState(null);
+  const [formError, setFormError] = useState('');
+  const [formLoading, setFormLoading] = useState(false);
+
+  // Add form fields
+  const [addForm, setAddForm] = useState({
+    gateway_id: '', name: '', local_ip: '', plug_model: 'tapo_p110', group_id: '',
+  });
+
+  // Edit form fields
+  const [editForm, setEditForm] = useState({
+    name: '', group_id: '', status: '',
+  });
+
+  const fetchData = useCallback(async () => {
+    try {
+      const [plugsRes, gatewaysRes, groupsRes, profileRes] = await Promise.all([
+        api.get('/api/cpo/plugs'),
+        api.get('/api/cpo/gateways'),
+        api.get('/api/cpo/groups'),
+        api.get('/api/cpo/profile'),
+      ]);
+      setPlugs(plugsRes);
+      setGateways(gatewaysRes);
+      setGroups(groupsRes);
+      setTenantName(profileRes.tenant?.name || '');
+    } catch (err) {
+      console.error('Failed to load plugs:', err);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { fetchData(); }, [fetchData]);
+
+  // Filter plugs by status
+  const filteredPlugs = statusFilter
+    ? plugs.filter((p) => p.status === statusFilter)
+    : plugs;
+
+  /**
+   * Handle adding a new plug.
+   */
+  const handleAddPlug = async (e) => {
+    e.preventDefault();
+    if (!addForm.gateway_id || !addForm.name || !addForm.local_ip) {
+      setFormError('Gateway, name, and IP address are required.');
+      return;
+    }
+
+    setFormLoading(true);
+    setFormError('');
+
+    try {
+      const body = {
+        gateway_id: addForm.gateway_id,
+        name: addForm.name,
+        local_ip: addForm.local_ip,
+        plug_model: addForm.plug_model || 'tapo_p110',
+      };
+      if (addForm.group_id) body.group_id = parseInt(addForm.group_id);
+
+      await api.post('/api/cpo/plugs', body);
+      setShowAddModal(false);
+      setAddForm({ gateway_id: '', name: '', local_ip: '', plug_model: 'tapo_p110', group_id: '' });
+      await fetchData(); // Refresh the plug list
+    } catch (err) {
+      setFormError(err.message || 'Failed to add plug.');
+    } finally {
+      setFormLoading(false);
+    }
+  };
+
+  /**
+   * Open the edit modal with pre-filled data.
+   */
+  const openEditModal = (plug) => {
+    setEditingPlug(plug);
+    setEditForm({
+      name: plug.name,
+      group_id: plug.group_id || '',
+      status: plug.status,
+    });
+    setFormError('');
+    setShowEditModal(true);
+  };
+
+  /**
+   * Handle updating a plug.
+   */
+  const handleEditPlug = async (e) => {
+    e.preventDefault();
+    if (!editingPlug) return;
+
+    setFormLoading(true);
+    setFormError('');
+
+    try {
+      const body = {};
+      if (editForm.name !== editingPlug.name) body.name = editForm.name;
+      if (editForm.status !== editingPlug.status) body.status = editForm.status;
+
+      // Handle group assignment: empty string = remove from group (send 0)
+      const newGroupId = editForm.group_id === '' ? 0 : parseInt(editForm.group_id);
+      const oldGroupId = editingPlug.group_id || 0;
+      if (newGroupId !== oldGroupId) body.group_id = newGroupId;
+
+      await api.put(`/api/cpo/plugs/${editingPlug.id}`, body);
+      setShowEditModal(false);
+      setEditingPlug(null);
+      await fetchData();
+    } catch (err) {
+      setFormError(err.message || 'Failed to update plug.');
+    } finally {
+      setFormLoading(false);
+    }
+  };
+
+  /**
+   * Quick status toggle: Available ↔ Maintenance.
+   */
+  const toggleMaintenance = async (plug) => {
+    const newStatus = plug.status === 'available' ? 'maintenance' : 'available';
+    try {
+      await api.put(`/api/cpo/plugs/${plug.id}`, { status: newStatus });
+      await fetchData();
+    } catch (err) {
+      console.error('Failed to toggle status:', err);
+    }
+  };
+
+  return (
+    <CpoLayout tenantName={tenantName}>
+      {/* Page Header */}
+      <div className="cpo-page-header flex justify-between items-center" style={{ flexWrap: 'wrap', gap: '1rem' }}>
+        <div>
+          <h1>Plugs</h1>
+          <p>Manage your smart charging plugs</p>
+        </div>
+        <button className="btn btn-cpo" onClick={() => { setFormError(''); setShowAddModal(true); }}>
+          + Add Plug
+        </button>
+      </div>
+
+      {/* Filter Bar */}
+      <div className="filter-bar">
+        <select
+          value={statusFilter}
+          onChange={(e) => setStatusFilter(e.target.value)}
+        >
+          {STATUS_FILTERS.map((f) => (
+            <option key={f.value} value={f.value}>{f.label}</option>
+          ))}
+        </select>
+        <span style={{ color: 'var(--color-text-muted)', fontSize: '0.85rem' }}>
+          {filteredPlugs.length} plug{filteredPlugs.length !== 1 ? 's' : ''}
+        </span>
+      </div>
+
+      {/* Plugs Table */}
+      {loading ? (
+        <div className="data-table-container">
+          {[1, 2, 3].map((i) => (
+            <div key={i} style={{ padding: '1rem', borderBottom: '1px solid hsla(0,0%,100%,0.04)' }}>
+              <div className="skeleton" style={{ width: '100%', height: '18px' }} />
+            </div>
+          ))}
+        </div>
+      ) : filteredPlugs.length > 0 ? (
+        <div className="data-table-container animate-fade-in">
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Name</th>
+                <th>Gateway</th>
+                <th>IP Address</th>
+                <th>Group</th>
+                <th>Status</th>
+                <th>Power</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filteredPlugs.map((plug) => (
+                <tr key={plug.id}>
+                  <td style={{ color: 'var(--color-text-muted)' }}>#{plug.id}</td>
+                  <td style={{ color: 'var(--color-text-primary)', fontWeight: 500 }}>
+                    {plug.name}
+                  </td>
+                  <td>{plug.gateway_id}</td>
+                  <td style={{ fontFamily: 'monospace', fontSize: '0.82rem' }}>{plug.local_ip}</td>
+                  <td>{plug.group_name || <span style={{ color: 'var(--color-text-muted)' }}>Ungrouped</span>}</td>
+                  <td>
+                    <span className={`badge ${STATUS_BADGE[plug.status] || 'badge-warning'}`}>
+                      {plug.status}
+                    </span>
+                  </td>
+                  <td>
+                    {plug.current_power_w > 0
+                      ? <span style={{ color: 'var(--color-success)' }}>{plug.current_power_w}W</span>
+                      : <span style={{ color: 'var(--color-text-muted)' }}>0W</span>
+                    }
+                  </td>
+                  <td>
+                    <div className="flex gap-2">
+                      <button
+                        className="btn btn-ghost btn-sm"
+                        onClick={() => openEditModal(plug)}
+                      >
+                        Edit
+                      </button>
+                      {(plug.status === 'available' || plug.status === 'maintenance') && (
+                        <button
+                          className="btn btn-ghost btn-sm"
+                          onClick={() => toggleMaintenance(plug)}
+                          style={{
+                            color: plug.status === 'available'
+                              ? 'var(--color-warning)'
+                              : 'var(--color-success)',
+                          }}
+                        >
+                          {plug.status === 'available' ? '🔧' : '✓'}
+                        </button>
+                      )}
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div className="empty-state glass">
+          <div className="empty-state-icon">🔌</div>
+          <h3>No plugs found</h3>
+          <p>
+            {statusFilter
+              ? 'No plugs match the selected filter. Try a different status.'
+              : 'Register your first smart plug to get started.'}
+          </p>
+          {!statusFilter && (
+            <button className="btn btn-cpo" onClick={() => setShowAddModal(true)}>
+              + Add Your First Plug
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Add Plug Modal */}
+      {showAddModal && (
+        <div className="modal-overlay" onClick={() => setShowAddModal(false)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2>Add New Plug</h2>
+              <button className="modal-close" onClick={() => setShowAddModal(false)}>✕</button>
+            </div>
+
+            <form onSubmit={handleAddPlug}>
+              <div className="flex flex-col gap-4">
+                <div className="input-group">
+                  <label>Gateway *</label>
+                  <select
+                    className="input"
+                    value={addForm.gateway_id}
+                    onChange={(e) => setAddForm({ ...addForm, gateway_id: e.target.value })}
+                    required
+                    style={{ appearance: 'auto', WebkitAppearance: 'auto' }}
+                  >
+                    <option value="">Select a gateway...</option>
+                    {gateways.map((gw) => (
+                      <option key={gw.id} value={gw.id}>{gw.name} ({gw.id})</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="input-group">
+                  <label>Plug Name *</label>
+                  <input
+                    type="text"
+                    className="input"
+                    placeholder="e.g. Parking Bay 1"
+                    value={addForm.name}
+                    onChange={(e) => setAddForm({ ...addForm, name: e.target.value })}
+                    required
+                  />
+                </div>
+
+                <div className="input-group">
+                  <label>Local IP Address *</label>
+                  <input
+                    type="text"
+                    className="input"
+                    placeholder="e.g. 192.168.20.10"
+                    value={addForm.local_ip}
+                    onChange={(e) => setAddForm({ ...addForm, local_ip: e.target.value })}
+                    required
+                  />
+                </div>
+
+                <div className="input-group">
+                  <label>Charger Group (Optional)</label>
+                  <select
+                    className="input"
+                    value={addForm.group_id}
+                    onChange={(e) => setAddForm({ ...addForm, group_id: e.target.value })}
+                    style={{ appearance: 'auto', WebkitAppearance: 'auto' }}
+                  >
+                    <option value="">No group (public)</option>
+                    {groups.map((g) => (
+                      <option key={g.id} value={g.id}>{g.name} ({g.is_public ? 'Public' : 'Private'})</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              {formError && <p className="error-text mt-4">{formError}</p>}
+
+              <div className="modal-actions">
+                <button type="button" className="btn btn-ghost" onClick={() => setShowAddModal(false)}>Cancel</button>
+                <button type="submit" className="btn btn-cpo" disabled={formLoading}>
+                  {formLoading ? 'Adding...' : 'Add Plug'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Plug Modal */}
+      {showEditModal && editingPlug && (
+        <div className="modal-overlay" onClick={() => setShowEditModal(false)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2>Edit Plug</h2>
+              <button className="modal-close" onClick={() => setShowEditModal(false)}>✕</button>
+            </div>
+
+            <form onSubmit={handleEditPlug}>
+              <div className="flex flex-col gap-4">
+                <div className="input-group">
+                  <label>Plug Name</label>
+                  <input
+                    type="text"
+                    className="input"
+                    value={editForm.name}
+                    onChange={(e) => setEditForm({ ...editForm, name: e.target.value })}
+                  />
+                </div>
+
+                <div className="input-group">
+                  <label>Charger Group</label>
+                  <select
+                    className="input"
+                    value={editForm.group_id}
+                    onChange={(e) => setEditForm({ ...editForm, group_id: e.target.value })}
+                    style={{ appearance: 'auto', WebkitAppearance: 'auto' }}
+                  >
+                    <option value="">No group (public)</option>
+                    {groups.map((g) => (
+                      <option key={g.id} value={g.id}>{g.name}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="input-group">
+                  <label>Status</label>
+                  <select
+                    className="input"
+                    value={editForm.status}
+                    onChange={(e) => setEditForm({ ...editForm, status: e.target.value })}
+                    style={{ appearance: 'auto', WebkitAppearance: 'auto' }}
+                  >
+                    <option value="available">Available</option>
+                    <option value="offline">Offline</option>
+                    <option value="maintenance">Maintenance</option>
+                  </select>
+                </div>
+              </div>
+
+              {formError && <p className="error-text mt-4">{formError}</p>}
+
+              <div className="modal-actions">
+                <button type="button" className="btn btn-ghost" onClick={() => setShowEditModal(false)}>Cancel</button>
+                <button type="submit" className="btn btn-cpo" disabled={formLoading}>
+                  {formLoading ? 'Saving...' : 'Save Changes'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+    </CpoLayout>
+  );
+};
+
+export default CpoPlugs;
