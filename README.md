@@ -17,21 +17,21 @@ The AmpHive platform consists of four core components:
 ## 2. Architecture
 
 ```
-┌──────────────┐        ┌──────────────────┐        ┌──────────────┐
-│  Driver App  │◄──────►│  FastAPI Backend  │◄──────►│  PostgreSQL  │
-│  (React/Vite)│  REST  │  (Uvicorn)       │  SQL   │  (Cloud SQL) │
-└──────────────┘        └────────┬─────────┘        └──────────────┘
-       │                         │
-       │                         │ MQTT
-       │                    ┌────▼─────┐
-       │                    │ Mosquitto │
-       │                    │  Broker   │
-       │                    └────┬─────┘
-       │                         │ WireGuard VPN (Headscale)
-       │                    ┌────▼─────────────────┐
-       │                    │  ESP32-S3 Gateway     │
-       │                    │  (Tapo P110 Driver)   │
-       │                    └──────────────────────┘
+┌──────────────┐        ┌──────────────────┐        ┌────────────────────┐
+│  Driver App  │◄──────►│  FastAPI Backend  │◄──────►│  PostgreSQL 15     │
+│  (React/Vite)│  REST  │  (Uvicorn)       │  SQL   │  (Docker container │
+└──────────────┘        └────────┬─────────┘        │   on same VM)      │
+                                 │                  └────────────────────┘
+                                 │ MQTT
+                            ┌────▼─────┐
+                            │ Mosquitto │
+                            │  Broker   │
+                            └────┬─────┘
+                                 │ WireGuard VPN (Headscale)
+                            ┌────▼─────────────────┐
+                            │  ESP32-S3 Gateway     │
+                            │  (Tapo P110 Driver)   │
+                            └──────────────────────┘
 ```
 
 ---
@@ -58,19 +58,19 @@ AmpHive/
 │   │   └── schema_v2.sql     #    Migration delta: charger groups + memberships
 │   ├── services/
 │   │   ├── auth.py           #    JWT (HS256) + bcrypt + get_current_user dep
-│   │   ├── mqtt_manager.py   #    paho-mqtt bridge (publish cmds; inbound = stub)
+│   │   ├── mqtt_manager.py   #    paho-mqtt bridge (inbound telemetry → TelemetryStore + DB; outbound ON/OFF cmds)
 │   │   ├── payments.py       #    Razorpay orders/verify/webhook
 │   │   ├── tapo_direct.py    #    Direct-Mode Tapo driver (lib or HTTP relay)
-│   │   └── telemetry.py      #    In-memory TelemetryStore + SSE generator
+│   │   └── telemetry.py      #    In-memory TelemetryStore (COINS_PER_KWH pricing) + SSE generator
 │   ├── main.py               #    FastAPI app, lifespan, all 22 REST routes
 │   ├── Dockerfile            #    python:3.11-slim
 │   └── requirements.txt
 ├── frontend/                 # React + Vite Driver Web Application
 │   ├── src/
-│   │   ├── api/              #    client.js (fetch wrapper) + mockSse.js (dead)
-│   │   ├── components/       #    Navbar, SessionMonitor, WalletCard
+│   │   ├── api/              #    client.js (fetch wrapper)
+│   │   ├── components/       #    Navbar, SessionMonitor, WalletCard, MapComponent
 │   │   ├── contexts/         #    Auth, Session (real SSE), Wallet
-│   │   ├── pages/            #    Home, Login, Session, TopUp, Groups
+│   │   ├── pages/            #    Home, Login, Session, TopUp, Groups, History
 │   │   ├── styles/           #    global.css (glassmorphic dark theme)
 │   │   ├── App.jsx           #    Router & layout shell
 │   │   └── main.jsx          #    React DOM entry point
@@ -188,21 +188,23 @@ AmpHive is deployed to **Google Cloud Platform** in the `asia-south1` (Mumbai, I
 ### Live Infrastructure
 | Resource | Name | Specs |
 |----------|------|-------|
-| **Compute Engine VM** | `amphive-vm-in` | `e2-highcpu-4` (4 vCPU, 4GB RAM), 50GB pd-balanced, `asia-south1-a` |
-| **Cloud SQL** | `amphive-db-in` | PostgreSQL 15, `db-f1-micro`, `asia-south1` |
+| **Compute Engine VM** | `amphive-vm-in` | `e2-standard-2` (2 vCPU, 8GB RAM), 50GB pd-balanced, `asia-south1-a` (Mumbai) |
+| **Static IP** | `amphive-static-ip` | `8.231.81.12` — permanent, does not change on restart |
+| **Database** | `amphive-db` (Docker) | PostgreSQL 15 container on the VM, `postgres_data` named volume |
+| ~~Cloud SQL~~ | ~~`amphive-db-in`~~ | **Decommissioned** — deleted. DB now runs on VM. |
 
 ### Live Endpoints
 | Service | URL |
 |---------|-----|
-| **Frontend (Driver App)** | http://35.200.131.98 |
-| **Backend API (Swagger)** | http://35.200.131.98:8000/docs |
-| **MQTT Broker** | `35.200.131.98:1883` |
+| **Frontend (Driver App)** | http://8.231.81.12 |
+| **Backend API (Swagger)** | http://8.231.81.12:8000/docs |
+| **MQTT Broker** | `8.231.81.12:1883` |
 
 ### Deploying Updates
 ```powershell
 .\deploy\scripts\deploy.ps1
 ```
-This script waits for Cloud SQL, generates `.env` with the DB IP, SCPs files to the VM, and runs `docker-compose up -d --build`.
+This script sets `DATABASE_URL` to the local `db` container, SCPs all files to the VM, and runs `docker-compose up -d --build`. No Cloud SQL wait — deployment completes in ~1-2 minutes.
 
 ### Deployment Documentation
 * [new_device_setup.md](deploy/docs/new_device_setup.md) — Step-by-step setup for a new development device
@@ -243,13 +245,13 @@ Interactive Swagger UI: `http://localhost:8000/docs` when running locally.
 |-------|------------|
 | **Frontend** | React 19, Vite 8, React Router 6, CSS (Glassmorphism) |
 | **Backend** | Python 3.11, FastAPI, Uvicorn, SQLAlchemy 2.0 (async), Pydantic |
-| **Database** | PostgreSQL 15 (Cloud SQL in production) |
+| **Database** | PostgreSQL 15 (Docker container on VM — no Cloud SQL) |
 | **Messaging** | Eclipse Mosquitto 2.0 (MQTT) |
 | **VPN** | Headscale + WireGuard (Tailscale-compatible) |
 | **Firmware** | ESP-IDF v5.x (C), FreeRTOS, MicroLink Tailscale |
 | **Containers** | Docker, Docker Compose, Nginx (frontend serving) |
-| **Cloud** | Google Cloud Platform (Compute Engine, Cloud SQL) |
-| **Orchestration** | Kubernetes (K3s) manifests available |
+| **Cloud** | Google Cloud Platform (Compute Engine `e2-standard-2`, static IP) |
+| **Orchestration** | Kubernetes (K3s) manifests available (not live) |
 
 ---
 

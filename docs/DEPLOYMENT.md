@@ -1,6 +1,6 @@
 # AmpHive — Deployment
 
-*Verified against `deploy/`, root scripts, and `tools/` on 2026-06-20.*
+*Verified against `deploy/`, root scripts, and `tools/` on 2026-06-29.*
 
 There are **two parallel deployment models** in the repo:
 1. **Docker Compose on a GCP Compute Engine VM** — this is the **live/canonical**
@@ -14,30 +14,33 @@ There are **two parallel deployment models** in the repo:
 
 | Resource | Value |
 |----------|-------|
-| Compute VM | `amphive-vm-in`, zone `asia-south1-a`, `e2-highcpu-4`, Debian, 50 GB disk |
-| Cloud SQL | `amphive-db-in`, PostgreSQL 15, `db-f1-micro`, region `asia-south1`, db `amphive`, user `postgres` |
-| Public IP | **Ephemeral** — changes on VM restart. Docs disagree on the current value (see [SECURITY.md](SECURITY.md) / status doc); always re-check with `gcloud`. |
+| Compute VM | `amphive-vm-in`, zone `asia-south1-a` (Mumbai), `e2-standard-2` (2 vCPU / 8GB RAM), Debian 11, 50 GB disk |
+| Static IP | `8.231.81.12` (reserved as `amphive-static-ip` — **does not change on restart**) |
+| Database | PostgreSQL 15 running as a **Docker container** (`amphive-db`) on the VM. Data persists in the `postgres_data` named Docker volume. |
+| ~~Cloud SQL~~ | ~~`amphive-db-in`~~ — **Decommissioned and deleted** on 2026-06-29. |
 
-The VM runs `docker-compose.prod.yml` from a flat `~/amphive/` directory
+The VM runs `docker-compose.prod.yml` (version `3.7`) from a flat `~/amphive/` directory
 (`docker-compose.yml`, `mosquitto.conf`, `.env`, `backend/`, `frontend/`).
 
 ### Containers (prod compose)
 
 | Container | Image/build | Port | Notes |
-|-----------|-------------|------|-------|
-| `amphive-backend` | build `./backend` | 8000 | env via `${...}`; depends on mqtt only (DB is external Cloud SQL) |
+|-----------|-------------|------|---------|
+| `amphive-db` | `postgres:15-alpine` | internal | Postgres on the VM itself. `POSTGRES_PASSWORD=amphive_db_admin` hardcoded for compose v3.7 compat. |
+| `amphive-backend` | build `./backend` | 8000 | env via `${...}` from `.env`; depends on `db` + `mqtt`. |
 | `amphive-frontend` | build `./frontend` | 80 | Nginx serves the SPA + proxies `/api/` → backend |
-| `amphive-mqtt` | `eclipse-mosquitto:2.0` | 1883, 9001 | persistence volumes + healthcheck; **no DB container** |
+| `amphive-mqtt` | `eclipse-mosquitto:2.0` | 1883, 9001 | persistence volumes + healthcheck |
 
-Restart policy `always`. There is no `db` service in prod (Cloud SQL is used).
+Restart policy `always`.
 
 ### Compose file differences
 
 | | root `docker-compose.yml` | `deploy/docker/docker-compose.dev.yml` | `deploy/docker/docker-compose.prod.yml` |
 |--|--|--|--|
-| Local Postgres | ✅ `amphive-db-dev` | ✅ | ❌ (external Cloud SQL) |
+| Local Postgres | ✅ `amphive-db-dev` | ✅ | ✅ `amphive-db` (same VM) |
 | Secrets/Tapo env | ✅ via `${...}` | ❌ (DB+MQTT only) | ✅ via `${...}` |
 | mqtt healthcheck | ❌ | ❌ | ✅ |
+| db healthcheck | ❌ | ❌ | ✅ `pg_isready` |
 | restart | `unless-stopped` | `unless-stopped` | `always` |
 | `mosquitto.conf` mount path | `./deploy/config/...` | `../../mosquitto.conf` | `./mosquitto.conf` |
 
@@ -46,16 +49,15 @@ file omits all secrets, so Direct Mode / Razorpay won't work there.
 
 ### Deploy script — `deploy/scripts/deploy.ps1`
 
-1. Poll Cloud SQL `amphive-db-in` until `RUNNABLE`.
-2. `gcloud sql databases create amphive` (idempotent).
-3. Read the Cloud SQL IP and (re)write `.env`'s `DATABASE_URL`
-   (`postgresql+asyncpg://postgres:amphive_db_admin@<ip>:5432/amphive`),
-   `MQTT_BROKER_HOST=mqtt`, `MQTT_BROKER_PORT=1883`. If `.env` is absent it adds
-   a default `JWT_SECRET_KEY` and `COINS_PER_RUPEE=1.0`.
-4. `tar` up `backend/` + `frontend/` (excluding node_modules/.venv/.git) and
-   `gcloud compute scp` the tarball + `mosquitto.conf` + `docker-compose.prod.yml`
-   (as `docker-compose.yml`) + `.env` to `~/amphive/`.
-5. SSH: extract and `sudo docker-compose up -d --build`.
+1. Set `DATABASE_URL=postgresql+asyncpg://postgres:amphive_db_admin@db:5432/amphive` in
+   local `.env` (the hostname `db` resolves within the Docker Compose network).
+2. `tar` up `backend/` + `frontend/` (excluding node_modules/.venv/.git) and
+   `gcloud compute scp` the tarball to `~/amphive/`.
+3. SCP `mosquitto.conf` (via `/tmp/` + `sudo mv` to handle permissions),
+   `docker-compose.prod.yml` (as `docker-compose.yml`), and `.env`.
+4. SSH: extract and `sudo docker-compose up -d --build`.
+
+**Total time:** ~1–2 minutes (no Cloud SQL polling wait).
 
 ### One-time VM bootstrap — `deploy/scripts/startup.sh`
 
@@ -66,15 +68,12 @@ file omits all secrets, so Direct Mode / Razorpay won't work there.
 
 | Script | Action |
 |--------|--------|
-| `start-vm.bat` | Wake Cloud SQL (`activation-policy=ALWAYS`) → start VM → fetch new DB IP → SSH rewrite `DATABASE_URL` → `docker-compose down && up -d`. **Use this after a full stop** (it refreshes the DB IP). |
-| `stop-vm.bat` | Stop VM → sleep Cloud SQL (`activation-policy=NEVER`). Cost-saving. |
-| `start-remote-servers.bat` | SSH `docker-compose up -d` only (no IP refresh). |
+| `start-vm.bat` | Start VM only (`gcloud compute instances start`). All 4 containers auto-start via `restart: always`. **No Cloud SQL, no IP rewrite needed.** |
+| `stop-vm.bat` | Stop VM only (`gcloud compute instances stop`). All containers stop gracefully. DB data persists in Docker volume. |
+| `start-remote-servers.bat` | SSH `docker-compose up -d` only (no rebuild). |
 | `stop-remote-servers.bat` | SSH `docker-compose down`. |
 | `restart-remote-servers.bat` | SSH `docker-compose restart`. |
 | `logs-remote-backend.bat` | SSH `docker logs -f amphive-backend`. |
-
-⚠️ The lightweight `*-remote-servers.bat` trio does **not** refresh the DB IP, so
-after a DB wake they can point at a stale IP — use `start-vm.bat` instead.
 
 ---
 
