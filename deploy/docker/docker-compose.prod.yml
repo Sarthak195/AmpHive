@@ -7,7 +7,7 @@
 # Data is persisted via the 'postgres_data' named Docker volume, so it
 # survives container rebuilds and restarts.
 # =============================================================================
-# Note: No 'version' field — uses modern Compose Spec for full feature support.
+version: '3.7'
 
 services:
   db:
