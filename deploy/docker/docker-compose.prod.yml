@@ -7,7 +7,7 @@
 # Data is persisted via the 'postgres_data' named Docker volume, so it
 # survives container rebuilds and restarts.
 # =============================================================================
-version: '3.7'
+# Note: No 'version' field — uses modern Compose Spec for full feature support.
 
 services:
   db:
@@ -67,10 +67,8 @@ services:
       - TAPO_PLUG_IP=${TAPO_PLUG_IP:-}
       - TAPO_RELAY_URL=${TAPO_RELAY_URL:-}
     depends_on:
-      db:
-        condition: service_healthy
-      mqtt:
-        condition: service_started
+      - db
+      - mqtt
 
   frontend:
     build:
