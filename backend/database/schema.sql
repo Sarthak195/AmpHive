@@ -33,6 +33,8 @@ CREATE TABLE gateways (
     name VARCHAR(100) NOT NULL,
     vpn_ip VARCHAR(45) UNIQUE NOT NULL, -- Tailscale/WireGuard allocated IP
     status gateway_status DEFAULT 'offline'::gateway_status NOT NULL,
+    latitude DOUBLE PRECISION,
+    longitude DOUBLE PRECISION,
     last_seen_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL
 );

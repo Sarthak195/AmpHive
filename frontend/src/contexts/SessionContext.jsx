@@ -38,7 +38,7 @@ export const SessionProvider = ({ children }) => {
 
       // Open SSE connection for real-time telemetry
       const token = localStorage.getItem('amphive_token');
-      const sseUrl = `${API_BASE}/api/sessions/live/${newSessionId}`;
+      const sseUrl = `${API_BASE}/api/sessions/live/${newSessionId}?token=${token}`;
 
       // EventSource doesn't natively support Authorization headers,
       // so we pass the token as a query parameter for SSE.

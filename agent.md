@@ -69,7 +69,7 @@ AmpHive is a shared EV charging PaaS connecting 3rd-party smart plugs to a centr
 * `/backend/`: FastAPI server files (single-module app; all 22 routes in `main.py`).
   * `/backend/main.py`: REST routes (auth, groups, plugs, gateways, sessions+SSE, payments, direct) and lifespan startup/shutdown.
   * `/backend/services/auth.py`: JWT (HS256, 7-day) + bcrypt password hashing + `get_current_user` dependency.
-  * `/backend/services/mqtt_manager.py`: MQTT client. Publishes ON/OFF commands; **inbound telemetry/status handlers are stubs (log only)**.
+  * `/backend/services/mqtt_manager.py`: MQTT client. Publishes ON/OFF commands; inbound telemetry feeds the `TelemetryStore` (for live SSE stream) and persists to DB (plug power, session energy, peak power), and gateway status updates online/offline state in the DB.
   * `/backend/services/payments.py`: Razorpay create-order / verify / webhook (webhook only logs, no auto-credit yet).
   * `/backend/services/telemetry.py`: In-memory `TelemetryStore` singleton + SSE generator. **No TimescaleDB** anywhere.
   * `/backend/services/tapo_direct.py`: [Direct Mode] Tapo P110 driver (local `tapo` lib or HTTP relay via `TAPO_RELAY_URL`).
@@ -171,7 +171,7 @@ For detailed technical specifications, integration paths, and step-by-step instr
 ### [~] Phase 2: Frontend & Driver Interfaces (MOSTLY DONE)
 - **[x] Prepaid Driver Wallet Application:** React 19 + Vite SPA is built — login/register, Plug-ID start/stop, live SSE session monitor, wallet top-up, and private-group join via access code. (See [docs/ARCHITECTURE.md](file:///c:/Users/Sarthak/Documents/AmpHive/docs/ARCHITECTURE.md#frontend).)
 - **[ ] CPO Administration Dashboard:** Not built. There is also **no role enforcement** in the backend yet (all users are `driver`), so CPO/admin workflows are unsupported.
-- **[~] Visual Charging Analytics:** A live SSE session monitor exists, but there is **no TimescaleDB** and the MQTT inbound telemetry handlers are stubs — so historical analytics and real live power/energy over the ESP32 path are not yet functional. See [docs/IMPLEMENTATION_STATUS.md](file:///c:/Users/Sarthak/Documents/AmpHive/docs/IMPLEMENTATION_STATUS.md).
+- **[x] Visual Charging Analytics:** Inbound MQTT telemetry feeds the `TelemetryStore` and the database session and plug records. The live SSE session monitor displays real-time power, energy, duration, and calculated coin costs based on `COINS_PER_KWH`. (TimescaleDB itself is not used; in-memory store and session table updates are used). See [docs/IMPLEMENTATION_STATUS.md](file:///c:/Users/Sarthak/Documents/AmpHive/docs/IMPLEMENTATION_STATUS.md).
 
 ### [~] Phase 3: Financial & Third-Party Integrations (MOSTLY DONE)
 - **[x] Razorpay Top-Ups:** `/api/payments/create-order` + `/api/payments/verify` (HMAC-verified) credit coins; frontend uses the Razorpay CDN checkout. 

@@ -88,7 +88,7 @@ const WalletCard = () => {
         <button className="btn btn-primary" onClick={() => navigate('/topup')} style={{ flex: 1 }}>
           Top Up Balance
         </button>
-        <button className="btn btn-ghost" style={{ flex: 1 }}>
+        <button className="btn btn-ghost" onClick={() => navigate('/history')} style={{ flex: 1 }}>
           View History
         </button>
       </div>

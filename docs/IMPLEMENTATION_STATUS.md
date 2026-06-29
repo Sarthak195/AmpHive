@@ -16,9 +16,9 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 | JWT auth + bcrypt | ✅ | 7-day token, loaded fresh per request |
 | Role-based access control | ❌ | `role` is in the token but never enforced; all users are created `driver` |
 | MQTT command publish (ON/OFF) | ✅ | QoS 1, 3 s wait |
-| MQTT inbound telemetry/status handling | 🟦 | Handlers only log; no DB write, no `TelemetryStore` feed |
-| Live telemetry / SSE | 🟡 | Real SSE endpoint, but no live data source over Path A (placeholders only) |
-| TimescaleDB / time-series persistence | ❌ | In-memory `TelemetryStore` only |
+| MQTT inbound telemetry/status handling | ✅ | Telemetry updates TelemetryStore and session DB. Status updates gateway state in DB. |
+| Live telemetry / SSE | ✅ | Fully functional, streams real telemetry from TelemetryStore |
+| TimescaleDB / time-series persistence | ❌ | In-memory TelemetryStore + session table update only |
 | Razorpay create-order + verify | ✅ | HMAC-verified; credits coins + ledger |
 | Razorpay webhook auto-credit | 🟦 | Signature verified but only logs (no credit) |
 | Wallet debit on stop + ledger | ✅ | Not atomic/row-locked (race-prone) |
@@ -29,7 +29,7 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 |------------|:------:|-------|
 | Login/register, protected routes | ✅ | |
 | Plug-ID start + available-plugs list | ✅ | |
-| Live session monitor (SSE) | 🟡 | Uses real `EventSource`; **token not attached** to the SSE URL (auth gap) |
+| Live session monitor (SSE) | ✅ | Uses real `EventSource` with token query parameter |
 | Razorpay top-up flow | ✅ | CDN script + `window.Razorpay`; key comes from backend order |
 | Charger groups (join/list) | ✅ | |
 | Map / find-nearest-plug | ❌ | No map library or UI at all |
@@ -62,24 +62,22 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 
 ## 2. End-to-end reality check
 
-- **Path A (ESP32 + MQTT)** is *wired but not real*: topic contract matches, but
-  the firmware plug driver is mocked and the backend ignores inbound telemetry,
-  so completed sessions over this path record **0 kWh / 0 coins**.
+- **Path A (ESP32 + MQTT)** is functional on the backend: telemetry ingestion,
+  TelemetryStore updates, DB persistence, and gateway status updates are fully
+  implemented. However, the ESP32 firmware plug driver is currently mocked (returns
+  simulated telemetry), so the values are not yet from a physical smart plug.
 - **Path B (Direct Mode + WireGuard relay)** is the path that actually controls a
   physical plug today, and it's what the committed env enables. It does not feed
   the session/telemetry pipeline either — it's a separate on/off/info surface.
-- A fully working billed session requires either (a) finishing Path A
-  (real Tapo driver + telemetry ingestion), or (b) wiring Direct Mode into the
-  session/telemetry flow.
+- A fully working billed session with a real plug over Path A requires finishing
+  the firmware Tapo driver (real Tapo driver instead of the mock).
 
 ## 3. Full discrepancy list (doc says X → code does Y)
 
 1. **README API table lists 5 endpoints; there are 22.**
 2. **TimescaleDB** is referenced throughout the specs but **not used** — telemetry
    is in-memory and non-persistent.
-3. **MQTT inbound handlers are stubs** (only log); README's "telemetry persisted +
-   LWT offline alerts on the backend" is inaccurate (LWT is published by the
-   *firmware*, and the backend has no LWT).
+3. **LWT offline alerts on the backend** (README description) is inaccurate (LWT is published by the *firmware*, and the backend has no LWT, though gateway status is now persisted on the backend when received).
 4. **Python version:** README says 3.12; Dockerfile uses **3.11**.
 5. **`schema.sql`/`schema_v2.sql` are not executed** — the ORM `create_all` is the
    real schema, and it omits unique constraints + indexes the SQL files define.
@@ -88,7 +86,7 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 7. **`gateways/register` and `plugs/register` are unauthenticated.**
 8. **Direct Mode is documented as a temporary dev bypass** but is the
    actually-enabled path in the committed config.
-9. **`charging_sessions.peak_power_w`** is defined but never populated.
+9. [Resolved] `charging_sessions.peak_power_w` is now populated.
 10. **Wallet updates aren't atomic** despite the "thread-safe" comment.
 11. **Frontend SSE auth gap:** comment says pass `?token=`, code doesn't.
 12. **No map UI** despite "find nearest plug / OpenStreetMap" framing.

@@ -29,14 +29,14 @@ from sqlalchemy import select, or_, and_, func, cast, Date
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 
-from backend.database.db import get_db, init_db
+from backend.database.db import get_db, init_db, async_session_factory
 from backend.database.models import (
     User, UserRole, Plug, PlugStatus, Gateway, GatewayStatus, Tenant,
     ChargingSession, SessionStatus, LedgerTransaction, TransactionType,
     ChargerGroup, GroupMembership,
 )
 from backend.services.auth import (
-    hash_password, verify_password, create_access_token, get_current_user,
+    hash_password, verify_password, create_access_token, get_current_user, decode_access_token
 )
 from backend.services.rbac import require_role
 from backend.services.mqtt_manager import MQTTManager
@@ -80,12 +80,18 @@ async def lifespan(app: FastAPI):
     # Initialize the database tables
     await init_db()
     
-    # Initialize and start the MQTT connection
+    # Initialize and start the MQTT connection.
+    # Pass telemetry_store so inbound MQTT data feeds the SSE stream,
+    # and db_session_factory so telemetry is persisted to the database.
+    import asyncio
     mqtt_manager = MQTTManager(
         broker_host=MQTT_BROKER_HOST,
         broker_port=MQTT_BROKER_PORT,
         username=MQTT_USERNAME,
         password=MQTT_PASSWORD,
+        telemetry_store=telemetry_store,
+        db_session_factory=async_session_factory,
+        event_loop=asyncio.get_running_loop(),
     )
     mqtt_manager.start()
 
@@ -522,62 +528,6 @@ async def get_plug(
     )
 
 
-# ===========================================================================
-# Gateway & Plug Registration Endpoints
-# ===========================================================================
-
-@app.post("/api/gateways/register")
-async def register_gateway(
-    req: GatewayRegisterRequest,
-    db: AsyncSession = Depends(get_db),
-):
-    """Register a new ESP32 gateway in the database."""
-    gateway = Gateway(
-        id=req.gateway_id,
-        tenant_id=req.tenant_id,
-        name=req.name,
-        vpn_ip=req.vpn_ip,
-    )
-    db.add(gateway)
-    await db.commit()
-    await db.refresh(gateway)
-    logger.info(f"Gateway registered: {gateway.id} ({gateway.name})")
-
-    return {
-        "status": "registered",
-        "gateway_id": gateway.id,
-        "name": gateway.name,
-        "vpn_ip": gateway.vpn_ip,
-    }
-
-
-@app.post("/api/plugs/register")
-async def register_plug(
-    req: PlugRegisterRequest,
-    db: AsyncSession = Depends(get_db),
-):
-    """Register a new smart plug on a specific gateway's local VLAN subnet."""
-    plug = Plug(
-        gateway_id=req.gateway_id,
-        name=req.name,
-        local_ip=req.local_ip,
-        plug_model=req.plug_model,
-        group_id=req.group_id,
-    )
-    db.add(plug)
-    await db.commit()
-    await db.refresh(plug)
-    logger.info(f"Plug registered: {plug.id} ({plug.name}) on gateway {plug.gateway_id}")
-
-    return {
-        "status": "registered",
-        "plug_id": plug.id,
-        "gateway_id": req.gateway_id,
-        "name": plug.name,
-        "local_ip": plug.local_ip,
-        "plug_model": plug.plug_model,
-    }
-
 
 # ===========================================================================
 # Charging Session Endpoints
@@ -737,16 +687,20 @@ async def stop_charging_session(
     session.energy_kwh = final_energy
     session.coins_spent = final_cost
 
-    # 4. Deduct coins from user wallet and create ledger entry
-    user.coin_balance = max(0, user.coin_balance - final_cost)
+    # 4. Deduct coins from user wallet and create ledger entry (Atomic)
+    user_result = await db.execute(
+        select(User).where(User.id == user.id).with_for_update()
+    )
+    locked_user = user_result.scalar_one()
+    locked_user.coin_balance = max(0, locked_user.coin_balance - final_cost)
 
     ledger_entry = LedgerTransaction(
-        user_id=user.id,
+        user_id=locked_user.id,
         session_id=session.id,
         amount=-final_cost,  # Negative = debit
         transaction_type=TransactionType.SESSION_DEBIT,
         description=f"Charging session on {plug.name}: {final_energy:.3f} kWh",
-        balance_after=user.coin_balance,
+        balance_after=locked_user.coin_balance,
     )
     db.add(ledger_entry)
 
@@ -764,14 +718,14 @@ async def stop_charging_session(
         "session_id": session.id,
         "energy_kwh": round(final_energy, 3),
         "coins_spent": round(final_cost, 2),
-        "balance_remaining": round(user.coin_balance, 2),
+        "balance_remaining": round(locked_user.coin_balance, 2),
     }
 
 
 @app.get("/api/sessions/live/{session_id}")
 async def live_session_telemetry(
     session_id: int,
-    user: User = Depends(get_current_user),
+    token: Optional[str] = None,
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -779,12 +733,19 @@ async def live_session_telemetry(
     to the frontend. Yields a JSON event every ~1 second containing power,
     current, energy, duration, and cost data.
     """
+    if not token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    payload = decode_access_token(token)
+    if not payload or not payload.get("sub"):
+        raise HTTPException(status_code=401, detail="Invalid token")
+    user_id = int(payload.get("sub"))
+
     # Verify session exists and belongs to the user
     result = await db.execute(
         select(ChargingSession).where(
             and_(
                 ChargingSession.id == session_id,
-                ChargingSession.user_id == user.id,
+                ChargingSession.user_id == user_id,
             )
         )
     )
@@ -886,25 +847,29 @@ async def verify_payment(
     coins = payment_service.calculate_coins(req.amount_inr)
 
     # Credit coins to user wallet (thread-safe via database transaction)
-    user.coin_balance += coins
+    user_result = await db.execute(
+        select(User).where(User.id == user.id).with_for_update()
+    )
+    locked_user = user_result.scalar_one()
+    locked_user.coin_balance += coins
 
     # Create ledger top-up transaction
     ledger_entry = LedgerTransaction(
-        user_id=user.id,
+        user_id=locked_user.id,
         amount=coins,  # Positive = credit
         transaction_type=TransactionType.TOPUP,
         description=f"Wallet top-up: ₹{req.amount_inr} → {coins} coins (Razorpay: {req.razorpay_payment_id})",
-        balance_after=user.coin_balance,
+        balance_after=locked_user.coin_balance,
     )
     db.add(ledger_entry)
     await db.commit()
 
-    logger.info(f"Payment verified: user={user.email}, ₹{req.amount_inr} → {coins} coins")
+    logger.info(f"Payment verified: user={locked_user.email}, ₹{req.amount_inr} → {coins} coins")
 
     return {
         "status": "success",
         "coins_credited": coins,
-        "new_balance": round(user.coin_balance, 2),
+        "new_balance": round(locked_user.coin_balance, 2),
     }
 
 

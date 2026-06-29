@@ -18,6 +18,7 @@ import TopUp from './pages/TopUp';
 import Session from './pages/Session';
 import Login from './pages/Login';
 import Groups from './pages/Groups';
+import History from './pages/History';
 import { useAuth } from './contexts/AuthContext';
 
 // CPO Admin Dashboard pages
@@ -74,6 +75,9 @@ function App() {
           } />
           <Route path="/groups" element={
             <ProtectedRoute><Groups /></ProtectedRoute>
+          } />
+          <Route path="/history" element={
+            <ProtectedRoute><History /></ProtectedRoute>
           } />
 
           {/* CPO Setup — requires auth, shows onboarding if not a CPO */}

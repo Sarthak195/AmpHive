@@ -11,6 +11,7 @@ import WalletCard from '../components/WalletCard';
 import { useAuth } from '../contexts/AuthContext';
 import { useSession } from '../contexts/SessionContext';
 import api from '../api/client';
+import MapComponent from '../components/MapComponent';
 
 const Home = () => {
   const { user } = useAuth();
@@ -125,6 +126,10 @@ const Home = () => {
               Refresh
             </button>
           </div>
+
+          {plugs.length > 0 && !loadingPlugs && (
+            <MapComponent plugs={plugs} onPlugSelect={(id) => handleStartSession(null, id)} />
+          )}
 
           {loadingPlugs ? (
             <div className="flex flex-col gap-3">

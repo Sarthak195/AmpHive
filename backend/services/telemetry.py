@@ -14,9 +14,14 @@ Design decisions:
 """
 
 import asyncio
+import os
 import time
 from dataclasses import dataclass, field, asdict
 from typing import Dict, Optional, AsyncGenerator
+
+# Charging rate: coins deducted per kWh consumed during a session.
+# Default 5.0 means 1 kWh costs 5 coins (= ₹5 at the default 1:1 coin:rupee rate).
+COINS_PER_KWH = float(os.getenv("COINS_PER_KWH", "5.0"))
 
 
 @dataclass
@@ -57,12 +62,19 @@ class TelemetryStore:
 
     def update(self, plug_id: int, power_w: float, current_a: float,
                energy_kwh: float, status: str = "charging",
-               cost_coins: float = 0.0) -> None:
+               cost_coins: Optional[float] = None) -> None:
         """
         Called by the MQTT manager when a telemetry payload arrives from
         a gateway. Updates the in-memory snapshot and signals any waiting
         SSE consumers.
+
+        If cost_coins is not provided, it is auto-calculated from
+        energy_kwh * COINS_PER_KWH.
         """
+        # Auto-calculate cost if not explicitly provided
+        if cost_coins is None:
+            cost_coins = round(energy_kwh * COINS_PER_KWH, 2)
+
         # Calculate session duration from start time
         if plug_id not in self._session_start_times:
             self._session_start_times[plug_id] = time.time()
