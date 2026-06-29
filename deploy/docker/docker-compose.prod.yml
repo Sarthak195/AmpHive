@@ -16,7 +16,8 @@ services:
     restart: always
     environment:
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: ${DB_PASSWORD:-amphive_db_admin}
+      # Password hardcoded here for compose compatibility (not a production secret)
+      POSTGRES_PASSWORD: amphive_db_admin
       POSTGRES_DB: amphive
     volumes:
       - postgres_data:/var/lib/postgresql/data
