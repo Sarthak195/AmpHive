@@ -113,18 +113,14 @@ AmpHive is a shared EV charging PaaS connecting 3rd-party smart plugs to a centr
 | **OS** | Debian 11 |
 
 ### Cloud SQL Database
-| Property | Value |
-|----------|-------|
-| **Instance Name** | `amphive-db-in` |
-| **Region** | `asia-south1` |
-| **Engine** | PostgreSQL 15 |
-| **Tier** | `db-f1-micro` |
-| **Database** | `amphive` |
-| **User** | `postgres` |
+> **⚠️ DECOMMISSIONED** — `amphive-db-in` (Cloud SQL) has been deleted. PostgreSQL now runs as a
+> Docker container (`postgres:15-alpine`) directly on the GCP VM. Data persists
+> via the `postgres_data` named Docker volume on the VM's disk.
 
 ### Running Containers (Docker Compose on VM)
 | Container | Port | Service |
 |-----------|------|---------|
+| `amphive-db` | internal | PostgreSQL 15 (no exposed port — internal to compose network) |
 | `amphive-frontend` | `80` | React/Vite UI served via Nginx |
 | `amphive-backend` | `8000` | FastAPI REST API |
 | `amphive-mqtt` | `1883` | Eclipse Mosquitto MQTT Broker |
@@ -141,7 +137,11 @@ PC (`10.10.0.2`) to allow the cloud backend to control a Tapo P110 smart plug
 on the home LAN without an ESP32 gateway. See [wireguard_tunnel_setup.md](file:///c:/Users/Sarthak/Documents/AmpHive/deploy/docs/wireguard_tunnel_setup.md).
 
 ### Deployment Method
-The application is deployed via `deploy/scripts/deploy.ps1` which copies the code via `gcloud compute scp` and builds using `docker-compose up -d --build` directly on the VM.
+The application is deployed via `deploy/scripts/deploy.ps1` which copies the code via `gcloud compute scp`, uploads the docker-compose file and `.env`, and builds using `docker-compose up -d --build` directly on the VM. No Cloud SQL wait step — deployment is fast (~1-2 minutes total).
+
+### Start/Stop Infrastructure
+- **Start**: Run `start-vm.bat` — starts VM only (single `gcloud compute instances start` command). All containers auto-start via `restart: always`.
+- **Stop**: Run `stop-vm.bat` — stops VM only. All containers and Postgres stop gracefully. Data persists in the `postgres_data` Docker volume.
 
 ### Deployment History
 For the full log of infrastructure commands (AWS→GCP migration, India region migration, old resource cleanup), see [gcp_migration_runbook.md](file:///c:/Users/Sarthak/Documents/AmpHive/deploy/docs/gcp_migration_runbook.md).
