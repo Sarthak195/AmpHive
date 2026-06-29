@@ -107,9 +107,9 @@ AmpHive is a shared EV charging PaaS connecting 3rd-party smart plugs to a centr
 |----------|-------|
 | **Instance Name** | `amphive-vm-in` |
 | **Zone** | `asia-south1-a` (Mumbai) |
-| **Machine Type** | `e2-highcpu-4` (4 vCPU, 4GB RAM) |
+| **Machine Type** | `e2-standard-2` (2 vCPU, 8GB RAM) |
 | **Boot Disk** | 50GB Balanced Persistent Disk |
-| **Public IP** | `34.100.200.152` (ephemeral — may change on VM restart) |
+| **Public IP** | `8.231.81.12` (**static** — reserved as `amphive-static-ip`, will not change on restart) |
 | **OS** | Debian 11 |
 
 ### Cloud SQL Database
