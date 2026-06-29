@@ -2,10 +2,30 @@
 # AmpHive Production Docker Compose
 # This file is deployed to the GCP VM at ~/amphive/docker-compose.yml
 # All paths assume the flat VM directory structure created by deploy.ps1
+#
+# Database: PostgreSQL runs as a container on the VM itself (no Cloud SQL).
+# Data is persisted via the 'postgres_data' named Docker volume, so it
+# survives container rebuilds and restarts.
 # =============================================================================
 version: '3.7'
 
 services:
+  db:
+    image: postgres:15-alpine
+    container_name: amphive-db
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-amphive_db_admin}
+      POSTGRES_DB: amphive
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   mqtt:
     image: eclipse-mosquitto:2.0
     container_name: amphive-mqtt
@@ -39,6 +59,7 @@ services:
       - RAZORPAY_KEY_ID=${RAZORPAY_KEY_ID}
       - RAZORPAY_KEY_SECRET=${RAZORPAY_KEY_SECRET}
       - COINS_PER_RUPEE=${COINS_PER_RUPEE}
+      - COINS_PER_KWH=${COINS_PER_KWH:-5.0}
       # [Direct Mode] Tapo P110 control via WireGuard tunnel (bypasses ESP32)
       - DIRECT_MODE=${DIRECT_MODE:-false}
       - TAPO_USERNAME=${TAPO_USERNAME:-}
@@ -46,7 +67,10 @@ services:
       - TAPO_PLUG_IP=${TAPO_PLUG_IP:-}
       - TAPO_RELAY_URL=${TAPO_RELAY_URL:-}
     depends_on:
-      - mqtt
+      db:
+        condition: service_healthy
+      mqtt:
+        condition: service_started
 
   frontend:
     build:
@@ -62,3 +86,5 @@ services:
 volumes:
   mosquitto_data:
   mosquitto_log:
+  postgres_data:   # Persists DB data across container rebuilds
+

@@ -2,34 +2,23 @@
 setlocal enabledelayedexpansion
 
 echo ===================================================
-echo      AmpHive Startup Script (VM + Database)
+echo      AmpHive Startup Script (VM only)
 echo ===================================================
+echo NOTE: Database now runs as a Docker container on the VM.
+echo       No Cloud SQL required.
 
-echo [1/4] Starting Cloud SQL Database (amphive-db-in)...
-call gcloud sql instances patch amphive-db-in --activation-policy=ALWAYS
-
-echo [2/4] Starting GCP VM Instance (amphive-vm-in)...
+echo [1/1] Starting GCP VM Instance (amphive-vm-in)...
 call gcloud compute instances start amphive-vm-in --zone=asia-south1-a
 
-echo [3/4] Fetching new Cloud SQL IP address...
-for /f "tokens=*" %%i in ('gcloud sql instances describe amphive-db-in --format="value(ipAddresses[0].ipAddress)"') do set DB_IP=%%i
-set DB_IP=%DB_IP: =%
-
-if "%DB_IP%"=="" (
-    echo ERROR: Failed to fetch Cloud SQL IP.
-    pause
-    exit /b 1
-)
-
-echo        Database IP is now: %DB_IP%
-
-echo [4/4] Updating backend configuration on VM and restarting containers...
-set NEW_DB_URL=postgresql+asyncpg://postgres:amphive_db_admin@%DB_IP%:5432/amphive
-call gcloud compute ssh amphive-vm-in --zone=asia-south1-a --command="sed -i '/^DATABASE_URL=/d' ~/amphive/.env && echo DATABASE_URL=%NEW_DB_URL% >> ~/amphive/.env && cd ~/amphive && sudo docker-compose down && sudo docker-compose up -d"
-
 echo ===================================================
-echo AmpHive Backend is completely online!
-echo NOTE: DuckDNS IP will update automatically within 5 minutes.
-echo Ensure WireGuard tunnel is active on your PC if using Direct Mode.
+echo AmpHive VM is starting up!
+echo Docker containers (backend, frontend, mqtt, db) will
+echo start automatically via docker-compose restart:always.
+echo
+echo Wait ~30 seconds, then access:
+echo   Frontend : check IP with: gcloud compute instances list
+echo   Backend  : http://<VM_IP>:8000/docs
+echo
+echo If using Direct Mode, ensure WireGuard tunnel is active.
 echo ===================================================
 pause
