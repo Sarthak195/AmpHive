@@ -49,3 +49,16 @@ docker-compose.override.yml
 *.sqlite
 pgdata/
 *.tar.gz
+
+# Python cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+env/
+.env/
