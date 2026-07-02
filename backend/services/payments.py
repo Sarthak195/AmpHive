@@ -152,3 +152,79 @@ def calculate_coins(amount_inr: int) -> int:
     Uses the COINS_PER_RUPEE conversion rate (default 1:1).
     """
     return int(amount_inr * COINS_PER_RUPEE)
+
+
+def extract_payment_from_webhook(event: dict) -> Optional[dict]:
+    """
+    Extract the credit-relevant fields from a Razorpay webhook event payload.
+
+    Razorpay wraps the payment entity inside the webhook body like so:
+        {
+          "event": "payment.captured",
+          "payload": { "payment": { "entity": { ...payment fields... } } }
+        }
+
+    The payment entity carries the `notes` dict we attached at order-creation
+    time in create_order() (user_id + coins), plus the authoritative `amount`
+    (in paise) and a unique `id` (the razorpay_payment_id). We prefer the
+    `notes` values but fall back to deriving coins from `amount` so a webhook
+    can still credit correctly even if the notes were stripped.
+
+    Args:
+        event: The parsed JSON webhook body.
+
+    Returns:
+        A dict {payment_id, user_id, amount_inr, coins} when the event is a
+        creditable payment we can attribute to a user, or None otherwise
+        (e.g. non-payment events, or a payment with no resolvable user_id).
+    """
+    # Only payment.captured represents money that has actually settled.
+    # (authorized -> captured; we credit on capture to avoid crediting funds
+    # that were authorized but never captured.)
+    if event.get("event") != "payment.captured":
+        return None
+
+    entity = (
+        event.get("payload", {})
+        .get("payment", {})
+        .get("entity", {})
+    )
+    if not entity:
+        return None
+
+    payment_id = entity.get("id")
+    if not payment_id:
+        return None
+
+    notes = entity.get("notes") or {}
+
+    # Resolve the user_id — required to know whose wallet to credit.
+    user_id_raw = notes.get("user_id")
+    try:
+        user_id = int(user_id_raw) if user_id_raw is not None else None
+    except (TypeError, ValueError):
+        user_id = None
+    if user_id is None:
+        logger.warning(
+            f"Webhook payment {payment_id} has no resolvable user_id in notes; "
+            "cannot attribute credit."
+        )
+        return None
+
+    # Amount is authoritative from Razorpay, in paise. Convert to rupees.
+    amount_inr = int(entity.get("amount", 0)) // 100
+
+    # Prefer the coins we pre-computed at order time; fall back to deriving
+    # them from the settled amount so the credit is never zero due to notes.
+    coins_raw = notes.get("coins")
+    try:
+        coins = int(coins_raw) if coins_raw is not None else calculate_coins(amount_inr)
+    except (TypeError, ValueError):
+        coins = calculate_coins(amount_inr)
+
+    return {
+        "payment_id": payment_id,
+        "user_id": user_id,
+        "amount_inr": amount_inr,
+        "coins": coins,
+    }

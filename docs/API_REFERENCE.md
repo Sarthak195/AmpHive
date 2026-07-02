@@ -72,7 +72,7 @@ do not actually append it — see [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STAT
 |--------|------|------|------|-----------|
 | POST | `/api/payments/create-order` | JWT | `{amount_inr}` (₹10–₹10,000) | Creates a Razorpay order → `{order_id, amount(paise), currency, key_id}`. 503 if Razorpay unconfigured. |
 | POST | `/api/payments/verify` | JWT | `{razorpay_order_id, razorpay_payment_id, razorpay_signature, amount_inr}` | HMAC verify (400 if bad) → credit coins (`COINS_PER_RUPEE`) → ledger `topup` → `{status:"success", coins_credited, new_balance}` |
-| POST | `/api/payments/webhook` | none (HMAC-gated) | raw body + `X-Razorpay-Signature` | Verifies webhook signature, parses event — **currently only logs** (does not credit). → `{status:"ok"}` |
+| POST | `/api/payments/webhook` | none (HMAC-gated) | raw body + `X-Razorpay-Signature` | HMAC verify (400 if bad) → on `payment.captured`, auto-credit coins from the payment's `notes`/`amount` (atomic, row-locked) → ledger `topup`. Idempotent vs. `/verify` (dedupes on `razorpay_payment_id`). → `{status:"credited"\|"already_credited"\|"ignored"\|"user_not_found"}` |
 
 ## Direct Mode — Tapo P110 (dev/test, ESP32 bypass)
 
@@ -88,6 +88,31 @@ and `backend/services/tapo_direct.py`.
 | GET | `/api/direct/plug/info` | query `plug_ip?` | `{plug_ip, device_info, mode}` |
 | GET | `/api/direct/plug/energy` | query `plug_ip?` | `{plug_ip, energy_usage, mode}` |
 | GET | `/api/direct/plug/health` | query `plug_ip?` | `{plug_ip, health, mode}` (always 200) |
+
+## CPO Admin Portal (`/api/cpo/*`)
+
+Powers the operator dashboard (`frontend/src/pages/cpo/`). Except `setup`, every
+endpoint requires the caller's **DB role** to be `cpo` or `admin`, enforced by
+`require_role(...)` in `backend/services/rbac.py` (403 otherwise). All queries are
+scoped to the caller's `tenant_id`, so operators only ever see their own assets.
+
+| Method | Path | Auth | Body/Params | Behaviour |
+|--------|------|------|-------------|-----------|
+| POST | `/api/cpo/setup` | JWT | `{tenant_name}` | One-time: creates a tenant and promotes the caller to `cpo`. 400 if already tenant-linked or name taken. |
+| GET | `/api/cpo/profile` | cpo/admin | — | Tenant info + counts `{gateway_count, plug_count, group_count}`. |
+| GET | `/api/cpo/gateways` | cpo/admin | — | Tenant's gateways (each with `plug_count`). |
+| POST | `/api/cpo/gateways` | cpo/admin | `{gateway_id, name, vpn_ip}` | Register a gateway under the tenant. |
+| GET | `/api/cpo/plugs` | cpo/admin | — | All plugs across the tenant's gateways (status, power, group). |
+| POST | `/api/cpo/plugs` | cpo/admin | `{gateway_id, name, local_ip, plug_model?, group_id?}` | Register a plug (validates gateway + group ownership). |
+| PUT | `/api/cpo/plugs/{id}` | cpo/admin | `{name?, group_id?, status?}` | Update a plug (`group_id:0` = unassign). |
+| GET | `/api/cpo/groups` | cpo/admin | — | Tenant's charger groups (with `plug_count`, `member_count`, `access_code`). |
+| POST | `/api/cpo/groups` | cpo/admin | `{name, is_public?}` | Create a group; private groups get a generated access code. |
+| PUT | `/api/cpo/groups/{id}` | cpo/admin | `{name?, is_public?, regenerate_access_code?}` | Update a group / rotate access code. |
+| DELETE | `/api/cpo/groups/{id}` | cpo/admin | — | Delete a group; assigned plugs become ungrouped. |
+| GET | `/api/cpo/analytics/overview` | cpo/admin | — | Plugs/gateways/active-session counts + today & all-time energy/revenue. |
+| GET | `/api/cpo/analytics/sessions` | cpo/admin | query `plug_id?, status_filter?, days=30, limit=50` | Session history enriched with plug name, user email, duration. |
+| GET | `/api/cpo/analytics/revenue` | cpo/admin | query `days=30` | Daily `{date, revenue_coins, session_count}` series. |
+| GET | `/api/cpo/analytics/energy` | cpo/admin | query `days=30` | Daily `{date, energy_kwh, session_count}` series. |
 
 ---
 

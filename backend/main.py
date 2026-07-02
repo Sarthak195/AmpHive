@@ -18,7 +18,7 @@ import json
 import logging
 import os
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 from dotenv import load_dotenv
@@ -843,6 +843,26 @@ async def verify_payment(
     if not is_valid:
         raise HTTPException(status_code=400, detail="Payment verification failed. Invalid signature.")
 
+    # --- Idempotency guard -------------------------------------------------
+    # Both the webhook and the client-side /verify path credit the same payment.
+    # We check if a LedgerTransaction TOPUP row with this razorpay_payment_id
+    # already exists. If it does, we return successfully without double-crediting.
+    existing = await db.execute(
+        select(LedgerTransaction).where(
+            and_(
+                LedgerTransaction.transaction_type == TransactionType.TOPUP,
+                LedgerTransaction.description.contains(req.razorpay_payment_id),
+            )
+        )
+    )
+    if existing.scalar_one_or_none():
+        logger.info(f"Payment {req.razorpay_payment_id} already credited — skipping verify (idempotent).")
+        return {
+            "status": "success",
+            "coins_credited": 0,
+            "new_balance": round(user.coin_balance, 2),
+        }
+
     # Calculate coins to credit
     coins = payment_service.calculate_coins(req.amount_inr)
 
@@ -874,11 +894,23 @@ async def verify_payment(
 
 
 @app.post("/api/payments/webhook")
-async def razorpay_webhook(request: Request):
+async def razorpay_webhook(request: Request, db: AsyncSession = Depends(get_db)):
     """
-    Razorpay server-to-server webhook (backup verification).
-    Razorpay calls this endpoint when a payment event occurs.
-    This is a fallback — the primary flow is client-side verify above.
+    Razorpay server-to-server webhook (server-authoritative credit path).
+
+    Razorpay calls this endpoint when a payment event occurs. Unlike the
+    client-side /verify path (which depends on the browser round-tripping the
+    signature back to us), this callback comes straight from Razorpay's
+    servers, so it credits the wallet even if the user closes the tab right
+    after paying.
+
+    Flow:
+      1. Verify the HMAC signature (X-Razorpay-Signature) against the raw body.
+      2. Parse the event and extract the settled payment (payment.captured).
+      3. Idempotency guard: if a ledger TOPUP row already references this
+         razorpay_payment_id (created here OR by /verify), do nothing. This
+         prevents double-crediting when both paths fire for the same payment.
+      4. Atomically credit coins (row-locked user) and write a ledger entry.
     """
     body = await request.body()
     signature = request.headers.get("X-Razorpay-Signature", "")
@@ -895,11 +927,68 @@ async def razorpay_webhook(request: Request):
     event_type = event.get("event", "")
     logger.info(f"Razorpay webhook received: {event_type}")
 
-    # Handle payment.captured event
-    # In production, this would credit coins if the client-side verify was missed.
-    # For MVP, we log it and rely on the client-side flow.
+    # Extract the creditable payment. Returns None for non-payment events
+    # (e.g. order.paid, refund.*) or captures we can't attribute to a user.
+    payment = payment_service.extract_payment_from_webhook(event)
+    if payment is None:
+        # Not a creditable event — acknowledge so Razorpay stops retrying.
+        return {"status": "ignored", "event": event_type}
 
-    return {"status": "ok"}
+    payment_id = payment["payment_id"]
+
+    # --- Idempotency guard -------------------------------------------------
+    # Both the webhook and the client-side /verify path credit the same
+    # payment. We embed the razorpay_payment_id in the ledger description
+    # (see /verify and below), so a matching TOPUP row means this payment was
+    # already credited. Matching on the payment_id substring is safe because
+    # Razorpay payment IDs (e.g. "pay_XXXXXXXX") are globally unique.
+    existing = await db.execute(
+        select(LedgerTransaction).where(
+            and_(
+                LedgerTransaction.transaction_type == TransactionType.TOPUP,
+                LedgerTransaction.description.contains(payment_id),
+            )
+        )
+    )
+    if existing.scalar_one_or_none():
+        logger.info(f"Webhook payment {payment_id} already credited — skipping (idempotent).")
+        return {"status": "already_credited", "payment_id": payment_id}
+
+    # --- Credit the wallet (atomic, row-locked) ----------------------------
+    user_result = await db.execute(
+        select(User).where(User.id == payment["user_id"]).with_for_update()
+    )
+    locked_user = user_result.scalar_one_or_none()
+    if locked_user is None:
+        # User was deleted, or notes carried a stale id. Acknowledge to stop
+        # retries; nothing we can credit.
+        logger.warning(f"Webhook payment {payment_id} references unknown user {payment['user_id']}.")
+        return {"status": "user_not_found", "payment_id": payment_id}
+
+    coins = payment["coins"]
+    locked_user.coin_balance += coins
+
+    ledger_entry = LedgerTransaction(
+        user_id=locked_user.id,
+        amount=coins,  # Positive = credit
+        transaction_type=TransactionType.TOPUP,
+        description=f"Wallet top-up (webhook): ₹{payment['amount_inr']} → {coins} coins (Razorpay: {payment_id})",
+        balance_after=locked_user.coin_balance,
+    )
+    db.add(ledger_entry)
+    await db.commit()
+
+    logger.info(
+        f"Webhook credited user={locked_user.email}: ₹{payment['amount_inr']} → {coins} coins "
+        f"(payment={payment_id})"
+    )
+
+    return {
+        "status": "credited",
+        "payment_id": payment_id,
+        "coins_credited": coins,
+        "new_balance": round(locked_user.coin_balance, 2),
+    }
 
 
 # ===========================================================================
@@ -1873,9 +1962,7 @@ async def cpo_analytics_revenue(
     Returns an array of {date, revenue_coins, session_count} for each day
     in the requested range, suitable for plotting a revenue trend line.
     """
-    from datetime import timedelta as td
-
-    cutoff = datetime.now(timezone.utc) - td(days=days)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
 
     # Query: group completed sessions by date, sum revenue
     result = await db.execute(
@@ -1916,9 +2003,7 @@ async def cpo_analytics_energy(
     Returns an array of {date, energy_kwh, session_count} for each day
     in the requested range, suitable for plotting an energy consumption chart.
     """
-    from datetime import timedelta as td
-
-    cutoff = datetime.now(timezone.utc) - td(days=days)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
 
     result = await db.execute(
         select(

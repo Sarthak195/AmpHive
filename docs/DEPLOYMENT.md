@@ -75,6 +75,27 @@ file omits all secrets, so Direct Mode / Razorpay won't work there.
 | `restart-remote-servers.bat` | SSH `docker-compose restart`. |
 | `logs-remote-backend.bat` | SSH `docker logs -f amphive-backend`. |
 
+### Database Seeding
+
+To populate the database with development/test data (sample tenants, CPOs, drivers, gateways, plugs, completed charging sessions, and ledger transaction logs), you can run the database seed script:
+
+- **Run locally (requires dependencies and database running):**
+  ```bash
+  python backend/seed.py
+  ```
+
+- **Run in Docker Compose development environment:**
+  ```bash
+  docker exec -it amphive-backend-dev python seed.py
+  ```
+
+Once completed, the database will be populated with default test accounts (all using the password `password123`):
+- **Admin**: `admin@amphive.com`
+- **CPO 1 (VoltNetwork)**: `cpo@voltnetwork.com`
+- **CPO 2 (GreenCharge)**: `cpo@greencharge.com`
+- **Driver 1**: `driver1@gmail.com`
+- **Driver 2**: `driver2@gmail.com`
+
 ---
 
 ## 2. MQTT broker config (`deploy/config/mosquitto.conf`)

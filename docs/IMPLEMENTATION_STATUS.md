@@ -14,13 +14,13 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 |------------|:------:|-------|
 | REST API (auth, groups, plugs, sessions, payments, direct) | ✅ | 22 endpoints — see [API_REFERENCE.md](API_REFERENCE.md) (README still lists only 5) |
 | JWT auth + bcrypt | ✅ | 7-day token, loaded fresh per request |
-| Role-based access control | ❌ | `role` is in the token but never enforced; all users are created `driver` |
+| Role-based access control | ✅ | Enforced via `services/rbac.py` `require_role(...)` on all `/api/cpo/*` routes (checks the DB role, not just the token) |
 | MQTT command publish (ON/OFF) | ✅ | QoS 1, 3 s wait |
 | MQTT inbound telemetry/status handling | ✅ | Telemetry updates TelemetryStore and session DB. Status updates gateway state in DB. |
 | Live telemetry / SSE | ✅ | Fully functional, streams real telemetry from TelemetryStore |
 | TimescaleDB / time-series persistence | ❌ | In-memory TelemetryStore + session table update only |
 | Razorpay create-order + verify | ✅ | HMAC-verified; credits coins + ledger |
-| Razorpay webhook auto-credit | 🟦 | Signature verified but only logs (no credit) |
+| Razorpay webhook auto-credit | ✅ | Credits coins on `payment.captured`; atomic + idempotent vs. `/verify` (dedupes on `razorpay_payment_id`) |
 | Wallet debit on stop + ledger | ✅ | Not atomic/row-locked (race-prone) |
 | Direct Mode Tapo endpoints | ✅ | Gated by `DIRECT_MODE`; lib or relay mode |
 

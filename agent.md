@@ -70,7 +70,7 @@ AmpHive is a shared EV charging PaaS connecting 3rd-party smart plugs to a centr
   * `/backend/main.py`: REST routes (auth, groups, plugs, gateways, sessions+SSE, payments, direct) and lifespan startup/shutdown.
   * `/backend/services/auth.py`: JWT (HS256, 7-day) + bcrypt password hashing + `get_current_user` dependency.
   * `/backend/services/mqtt_manager.py`: MQTT client. Publishes ON/OFF commands; inbound telemetry feeds the `TelemetryStore` (for live SSE stream) and persists to DB (plug power, session energy, peak power), and gateway status updates online/offline state in the DB.
-  * `/backend/services/payments.py`: Razorpay create-order / verify / webhook (webhook only logs, no auto-credit yet).
+  * `/backend/services/payments.py`: Razorpay create-order / verify / webhook. The webhook now auto-credits coins on `payment.captured` (idempotent vs. the `/verify` path via the `razorpay_payment_id` recorded in the ledger description).
   * `/backend/services/telemetry.py`: In-memory `TelemetryStore` singleton + SSE generator. **No TimescaleDB** anywhere.
   * `/backend/services/tapo_direct.py`: [Direct Mode] Tapo P110 driver (local `tapo` lib or HTTP relay via `TAPO_RELAY_URL`).
   * `/backend/database/models.py`: SQLAlchemy ORM models — **runtime source of truth** (`init_db` calls `create_all`).
@@ -170,12 +170,12 @@ For detailed technical specifications, integration paths, and step-by-step instr
 
 ### [~] Phase 2: Frontend & Driver Interfaces (MOSTLY DONE)
 - **[x] Prepaid Driver Wallet Application:** React 19 + Vite SPA is built — login/register, Plug-ID start/stop, live SSE session monitor, wallet top-up, and private-group join via access code. (See [docs/ARCHITECTURE.md](file:///c:/Users/Sarthak/Documents/AmpHive/docs/ARCHITECTURE.md#frontend).)
-- **[ ] CPO Administration Dashboard:** Not built. There is also **no role enforcement** in the backend yet (all users are `driver`), so CPO/admin workflows are unsupported.
+- **[x] CPO Administration Dashboard:** Built. Backend RBAC is enforced via `backend/services/rbac.py` (`require_role("cpo","admin")`) across the `/api/cpo/*` endpoints (setup, profile, gateway/plug/group CRUD, analytics overview/sessions/revenue/energy). Frontend pages live under `frontend/src/pages/cpo/` (Setup, Dashboard, Plugs, Groups, Sessions), gated by `CpoProtectedRoute`. Drivers self-promote to `cpo` (creating a tenant) via `POST /api/cpo/setup`.
 - **[x] Visual Charging Analytics:** Inbound MQTT telemetry feeds the `TelemetryStore` and the database session and plug records. The live SSE session monitor displays real-time power, energy, duration, and calculated coin costs based on `COINS_PER_KWH`. (TimescaleDB itself is not used; in-memory store and session table updates are used). See [docs/IMPLEMENTATION_STATUS.md](file:///c:/Users/Sarthak/Documents/AmpHive/docs/IMPLEMENTATION_STATUS.md).
 
 ### [~] Phase 3: Financial & Third-Party Integrations (MOSTLY DONE)
 - **[x] Razorpay Top-Ups:** `/api/payments/create-order` + `/api/payments/verify` (HMAC-verified) credit coins; frontend uses the Razorpay CDN checkout. 
-- **[~] Razorpay Webhooks Handler:** `/api/payments/webhook` verifies the HMAC signature but **currently only logs** — it does not auto-credit `coin_balance`. (Top-ups are credited via the synchronous `/verify` path instead.)
+- **[x] Razorpay Webhooks Handler:** `/api/payments/webhook` verifies the HMAC signature and **auto-credits** `coin_balance` on `payment.captured` (server-authoritative path, so top-ups land even if the browser never returns to `/verify`). Crediting is atomic (row-locked user) and idempotent: it skips if a ledger TOPUP row already references the same `razorpay_payment_id`, so it never double-credits alongside `/verify`.
 - **[x] Virtual Ledger Audits:** Credits/debits are logged to `ledger_transactions`. ⚠️ Wallet updates are **not atomic/row-locked** (race-prone) — see [docs/SECURITY.md](file:///c:/Users/Sarthak/Documents/AmpHive/docs/SECURITY.md).
 
 ### [ ] Phase 4: Hardware & Optimization Scaling (REMAINING)
