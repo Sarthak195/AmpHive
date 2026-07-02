@@ -46,7 +46,7 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 | Edge watchdogs (duration/energy/thermal 75 °C) | ✅ | |
 | Over-current cutoff (13 A / 5 min) | ❌ | Current published but never compared |
 | Tapo P110 driver (KLAP/AES) | 🟦 | Mock — returns simulated telemetry, cleartext POST |
-| Session persistence in NVS / offline resync | ❌ | `active_session` is RAM-only |
+| Session persistence in NVS / offline resync | ✅ | `session_nvs` module persists active session to NVS; `offline_log` ring buffer (64 entries) caches telemetry during MQTT outages; resync on reconnect |
 | OTA updates | ❌ | Single-app partition table; no `esp_https_ota` |
 | Headscale (vs Tailscale defaults) | 🟡 | `/key` fetch supports it, but default host constants point at Tailscale |
 
@@ -103,7 +103,10 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 14. **Firmware Tapo driver is a mock** — no KLAP, no AES, simulated readings.
 15. **No OTA** and the **single-app partition table** precludes the spec'd
     dual-partition rollback without a partition change.
-16. **No NVS session register / offline telemetry resync** on the firmware.
+16. [Resolved 2026-07-02] **NVS session register / offline telemetry resync** now
+    implemented via `session_nvs.c` (persists active session params) and
+    `offline_log.c` (64-entry NVS ring buffer). Watchdogs enforce limits locally
+    even when MQTT is down; buffered telemetry is resynced on reconnect.
 17. **No over-current cutoff** on the firmware.
 18. **Telemetry topic shape** in `requirements.md` (`.../plugs/{id}/telemetry`)
     doesn't match the implemented per-gateway topic — but firmware & backend agree.

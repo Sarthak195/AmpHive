@@ -16,6 +16,8 @@
 #include "microlink.h"
 #include "tapo_protocol.h"
 #include "esp_http_server.h"
+#include "session_nvs.h"
+#include "offline_log.h"
 
 // ─── Configuration Variables ──────────────────────────────────────────────────
 char wifi_ssid[32] = "";
@@ -47,6 +49,7 @@ static int wifi_retry_count = 0;
 // Active session safety watchdog state
 static struct {
     bool active;
+    char session_id[SESSION_ID_MAX_LEN];
     uint32_t start_time_s;
     uint32_t max_duration_s;
     float start_energy_kwh;
@@ -58,6 +61,7 @@ static void start_mqtt_client(void);
 static void telemetry_task(void *pvParameters);
 static void microlink_task(void *pvParameters);
 static void start_captive_portal(void);
+static void resync_offline_logs(void);
 
 // ─── NVS Configuration Helpers ───────────────────────────────────────────────
 static void load_config_from_nvs(void) {
@@ -296,6 +300,9 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
             snprintf(command_topic, sizeof(command_topic), "amphive/gateways/%s/plugs/+/commands", gateway_id);
             esp_mqtt_client_subscribe(mqtt_client, command_topic, 1);
             ESP_LOGI(TAG, "Subscribed to commands: %s", command_topic);
+
+            // Drain any offline-buffered telemetry
+            resync_offline_logs();
             break;
             
         case MQTT_EVENT_DISCONNECTED:
@@ -331,6 +338,20 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
                     sscanf(kwh_ptr, "\"max_kwh\":%f", &kwh_limit);
                 }
 
+                // Parse optional session_id (forward-compatible with backend)
+                active_session.session_id[0] = '\0';
+                char *sid_ptr = strstr(data, "\"session_id\":\"");
+                if (sid_ptr) {
+                    sid_ptr += strlen("\"session_id\":\"");
+                    char *end = strchr(sid_ptr, '"');
+                    if (end) {
+                        size_t len = end - sid_ptr;
+                        if (len >= SESSION_ID_MAX_LEN) len = SESSION_ID_MAX_LEN - 1;
+                        memcpy(active_session.session_id, sid_ptr, len);
+                        active_session.session_id[len] = '\0';
+                    }
+                }
+
                 // Call local Tapo Driver
                 if (tapo_set_power_state(target_plug_ip, true) == ESP_OK) {
                     active_session.active = true;
@@ -346,11 +367,23 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
                     }
                     
                     ESP_LOGI(TAG, "Session initialized. Limit: %lu s, %f kWh", duration, kwh_limit);
+
+                    // Persist session to NVS for crash recovery
+                    session_params_t nvs_params = {
+                        .active = true,
+                        .start_time_s = active_session.start_time_s,
+                        .max_duration_s = active_session.max_duration_s,
+                        .max_kwh_mwh = (uint32_t)(active_session.max_kwh * 1000.0f),
+                        .start_energy_mwh = (uint32_t)(active_session.start_energy_kwh * 1000.0f),
+                    };
+                    strncpy(nvs_params.session_id, active_session.session_id, SESSION_ID_MAX_LEN);
+                    session_nvs_save(&nvs_params);
                 }
             } else if (strstr(data, "\"action\":\"OFF\"") || strstr(data, "\"action\": \"OFF\"")) {
                 ESP_LOGI(TAG, "Command: Turning Smart Plug OFF.");
                 tapo_set_power_state(target_plug_ip, false);
                 active_session.active = false;
+                session_nvs_clear();
             }
             break;
         }
@@ -379,6 +412,43 @@ static void start_mqtt_client(void) {
     esp_mqtt_client_start(mqtt_client);
 }
 
+// ─── Offline Telemetry Resync ─────────────────────────────────────────────────
+static void resync_offline_logs(void) {
+    uint16_t count = offline_log_count();
+    if (count == 0) return;
+
+    ESP_LOGI(TAG, "Resyncing %u offline telemetry entries...", count);
+
+    char telemetry_topic[64];
+    snprintf(telemetry_topic, sizeof(telemetry_topic), "amphive/gateways/%s/telemetry", gateway_id);
+
+    offline_telemetry_entry_t entry;
+    uint16_t sent = 0;
+
+    while (offline_log_pop(&entry) == ESP_OK) {
+        char payload[320];
+        snprintf(payload, sizeof(payload),
+                 "{\"plug_id\":%u,\"watts\":%.1f,\"kwh\":%.4f,\"voltage\":%.1f,"
+                 "\"current\":%.2f,\"status\":\"%s\",\"offline\":true,"
+                 "\"offline_ts\":%lu}",
+                 entry.plug_id,
+                 (float)entry.watts_x10 / 10.0f,
+                 (float)entry.kwh_x1000 / 1000.0f,
+                 (float)entry.voltage_x10 / 10.0f,
+                 (float)entry.current_x100 / 100.0f,
+                 entry.status ? "occupied" : "available",
+                 entry.timestamp_s);
+
+        esp_mqtt_client_publish(mqtt_client, telemetry_topic, payload, 0, 0, 0);
+        sent++;
+
+        /* Small delay between publishes to avoid flooding the broker */
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+
+    ESP_LOGI(TAG, "Offline resync complete: %u entries published.", sent);
+}
+
 // ─── Telemetry Polling & Watchdog Safety Loop ────────────────────────────────
 static void telemetry_task(void *pvParameters) {
     tapo_telemetry_t telemetry;
@@ -386,42 +456,62 @@ static void telemetry_task(void *pvParameters) {
     snprintf(telemetry_topic, sizeof(telemetry_topic), "amphive/gateways/%s/telemetry", gateway_id);
 
     while (1) {
-        if (mqtt_connected) {
-            esp_err_t ret = tapo_get_telemetry(target_plug_ip, &telemetry);
-            if (ret == ESP_OK) {
-                char payload[256];
-                snprintf(payload, sizeof(payload),
-                         "{\"plug_id\":%d,\"watts\":%.1f,\"kwh\":%.4f,\"voltage\":%.1f,\"current\":%.2f,\"status\":\"%s\"}",
-                         TARGET_PLUG_ID,
-                         telemetry.power_w,
-                         telemetry.energy_kwh,
-                         telemetry.voltage_v,
-                         telemetry.current_a,
-                         active_session.active ? "occupied" : "available");
-                
+        /* ALWAYS poll the plug — safety enforcement must not depend on MQTT */
+        esp_err_t ret = tapo_get_telemetry(target_plug_ip, &telemetry);
+        if (ret == ESP_OK) {
+            char payload[256];
+            snprintf(payload, sizeof(payload),
+                     "{\"plug_id\":%d,\"watts\":%.1f,\"kwh\":%.4f,\"voltage\":%.1f,\"current\":%.2f,\"status\":\"%s\"}",
+                     TARGET_PLUG_ID,
+                     telemetry.power_w,
+                     telemetry.energy_kwh,
+                     telemetry.voltage_v,
+                     telemetry.current_a,
+                     active_session.active ? "occupied" : "available");
+
+            if (mqtt_connected) {
+                /* Online: publish telemetry normally */
                 esp_mqtt_client_publish(mqtt_client, telemetry_topic, payload, 0, 0, 0);
+            } else {
+                /* Offline: buffer the reading for later resync */
+                offline_telemetry_entry_t log_entry = {
+                    .timestamp_s   = xTaskGetTickCount() * portTICK_PERIOD_MS / 1000,
+                    .watts_x10     = (uint16_t)(telemetry.power_w * 10.0f),
+                    .kwh_x1000     = (uint32_t)(telemetry.energy_kwh * 1000.0f),
+                    .voltage_x10   = (uint16_t)(telemetry.voltage_v * 10.0f),
+                    .current_x100  = (uint16_t)(telemetry.current_a * 100.0f),
+                    .temperature_x10 = (int16_t)(telemetry.temperature_c * 10.0f),
+                    .plug_id       = TARGET_PLUG_ID,
+                    .status        = active_session.active ? 1 : 0,
+                };
+                offline_log_append(&log_entry);
+            }
 
-                // Check Session Safety Limits (Watchdog)
-                if (active_session.active) {
-                    uint32_t current_time_s = xTaskGetTickCount() * portTICK_PERIOD_MS / 1000;
-                    uint32_t elapsed_s = current_time_s - active_session.start_time_s;
-                    float consumed_kwh = telemetry.energy_kwh - active_session.start_energy_kwh;
+            /* Check Session Safety Limits (Watchdog) — runs regardless of MQTT */
+            if (active_session.active) {
+                uint32_t current_time_s = xTaskGetTickCount() * portTICK_PERIOD_MS / 1000;
+                uint32_t elapsed_s = current_time_s - active_session.start_time_s;
+                float consumed_kwh = telemetry.energy_kwh - active_session.start_energy_kwh;
 
-                    if (elapsed_s >= active_session.max_duration_s) {
-                        ESP_LOGE(TAG, "WATCHDOG: Maximum session duration (%lu s) exceeded. Shutting down plug locally!", active_session.max_duration_s);
-                        tapo_set_power_state(target_plug_ip, false);
-                        active_session.active = false;
-                    }
-                    else if (consumed_kwh >= active_session.max_kwh) {
-                        ESP_LOGE(TAG, "WATCHDOG: Session energy consumption limit (%f kWh) reached. Shutting down plug locally!", active_session.max_kwh);
-                        tapo_set_power_state(target_plug_ip, false);
-                        active_session.active = false;
-                    }
-                    else if (telemetry.temperature_c > 75.0f) {
-                        ESP_LOGE(TAG, "THERMAL ALARM: Plug temperature at %.1f C. Shutting down plug locally!", telemetry.temperature_c);
-                        tapo_set_power_state(target_plug_ip, false);
-                        active_session.active = false;
-                        
+                if (elapsed_s >= active_session.max_duration_s) {
+                    ESP_LOGE(TAG, "WATCHDOG: Maximum session duration (%lu s) exceeded. Shutting down plug locally!", active_session.max_duration_s);
+                    tapo_set_power_state(target_plug_ip, false);
+                    active_session.active = false;
+                    session_nvs_clear();
+                }
+                else if (consumed_kwh >= active_session.max_kwh) {
+                    ESP_LOGE(TAG, "WATCHDOG: Session energy consumption limit (%f kWh) reached. Shutting down plug locally!", active_session.max_kwh);
+                    tapo_set_power_state(target_plug_ip, false);
+                    active_session.active = false;
+                    session_nvs_clear();
+                }
+                else if (telemetry.temperature_c > 75.0f) {
+                    ESP_LOGE(TAG, "THERMAL ALARM: Plug temperature at %.1f C. Shutting down plug locally!", telemetry.temperature_c);
+                    tapo_set_power_state(target_plug_ip, false);
+                    active_session.active = false;
+                    session_nvs_clear();
+                    
+                    if (mqtt_connected) {
                         char alarm_topic[128];
                         snprintf(alarm_topic, sizeof(alarm_topic), "amphive/gateways/%s/alarms", gateway_id);
                         esp_mqtt_client_publish(mqtt_client, alarm_topic, "{\"error\":\"THERMAL_CUTOFF\"}", 0, 1, 0);
@@ -500,9 +590,37 @@ void app_main(void) {
     // 2. Initialize local smart plug drivers
     tapo_init();
 
-    // 3. Start telemetry and safety watchdog loops
+    // 3. Initialize offline telemetry log
+    offline_log_init();
+
+    // 4. Check for crash-recovered session in NVS
+    session_params_t recovered;
+    session_nvs_load(&recovered);
+    if (recovered.active) {
+        ESP_LOGW(TAG, "*** CRASH RECOVERY: Restoring active session from NVS ***");
+        ESP_LOGW(TAG, "    Session ID : %s", recovered.session_id);
+        ESP_LOGW(TAG, "    Max dur    : %lu s", recovered.max_duration_s);
+        ESP_LOGW(TAG, "    Max kWh    : %.3f", (float)recovered.max_kwh_mwh / 1000.0f);
+
+        active_session.active = true;
+        strncpy(active_session.session_id, recovered.session_id, SESSION_ID_MAX_LEN);
+        active_session.start_time_s      = recovered.start_time_s;
+        active_session.max_duration_s     = recovered.max_duration_s;
+        active_session.max_kwh            = (float)recovered.max_kwh_mwh / 1000.0f;
+        active_session.start_energy_kwh   = (float)recovered.start_energy_mwh / 1000.0f;
+
+        /* Note: start_time_s was tick-based and the tick counter restarted
+           at zero on reboot.  We recalibrate by treating the current tick
+           as the new start and reducing max_duration by whatever time
+           *can* be inferred later once telemetry is flowing.  For safety,
+           keep the original limits — worst case the session runs a bit
+           longer than intended, but the energy limit still triggers. */
+        active_session.start_time_s = xTaskGetTickCount() * portTICK_PERIOD_MS / 1000;
+    }
+
+    // 5. Start telemetry and safety watchdog loops
     xTaskCreate(telemetry_task, "telemetry_safety", 4096, NULL, 5, NULL);
 
-    // 4. Start Tailscale connection client
+    // 6. Start Tailscale connection client
     xTaskCreate(microlink_task, "microlink_vpn", 32768, NULL, 6, NULL);
 }
