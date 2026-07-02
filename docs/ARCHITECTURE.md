@@ -1,6 +1,6 @@
 # AmpHive — System Architecture
 
-*Verified against source on 2026-06-20. For per-component status and the gap
+*Verified against source on 2026-07-02. For per-component status and the gap
 between this and the product specs, see [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md).*
 
 AmpHive turns off-the-shelf smart plugs (TP-Link Tapo P110) into a shared,
@@ -14,10 +14,10 @@ network, or (today, for dev/test) directly over a WireGuard tunnel.
 ## 1. The four planes
 
 ```
-┌───────────────┐   REST/JSON    ┌─────────────────────┐   asyncpg    ┌──────────────┐
-│  Driver Web   │ ◄────────────► │   FastAPI backend   │ ◄──────────► │  PostgreSQL  │
-│  App (React)  │   + SSE live   │   (Uvicorn, main.py)│              │ (Cloud SQL)  │
-└───────────────┘                └──────┬──────────────┘              └──────────────┘
+┌───────────────┐   REST/JSON    ┌─────────────────────┐   asyncpg    ┌──────────────────┐
+│  Driver Web   │ ◄────────────► │   FastAPI backend   │ ◄──────────► │   PostgreSQL 15  │
+│  App (React)  │   + SSE live   │   (Uvicorn, main.py)│              │ (Docker on VM)   │
+└───────────────┘                └──────┬──────────────┘              └──────────────────┘
                                         │ MQTT (paho)
                                   ┌─────▼──────────┐
                                   │   Mosquitto    │  topics: amphive/gateways/...
@@ -59,11 +59,13 @@ Path A as "done" while the committed configuration actually runs Path B.
 4. See [MQTT_CONTRACT.md](MQTT_CONTRACT.md) for exact topics.
 
 **Status:** the firmware control loop, overlay client, and MQTT contract are
-implemented and the topic strings match the backend — **but** the ESP32's Tapo
-driver is a mock (returns simulated telemetry), and the backend's inbound
-MQTT handlers are stubs (they only log; they do not persist telemetry or feed
-the live SSE stream). So end-to-end billing over Path A does not yet produce
-real energy/cost figures. See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md).
+implemented and the topic strings match the backend. The backend's inbound
+handlers are **live** — telemetry updates the in-memory `TelemetryStore` (feeding
+the SSE stream) and persists `energy_kwh`/`peak_power_w` to the session row, and
+status messages update gateway online/offline state in the DB. The remaining gap
+is on the device: the ESP32's Tapo driver is a **mock** (returns simulated
+telemetry), so end-to-end billing over Path A does not yet reflect a real plug.
+See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md).
 
 ### Path B — Direct Mode over WireGuard (current dev/test reality)
 1. A WireGuard tunnel links the GCP VM (`10.10.0.1`) to the developer's home PC
@@ -98,8 +100,9 @@ POST /api/sessions/start            (JWT required)
         ▼
 GET /api/sessions/live/{id}          (SSE, text/event-stream)
   • streams telemetry snapshots from the in-memory TelemetryStore
-  • NOTE: in Path A nothing currently writes live data into the store, so the
-    stream emits the "starting"→"completed" placeholder snapshots only.
+  • the store is fed by inbound MQTT telemetry (Path A); values are only as real
+    as the source — today the ESP32 Tapo driver is mocked, so Path A readings
+    are simulated until that driver is finished.
         │
         ▼
 POST /api/sessions/stop              (JWT required)
@@ -111,11 +114,16 @@ POST /api/sessions/stop              (JWT required)
 
 ### Auth & wallet
 - **Auth:** stateless JWT (HS256, 7-day expiry), `Authorization: Bearer`.
-  Passwords hashed with bcrypt. All accounts are created as `driver`; there is
-  no role enforcement in code yet (see [SECURITY.md](SECURITY.md)).
+  Passwords hashed with bcrypt. Accounts are created as `driver`; a driver
+  self-promotes to `cpo` via `POST /api/cpo/setup` (which also creates their
+  tenant). **Role-based access control is enforced** on every `/api/cpo/*` route
+  by `require_role("cpo","admin")` (`backend/services/rbac.py`), which checks the
+  live DB role rather than trusting the token.
 - **Wallet:** a single `users.coin_balance` float. Credited by Razorpay
-  top-ups (`/api/payments/verify`), debited at session stop. Conversion is
-  `COINS_PER_RUPEE` (default 1.0).
+  top-ups (`/api/payments/verify` and the server-authoritative webhook), debited
+  at session stop. Conversion is `COINS_PER_RUPEE` (default 1.0). Credits and
+  debits are **row-locked** (`SELECT ... FOR UPDATE`) so concurrent updates
+  don't race.
 - **Telemetry/live data:** held in an **in-memory** `TelemetryStore` singleton
   (`backend/services/telemetry.py`) — there is no time-series database. The
   product spec's "TimescaleDB" is not present.
@@ -138,8 +146,15 @@ React 19 + Vite SPA in `frontend/`. Served by Nginx, which also reverse-proxies
 State lives in three React contexts: `AuthContext` (JWT in `localStorage`,
 `/api/auth/me` on load), `SessionContext` (opens a real `EventSource` to the SSE
 endpoint), and `WalletContext` (derives balance from the user object). Razorpay
-is loaded via a CDN `<script>` and used through `window.Razorpay`. There is **no
-map** UI despite the "find nearest plug" product framing.
+is loaded via a CDN `<script>` and used through `window.Razorpay`. Home renders a
+**Leaflet/OpenStreetMap** map (`MapComponent`, `react-leaflet`) of available
+plugs — though plug **coordinates aren't persisted** in the data model yet, so
+markers currently use fallback/random positions near India.
+
+**CPO operator portal** — a second set of pages under `frontend/src/pages/cpo/`
+(`CpoSetup`, `CpoDashboard`, `CpoPlugs`, `CpoGroups`, `CpoSessions`) sits behind
+a `CpoProtectedRoute` that requires the `cpo` role and drives the `/api/cpo/*`
+endpoints (tenant setup, gateway/plug/group CRUD, and analytics).
 
 ---
 
@@ -162,7 +177,7 @@ tunnel are unrelated despite both being "VPNs".
 |-------|------------|
 | Frontend | React 19, React Router 6, Vite 8, hand-written CSS (glassmorphism). Razorpay via CDN. |
 | Backend | Python 3.11 (Dockerfile), FastAPI, Uvicorn, SQLAlchemy 2.0 (async), Pydantic, paho-mqtt v2, python-jose, passlib/bcrypt, razorpay, tapo. |
-| Database | PostgreSQL 15 (Cloud SQL in prod). **No** TimescaleDB. |
+| Database | PostgreSQL 15 (Docker container on the GCP VM — Cloud SQL was decommissioned 2026-06-29). **No** TimescaleDB. |
 | Messaging | Eclipse Mosquitto 2.0 (anonymous, no TLS — secured by the overlay). |
 | Overlay VPN | Headscale control plane + the custom `microlink` Tailscale client on the ESP32. |
 | Firmware | ESP-IDF (targets ESP32-S3-N16R8), FreeRTOS, `microlink`, vendored `wireguard_lwip`. |

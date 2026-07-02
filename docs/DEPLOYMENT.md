@@ -1,6 +1,6 @@
 # AmpHive — Deployment
 
-*Verified against `deploy/`, root scripts, and `tools/` on 2026-06-29.*
+*Verified against `deploy/`, `scripts/`, and `tools/` on 2026-07-02.*
 
 There are **two parallel deployment models** in the repo:
 1. **Docker Compose on a GCP Compute Engine VM** — this is the **live/canonical**
@@ -64,16 +64,21 @@ file omits all secrets, so Direct Mode / Razorpay won't work there.
 `apt-get install docker.io docker-compose`, enable+start Docker. Nothing else
 (no firewall, no WireGuard — those are manual / runbook steps).
 
-### Helper `.bat` scripts (root)
+### Helper scripts (`scripts/`)
+
+Windows helper scripts live in `scripts/` (moved there from the repo root on
+2026-07-02). Each is self-contained and invokes `gcloud` directly, so they can be
+run from anywhere.
 
 | Script | Action |
 |--------|--------|
-| `start-vm.bat` | Start VM only (`gcloud compute instances start`). All 4 containers auto-start via `restart: always`. **No Cloud SQL, no IP rewrite needed.** |
-| `stop-vm.bat` | Stop VM only (`gcloud compute instances stop`). All containers stop gracefully. DB data persists in Docker volume. |
-| `start-remote-servers.bat` | SSH `docker-compose up -d` only (no rebuild). |
-| `stop-remote-servers.bat` | SSH `docker-compose down`. |
-| `restart-remote-servers.bat` | SSH `docker-compose restart`. |
-| `logs-remote-backend.bat` | SSH `docker logs -f amphive-backend`. |
+| `scripts/start-vm.bat` | Start VM only (`gcloud compute instances start`). All 4 containers auto-start via `restart: always`. **No Cloud SQL, no IP rewrite needed.** |
+| `scripts/stop-vm.bat` | Stop VM only (`gcloud compute instances stop`). All containers stop gracefully. DB data persists in Docker volume. |
+| `scripts/start-remote-servers.bat` | SSH `docker-compose up -d` only (no rebuild). |
+| `scripts/stop-remote-servers.bat` | SSH `docker-compose down`. |
+| `scripts/restart-remote-servers.bat` | SSH `docker-compose restart`. |
+| `scripts/logs-remote-backend.bat` | SSH `docker logs -f amphive-backend`. |
+| `scripts/setup_duckdns.sh` | DuckDNS dynamic-DNS updater (⚠ commits a live token — see [SECURITY.md](SECURITY.md)). |
 
 ### Database Seeding
 

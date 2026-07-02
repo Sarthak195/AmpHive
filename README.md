@@ -1,313 +1,169 @@
-# AmpHive EV Charging Platform
+# AmpHive — Shared EV Charging Platform
 
-AmpHive is an enterprise-grade Software-as-a-Service (SaaS) and Platform-as-a-Service (PaaS) solution that transforms budget, off-the-shelf smart plugs (e.g., TP-Link Tapo P110) into a secure, monetizable, shared EV charging network.
-
----
-
-## 1. System Overview
-
-The AmpHive platform consists of four core components:
-1. **Central API Server:** A FastAPI application orchestrating user wallets, charging session states, database transactions, and client-gateway message routing.
-2. **Driver Web App:** A React + Vite single-page application providing EV drivers with a Plug-ID-driven interface to start/stop charging, monitor live sessions, manage prepaid wallets, and join private charger groups via access codes.
-3. **Overlay VPN Plane:** A self-hosted Headscale control server that configures secure, encrypted WireGuard overlay tunnels between the server and the gateways, bypassing local firewalls/CGNATs completely.
-4. **ESP32 Edge Gateway:** A microcontroller gateway deployed at the charging site that connects to the private VPN, receives MQTT commands, and controls/polls local smart plugs over a dedicated physical VLAN.
-
----
-
-## 2. Architecture
+AmpHive turns budget, off-the-shelf smart plugs (TP-Link Tapo P110) into a secure,
+monetizable, shared EV charging network. A driver enters a **Plug ID** in a web
+app, the backend authorizes and bills against a prepaid coin wallet, and the
+command reaches the plug — either through an ESP32 gateway over an encrypted
+overlay network, or (today, for dev/test) directly over a WireGuard tunnel.
 
 ```
-┌──────────────┐        ┌──────────────────┐        ┌────────────────────┐
+┌──────────────┐        ┌───────────────────┐        ┌────────────────────┐
 │  Driver App  │◄──────►│  FastAPI Backend  │◄──────►│  PostgreSQL 15     │
-│  (React/Vite)│  REST  │  (Uvicorn)       │  SQL   │  (Docker container │
-└──────────────┘        └────────┬─────────┘        │   on same VM)      │
-                                 │                  └────────────────────┘
+│ (React/Vite) │  REST  │    (Uvicorn)      │  SQL   │ (Docker on the VM) │
+└──────────────┘  +SSE  └────────┬──────────┘        └────────────────────┘
                                  │ MQTT
                             ┌────▼─────┐
                             │ Mosquitto │
-                            │  Broker   │
                             └────┬─────┘
-                                 │ WireGuard VPN (Headscale)
-                            ┌────▼─────────────────┐
-                            │  ESP32-S3 Gateway     │
-                            │  (Tapo P110 Driver)   │
-                            └──────────────────────┘
+                                 │ WireGuard / Headscale overlay
+                            ┌────▼──────────────────┐
+                            │  ESP32-S3 Gateway      │
+                            │  (Tapo P110 driver)    │
+                            └───────────────────────┘
 ```
 
 ---
 
-## 3. Directory Structure
+## 📖 Documentation
+
+The **[`docs/`](docs/)** folder is the single source of truth — it describes what
+the code actually does today, verified against source.
+
+| | |
+|--|--|
+| [Architecture](docs/ARCHITECTURE.md) | End-to-end system + the two operating modes |
+| [API Reference](docs/API_REFERENCE.md) | All 35 REST endpoints |
+| [Data Model](docs/DATA_MODEL.md) | Tables, ORM models, enums, schema drift |
+| [Dependencies](docs/DEPENDENCIES.md) | Import graphs, packages, high-impact files |
+| [MQTT Contract](docs/MQTT_CONTRACT.md) | Backend ↔ gateway topic/payload contract |
+| [Firmware](docs/FIRMWARE.md) | ESP32 firmware + `microlink` overlay client |
+| [Deployment](docs/DEPLOYMENT.md) | GCP VM + Docker Compose, scripts, K8s |
+| [Implementation Status](docs/IMPLEMENTATION_STATUS.md) | Works / stub / aspirational + discrepancies |
+| [Security](docs/SECURITY.md) | Open gaps, committed secrets, remediation |
+
+This README plus [requirements.md](requirements.md) and
+[features_list.md](features_list.md) describe the **product vision**; for the gap
+between vision and current code, see
+[Implementation Status](docs/IMPLEMENTATION_STATUS.md). Contributing (human or AI)?
+Read [AGENTS.md](AGENTS.md).
+
+---
+
+## Repository layout
 
 ```
 AmpHive/
-├── docs/                     # ⭐ Technical reference docs (verified vs source)
-│   ├── ARCHITECTURE.md       #    System architecture & the two operating modes
-│   ├── API_REFERENCE.md      #    All 22 REST endpoints
-│   ├── DATA_MODEL.md         #    DB tables, models, enums, schema drift
-│   ├── MQTT_CONTRACT.md      #    Backend↔gateway MQTT topic/payload contract
-│   ├── FIRMWARE.md           #    ESP32 firmware + microlink Tailscale client
-│   ├── DEPLOYMENT.md         #    Compose, deploy scripts, K8s, tools
-│   ├── IMPLEMENTATION_STATUS.md  # What works / stub / aspirational + discrepancies
-│   └── SECURITY.md           #    Committed secrets, open broker, auth gaps
-├── backend/                  # FastAPI Backend Server Code
-│   ├── database/
-│   │   ├── db.py             #    Async engine + init_db (create_all)
-│   │   ├── init_db.py        #    Standalone DB-init helper
-│   │   ├── models.py         #    SQLAlchemy ORM models (runtime source of truth)
-│   │   ├── schema.sql        #    Reference SQL (NOT executed by the app)
-│   │   └── schema_v2.sql     #    Migration delta: charger groups + memberships
-│   ├── services/
-│   │   ├── auth.py           #    JWT (HS256) + bcrypt + get_current_user dep
-│   │   ├── mqtt_manager.py   #    paho-mqtt bridge (inbound telemetry → TelemetryStore + DB; outbound ON/OFF cmds)
-│   │   ├── payments.py       #    Razorpay orders/verify/webhook
-│   │   ├── tapo_direct.py    #    Direct-Mode Tapo driver (lib or HTTP relay)
-│   │   └── telemetry.py      #    In-memory TelemetryStore (COINS_PER_KWH pricing) + SSE generator
-│   ├── main.py               #    FastAPI app, lifespan, all 22 REST routes
-│   ├── Dockerfile            #    python:3.11-slim
-│   └── requirements.txt
-├── frontend/                 # React + Vite Driver Web Application
-│   ├── src/
-│   │   ├── api/              #    client.js (fetch wrapper)
-│   │   ├── components/       #    Navbar, SessionMonitor, WalletCard, MapComponent
-│   │   ├── contexts/         #    Auth, Session (real SSE), Wallet
-│   │   ├── pages/            #    Home, Login, Session, TopUp, Groups, History
-│   │   ├── styles/           #    global.css (glassmorphic dark theme)
-│   │   ├── App.jsx           #    Router & layout shell
-│   │   └── main.jsx          #    React DOM entry point
-│   ├── Dockerfile            #    Multi-stage build (Node → Nginx)
-│   ├── nginx.conf            #    Serves SPA + proxies /api/ → backend:8000
-│   └── package.json          #    React 19, React Router 6 (Vite 8)
-├── firmware/                 # ESP32-S3 Gateway Firmware (ESP-IDF v5.x)
-│   ├── components/           # External submodules (MicroLink Tailscale client)
-│   ├── main/                 # C source files (main loop, Tapo drivers, CMake)
-│   └── sdkconfig.defaults    # FreeRTOS and PSRAM configuration defaults
-├── deploy/                   # All deployment configs, scripts & docs
-│   ├── scripts/              # Deployment & bootstrap scripts
-│   │   ├── deploy.ps1        # Main GCP VM deployment script
-│   │   └── startup.sh        # One-time VM bootstrap (installs Docker)
-│   ├── docker/               # Docker Compose definitions
-│   │   ├── docker-compose.prod.yml  # Production (deployed to VM)
-│   │   └── docker-compose.dev.yml   # Local dev (includes local Postgres)
-│   ├── config/               # Service configuration files
-│   │   ├── mosquitto.conf    # MQTT broker config
-│   │   └── .env.template     # Environment variable template
-│   ├── docs/                 # Deployment guides & runbooks
-│   │   ├── new_device_setup.md       # New developer machine setup
-│   │   ├── deploy_guide.md           # Cloud hosting & VPN networking guide
-│   │   ├── deployment_checklist.md   # Step-by-step site deployment
-│   │   ├── ec2_deployment_runbook.md # Historical AWS EC2 setup log
-│   │   └── gcp_migration_runbook.md  # AWS→GCP & India region migration log
-│   └── k8s/                  # Kubernetes (K3s) manifests for cluster scaling
-│       ├── namespace.yaml
-│       ├── backend.yaml
-│       ├── frontend.yaml
-│       ├── mosquitto.yaml
-│       ├── headscale.yaml
-│       └── postgres.yaml
-├── tools/                    # Direct-Mode helpers (run on the home PC)
-│   ├── relay_server.py       #   HTTP relay the backend's TAPO_RELAY_URL calls
-│   ├── local_tapo_test.py    #   Tapo connection self-test
-│   └── turn_on.py / turn_off.py  # Manual plug on/off
-├── *.bat                     # GCP VM/container helper scripts (start-vm, logs, …)
-├── setup_duckdns.sh          # DuckDNS dynamic-DNS updater
-├── docker-compose.yml        # Convenience local dev compose (runs from root)
-├── agent.md                  # AI-agent context, file map & progress log
-├── features_list.md          # Detailed features roadmap & specifications
-└── requirements.md           # Product Requirements Document (PRD) & Design Spec
+├── docs/          Technical reference (source of truth) — see above
+├── backend/       FastAPI app: main.py (all routes), services/, database/, seed.py
+├── frontend/      React 19 + Vite SPA: driver app + CPO operator portal
+├── firmware/      ESP32-S3 (ESP-IDF) gateway: microlink overlay client + Tapo driver
+├── deploy/        Docker Compose (dev/prod), K8s manifests, configs, runbooks
+├── scripts/       Windows ops helpers (VM start/stop, remote compose/logs, DuckDNS)
+├── tools/         Direct-Mode Tapo helpers (run on the home PC)
+├── context_repos/ Read-only reference submodules (ChargeHub, headscale, ESP32-WoL)
+├── docker-compose.yml   Local-dev convenience (mirrors deploy/docker/docker-compose.dev.yml)
+├── AGENTS.md / CLAUDE.md   Contributor + AI-agent guidance
+├── requirements.md / features_list.md   Product vision & roadmap
 ```
 
 ---
 
-> ### 📖 Technical Documentation
-> The [`docs/`](docs/) folder is the **technical reference** describing what the
-> code actually does today (verified against source):
-> [Architecture](docs/ARCHITECTURE.md) ·
-> [API Reference](docs/API_REFERENCE.md) ·
-> [Data Model](docs/DATA_MODEL.md) ·
-> [MQTT Contract](docs/MQTT_CONTRACT.md) ·
-> [Firmware](docs/FIRMWARE.md) ·
-> [Deployment](docs/DEPLOYMENT.md) ·
-> [Implementation Status](docs/IMPLEMENTATION_STATUS.md) ·
-> [Security Notes](docs/SECURITY.md).
->
-> This README and [requirements.md](requirements.md) / [features_list.md](features_list.md)
-> describe the *product vision*; for the gap between vision and current code, see
-> [Implementation Status](docs/IMPLEMENTATION_STATUS.md).
+## Quick start (local development)
 
----
+Launch the full stack (backend + frontend + MQTT + PostgreSQL) with Docker:
 
-## 4. Implemented & Working Features
-
-### Backend (FastAPI)
-* **REST API Endpoints:** Health check, gateway registration, plug registration, session start/stop — all orchestrated via MQTT commands to edge gateways.
-* **MQTT Communication Layer:** Telemetry published periodically, commands sent to gateways with Last Will and Testament tracking for automatic offline alerts.
-* **Multi-Tenant Database Models (PostgreSQL):** Tables and SQLAlchemy models for CPOs (tenants), gateways, plugs, sessions, users, and prepaid wallets.
-* **Lifespan-Managed MQTT Client:** Async context manager ensuring clean broker connect/disconnect on server start/stop.
-
-### Frontend (React + Vite)
-* **Plug ID Landing Page (`/`):** Drivers enter the Plug ID (printed on the charging outlet) to start a session. Supports public chargers and access-code-gated private groups.
-* **Live Session Monitor (`/session`):** Real-time telemetry display (charging power, current, duration, energy consumed, cost).
-* **Wallet Top-Up (`/topup`):** Prepaid coin balance management and top-up interface (Razorpay: UPI, cards, wallets, net banking).
-* **Context-Based State Management:** `AuthContext`, `SessionContext`, and `WalletContext` providers for global state.
-* **Glassmorphic Dark Theme:** Modern, mobile-responsive UI with frosted-glass aesthetics.
-
-### Infrastructure & Networking
-* **Secure VPN Overlay (Headscale/WireGuard):** Automatic node coordination mapping traffic securely over NATs and firewalls.
-* **Production Docker Stack:** Multi-container orchestration (Backend + Frontend + MQTT) with health checks.
-* **Kubernetes Manifests:** K3s-ready YAML manifests for all services (backend, frontend, MQTT, Headscale, PostgreSQL).
-
-### Firmware (ESP32-S3)
-* **Smart Plug Driver:** Embedded TP-Link Tapo P110 protocol driver over local VLAN subnets.
-* **Edge Safety Watchdogs:** Auto-shutdown on session duration, capacity limits, or thermal breaches (75°C).
-* **VPN Integration:** WireGuard tunnel via MicroLink Tailscale component for secure cloud connectivity.
-
----
-
-## 5. Quick Start: Local Development
-
-Launch the full stack (Backend + Frontend + MQTT Broker + PostgreSQL) locally using Docker Compose:
-
-1. **Start the containers:**
-   ```bash
-   docker compose up --build
-   ```
-2. **Access the services:**
-   | Service | URL |
-   |---------|-----|
-   | **Frontend (Driver App)** | [http://localhost](http://localhost) |
-   | **Backend API (Swagger)** | [http://localhost:8000/docs](http://localhost:8000/docs) |
-   | **MQTT Broker** | `localhost:1883` |
-   | **PostgreSQL** | `localhost:5432` (user: `postgres`, pass: `amphive_dev`) |
-
----
-
-## 6. Production Cloud Deployment
-
-AmpHive is deployed to **Google Cloud Platform** in the `asia-south1` (Mumbai, India) region.
-
-### Live Infrastructure
-| Resource | Name | Specs |
-|----------|------|-------|
-| **Compute Engine VM** | `amphive-vm-in` | `e2-standard-2` (2 vCPU, 8GB RAM), 50GB pd-balanced, `asia-south1-a` (Mumbai) |
-| **Static IP** | `amphive-static-ip` | `8.231.81.12` — permanent, does not change on restart |
-| **Database** | `amphive-db` (Docker) | PostgreSQL 15 container on the VM, `postgres_data` named volume |
-| ~~Cloud SQL~~ | ~~`amphive-db-in`~~ | **Decommissioned** — deleted. DB now runs on VM. |
-
-### Live Endpoints
-| Service | URL |
-|---------|-----|
-| **Frontend (Driver App)** | http://8.231.81.12 |
-| **Backend API (Swagger)** | http://8.231.81.12:8000/docs |
-| **MQTT Broker** | `8.231.81.12:1883` |
-
-### Deploying Updates
-```powershell
-.\deploy\scripts\deploy.ps1
-```
-This script sets `DATABASE_URL` to the local `db` container, SCPs all files to the VM, and runs `docker-compose up -d --build`. No Cloud SQL wait — deployment completes in ~1-2 minutes.
-
-### Deployment Documentation
-* [new_device_setup.md](deploy/docs/new_device_setup.md) — Step-by-step setup for a new development device
-* [deploy_guide.md](deploy/docs/deploy_guide.md) — Cloud hosting & VPN networking guide
-* [deployment_checklist.md](deploy/docs/deployment_checklist.md) — Step-by-step site deployment checklist
-* [gcp_migration_runbook.md](deploy/docs/gcp_migration_runbook.md) — Full log of AWS→GCP migration and India region migration
-* [wireguard_tunnel_setup.md](deploy/docs/wireguard_tunnel_setup.md) — Direct-Mode WireGuard tunnel setup
-* [phase2_walkthrough.md](deploy/docs/phase2_walkthrough.md) — Phase-2 work log
-* [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) — Consolidated deployment reference (compose, scripts, K8s)
-
----
-
-## 7. API Reference
-
-The FastAPI backend exposes **22 REST endpoints** across auth, charger groups,
-plugs, gateways, sessions (incl. an SSE live stream), Razorpay payments, and a
-Direct-Mode Tapo control surface.
-
-| Group | Endpoints |
-|-------|-----------|
-| Health | `GET /api/health` |
-| Auth | `POST /api/auth/register`, `POST /api/auth/login`, `GET /api/auth/me` |
-| Groups | `POST /api/groups/join`, `GET /api/groups/my` |
-| Plugs | `GET /api/plugs/available`, `GET /api/plugs/{id}`, `POST /api/plugs/register` |
-| Gateways | `POST /api/gateways/register` |
-| Sessions | `POST /api/sessions/start`, `POST /api/sessions/stop`, `GET /api/sessions/live/{id}` (SSE), `GET /api/sessions/history` |
-| Payments | `POST /api/payments/create-order`, `POST /api/payments/verify`, `POST /api/payments/webhook` |
-| Direct Mode | `POST /api/direct/plug/on`, `POST /api/direct/plug/off`, `GET /api/direct/plug/info`, `GET /api/direct/plug/energy`, `GET /api/direct/plug/health` |
-
-**Full request/response details:** see [docs/API_REFERENCE.md](docs/API_REFERENCE.md).
-Interactive Swagger UI: `http://localhost:8000/docs` when running locally.
-
----
-
-## 8. Tech Stack
-
-| Layer | Technology |
-|-------|------------|
-| **Frontend** | React 19, Vite 8, React Router 6, CSS (Glassmorphism) |
-| **Backend** | Python 3.11, FastAPI, Uvicorn, SQLAlchemy 2.0 (async), Pydantic |
-| **Database** | PostgreSQL 15 (Docker container on VM — no Cloud SQL) |
-| **Messaging** | Eclipse Mosquitto 2.0 (MQTT) |
-| **VPN** | Headscale + WireGuard (Tailscale-compatible) |
-| **Firmware** | ESP-IDF v5.x (C), FreeRTOS, MicroLink Tailscale |
-| **Containers** | Docker, Docker Compose, Nginx (frontend serving) |
-| **Cloud** | Google Cloud Platform (Compute Engine `e2-standard-2`, static IP) |
-| **Orchestration** | Kubernetes (K3s) manifests available (not live) |
-
----
-
-## 9. Setup on a New Development Device
-
-If you are setting up your workspace on a brand new development device, follow these steps to restore the environment:
-
-### Step 1: Clone the Repository & Submodules
-Clone this repository and download the referenced context repositories (ChargeHub, ESP32 Tailscale gateway, and Headscale) automatically:
-```bash
-git clone https://github.com/Sarthak195/AmpHive.git
-cd AmpHive
-git submodule update --init --recursive
-```
-
-### Step 2: Setup Local Python Virtual Environment
-Initialize a local environment for backend script editing and testing:
-```bash
-# Create the virtual environment
-python -m venv .venv
-
-# Activate the environment
-# On Windows (PowerShell):
-.venv\Scripts\Activate.ps1
-# On Linux / macOS:
-source .venv/bin/activate
-
-# Install backend dependencies
-pip install -r backend/requirements.txt
-```
-
-### Step 4: Setup Frontend Development
-Install Node.js dependencies for the driver web application:
-```bash
-cd frontend
-npm install
-npm run dev    # Starts Vite dev server at http://localhost:5173
-cd ..
-```
-
-### Step 5: Run the Full Local Stack
-Make sure you have **Docker Desktop** installed on your new device, then start all services:
 ```bash
 docker compose up --build
 ```
 
-### Step 6: Configure the ESP-IDF Toolchain
-To modify or flash the ESP32 gateway firmware, install the **ESP-IDF** extension (v5.x recommended) in VS Code or follow the command-line setup guide from Espressif:
-1. Open the `/firmware` directory in your IDE.
-2. Set the build target: `idf.py set-target esp32s3`
-3. Flash the gateway: `idf.py -p COMX flash monitor` (replace `COMX` with your serial COM port).
+| Service | URL |
+|---------|-----|
+| Frontend (Driver App) | http://localhost |
+| Backend API (Swagger) | http://localhost:8000/docs |
+| MQTT Broker | `localhost:1883` |
+| PostgreSQL | `localhost:5432` (user `postgres`, pass `amphive_dev`) |
+
+Seed sample data (tenants, CPOs, drivers, plugs, sessions; all passwords
+`password123`):
+
+```bash
+docker exec -it amphive-backend-dev python seed.py
+```
 
 ---
 
-## 10. References & Specifications
+## API at a glance
 
-* **Product Requirements Document:** See [requirements.md](requirements.md) for functional/non-functional requirements, data security frameworks, and CPO-level security designs.
-* **Features Roadmap:** See [features_list.md](features_list.md) for the detailed implementation catalog covering Razorpay billing, CPO admin portal, captive portal WiFi provisioning, OTA firmware updates, and dynamic load balancing.
-* **Firmware Source:** View [main.c](firmware/main/main.c) to inspect how the ESP32 manages WiFi, connects to the Headscale VPN task, receives broker commands, and runs local session watchdog fail-safes.
+The FastAPI backend exposes **35 REST endpoints**. Full details in
+[docs/API_REFERENCE.md](docs/API_REFERENCE.md); interactive Swagger at
+`http://localhost:8000/docs`.
+
+| Group | Endpoints |
+|-------|-----------|
+| Health | `GET /api/health` |
+| Auth | `register`, `login`, `me` |
+| Groups | `join`, `my` |
+| Plugs | `available`, `{id}` |
+| Sessions | `start`, `stop`, `live/{id}` (SSE), `history` |
+| Payments | `create-order`, `verify`, `webhook` (Razorpay) |
+| Direct Mode | `plug/on`, `plug/off`, `plug/info`, `plug/energy`, `plug/health` |
+| CPO Portal | `setup`, `profile`, gateway/plug/group CRUD, analytics (overview/sessions/revenue/energy) |
+
+> Gateway/plug provisioning is done through the RBAC-gated `/api/cpo/*` endpoints
+> (the old unauthenticated `gateways/register` / `plugs/register` were removed).
+
+---
+
+## Tech stack
+
+| Layer | Technology |
+|-------|------------|
+| Frontend | React 19, Vite 8, React Router 6, Leaflet map, Recharts, hand-written CSS |
+| Backend | Python 3.11, FastAPI, Uvicorn, SQLAlchemy 2.0 (async), Pydantic |
+| Database | PostgreSQL 15 (Docker container on the VM — no Cloud SQL) |
+| Messaging | Eclipse Mosquitto 2.0 (MQTT) |
+| Overlay VPN | Headscale + WireGuard (Tailscale-compatible) |
+| Firmware | ESP-IDF v5.x (C), FreeRTOS, custom `microlink` Tailscale client |
+| Cloud | Google Cloud Platform (Compute Engine `e2-standard-2`, static IP, `asia-south1`) |
+
+---
+
+## Production deployment
+
+Live on GCP (`asia-south1`, Mumbai) at static IP **`8.231.81.12`**
+(frontend `:80`, backend `:8000/docs`, MQTT `:1883`). Ship updates with:
+
+```powershell
+.\deploy\scripts\deploy.ps1
+```
+
+See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) and the runbooks in
+[`deploy/docs/`](deploy/docs/) (device setup, cloud/VPN guide, deployment
+checklist, GCP migration log, WireGuard tunnel setup).
+
+---
+
+## Setup on a new development device
+
+```bash
+# 1. Clone with submodules
+git clone https://github.com/Sarthak195/AmpHive.git
+cd AmpHive
+git submodule update --init --recursive
+
+# 2. Python venv for backend script editing
+python -m venv .venv
+# Windows:  .venv\Scripts\Activate.ps1   |   Linux/macOS:  source .venv/bin/activate
+pip install -r backend/requirements.txt
+
+# 3. Frontend deps
+cd frontend && npm install && npm run dev   # Vite dev server at http://localhost:5173
+cd ..
+
+# 4. Full local stack (requires Docker Desktop)
+docker compose up --build
+```
+
+**Firmware:** open `firmware/` in an ESP-IDF v5.x environment,
+`idf.py set-target esp32s3`, then `idf.py -p COMX flash monitor`. See
+[docs/FIRMWARE.md](docs/FIRMWARE.md).

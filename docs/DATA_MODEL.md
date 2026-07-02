@@ -1,6 +1,6 @@
 # AmpHive — Data Model
 
-*Verified against `backend/database/models.py`, `schema.sql`, `schema_v2.sql` on 2026-06-20.*
+*Verified against `backend/database/models.py`, `schema.sql`, `schema_v2.sql` on 2026-07-02.*
 
 > **Source of truth at runtime is `models.py`.** `init_db()` (`backend/database/db.py`)
 > calls SQLAlchemy `Base.metadata.create_all` on startup — the `.sql` files are
@@ -48,8 +48,8 @@ Owns users, gateways, sessions, charger_groups (cascade delete-orphan).
 ### `charging_sessions`
 `id` PK · `tenant_id` → tenants (CASCADE) · `user_id` → users (CASCADE) ·
 `plug_id` → plugs (CASCADE) · `started_at` · `ended_at` (nullable) ·
-`energy_kwh` float · `peak_power_w` float *(never populated — see status doc)* ·
-`coins_spent` float · `status` (default `active`).
+`energy_kwh` float · `peak_power_w` float *(populated from inbound telemetry in
+`mqtt_manager.py`)* · `coins_spent` float · `status` (default `active`).
 
 ### `ledger_transactions`
 Double-entry-style wallet audit. `id` PK · `user_id` → users (CASCADE) ·
@@ -102,11 +102,15 @@ DB created by the running app will not have them):
 
 ## 5. Notes / gaps
 
-- `charging_sessions.peak_power_w` exists but is never written by any endpoint.
-- Wallet credit/debit (`coin_balance += …`) is **not row-locked or atomic**,
-  despite a "thread-safe" comment — concurrent top-ups/debits can race.
+- `charging_sessions.peak_power_w` is now populated from inbound telemetry
+  (`backend/services/mqtt_manager.py` tracks the max observed wattage).
+- Wallet credit/debit is **row-locked** (`SELECT ... FOR UPDATE` in the stop,
+  verify, and webhook paths), so concurrent top-ups/debits no longer race.
 - There is **no time-series/telemetry table.** Live telemetry is in-memory only
   (`TelemetryStore`); the product spec's TimescaleDB is not implemented.
-- Registration always creates `role=driver`; there is no API path to create
-  `admin`/`cpo` users, and `role` is never checked for authorization.
+- Self-registration always creates `role=driver`; a driver becomes a `cpo`
+  through `POST /api/cpo/setup`. `role` **is** enforced for authorization on the
+  `/api/cpo/*` routes via `require_role(...)` (`backend/services/rbac.py`).
+- `backend/seed.py` populates sample tenants/users/gateways/plugs/sessions for
+  development (default password `password123`) — see [DEPLOYMENT.md](DEPLOYMENT.md#database-seeding).
 </content>

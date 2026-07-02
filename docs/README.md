@@ -1,10 +1,15 @@
 # AmpHive Documentation
 
-This folder is the **technical reference** for the AmpHive platform. Unlike the
-root-level [`requirements.md`](../requirements.md) and
-[`features_list.md`](../features_list.md) — which are *product/aspirational*
-specifications — the documents here describe **what the code actually does today**,
-verified against the source on 2026-06-20.
+This folder is the **technical reference** for the AmpHive platform, and the
+**single source of truth** for how the system works today. Unlike the root-level
+[`requirements.md`](../requirements.md) and [`features_list.md`](../features_list.md)
+— which are *product/aspirational* specifications — the documents here describe
+**what the code actually does today**, verified against the source on 2026-07-02.
+
+> The older root-level "map" files (`architecture.md`, `api-map.md`, `routes.md`,
+> `database-map.md`, `dependency-graph.md`, `memory.md`) have been **superseded by
+> this folder**; they now contain only redirect pointers here. Update the docs in
+> this folder — not those — when behaviour changes.
 
 > When a doc here and a product spec disagree, the docs here win for "current
 > behaviour"; the product spec wins for "intended direction". The
@@ -17,6 +22,7 @@ verified against the source on 2026-06-20.
 | [ARCHITECTURE.md](ARCHITECTURE.md) | End-to-end system architecture, the two operating modes (ESP32/MQTT vs Direct Mode), and how a charging session flows through the stack. |
 | [API_REFERENCE.md](API_REFERENCE.md) | Every backend REST endpoint (all 22), request/response shapes, and auth requirements. |
 | [DATA_MODEL.md](DATA_MODEL.md) | PostgreSQL tables, SQLAlchemy models, enums, relationships, and the schema-vs-ORM drift. |
+| [DEPENDENCIES.md](DEPENDENCIES.md) | Backend/frontend/firmware import graphs, package dependencies, high-impact files, and known dead code. |
 | [MQTT_CONTRACT.md](MQTT_CONTRACT.md) | The exact MQTT topic/payload contract between the backend and the ESP32 gateway. |
 | [FIRMWARE.md](FIRMWARE.md) | ESP32-S3 firmware: boot flow, tasks, watchdogs, the Tapo driver stub, and the `microlink` Tailscale-protocol client. |
 | [DEPLOYMENT.md](DEPLOYMENT.md) | How the system is deployed (GCP VM + Docker Compose), the helper scripts, and the K8s manifests. |

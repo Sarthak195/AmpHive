@@ -1,6 +1,6 @@
 # AmpHive — Backend API Reference
 
-*Verified against `backend/main.py` on 2026-06-20.*
+*Verified against `backend/main.py` on 2026-07-02.*
 
 All routes are defined directly on the FastAPI `app` in `backend/main.py` (there
 is no `APIRouter`/prefix grouping). Every path is hard-coded under `/api`.
@@ -10,8 +10,11 @@ Interactive docs: `http://<host>:8000/docs`.
 - **Auth:** routes marked **JWT** require `Authorization: Bearer <token>`
   (FastAPI `HTTPBearer` → `get_current_user`). The user is loaded fresh from the
   DB on every request, so balance/role are always current.
+- Routes marked **cpo/admin** additionally require the caller's DB role to be
+  `cpo` or `admin`, enforced by `require_role(...)` (`backend/services/rbac.py`).
 - **CORS:** wide open (`allow_origins=["*"]`) — flagged for production lockdown.
-- **22 endpoints total.**
+- **35 endpoints total**, grouped below: health (1), auth (3), groups (2),
+  plugs (2), sessions (4), payments (3), Direct Mode (5), CPO portal (15).
 
 ---
 
@@ -45,13 +48,12 @@ Token: HS256 JWT, claims `sub`/`role`/`email`/`iat`/`exp`, **7-day** expiry.
 |--------|------|------|-------------|-----------|
 | GET | `/api/plugs/available` | JWT | — | Plugs in accessible groups **or** ungrouped (`group_id IS NULL`, visible to all) → `[{id, name, status, current_power_w, plug_model, group_name?}]` |
 | GET | `/api/plugs/{plug_id}` | JWT | path `plug_id:int` | Single plug; 404 if missing, 403 if in a private group the user hasn't joined |
-| POST | `/api/plugs/register` | **none** | `{gateway_id, name, local_ip, plug_model="tapo_p110", group_id?}` | Creates a plug row (unauthenticated — provisioning) |
 
-## Gateways
-
-| Method | Path | Auth | Body | Behaviour |
-|--------|------|------|------|-----------|
-| POST | `/api/gateways/register` | **none** | `{gateway_id, name, vpn_ip, tenant_id}` | Creates a gateway (PK = supplied `gateway_id`; unauthenticated — provisioning) |
+> **Provisioning moved.** The old unauthenticated `POST /api/plugs/register` and
+> `POST /api/gateways/register` have been **removed**. Gateways and plugs are now
+> created through the RBAC-gated `POST /api/cpo/gateways` / `POST /api/cpo/plugs`
+> (see [CPO Admin Portal](#cpo-admin-portal-apicpo)), which scope every write to
+> the caller's tenant.
 
 ## Charging sessions
 

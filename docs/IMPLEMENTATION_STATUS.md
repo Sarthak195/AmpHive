@@ -1,6 +1,6 @@
 # AmpHive — Implementation Status & Discrepancies
 
-*Verified against source on 2026-06-20. This page reconciles the aspirational
+*Verified against source on 2026-07-02. This page reconciles the aspirational
 product specs ([requirements.md](../requirements.md), [features_list.md](../features_list.md))
 with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub/mock ·
 ❌ not implemented.*
@@ -12,7 +12,7 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 ### Backend
 | Capability | Status | Notes |
 |------------|:------:|-------|
-| REST API (auth, groups, plugs, sessions, payments, direct) | ✅ | 22 endpoints — see [API_REFERENCE.md](API_REFERENCE.md) (README still lists only 5) |
+| REST API (auth, groups, plugs, sessions, payments, direct, CPO portal) | ✅ | 35 endpoints — see [API_REFERENCE.md](API_REFERENCE.md) |
 | JWT auth + bcrypt | ✅ | 7-day token, loaded fresh per request |
 | Role-based access control | ✅ | Enforced via `services/rbac.py` `require_role(...)` on all `/api/cpo/*` routes (checks the DB role, not just the token) |
 | MQTT command publish (ON/OFF) | ✅ | QoS 1, 3 s wait |
@@ -21,7 +21,7 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 | TimescaleDB / time-series persistence | ❌ | In-memory TelemetryStore + session table update only |
 | Razorpay create-order + verify | ✅ | HMAC-verified; credits coins + ledger |
 | Razorpay webhook auto-credit | ✅ | Credits coins on `payment.captured`; atomic + idempotent vs. `/verify` (dedupes on `razorpay_payment_id`) |
-| Wallet debit on stop + ledger | ✅ | Not atomic/row-locked (race-prone) |
+| Wallet debit on stop + ledger | ✅ | Row-locked (`SELECT ... FOR UPDATE`) in stop/verify/webhook paths |
 | Direct Mode Tapo endpoints | ✅ | Gated by `DIRECT_MODE`; lib or relay mode |
 
 ### Frontend
@@ -32,10 +32,10 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 | Live session monitor (SSE) | ✅ | Uses real `EventSource` with token query parameter |
 | Razorpay top-up flow | ✅ | CDN script + `window.Razorpay`; key comes from backend order |
 | Charger groups (join/list) | ✅ | |
-| Map / find-nearest-plug | ❌ | No map library or UI at all |
+| CPO operator portal (setup, dashboard, plugs, groups, sessions) | ✅ | `pages/cpo/*` behind `CpoProtectedRoute`; charts via `recharts` |
+| Map of available plugs | 🟡 | Leaflet/OpenStreetMap `MapComponent` on Home; plug coordinates not persisted, so markers use fallback/random positions |
 | "View History" button (WalletCard) | ❌ | No handler/route |
-| `mockSse.js` | ❌(dead) | Unimported leftover; event shape wouldn't match anyway |
-| TypeScript usage | ❌ | TS toolchain + TS-only ESLint present, but all app code is `.jsx`/`.js` |
+| TypeScript usage | ❌ | TS toolchain + `@types/*` present, but all app code is `.jsx`/`.js` |
 
 ### Firmware
 | Capability | Status | Notes |
@@ -54,7 +54,7 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 | Capability | Status | Notes |
 |------------|:------:|-------|
 | Docker Compose on GCP VM | ✅ | Live/canonical |
-| `deploy.ps1` + `.bat` helpers | ✅ | `start-vm.bat` refreshes DB IP |
+| `deploy.ps1` + `scripts/*.bat` helpers | ✅ | VM start/stop + remote compose/logs (in `scripts/`) |
 | K8s/K3s manifests | 🟡 | Complete but not the live deployment; stale images, missing env |
 | Mosquitto broker | 🟡 | Works, but anonymous + no TLS + publicly reachable |
 
@@ -74,23 +74,32 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 
 ## 3. Full discrepancy list (doc says X → code does Y)
 
-1. **README API table lists 5 endpoints; there are 22.**
+1. [Resolved 2026-07-02] The README API section now summarizes all **35**
+   endpoints (including the CPO portal) and links to [API_REFERENCE.md](API_REFERENCE.md).
 2. **TimescaleDB** is referenced throughout the specs but **not used** — telemetry
    is in-memory and non-persistent.
 3. **LWT offline alerts on the backend** (README description) is inaccurate (LWT is published by the *firmware*, and the backend has no LWT, though gateway status is now persisted on the backend when received).
 4. **Python version:** README says 3.12; Dockerfile uses **3.11**.
 5. **`schema.sql`/`schema_v2.sql` are not executed** — the ORM `create_all` is the
    real schema, and it omits unique constraints + indexes the SQL files define.
-6. **Registration is fixed to `driver`; no RBAC** despite the documented
-   admin/CPO/driver model and CPO portal.
-7. **`gateways/register` and `plugs/register` are unauthenticated.**
+6. [Resolved 2026-07-02] RBAC is enforced. Self-registration still creates a
+   `driver`, but a driver self-promotes to `cpo` via `POST /api/cpo/setup`, and
+   `require_role("cpo","admin")` (`backend/services/rbac.py`) gates all `/api/cpo/*`
+   routes against the live DB role.
+7. [Resolved 2026-07-02] The unauthenticated `gateways/register` /
+   `plugs/register` endpoints were removed; provisioning now goes through the
+   RBAC-gated, tenant-scoped `POST /api/cpo/gateways` / `POST /api/cpo/plugs`.
 8. **Direct Mode is documented as a temporary dev bypass** but is the
    actually-enabled path in the committed config.
 9. [Resolved] `charging_sessions.peak_power_w` is now populated.
-10. **Wallet updates aren't atomic** despite the "thread-safe" comment.
+10. [Resolved 2026-07-02] Wallet updates are now row-locked (`SELECT ... FOR
+    UPDATE`) in the stop, verify, and webhook paths.
 11. **Frontend SSE auth gap:** comment says pass `?token=`, code doesn't.
-12. **No map UI** despite "find nearest plug / OpenStreetMap" framing.
-13. **`mockSse.js` is dead code** (and its event shape wouldn't match the consumer).
+12. [Partly resolved 2026-07-02] A Leaflet/OpenStreetMap map (`MapComponent`) is
+    now on Home, but plug **geolocation isn't in the data model**, so markers use
+    fallback/random coordinates rather than real plug locations.
+13. [Resolved 2026-07-02] The dead `frontend/src/api/mockSse.js` leftover has been
+    deleted.
 14. **Firmware Tapo driver is a mock** — no KLAP, no AES, simulated readings.
 15. **No OTA** and the **single-app partition table** precludes the spec'd
     dual-partition rollback without a partition change.
