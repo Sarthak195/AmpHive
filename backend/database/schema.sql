@@ -79,6 +79,24 @@ CREATE TABLE ledger_transactions (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL
 );
 
+-- 7. Telemetry Readings Table (append-only time-series of raw plug samples)
+-- Written via a buffered background batch-flush from the MQTT handler
+-- (backend/services/telemetry_persistence.py). tenant_id is denormalized so CPO
+-- charts filter without a plug->gateway->tenant join; session_id is nullable
+-- (SET NULL) since telemetry can arrive with no active session.
+CREATE TABLE telemetry_readings (
+    id BIGSERIAL PRIMARY KEY,
+    tenant_id INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    plug_id INTEGER NOT NULL REFERENCES plugs(id) ON DELETE CASCADE,
+    session_id INTEGER REFERENCES charging_sessions(id) ON DELETE SET NULL,
+    recorded_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    power_w DOUBLE PRECISION NOT NULL,
+    energy_kwh DOUBLE PRECISION NOT NULL, -- cumulative, as reported by firmware
+    voltage_v DOUBLE PRECISION NOT NULL,
+    current_a DOUBLE PRECISION NOT NULL,
+    status VARCHAR(20) -- raw firmware signal (nullable)
+);
+
 -- Indexes for performance
 CREATE INDEX idx_users_tenant ON users(tenant_id);
 CREATE INDEX idx_gateways_tenant ON gateways(tenant_id);
@@ -86,3 +104,6 @@ CREATE INDEX idx_plugs_gateway ON plugs(gateway_id);
 CREATE INDEX idx_sessions_user ON charging_sessions(user_id);
 CREATE INDEX idx_sessions_status ON charging_sessions(status);
 CREATE INDEX idx_ledger_user ON ledger_transactions(user_id);
+CREATE INDEX idx_telemetry_plug_recorded ON telemetry_readings(plug_id, recorded_at);
+CREATE INDEX idx_telemetry_session_recorded ON telemetry_readings(session_id, recorded_at);
+CREATE INDEX idx_telemetry_tenant_recorded ON telemetry_readings(tenant_id, recorded_at);

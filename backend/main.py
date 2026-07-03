@@ -33,7 +33,7 @@ from backend.database.db import get_db, init_db, async_session_factory
 from backend.database.models import (
     User, UserRole, Plug, PlugStatus, Gateway, GatewayStatus, Tenant,
     ChargingSession, SessionStatus, LedgerTransaction, TransactionType,
-    ChargerGroup, GroupMembership,
+    ChargerGroup, GroupMembership, TelemetryReading,
 )
 from backend.services.auth import (
     hash_password, verify_password, create_access_token, get_current_user, decode_access_token
@@ -41,6 +41,7 @@ from backend.services.auth import (
 from backend.services.rbac import require_role
 from backend.services.mqtt_manager import MQTTManager
 from backend.services.telemetry import TelemetryStore
+from backend.services.telemetry_persistence import TelemetryPersistenceService
 # [Direct Mode] Import the Tapo direct driver for ESP32-bypass plug control
 from backend.services.tapo_direct import TapoDirectDriver
 from backend.services import payments as payment_service
@@ -71,19 +72,31 @@ mqtt_manager = None
 # [Direct Mode] Global reference to the Tapo direct driver (initialized in lifespan)
 tapo_driver: Optional[TapoDirectDriver] = None
 telemetry_store = TelemetryStore()
+# Buffered batch-flush service for time-series telemetry persistence (lifespan-owned)
+telemetry_persistence: Optional[TelemetryPersistenceService] = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage MQTT and Tapo Direct connection lifecycles with the FastAPI application."""
-    global mqtt_manager, tapo_driver
-    
+    global mqtt_manager, tapo_driver, telemetry_persistence
+
     # Initialize the database tables
     await init_db()
-    
+
+    import asyncio
+    loop = asyncio.get_running_loop()
+
+    # Start the telemetry persistence flush loop before MQTT so the buffer is
+    # ready to receive enqueued readings as soon as messages arrive.
+    telemetry_persistence = TelemetryPersistenceService(
+        db_session_factory=async_session_factory,
+    )
+    telemetry_persistence.start(loop)
+
     # Initialize and start the MQTT connection.
     # Pass telemetry_store so inbound MQTT data feeds the SSE stream,
-    # and db_session_factory so telemetry is persisted to the database.
-    import asyncio
+    # db_session_factory so session totals are persisted, and
+    # telemetry_persistence so raw samples are buffered into telemetry_readings.
     mqtt_manager = MQTTManager(
         broker_host=MQTT_BROKER_HOST,
         broker_port=MQTT_BROKER_PORT,
@@ -91,7 +104,8 @@ async def lifespan(app: FastAPI):
         password=MQTT_PASSWORD,
         telemetry_store=telemetry_store,
         db_session_factory=async_session_factory,
-        event_loop=asyncio.get_running_loop(),
+        event_loop=loop,
+        telemetry_persistence=telemetry_persistence,
     )
     mqtt_manager.start()
 
@@ -109,9 +123,12 @@ async def lifespan(app: FastAPI):
         logger.info("Direct Mode DISABLED — using standard ESP32/MQTT path")
 
     yield
-    # Stop the MQTT connection during shutdown
+    # Stop MQTT first (no new enqueues), then drain + stop the flush loop so the
+    # buffered tail is persisted.
     if mqtt_manager:
         mqtt_manager.stop()
+    if telemetry_persistence:
+        await telemetry_persistence.stop()
 
 
 app = FastAPI(
@@ -2027,6 +2044,69 @@ async def cpo_analytics_energy(
             "date": str(row[0]),
             "energy_kwh": round(float(row[1]), 3),
             "session_count": int(row[2]),
+        }
+        for row in rows
+    ]
+
+
+@app.get("/api/cpo/analytics/telemetry")
+async def cpo_analytics_telemetry(
+    user: User = Depends(require_role("cpo", "admin")),
+    db: AsyncSession = Depends(get_db),
+    plug_id: Optional[int] = None,
+    days: int = 1,
+    bucket: str = "hour",
+):
+    """
+    Downsampled time-series telemetry for the CPO's load graphs / energy audits.
+
+    Buckets raw `telemetry_readings` via date_trunc and returns average / peak
+    power plus the cumulative energy reading per bucket. Tenant-scoped (uses the
+    denormalized telemetry_readings.tenant_id); optional plug_id filter.
+
+    Returns an array of
+    {timestamp, avg_power_w, max_power_w, energy_kwh, sample_count}.
+    """
+    allowed_buckets = {"minute", "hour", "day"}
+    if bucket not in allowed_buckets:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid bucket '{bucket}'. Allowed: {sorted(allowed_buckets)}.",
+        )
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    bucket_col = func.date_trunc(bucket, TelemetryReading.recorded_at).label("bucket")
+
+    conditions = [
+        TelemetryReading.tenant_id == user.tenant_id,
+        TelemetryReading.recorded_at >= cutoff,
+    ]
+    if plug_id is not None:
+        conditions.append(TelemetryReading.plug_id == plug_id)
+
+    result = await db.execute(
+        select(
+            bucket_col,
+            func.avg(TelemetryReading.power_w).label("avg_power_w"),
+            func.max(TelemetryReading.power_w).label("max_power_w"),
+            # energy_kwh is cumulative-per-session, so max() = value at end of bucket
+            func.max(TelemetryReading.energy_kwh).label("energy_kwh"),
+            func.count(TelemetryReading.id).label("sample_count"),
+        )
+        .where(and_(*conditions))
+        .group_by(bucket_col)
+        .order_by(bucket_col)
+    )
+
+    rows = result.all()
+
+    return [
+        {
+            "timestamp": row[0].isoformat() if row[0] else None,
+            "avg_power_w": round(float(row[1]), 1),
+            "max_power_w": round(float(row[2]), 1),
+            "energy_kwh": round(float(row[3]), 3),
+            "sample_count": int(row[4]),
         }
         for row in rows
     ]

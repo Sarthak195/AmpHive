@@ -124,9 +124,13 @@ POST /api/sessions/stop              (JWT required)
   at session stop. Conversion is `COINS_PER_RUPEE` (default 1.0). Credits and
   debits are **row-locked** (`SELECT ... FOR UPDATE`) so concurrent updates
   don't race.
-- **Telemetry/live data:** held in an **in-memory** `TelemetryStore` singleton
-  (`backend/services/telemetry.py`) — there is no time-series database. The
-  product spec's "TimescaleDB" is not present.
+- **Telemetry/live data:** live SSE is still served from an **in-memory**
+  `TelemetryStore` singleton (`backend/services/telemetry.py`). Raw samples are
+  **also** persisted to the `telemetry_readings` time-series table via a buffered
+  background batch-flush (`backend/services/telemetry_persistence.py`), decoupled
+  from the SSE path, and queried by `GET /api/cpo/analytics/telemetry`. This uses
+  **plain Postgres** + `date_trunc` aggregation; the product spec's "TimescaleDB"
+  is not present (a possible future upgrade).
 
 ---
 

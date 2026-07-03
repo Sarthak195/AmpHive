@@ -43,6 +43,7 @@ const CpoDashboard = () => {
   const [overview, setOverview] = useState(null);
   const [revenueData, setRevenueData] = useState([]);
   const [energyData, setEnergyData] = useState([]);
+  const [loadData, setLoadData] = useState([]);
   const [recentSessions, setRecentSessions] = useState([]);
   const [tenantName, setTenantName] = useState('');
   const [loading, setLoading] = useState(true);
@@ -51,10 +52,11 @@ const CpoDashboard = () => {
     const fetchData = async () => {
       try {
         // Fetch all dashboard data in parallel
-        const [overviewRes, revenueRes, energyRes, sessionsRes, profileRes] = await Promise.all([
+        const [overviewRes, revenueRes, energyRes, loadRes, sessionsRes, profileRes] = await Promise.all([
           api.get('/api/cpo/analytics/overview'),
           api.get('/api/cpo/analytics/revenue?days=30'),
           api.get('/api/cpo/analytics/energy?days=30'),
+          api.get('/api/cpo/analytics/telemetry?days=1&bucket=hour'),
           api.get('/api/cpo/analytics/sessions?limit=10'),
           api.get('/api/cpo/profile'),
         ]);
@@ -62,6 +64,7 @@ const CpoDashboard = () => {
         setOverview(overviewRes);
         setRevenueData(revenueRes);
         setEnergyData(energyRes);
+        setLoadData(loadRes);
         setRecentSessions(sessionsRes);
         setTenantName(profileRes.tenant?.name || '');
       } catch (err) {
@@ -93,6 +96,15 @@ const CpoDashboard = () => {
       month: 'short', day: 'numeric',
       hour: '2-digit', minute: '2-digit',
     });
+  };
+
+  /**
+   * Format an ISO timestamp to an hour label (e.g. "14:00") for the load graph.
+   */
+  const formatHour = (isoStr) => {
+    if (!isoStr) return '';
+    const d = new Date(isoStr);
+    return d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: false });
   };
 
   /**
@@ -274,6 +286,56 @@ const CpoDashboard = () => {
             </div>
           )}
         </div>
+      </div>
+
+      {/* Load Graph — power draw over the last 24h (from persisted telemetry) */}
+      <div className="chart-container animate-fade-in animate-delay-2" style={{ marginBottom: '2rem' }}>
+        <h3>⚡ Load (Last 24h)</h3>
+        {loadData.length > 0 ? (
+          <ResponsiveContainer width="100%" height={220}>
+            <AreaChart data={loadData}>
+              <defs>
+                <linearGradient id="loadGradient" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%" stopColor="hsl(160, 70%, 50%)" stopOpacity={0.3} />
+                  <stop offset="95%" stopColor="hsl(160, 70%, 50%)" stopOpacity={0} />
+                </linearGradient>
+              </defs>
+              <CartesianGrid strokeDasharray="3 3" stroke="hsla(0,0%,100%,0.06)" />
+              <XAxis
+                dataKey="timestamp"
+                tickFormatter={formatHour}
+                stroke="hsla(0,0%,100%,0.2)"
+                tick={{ fill: 'hsl(220,10%,50%)', fontSize: 11 }}
+              />
+              <YAxis
+                stroke="hsla(0,0%,100%,0.2)"
+                tick={{ fill: 'hsl(220,10%,50%)', fontSize: 11 }}
+              />
+              <Tooltip content={<CustomTooltip />} labelFormatter={formatHour} />
+              <Area
+                type="monotone"
+                dataKey="avg_power_w"
+                name="Avg Power (W)"
+                stroke="hsl(160, 70%, 50%)"
+                strokeWidth={2}
+                fill="url(#loadGradient)"
+              />
+              <Area
+                type="monotone"
+                dataKey="max_power_w"
+                name="Peak Power (W)"
+                stroke="hsl(40, 90%, 55%)"
+                strokeWidth={1.5}
+                strokeDasharray="4 3"
+                fill="none"
+              />
+            </AreaChart>
+          </ResponsiveContainer>
+        ) : (
+          <div className="empty-state" style={{ padding: '2rem 1rem' }}>
+            <p>No telemetry recorded in the last 24h</p>
+          </div>
+        )}
       </div>
 
       {/* Recent Sessions Table */}

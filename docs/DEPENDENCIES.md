@@ -17,7 +17,7 @@ main.py  (FastAPI app — 35 REST endpoints, all schemas, lifespan)
 │
 ├── database/db.py         async engine + async_sessionmaker + get_db + init_db (create_all)
 │    └── database/models.py → Base
-├── database/models.py     8 ORM tables + 5 enums  (runtime source of truth)
+├── database/models.py     9 ORM tables + 5 enums  (runtime source of truth)
 │    └── sqlalchemy / sqlalchemy.orm, enum
 ├── database/init_db.py    standalone DB-init helper (duplicates db.py:init_db — see §5)
 ├── database/schema.sql / schema_v2.sql   reference SQL, NOT executed by the app

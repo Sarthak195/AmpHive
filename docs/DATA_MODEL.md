@@ -65,6 +65,20 @@ false) · `access_code` VARCHAR(20) unique (nullable) · `created_at`.
 Join table. `id` PK · `user_id` → users (CASCADE) · `group_id` → charger_groups
 (CASCADE) · `joined_at`.
 
+### `telemetry_readings`
+Append-only time-series of raw plug samples (~1 row/plug/~15s). `id` **BIGINT PK**
+· `tenant_id` → tenants (CASCADE, **denormalized** so CPO charts filter without a
+plug→gateway→tenant join) · `plug_id` → plugs (CASCADE) · `session_id` →
+charging_sessions (**SET NULL, nullable** — telemetry can arrive with no active
+session, and deleting a session must not erase audit history) · `recorded_at`
+(stamped in the MQTT handler) · `power_w` · `energy_kwh` *(cumulative, as reported
+by firmware)* · `voltage_v` · `current_a` · `status` VARCHAR(20) (raw firmware
+signal, nullable). Composite indexes on `(plug_id, recorded_at)`,
+`(session_id, recorded_at)`, `(tenant_id, recorded_at)` — declared in `models.py`
+(unlike other tables' indexes) so `create_all` actually creates them. Written by
+the buffered batch-flush service `backend/services/telemetry_persistence.py`; read
+by `GET /api/cpo/analytics/telemetry` via `date_trunc` aggregation.
+
 ## 3. Relationships
 
 ```
@@ -73,6 +87,7 @@ tenants ─┬─< users ─┬─< charging_sessions >─┬─ plugs >── g
          │          └─< group_memberships >──┤
          ├─< gateways ─< plugs               │
          ├─< charging_sessions               │
+         ├─< telemetry_readings >── plugs / charging_sessions (nullable)
          └─< charger_groups ─┬─< plugs       │
                              └─< group_memberships
 ```
@@ -89,7 +104,11 @@ joined via `access_code`.
 - **`schema_v2.sql`** = a *migration delta* only: `CREATE TABLE IF NOT EXISTS
   charger_groups / group_memberships` and `ALTER TABLE plugs ADD COLUMN group_id`.
   Apply **after** `schema.sql`.
-- **`models.py`** = the union of all 8 tables and the authoritative runtime schema.
+- **`models.py`** = the union of all 9 tables and the authoritative runtime schema.
+- **`telemetry_readings`** is the exception to the drift pattern: its three
+  composite indexes are declared in `models.py` (`__table_args__`), so
+  `create_all` creates them at runtime. `schema.sql` mirrors the same DDL for
+  reference parity.
 
 Constraints/indexes present in the SQL files but **missing from the ORM** (so a
 DB created by the running app will not have them):
@@ -106,8 +125,15 @@ DB created by the running app will not have them):
   (`backend/services/mqtt_manager.py` tracks the max observed wattage).
 - Wallet credit/debit is **row-locked** (`SELECT ... FOR UPDATE` in the stop,
   verify, and webhook paths), so concurrent top-ups/debits no longer race.
-- There is **no time-series/telemetry table.** Live telemetry is in-memory only
-  (`TelemetryStore`); the product spec's TimescaleDB is not implemented.
+- Time-series telemetry **is** now persisted to `telemetry_readings` via a
+  buffered background batch-flush (`backend/services/telemetry_persistence.py`),
+  decoupled from the live in-memory `TelemetryStore` (which still drives SSE).
+  This uses **plain Postgres** + `date_trunc` aggregation; the spec's TimescaleDB
+  (hypertables, native retention, continuous aggregates) is *not* used and is a
+  possible future upgrade. Retention is an opt-in periodic prune gated by
+  `TELEMETRY_RETENTION_DAYS` (default `0` = keep all). See tunables:
+  `TELEMETRY_FLUSH_INTERVAL_SEC`, `TELEMETRY_BUFFER_MAX`,
+  `TELEMETRY_PRUNE_EVERY_N_FLUSHES`.
 - Self-registration always creates `role=driver`; a driver becomes a `cpo`
   through `POST /api/cpo/setup`. `role` **is** enforced for authorization on the
   `/api/cpo/*` routes via `require_role(...)` (`backend/services/rbac.py`).

@@ -18,7 +18,7 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 | MQTT command publish (ON/OFF) | ✅ | QoS 1, 3 s wait |
 | MQTT inbound telemetry/status handling | ✅ | Telemetry updates TelemetryStore and session DB. Status updates gateway state in DB. |
 | Live telemetry / SSE | ✅ | Fully functional, streams real telemetry from TelemetryStore |
-| TimescaleDB / time-series persistence | ❌ | In-memory TelemetryStore + session table update only |
+| Time-series telemetry persistence | ✅ | Persistent `telemetry_readings` table fed by a buffered background batch-flush from the MQTT handler (`services/telemetry_persistence.py`); queried by `GET /api/cpo/analytics/telemetry` via `date_trunc`. Plain Postgres (no TimescaleDB) — hypertables/retention/continuous-aggregates noted as a future upgrade. Live SSE still uses the in-memory TelemetryStore. |
 | Razorpay create-order + verify | ✅ | HMAC-verified; credits coins + ledger |
 | Razorpay webhook auto-credit | ✅ | Credits coins on `payment.captured`; atomic + idempotent vs. `/verify` (dedupes on `razorpay_payment_id`) |
 | Wallet debit on stop + ledger | ✅ | Row-locked (`SELECT ... FOR UPDATE`) in stop/verify/webhook paths |
@@ -34,7 +34,7 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 | Charger groups (join/list) | ✅ | |
 | CPO operator portal (setup, dashboard, plugs, groups, sessions) | ✅ | `pages/cpo/*` behind `CpoProtectedRoute`; charts via `recharts` |
 | Map of available plugs | 🟡 | Leaflet/OpenStreetMap `MapComponent` on Home; plug coordinates not persisted, so markers use fallback/random positions |
-| "View History" button (WalletCard) | ❌ | No handler/route |
+| "View History" button (WalletCard) | ✅ | `WalletCard` button → `/history` route (`App.jsx`) → `History.jsx`, which fetches `GET /api/sessions/history`. Shows charging-session debits; does not yet show a unified ledger with top-up credits. |
 | TypeScript usage | ❌ | TS toolchain + `@types/*` present, but all app code is `.jsx`/`.js` |
 
 ### Firmware
@@ -76,8 +76,13 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 
 1. [Resolved 2026-07-02] The README API section now summarizes all **35**
    endpoints (including the CPO portal) and links to [API_REFERENCE.md](API_REFERENCE.md).
-2. **TimescaleDB** is referenced throughout the specs but **not used** — telemetry
-   is in-memory and non-persistent.
+2. [Partly resolved 2026-07-02] Time-series telemetry **is** now persisted to the
+   `telemetry_readings` table via a buffered batch-flush from the MQTT handler
+   (`backend/services/telemetry_persistence.py`), queried by
+   `GET /api/cpo/analytics/telemetry`. **TimescaleDB specifically** is still not
+   used — plain Postgres + `date_trunc` aggregation was chosen deliberately;
+   hypertables/native-retention/continuous-aggregates remain a possible future
+   upgrade.
 3. **LWT offline alerts on the backend** (README description) is inaccurate (LWT is published by the *firmware*, and the backend has no LWT, though gateway status is now persisted on the backend when received).
 4. **Python version:** README says 3.12; Dockerfile uses **3.11**.
 5. **`schema.sql`/`schema_v2.sql` are not executed** — the ORM `create_all` is the

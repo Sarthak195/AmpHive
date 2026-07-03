@@ -1,0 +1,6 @@
+# Development / test dependencies (not installed in the production image).
+#   pip install -r backend/requirements.txt -r backend/requirements-dev.txt
+#   pytest backend/tests
+-r requirements.txt
+pytest>=8.0.0
+pytest-asyncio>=0.23.0

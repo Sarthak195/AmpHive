@@ -14,7 +14,7 @@ Phase 2 additions (marked with [P2]):
 import enum
 from datetime import datetime
 from typing import List, Optional
-from sqlalchemy import Column, Integer, String, Float, Boolean, ForeignKey, DateTime, Enum as SQLEnum, text
+from sqlalchemy import Column, Integer, BigInteger, String, Float, Boolean, ForeignKey, DateTime, Enum as SQLEnum, Index, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 class Base(DeclarativeBase):
@@ -208,3 +208,50 @@ class GroupMembership(Base):
     # Relationships
     user: Mapped[User] = relationship("User", back_populates="group_memberships")
     group: Mapped[ChargerGroup] = relationship("ChargerGroup", back_populates="memberships")
+
+
+# --- Time-Series Telemetry Persistence ---
+
+class TelemetryReading(Base):
+    """
+    Append-only time-series of raw plug telemetry samples (~1 row/plug/~15s).
+
+    Feeds CPO analytical charts (load graphs, historical energy audits) via
+    date_trunc aggregation. Written via a buffered background batch-flush task
+    (services/telemetry_persistence.py), NOT per-message, so the live SSE path
+    (services/telemetry.py TelemetryStore) is never blocked by DB writes.
+
+    Design notes:
+    - BigInteger PK: append-only, high row count over the table's lifetime.
+    - tenant_id is denormalized (plug -> gateway -> tenant) so CPO charts can
+      filter without a join on a hot analytical query. FK + CASCADE matches the
+      Gateway/ChargingSession convention.
+    - session_id is nullable / SET NULL: telemetry can arrive with no active
+      session (idle plug), and deleting a session must not erase audit history.
+    - status is a plain String (not a PG enum): it is a raw firmware signal that
+      may evolve; a PG enum would need a migration to extend.
+    - No relationship() back-refs on Plug/ChargingSession/Tenant: this is a
+      high-cardinality child that should never be exposed as a lazy-loadable
+      collection.
+    """
+    __tablename__ = "telemetry_readings"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    plug_id: Mapped[int] = mapped_column(Integer, ForeignKey("plugs.id", ondelete="CASCADE"), nullable=False)
+    session_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("charging_sessions.id", ondelete="SET NULL"), nullable=True)
+    recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+    power_w: Mapped[float] = mapped_column(Float, nullable=False)
+    energy_kwh: Mapped[float] = mapped_column(Float, nullable=False)   # cumulative, as reported by firmware
+    voltage_v: Mapped[float] = mapped_column(Float, nullable=False)
+    current_a: Mapped[float] = mapped_column(Float, nullable=False)
+    status: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)  # raw firmware signal
+
+    # Indexes MUST be declared here: create_all() (db.py init_db) is the only
+    # schema path; schema.sql is never executed. Each composite maps 1:1 to a
+    # query shape: plug load graph, per-session series, tenant-scoped aggregation.
+    __table_args__ = (
+        Index("idx_telemetry_plug_recorded", "plug_id", "recorded_at"),
+        Index("idx_telemetry_session_recorded", "session_id", "recorded_at"),
+        Index("idx_telemetry_tenant_recorded", "tenant_id", "recorded_at"),
+    )

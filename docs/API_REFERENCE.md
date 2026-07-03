@@ -13,8 +13,8 @@ Interactive docs: `http://<host>:8000/docs`.
 - Routes marked **cpo/admin** additionally require the caller's DB role to be
   `cpo` or `admin`, enforced by `require_role(...)` (`backend/services/rbac.py`).
 - **CORS:** wide open (`allow_origins=["*"]`) — flagged for production lockdown.
-- **35 endpoints total**, grouped below: health (1), auth (3), groups (2),
-  plugs (2), sessions (4), payments (3), Direct Mode (5), CPO portal (15).
+- **36 endpoints total**, grouped below: health (1), auth (3), groups (2),
+  plugs (2), sessions (4), payments (3), Direct Mode (5), CPO portal (16).
 
 ---
 
@@ -115,6 +115,7 @@ scoped to the caller's `tenant_id`, so operators only ever see their own assets.
 | GET | `/api/cpo/analytics/sessions` | cpo/admin | query `plug_id?, status_filter?, days=30, limit=50` | Session history enriched with plug name, user email, duration. |
 | GET | `/api/cpo/analytics/revenue` | cpo/admin | query `days=30` | Daily `{date, revenue_coins, session_count}` series. |
 | GET | `/api/cpo/analytics/energy` | cpo/admin | query `days=30` | Daily `{date, energy_kwh, session_count}` series. |
+| GET | `/api/cpo/analytics/telemetry` | cpo/admin | query `plug_id?, days=1, bucket=hour` | `date_trunc`-bucketed time-series from `telemetry_readings` (bucket ∈ {minute, hour, day}; 400 otherwise) → `[{timestamp, avg_power_w, max_power_w, energy_kwh, sample_count}]`. Powers the dashboard load graph. |
 
 ---
 
@@ -131,4 +132,8 @@ scoped to the caller's `tenant_id`, so operators only ever see their own assets.
 | `DIRECT_MODE` | `false` | Enable `/api/direct/*` endpoints |
 | `TAPO_USERNAME` / `TAPO_PASSWORD` / `TAPO_PLUG_IP` | `""` | Tapo account + default plug IP for Direct Mode |
 | `TAPO_RELAY_URL` | none | If set, Direct Mode calls an HTTP relay instead of the local `tapo` lib |
+| `TELEMETRY_FLUSH_INTERVAL_SEC` | `10.0` | How often the buffered telemetry flush task drains to `telemetry_readings` |
+| `TELEMETRY_BUFFER_MAX` | `10000` | Max buffered readings; oldest dropped if the DB is unavailable |
+| `TELEMETRY_RETENTION_DAYS` | `0` | Prune `telemetry_readings` older than N days. `0` = retention disabled (keep all) |
+| `TELEMETRY_PRUNE_EVERY_N_FLUSHES` | `360` | Run the retention prune every N flushes (~hourly at the default interval) |
 </content>

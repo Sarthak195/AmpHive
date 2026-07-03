@@ -28,11 +28,12 @@ class MQTTManager:
         telemetry_store=None,
         db_session_factory: Optional[Callable] = None,
         event_loop: Optional[asyncio.AbstractEventLoop] = None,
+        telemetry_persistence=None,
     ):
         # Prevent re-initialization if already initialized
         if hasattr(self, "client"):
             return
-        
+
         self.broker_host = broker_host
         self.broker_port = broker_port
         self.username = username
@@ -40,6 +41,8 @@ class MQTTManager:
         self.telemetry_store = telemetry_store
         self.db_session_factory = db_session_factory
         self.event_loop = event_loop
+        # Buffered batch-flush sink for time-series persistence (optional).
+        self.telemetry_persistence = telemetry_persistence
         
         self.client = mqtt.Client(client_id="amphive_backend_server", callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
         
@@ -155,7 +158,22 @@ class MQTTManager:
                 # cost_coins=None → auto-calculated by TelemetryStore using COINS_PER_KWH
             )
 
-        # --- 2. Persist to the database (async, fire-and-forget) ---
+        # --- 2. Enqueue a raw sample for time-series persistence ---
+        # Buffered + batch-flushed by TelemetryPersistenceService. This is where
+        # voltage/current/status (parsed above but not used for session totals)
+        # get persisted to telemetry_readings.
+        if self.telemetry_persistence:
+            self.telemetry_persistence.enqueue({
+                "plug_id": plug_id,
+                "recorded_at": datetime.now(timezone.utc),
+                "power_w": watts,
+                "energy_kwh": kwh,
+                "voltage_v": voltage,
+                "current_a": current,
+                "status": status,
+            })
+
+        # --- 3. Persist authoritative session totals (async, fire-and-forget) ---
         if self.db_session_factory and self.event_loop:
             asyncio.run_coroutine_threadsafe(
                 self._persist_telemetry(plug_id, watts, kwh),
