@@ -1,5 +1,7 @@
 # AmpHive — ESP32-S3 Gateway Firmware
 
+> Quick setup? See [ESP32_CONNECTION.md](ESP32_CONNECTION.md) for build/flash/monitor commands and common connection issues.
+
 *Verified against `firmware/` on 2026-06-20.*
 
 The gateway is an ESP-IDF application targeting **ESP32-S3-N16R8** (16 MB flash /
