@@ -9,6 +9,7 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "esp_mac.h"
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "esp_netif.h"
@@ -26,6 +27,8 @@ char ts_auth_key[128] = "";
 char device_name[32] = "";
 char gateway_id[32] = "";
 char target_plug_ip[16] = "";
+char tapo_email[64] = "";
+char tapo_password[64] = "";
 
 bool config_loaded = false;
 
@@ -84,6 +87,10 @@ static void load_config_from_nvs(void) {
     nvs_get_str(my_handle, "gateway_id", gateway_id, &size);
     size = sizeof(target_plug_ip);
     nvs_get_str(my_handle, "target_plug", target_plug_ip, &size);
+    size = sizeof(tapo_email);
+    nvs_get_str(my_handle, "tapo_email", tapo_email, &size);
+    size = sizeof(tapo_password);
+    nvs_get_str(my_handle, "tapo_pwd", tapo_password, &size);
 
     nvs_close(my_handle);
     
@@ -94,7 +101,7 @@ static void load_config_from_nvs(void) {
     }
 }
 
-static void save_config_to_nvs(const char* ssid, const char* pwd, const char* auth, const char* dev_name, const char* gw_id, const char* plug_ip) {
+static void save_config_to_nvs(const char* ssid, const char* pwd, const char* auth, const char* dev_name, const char* gw_id, const char* plug_ip, const char* t_email, const char* t_pwd) {
     nvs_handle_t my_handle;
     esp_err_t err = nvs_open("storage", NVS_READWRITE, &my_handle);
     if (err != ESP_OK) return;
@@ -105,7 +112,9 @@ static void save_config_to_nvs(const char* ssid, const char* pwd, const char* au
     nvs_set_str(my_handle, "device_name", dev_name);
     nvs_set_str(my_handle, "gateway_id", gw_id);
     nvs_set_str(my_handle, "target_plug", plug_ip);
-    
+    nvs_set_str(my_handle, "tapo_email", t_email);
+    nvs_set_str(my_handle, "tapo_pwd", t_pwd);
+
     nvs_commit(my_handle);
     nvs_close(my_handle);
     ESP_LOGI(TAG, "Configuration saved to NVS.");
@@ -124,12 +133,38 @@ static const char* portal_html = \
     "<label>Device Name:</label><input name='dev_name' required>"
     "<label>Gateway MAC/ID:</label><input name='gw_id' required>"
     "<label>Target Plug IP:</label><input name='plug_ip' required>"
+    "<label>Tapo Account Email:</label><input name='tapo_email' type='email' required>"
+    "<label>Tapo Account Password:</label><input name='tapo_pwd' type='password' required>"
     "<button type='submit'>Save & Reboot</button>"
     "</form></body></html>";
 
 static esp_err_t portal_get_handler(httpd_req_t *req) {
     httpd_resp_send(req, portal_html, HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
+}
+
+// Decode application/x-www-form-urlencoded values in place ('%XX' and '+').
+// httpd_query_key_value extracts but does not decode, so e.g. a Tapo email's
+// '@' arrives as "%40" and must be decoded before use.
+static int hexval(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+static void url_decode(char *s) {
+    char *dst = s;
+    for (char *src = s; *src; ) {
+        if (*src == '%' && hexval(src[1]) >= 0 && hexval(src[2]) >= 0) {
+            *dst++ = (char)(hexval(src[1]) * 16 + hexval(src[2]));
+            src += 3;
+        } else if (*src == '+') {
+            *dst++ = ' '; src++;
+        } else {
+            *dst++ = *src++;
+        }
+    }
+    *dst = '\0';
 }
 
 static esp_err_t portal_post_handler(httpd_req_t *req) {
@@ -151,14 +186,20 @@ static esp_err_t portal_post_handler(httpd_req_t *req) {
     buf[ret] = '\0';
 
     char ssid[32] = {0}, pwd[64] = {0}, auth[128] = {0}, dev[32] = {0}, gw[32] = {0}, plug[16] = {0};
+    char t_email[64] = {0}, t_pwd[64] = {0};
     httpd_query_key_value(buf, "ssid", ssid, sizeof(ssid));
     httpd_query_key_value(buf, "pwd", pwd, sizeof(pwd));
     httpd_query_key_value(buf, "auth", auth, sizeof(auth));
     httpd_query_key_value(buf, "dev_name", dev, sizeof(dev));
     httpd_query_key_value(buf, "gw_id", gw, sizeof(gw));
     httpd_query_key_value(buf, "plug_ip", plug, sizeof(plug));
+    httpd_query_key_value(buf, "tapo_email", t_email, sizeof(t_email));
+    httpd_query_key_value(buf, "tapo_pwd", t_pwd, sizeof(t_pwd));
 
-    save_config_to_nvs(ssid, pwd, auth, dev, gw, plug);
+    url_decode(ssid); url_decode(pwd); url_decode(auth); url_decode(dev);
+    url_decode(gw); url_decode(plug); url_decode(t_email); url_decode(t_pwd);
+
+    save_config_to_nvs(ssid, pwd, auth, dev, gw, plug, t_email, t_pwd);
 
     const char* resp = "<html><body><h2>Saved! Rebooting gateway...</h2></body></html>";
     httpd_resp_send(req, resp, HTTPD_RESP_USE_STRLEN);
@@ -291,12 +332,12 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
             mqtt_connected = true;
             
             // Publish status: ONLINE
-            char status_topic[64];
+            char status_topic[128];
             snprintf(status_topic, sizeof(status_topic), "amphive/gateways/%s/status", gateway_id);
             esp_mqtt_client_publish(mqtt_client, status_topic, "{\"status\":\"online\"}", 0, 1, 1);
             
             // Subscribe to incoming commands for this gateway's plugs
-            char command_topic[64];
+            char command_topic[128];
             snprintf(command_topic, sizeof(command_topic), "amphive/gateways/%s/plugs/+/commands", gateway_id);
             esp_mqtt_client_subscribe(mqtt_client, command_topic, 1);
             ESP_LOGI(TAG, "Subscribed to commands: %s", command_topic);
@@ -394,17 +435,20 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
 
 // ─── MQTT Client Startup ─────────────────────────────────────────────────────
 static void start_mqtt_client(void) {
-    char lwt_topic[64];
+    char lwt_topic[128];
     snprintf(lwt_topic, sizeof(lwt_topic), "amphive/gateways/%s/status", gateway_id);
 
     esp_mqtt_client_config_t mqtt_cfg = {
         .broker.address.uri = MQTT_BROKER_URL,
         .session.last_will = {
             .topic = lwt_topic,
-            .message = "{\"status\":\"offline\"}",
+            .msg = "{\"status\":\"offline\"}",
             .qos = 1,
             .retain = true,
-        }
+        },
+        /* The command handler runs on the MQTT task and now drives the Tapo KLAP
+           handshake (crypto + HTTP), so give it extra stack headroom. */
+        .task.stack_size = 8192,
     };
 
     mqtt_client = esp_mqtt_client_init(&mqtt_cfg);
@@ -419,7 +463,7 @@ static void resync_offline_logs(void) {
 
     ESP_LOGI(TAG, "Resyncing %u offline telemetry entries...", count);
 
-    char telemetry_topic[64];
+    char telemetry_topic[128];
     snprintf(telemetry_topic, sizeof(telemetry_topic), "amphive/gateways/%s/telemetry", gateway_id);
 
     offline_telemetry_entry_t entry;
@@ -452,7 +496,7 @@ static void resync_offline_logs(void) {
 // ─── Telemetry Polling & Watchdog Safety Loop ────────────────────────────────
 static void telemetry_task(void *pvParameters) {
     tapo_telemetry_t telemetry;
-    char telemetry_topic[64];
+    char telemetry_topic[128];
     snprintf(telemetry_topic, sizeof(telemetry_topic), "amphive/gateways/%s/telemetry", gateway_id);
 
     while (1) {
@@ -505,16 +549,28 @@ static void telemetry_task(void *pvParameters) {
                     active_session.active = false;
                     session_nvs_clear();
                 }
-                else if (telemetry.temperature_c > 75.0f) {
-                    ESP_LOGE(TAG, "THERMAL ALARM: Plug temperature at %.1f C. Shutting down plug locally!", telemetry.temperature_c);
+                else if (telemetry.overheated) {
+                    ESP_LOGE(TAG, "THERMAL ALARM: Plug reports overheat_status != normal. Shutting down plug locally!");
                     tapo_set_power_state(target_plug_ip, false);
                     active_session.active = false;
                     session_nvs_clear();
-                    
+
                     if (mqtt_connected) {
                         char alarm_topic[128];
                         snprintf(alarm_topic, sizeof(alarm_topic), "amphive/gateways/%s/alarms", gateway_id);
                         esp_mqtt_client_publish(mqtt_client, alarm_topic, "{\"error\":\"THERMAL_CUTOFF\"}", 0, 1, 0);
+                    }
+                }
+                else if (telemetry.overcurrent) {
+                    ESP_LOGE(TAG, "OVERCURRENT ALARM: Plug reports overcurrent_status != normal. Shutting down plug locally!");
+                    tapo_set_power_state(target_plug_ip, false);
+                    active_session.active = false;
+                    session_nvs_clear();
+
+                    if (mqtt_connected) {
+                        char alarm_topic[128];
+                        snprintf(alarm_topic, sizeof(alarm_topic), "amphive/gateways/%s/alarms", gateway_id);
+                        esp_mqtt_client_publish(mqtt_client, alarm_topic, "{\"error\":\"OVERCURRENT_CUTOFF\"}", 0, 1, 0);
                     }
                 }
             }
@@ -587,8 +643,8 @@ void app_main(void) {
         }
     }
 
-    // 2. Initialize local smart plug drivers
-    tapo_init();
+    // 2. Initialize local smart plug driver (Tapo KLAP) with account credentials
+    tapo_init(tapo_email, tapo_password, 230.0f);
 
     // 3. Initialize offline telemetry log
     offline_log_init();
@@ -619,7 +675,8 @@ void app_main(void) {
     }
 
     // 5. Start telemetry and safety watchdog loops
-    xTaskCreate(telemetry_task, "telemetry_safety", 4096, NULL, 5, NULL);
+    //    Stack raised to 8 KB: the task now performs real KLAP crypto + HTTP each poll.
+    xTaskCreate(telemetry_task, "telemetry_safety", 8192, NULL, 5, NULL);
 
     // 6. Start Tailscale connection client
     xTaskCreate(microlink_task, "microlink_vpn", 32768, NULL, 6, NULL);

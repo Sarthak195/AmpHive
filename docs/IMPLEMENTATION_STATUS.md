@@ -43,9 +43,9 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 | `microlink` Tailscale client (Noise/ts2021, DERP, DISCO, STUN, WG) | 🟡 | Substantial & mostly working; TODOs in WG send/pubkey, no IPv6, zerocopy excluded |
 | MQTT control loop + topic contract | ✅ | Matches backend topics |
 | Captive portal provisioning | ✅ | `AmpHive_Setup_XXXX` → NVS → reboot |
-| Edge watchdogs (duration/energy/thermal 75 °C) | ✅ | |
-| Over-current cutoff (13 A / 5 min) | ❌ | Current published but never compared |
-| Tapo P110 driver (KLAP/AES) | 🟦 | Mock — returns simulated telemetry, cleartext POST |
+| Edge watchdogs (duration/energy/thermal/over-current) | ✅ | Thermal + over-current now use the plug's `overheat_status`/`overcurrent_status` flags (the P110 has no °C sensor) |
+| Over-current cutoff | ✅ | Enforced via the plug's `overcurrent_status` flag → local OFF + `OVERCURRENT_CUTOFF` alarm |
+| Tapo P110 driver (KLAP/AES) | 🟡 | **Real KLAP v2** (mbedTLS SHA/AES + `esp_http_client`); protocol-validated against a real P110 via `tools/klap_probe.py`. On-device flash pending; builds on **ESP-IDF v5.3** (not v6 — see [ESP32_CONNECTION.md](ESP32_CONNECTION.md#8-esp-idf-v6-incompatibilities)) |
 | Session persistence in NVS / offline resync | ✅ | `session_nvs` module persists active session to NVS; `offline_log` ring buffer (64 entries) caches telemetry during MQTT outages; resync on reconnect |
 | OTA updates | ❌ | Single-app partition table; no `esp_https_ota` |
 | Headscale (vs Tailscale defaults) | 🟡 | `/key` fetch supports it, but default host constants point at Tailscale |
@@ -99,20 +99,25 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 9. [Resolved] `charging_sessions.peak_power_w` is now populated.
 10. [Resolved 2026-07-02] Wallet updates are now row-locked (`SELECT ... FOR
     UPDATE`) in the stop, verify, and webhook paths.
-11. **Frontend SSE auth gap:** comment says pass `?token=`, code doesn't.
+11. [Resolved 2026-07-02] **Frontend SSE auth gap:** The frontend now passes the JWT token as a `?token=` query parameter, and the backend decodes/verifies it.
 12. [Partly resolved 2026-07-02] A Leaflet/OpenStreetMap map (`MapComponent`) is
     now on Home, but plug **geolocation isn't in the data model**, so markers use
     fallback/random coordinates rather than real plug locations.
 13. [Resolved 2026-07-02] The dead `frontend/src/api/mockSse.js` leftover has been
     deleted.
-14. **Firmware Tapo driver is a mock** — no KLAP, no AES, simulated readings.
+14. [Resolved 2026-07-03] The firmware Tapo driver is now a **real KLAP v2**
+    implementation (mbedTLS SHA/AES + `esp_http_client`), protocol-validated against
+    a real P110 via `tools/klap_probe.py`. On-device flash verification is pending,
+    and it builds on **ESP-IDF v5.3** (the installed v6.0.1 has breaking changes —
+    see [ESP32_CONNECTION.md §8](ESP32_CONNECTION.md#8-esp-idf-v6-incompatibilities)).
 15. **No OTA** and the **single-app partition table** precludes the spec'd
     dual-partition rollback without a partition change.
 16. [Resolved 2026-07-02] **NVS session register / offline telemetry resync** now
     implemented via `session_nvs.c` (persists active session params) and
     `offline_log.c` (64-entry NVS ring buffer). Watchdogs enforce limits locally
     even when MQTT is down; buffered telemetry is resynced on reconnect.
-17. **No over-current cutoff** on the firmware.
+17. [Resolved 2026-07-03] **Over-current cutoff** is now enforced on the firmware via
+    the plug's `overcurrent_status` flag (local OFF + `OVERCURRENT_CUTOFF` alarm).
 18. **Telemetry topic shape** in `requirements.md` (`.../plugs/{id}/telemetry`)
     doesn't match the implemented per-gateway topic — but firmware & backend agree.
 19. **MQTT "Noise-encrypted TCP"** (spec) → plain `mqtt://`, secured only by the

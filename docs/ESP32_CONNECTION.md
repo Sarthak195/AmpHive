@@ -1,130 +1,291 @@
-# ESP32-S3 Connection & Flashing Guide
+# ESP32 Connection, Build & Flashing Guide
 
-Quick reference for building, flashing, and monitoring the AmpHive gateway firmware.
-Full firmware architecture is in [FIRMWARE.md](FIRMWARE.md).
+Complete reference for building, flashing, and monitoring the AmpHive gateway
+firmware — on the default **ESP32-S3** board and on **other ESP32 models**. Firmware
+architecture is in [FIRMWARE.md](FIRMWARE.md).
+
+> **Toolchain version matters.** This firmware is written for **ESP-IDF v5.3**
+> (v5.x LTS). It does **not** build as-is on **ESP-IDF v6.0** — v6 removed the
+> `json` and `mqtt` core components and upgraded to mbedTLS 4.x, which the
+> vendored `microlink` client is not compatible with. See
+> [§8 ESP-IDF v6 incompatibilities](#8-esp-idf-v6-incompatibilities) before using v6.
 
 ---
 
-## Hardware
+## 1. Hardware
 
-- **Target board:** ESP32-S3-N16R8 (16 MB flash, 8 MB PSRAM)
-- **Cable:** USB-C data cable (not charge-only — cheap cables silently fail)
-- **Port (Windows):** Shows as `COMx` in Device Manager under "Silicon Labs CP210x" or "USB Serial Device"
-- **Port (macOS):** `/dev/tty.usbmodem*` or `/dev/tty.SLAB_USBtoUART`
-- **Port (Linux):** `/dev/ttyUSB0` or `/dev/ttyACM0`
+| Item | Detail |
+|------|--------|
+| **Default board** | ESP32-S3-N16R8 (16 MB flash, 8 MB octal PSRAM) |
+| **Cable** | USB-C **data** cable — charge-only cables silently fail to enumerate |
+| **USB-UART bridge** | Onboard CP210x or native USB-Serial/JTAG, depending on board |
 
-To identify the port on Windows, run before and after plugging in:
+The firmware also runs on other ESP32 targets (see [§5](#5-flashing-other-esp32-models)),
+but the committed `sdkconfig.defaults` is tuned for the S3-N16R8 (octal PSRAM, 16 MB
+flash). Other chips need PSRAM/flash settings adjusted.
+
+### Identify the serial port
+
+| OS | Port looks like | How to find it |
+|----|-----------------|----------------|
+| **Windows** | `COM3`, `COM7`, … | Device Manager → *Ports (COM & LPT)*, or the PowerShell command below |
+| **macOS** | `/dev/tty.usbserial-*`, `/dev/tty.usbmodem*`, `/dev/tty.SLAB_USBtoUART` | `ls /dev/tty.*` before/after plugging in |
+| **Linux** | `/dev/ttyUSB0` (CP210x) or `/dev/ttyACM0` (native USB) | `ls /dev/ttyUSB* /dev/ttyACM*`; `dmesg | tail` after plugging in |
+
+Windows — run before and after plugging in and diff the list:
 ```powershell
-Get-PnpDevice -PresentOnly | Where-Object { $_.InstanceId -match 'USB' } | Select-Object FriendlyName, Status
+Get-PnpDevice -PresentOnly -Class Ports | Select-Object FriendlyName, Status
+# or, to see just COM names:
+[System.IO.Ports.SerialPort]::GetPortNames()
 ```
 
 ---
 
-## Prerequisites
+## 2. Install the toolchain (ESP-IDF v5.3)
 
-ESP-IDF v5.3 must be installed and activated. One-time setup:
+Pick **one** install method. **Target version: v5.3.x** (5.4.x also works; avoid 6.x).
 
+**A. Espressif IDF Installation Manager (EIM) / Windows installer** — recommended on Windows.
+Download from <https://dl.espressif.com/dl/esp-idf/> and select version **v5.3**. EIM
+installs the framework under e.g. `C:\esp\v5.3\esp-idf` and the tools under `C:\Espressif`.
+
+**B. Manual git clone (any OS):**
 ```bash
-# Windows (PowerShell, run once)
-winget install Espressif.EspIdf
-
-# After install, activate in every new terminal
-. $env:IDF_PATH\export.ps1          # PowerShell
-# or
-source $IDF_PATH/export.sh          # bash / Git Bash
+mkdir -p ~/esp && cd ~/esp
+git clone -b v5.3.2 --recursive https://github.com/espressif/esp-idf.git
+cd esp-idf && ./install.sh esp32s3        # Windows: .\install.ps1 esp32s3
 ```
 
-Verify:
+**C. VS Code** — the *Espressif IDF* extension installs and manages v5.3 for you.
+
+> ⚠️ Do not `winget install Espressif.EspIdf` blindly — it may pull **v6.x**, which
+> this firmware does not build against (see [§8](#8-esp-idf-v6-incompatibilities)).
+
+---
+
+## 3. Activate the environment (every new terminal)
+
+ESP-IDF must be "exported" into your shell before `idf.py` works.
+
+**Windows PowerShell** (native git-clone install):
+```powershell
+. $HOME\esp\esp-idf\export.ps1
+```
+
+**macOS / Linux (bash/zsh):**
 ```bash
-idf.py --version   # should print 5.3.x
+. ~/esp/esp-idf/export.sh
+```
+
+**Windows via EIM** — EIM writes a PowerShell activation profile. Dot-source it:
+```powershell
+. "C:\Espressif\tools\Microsoft.<ver>.PowerShell_profile.ps1"
+```
+
+### ⚠️ Git Bash / MSYS is NOT supported
+ESP-IDF's `export.sh` refuses to run under Git Bash / MSYS/MinGW
+(*"MSys/Mingw is not supported"*). On Windows, **use PowerShell**, not Git Bash.
+
+To drive a build from a Git Bash (or CI) shell, shell out to PowerShell and load the
+profile first — this is the recipe that works on the current dev machine (EIM install):
+```bash
+powershell -NoProfile -ExecutionPolicy Bypass -Command \
+  'Remove-Item Env:MSYSTEM -ErrorAction SilentlyContinue; \
+   . "C:\Espressif\tools\Microsoft.v5.3.PowerShell_profile.ps1" *> $null; \
+   Set-Location "C:\Users\<you>\Documents\AmpHive\firmware"; \
+   idf.py -p COM3 flash monitor'
+```
+(`Remove-Item Env:MSYSTEM` stops idf.py mistaking the child process for an MSYS shell.)
+
+Verify activation:
+```bash
+idf.py --version    # expect: ESP-IDF v5.3.x
 ```
 
 ---
 
-## Build, Flash & Monitor
+## 4. Build, flash & monitor (default ESP32-S3)
 
 ```bash
 cd firmware
 
-# First time or after a target change
+# 1. One-time (or after changing chip target): generates sdkconfig from sdkconfig.defaults
 idf.py set-target esp32s3
 
-# Build only
+# 2. Build
 idf.py build
 
-# Flash + open serial monitor (replace COM3 with your port)
+# 3. Flash + open serial monitor (replace COM3 with your port from §1)
 idf.py -p COM3 flash monitor
-
-# Monitor only (board already flashed)
-idf.py -p COM3 monitor
 ```
 
-**Monitor shortcuts:**
-| Key | Action |
-|-----|--------|
+Split commands if you prefer:
+```bash
+idf.py -p COM3 flash       # flash only
+idf.py -p COM3 monitor     # monitor only (already-flashed board)
+idf.py -p COM3 app-flash   # flash only the app partition (faster; skips bootloader/table)
+```
+
+**Serial monitor shortcuts:**
+| Keys | Action |
+|------|--------|
 | `Ctrl+]` | Exit monitor |
-| `Ctrl+T Ctrl+R` | Reset chip |
-| `Ctrl+T Ctrl+F` | Flash without re-building |
+| `Ctrl+T` then `Ctrl+R` | Reset the chip |
+| `Ctrl+T` then `Ctrl+F` | Rebuild + flash app, keep monitoring |
+| `Ctrl+T` then `Ctrl+H` | Help (all shortcuts) |
+
+If flashing can't sync (`Failed to connect… No serial data received`): hold the **BOOT**
+button, tap **RESET/EN**, release BOOT once "Connecting…" appears (forces download mode).
 
 ---
 
-## First Boot (Captive Portal)
+## 5. Flashing other ESP32 models
 
-On a board with no NVS config (factory or after `idf.py erase-flash`):
-
-1. Board starts SoftAP: **`AmpHive_Setup_XXXX`** (open, no password)
-2. Connect your laptop to that network
-3. Navigate to `http://192.168.4.1`
-4. Fill in: WiFi SSID, WiFi password, Tailscale auth key, device name, gateway ID, target plug IP
-5. Submit → board reboots and connects to your WiFi
-
----
-
-## Erase NVS / Full Reset
+The build is retargetable. The only per-chip step is `set-target`, plus adjusting
+PSRAM/flash config for boards that differ from the S3-N16R8.
 
 ```bash
-# Erase entire flash (wipes WiFi config, NVS sessions, offline telemetry)
+# Pick the chip, then rebuild + flash
+idf.py set-target esp32s3     # ESP32-S3  (default; Xtensa, PSRAM)
+idf.py set-target esp32       # classic ESP32 (Xtensa)
+idf.py set-target esp32s2     # ESP32-S2  (Xtensa, single core)
+idf.py set-target esp32c3     # ESP32-C3  (RISC-V)
+idf.py set-target esp32c6     # ESP32-C6  (RISC-V, Wi-Fi 6)
+idf.py set-target esp32h2     # ESP32-H2  (RISC-V, 802.15.4 — no Wi-Fi, not usable as a gateway)
+idf.py build
+idf.py -p <PORT> flash monitor
+```
+
+`set-target` **wipes `sdkconfig`** and regenerates it from `sdkconfig.defaults`, so
+re-apply any board-specific settings afterward (or put them in `sdkconfig.defaults`):
+
+- **PSRAM:** `sdkconfig.defaults` enables **octal** PSRAM (`CONFIG_SPIRAM_MODE_OCT`) for
+  the S3-N16R8. Boards with **quad** PSRAM (most WROVER/other S3 modules) need
+  `CONFIG_SPIRAM_MODE_QUAD`; chips with **no PSRAM** (C3, plain ESP32 without PSRAM)
+  must remove the `CONFIG_SPIRAM*` lines — otherwise the `microlink` 32 KB task can't
+  get its external-RAM stack and the board crashes on boot. See AGENTS.md rule 3.
+- **Flash size:** set `CONFIG_ESPTOOLPY_FLASHSIZE_*` to match the module (e.g. `4MB`).
+- **Chip family:** RISC-V targets (C3/C6/H2) use a different toolchain, installed
+  automatically by `install.sh <target>` or EIM.
+- Use `idf.py menuconfig` to change these interactively, or edit `sdkconfig.defaults`
+  and `rm -rf build sdkconfig` for a clean regeneration.
+
+> Practical note: the gateway needs **Wi-Fi + enough RAM for the overlay client**.
+> ESP32-S3 with PSRAM is the intended target. ESP32/-S2/-C3/-C6 can build, but a
+> no-PSRAM chip may not fit the `microlink` stacks — validate on serial before relying on it.
+
+---
+
+## 6. First boot — captive-portal provisioning
+
+On a board with no stored config (factory-fresh or after `erase-flash`):
+
+1. The board starts an open SoftAP: **`AmpHive_Setup_XXXX`** (XXXX = last MAC bytes).
+2. Join that Wi-Fi network from a laptop/phone.
+3. Browse to **`http://192.168.4.1`**.
+4. Fill in the form — **8 fields**:
+   | Field | Example | Notes |
+   |-------|---------|-------|
+   | WiFi SSID | `HomeNet` | 2.4 GHz network the plug is on |
+   | WiFi Password | | |
+   | Headscale/Tailscale Auth Key | `mkey:…` / `tskey-…` | overlay join key |
+   | Device Name | `gateway-01` | shown on the control plane |
+   | Gateway MAC/ID | `gw-abc123` | must match the backend's gateway record |
+   | Target Plug IP | `192.168.1.5` | the Tapo plug's LAN IP (see tip below) |
+   | **Tapo Account Email** | `you@example.com` | **new** — Tapo cloud login; used for KLAP auth |
+   | **Tapo Account Password** | | **new** — stored in NVS (plaintext, prototype) |
+5. Submit → config is written to NVS and the board reboots into normal operation.
+
+> **Find the plug's IP:** it's DHCP-assigned and can change. In the Tapo app:
+> *Device → Settings → Device Info → IP Address*. Or scan the LAN — the plug answers
+> a 48-byte body to `POST http://<ip>/app/handshake1` (that's how `tools/klap_probe.py`
+> discovers it). "Third-Party Compatibility" must be **enabled** in the Tapo app.
+
+---
+
+## 7. Erase / reprovision / reset
+
+```bash
+# Wipe the whole flash (firmware + ALL NVS: Wi-Fi, sessions, offline telemetry, Tapo creds)
 idf.py -p COM3 erase-flash
 
-# Erase only the NVS partition (preserves firmware)
+# Wipe ONLY the NVS partition (keeps firmware; forces re-provisioning on next boot)
 parttool.py -p COM3 erase_partition --partition-name nvs
+
+# Re-provision without erasing: connect to AmpHive_Setup_XXXX only appears if config is
+# missing/invalid — to force it, erase NVS as above, or change Wi-Fi so STA connect fails.
+```
+
+Raw esptool equivalents (when idf.py isn't available, e.g. flashing a prebuilt binary):
+```bash
+esptool.py -p COM3 -b 460800 erase_flash
+esptool.py -p COM3 -b 460800 --chip esp32s3 write_flash 0x0 build/flash_image.bin
+# or the individual images idf.py prints after a build:
+#   0x0 bootloader/bootloader.bin, 0x8000 partition_table/partition-table.bin,
+#   0x10000 amphive-gateway.bin
 ```
 
 ---
 
-## Common Issues
+## 8. ESP-IDF v6 incompatibilities
+
+> Recorded so future work doesn't repeat the investigation. As of 2026-07, the dev
+> machine had **v6.0.1** installed; the firmware targets **v5.3**. Building on v6.0.1
+> surfaced a cascade of breaking changes:
+
+| v6 change | Symptom | Workaround if you must use v6 |
+|-----------|---------|-------------------------------|
+| `json` (cJSON) removed from core | `Failed to resolve component 'json' required by 'microlink'` | Vendored locally at `firmware/components/json/` (cJSON v1.7.18) — **already applied** |
+| `mqtt` (esp-mqtt) removed from core | `Failed to resolve component 'mqtt' required by 'main'` | Added `espressif/mqtt: "^1.0.0"` in `firmware/main/idf_component.yml` — **already applied** |
+| GCC 15 `-Werror` (new warnings) | `-Werror=unterminated-string-initialization` in `wireguard_lwip`/`microlink` | `-Wno-error` added to those two components' `CMakeLists.txt` — **already applied** |
+| **mbedTLS 3.x → 4.x** | `fatal error: mbedtls/entropy.h: No such file or directory` in `microlink_derp.c` | **Not resolved** — microlink uses mbedTLS 3.x entropy/DRBG/SSL APIs removed in 4.x. Requires porting microlink to the PSA crypto API (large) |
+
+**Bottom line:** use **ESP-IDF v5.3** to build this firmware. The v6 fixes above are
+committed (they're harmless on v5.3), but the mbedTLS-4 gap makes a full v6 build
+impractical without reworking `microlink`.
+
+---
+
+## 9. Troubleshooting
 
 | Symptom | Fix |
 |---------|-----|
-| `No serial data / port not found` | Try a different USB cable; check Device Manager for the COM port |
-| `Failed to connect to ESP32` | Hold **BOOT** button while `idf.py flash` starts connecting, release after "Connecting…" |
-| `Wrong target` error | Run `idf.py set-target esp32s3` then rebuild |
-| Board reboots in a loop | Watch serial for the crash reason; likely NVS key mismatch — erase NVS |
-| Monitor garbled output | Baud rate mismatch; set to **115200** (`idf.py monitor` uses this by default) |
-| `Permission denied /dev/ttyUSB0` (Linux) | `sudo usermod -aG dialout $USER` then log out/in |
+| `MSys/Mingw is not supported` / `idf.py: command not found` in Git Bash | Use **PowerShell**, or shell out to it (see [§3](#3-activate-the-environment-every-new-terminal)) |
+| `No serial data received` / `Failed to connect to ESP32` | Bad/charge-only cable; wrong COM port; hold **BOOT**, tap **RESET**, release BOOT after "Connecting…" |
+| `A fatal error occurred: Wrong boot mode detected` | Board stuck in download mode — press **RESET/EN** once |
+| `Failed to resolve component 'json'` / `'mqtt'` | You're on ESP-IDF v6 — see [§8](#8-esp-idf-v6-incompatibilities); switch to v5.3 |
+| `mbedtls/entropy.h: No such file` | ESP-IDF v6 (mbedTLS 4.x) — switch to v5.3 |
+| Board boot-loops after flashing | Watch serial for the panic; common causes: NVS key mismatch (→ erase NVS), or PSRAM config wrong for the board (→ [§5](#5-flashing-other-esp32-models)) |
+| `Brownout detector was triggered` | Underpowered USB port/cable — use a powered hub or a better cable |
+| Garbled monitor output | Baud mismatch — `idf.py monitor` uses **115200**; don't override it |
+| `Permission denied: /dev/ttyUSB0` (Linux) | `sudo usermod -aG dialout $USER`, then log out/in |
+| Plug commands do nothing after provisioning | Wrong Target Plug IP (DHCP changed it) or Tapo creds; re-provision ([§6](#6-first-boot--captive-portal-provisioning)). Validate creds with `python tools/klap_probe.py <ip>` |
+| KLAP `handshake1 auth mismatch` in serial log | Wrong Tapo email/password, or "Third-Party Compatibility" disabled in the Tapo app |
 
 ---
 
-## Checking NVS Config Live
+## 10. Quick reference
 
 ```bash
-# In the serial monitor, the boot log prints stored NVS keys on startup
-# Look for lines like:
-#   [NVS] ssid=MyNetwork
-#   [NVS] device_name=gateway-01
+# --- one-time toolchain (v5.3) ---
+# install ESP-IDF v5.3 (EIM on Windows, or git clone -b v5.3.2 --recursive)
+
+# --- every terminal ---
+. ~/esp/esp-idf/export.sh                 # macOS/Linux
+. $HOME\esp\esp-idf\export.ps1            # Windows PowerShell
+
+# --- build/flash cycle ---
+cd firmware
+idf.py set-target esp32s3                 # first time / chip change
+idf.py build
+idf.py -p COM3 flash monitor              # replace COM3
+
+# --- reset ---
+idf.py -p COM3 erase-flash                # wipe everything -> re-provision on boot
+
+# --- validate the plug independently (host, not the ESP32) ---
+python tools/klap_probe.py 192.168.1.5    # handshake + real power read
 ```
 
----
-
-## Useful idf.py Flags
-
-```bash
-# Verbose build output
-idf.py build -v
-
-# Set log level to DEBUG
-idf.py -p COM3 monitor --print-filter="*:D"
-
-# Override a sdkconfig value without editing the file
-idf.py -DCONFIG_LOG_DEFAULT_LEVEL=5 build
-```
+See also: [FIRMWARE.md](FIRMWARE.md) (architecture), [MQTT_CONTRACT.md](MQTT_CONTRACT.md)
+(topics), [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) (what works today).

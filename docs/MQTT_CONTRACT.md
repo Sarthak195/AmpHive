@@ -72,6 +72,10 @@ connect; runs a 15-second telemetry/watchdog loop; parses commands with
 1. Implement `_handle_gateway_telemetry` to parse the payload and call
    `telemetry_store.update(...)` (and optionally persist to the DB).
 2. Pass a `db_session_factory` into `MQTTManager` if DB persistence is wanted.
-3. Replace the firmware Tapo driver stub with a real KLAP implementation so the
-   `watts`/`kwh` values are real (see [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md)).
+3. ~~Replace the firmware Tapo driver stub with a real KLAP implementation~~ **Done**
+   — the driver is now real KLAP v2, so `watts` is the plug's real `current_power`
+   and `kwh` is a driver-side energy integrator (voltage/current are nominal/derived;
+   the P110 reports neither). On-device flash verification pending. See
+   [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) and
+   [FIRMWARE.md §4](FIRMWARE.md#4-tapo-driver--real-klap-v2-maintapo_protocolc).
 </content>

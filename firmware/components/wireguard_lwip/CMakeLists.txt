@@ -21,6 +21,11 @@ target_compile_definitions(${COMPONENT_LIB} PRIVATE
     WIREGUARD_CRYPTO_REFC=1
 )
 
+# Vendored ref-C WireGuard/crypto that predates GCC 15 (ESP-IDF v6's toolchain).
+# Relax -Werror so new GCC-15 warnings — e.g. -Wunterminated-string-initialization
+# on the Noise protocol constant strings — don't fail the build.
+target_compile_options(${COMPONENT_LIB} PRIVATE -Wno-error)
+
 # Disable stringop-overread warning for x25519.c (false positive in GCC array bounds check)
 set_source_files_properties(
     src/crypto/refc/x25519.c

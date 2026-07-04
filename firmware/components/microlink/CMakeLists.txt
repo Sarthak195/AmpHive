@@ -8,8 +8,10 @@ idf_component_register(
 )
 
 # Added -Wno-stringop-overread and -Wno-type-limits to handle the new crypto/math errors
-target_compile_options(${COMPONENT_LIB} PRIVATE 
-    "-Wno-format" 
+# -Wno-error: this ~13.5k-LOC client predates GCC 15 (ESP-IDF v6 toolchain); keep its
+# new warnings non-fatal rather than fail the build on them.
+target_compile_options(${COMPONENT_LIB} PRIVATE
+    "-Wno-format"
     "-Wno-error=format="
     "-Wno-unused-variable"
     "-Wno-unused-function"
@@ -17,4 +19,5 @@ target_compile_options(${COMPONENT_LIB} PRIVATE
     "-Wno-implicit-function-declaration"
     "-Wno-stringop-overread"
     "-Wno-type-limits"
+    "-Wno-error"
 )

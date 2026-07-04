@@ -56,11 +56,7 @@ the Tapo account password, and the DB password; scrub git history if feasible.
 
 ## 4. AuthZ gaps
 
-- **SSE auth gap.** The frontend opens `/api/sessions/live/{id}` with
-  `EventSource`, which can't send the `Authorization` header. The code intends a
-  `?token=` query param but doesn't add it. If/when the SSE route is enforced,
-  this connection will fail; today it relies on the route being reachable. Fix:
-  issue a signed, short-lived token in the query string.
+- [Resolved 2026-07-02] **SSE auth gap.** The frontend now passes the JWT token as a `?token=` query parameter, and the backend verifies the token and session ownership. A potential future hardening is to use a short-lived, single-use ticket instead of the full JWT token in the query parameter.
 
 > RBAC across the `/api/cpo/*` surface is now enforced (`require_role`) — see
 > [§7](#7-recently-fixed).
@@ -95,6 +91,7 @@ older references don't read as still-open.*
   and webhook paths — no more balance race.
 - **Webhook auto-credit is idempotent** — dedupes on `razorpay_payment_id` so the
   `/verify` and webhook paths can't double-credit.
+- **SSE connection is authenticated** — the frontend passes `?token=` query parameter, and the backend validates the JWT and checks ownership.
 
 ---
 
@@ -106,11 +103,11 @@ Still open:
 - [ ] Set a strong `JWT_SECRET_KEY` in every environment.
 - [ ] Restrict the MQTT broker (auth + bind to overlay; drop public 1883 rule).
 - [ ] Restrict CORS to the known frontend origin(s).
-- [ ] Fix SSE auth (signed short-lived token in the query string).
 - [ ] Consider a DB-level non-negative-balance constraint.
 
 Done (2026-07-02):
 - [x] Implement role checks for CPO/admin actions (`require_role`).
 - [x] Remove/authenticate `gateways/register` / `plugs/register`.
 - [x] Make wallet credit/debit atomic (row lock).
+- [x] Pass JWT token to SSE live telemetry connection to authenticate users.
 </content>

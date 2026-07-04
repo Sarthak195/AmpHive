@@ -21,6 +21,9 @@ dist/
 build/
 out/
 .next/
+sdkconfig
+sdkconfig.old
+managed_components/
 
 # IDEs and Editors
 .idea/

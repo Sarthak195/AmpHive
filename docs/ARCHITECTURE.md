@@ -62,10 +62,7 @@ Path A as "done" while the committed configuration actually runs Path B.
 implemented and the topic strings match the backend. The backend's inbound
 handlers are **live** — telemetry updates the in-memory `TelemetryStore` (feeding
 the SSE stream) and persists `energy_kwh`/`peak_power_w` to the session row, and
-status messages update gateway online/offline state in the DB. The remaining gap
-is on the device: the ESP32's Tapo driver is a **mock** (returns simulated
-telemetry), so end-to-end billing over Path A does not yet reflect a real plug.
-See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md).
+status messages update gateway online/offline state in the DB. The ESP32 now implements a **real KLAP v2** Tapo driver (mbedTLS SHA/AES + esp_http_client), with on-device flash verification pending. See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md).
 
 ### Path B — Direct Mode over WireGuard (current dev/test reality)
 1. A WireGuard tunnel links the GCP VM (`10.10.0.1`) to the developer's home PC
@@ -100,9 +97,8 @@ POST /api/sessions/start            (JWT required)
         ▼
 GET /api/sessions/live/{id}          (SSE, text/event-stream)
   • streams telemetry snapshots from the in-memory TelemetryStore
-  • the store is fed by inbound MQTT telemetry (Path A); values are only as real
-    as the source — today the ESP32 Tapo driver is mocked, so Path A readings
-    are simulated until that driver is finished.
+  • the store is fed by inbound MQTT telemetry (Path A), where the ESP32 drives
+    real P110 hardware via the local KLAP v2 protocol.
         │
         ▼
 POST /api/sessions/stop              (JWT required)

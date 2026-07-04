@@ -102,13 +102,15 @@ main.jsx  (ReactDOM.createRoot, StrictMode)
 ```
 main/main.c  (app_main)
 ├── FreeRTOS (task.h, event_groups.h)
-├── ESP-IDF (esp_wifi, esp_event, esp_netif, esp_http_server, nvs_flash, mqtt_client)
-├── components/microlink/        from-scratch Tailscale client (Noise/ts2021, DERP, DISCO, STUN, WG)
-├── components/wireguard_lwip/    vendored WireGuard-over-lwIP
-└── main/tapo_protocol.c          MOCK Tapo P110 driver (simulated telemetry — see IMPLEMENTATION_STATUS)
+├── ESP-IDF (esp_wifi, esp_event, esp_netif, esp_http_server, nvs_flash, mqtt_client, esp_http_client, mbedtls)
+├── components/microlink/         from-scratch Tailscale client (Noise/ts2021, DERP, DISCO, STUN, WG)
+├── components/wireguard_lwip/     vendored WireGuard-over-lwIP
+├── main/tapo_protocol.c           Real KLAP v2 Tapo P110 driver (mbedTLS SHA/AES + esp_http_client)
+├── main/session_nvs.c             NVS active session persistence for crash recovery
+└── main/offline_log.c             NVS telemetry ring buffer for offline resync
 
-main/CMakeLists.txt → SRCS main.c tapo_protocol.c
-                      REQUIRES esp_wifi mqtt esp_http_server nvs_flash microlink
+main/CMakeLists.txt → SRCS main.c tapo_protocol.c session_nvs.c offline_log.c
+                      REQUIRES esp_wifi mqtt esp_http_server nvs_flash microlink esp_http_client mbedtls
 ```
 
 ---

@@ -14,11 +14,10 @@
 #include "microlink_internal.h"
 #include "nacl_box.h"
 #include "esp_log.h"
+#include "esp_random.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "mbedtls/net_sockets.h"
-#include "mbedtls/entropy.h"
-#include "mbedtls/ctr_drbg.h"
 #include <string.h>
 #include <sys/socket.h>
 #include <netdb.h>
@@ -66,10 +65,7 @@ static const char *TAG = "ml_derp";
 #define DERP_MAX_FRAME_SIZE     (MICROLINK_NETWORK_BUFFER_SIZE + 64)
 
 /* mbedTLS context for DERP */
-static mbedtls_entropy_context derp_entropy;
-static mbedtls_ctr_drbg_context derp_ctr_drbg;
 static mbedtls_net_context derp_server_fd;
-static bool derp_rng_initialized = false;
 
 /* Receive buffer */
 static uint8_t derp_rx_buffer[DERP_MAX_FRAME_SIZE];
@@ -84,6 +80,12 @@ static const char *current_derp_server = MICROLINK_DERP_SERVER;
 /* Both read and write must be protected - concurrent access causes deadlock/corruption */
 static SemaphoreHandle_t derp_tls_mutex = NULL;
 static StaticSemaphore_t derp_tls_mutex_buffer;
+
+static int derp_esp_rng(void *ctx, unsigned char *output, size_t len) {
+    (void)ctx;
+    esp_fill_random(output, len);
+    return 0;
+}
 
 /**
  * @brief Write exact number of bytes to TLS
@@ -414,7 +416,7 @@ static esp_err_t derp_handshake(microlink_t *ml) {
 
     // Generate random nonce
     uint8_t nonce[NACL_BOX_NONCEBYTES];
-    mbedtls_ctr_drbg_random(&derp_ctr_drbg, nonce, NACL_BOX_NONCEBYTES);
+    derp_esp_rng(NULL, nonce, NACL_BOX_NONCEBYTES);
 
     // Encrypt JSON using NaCl box
     // DERP uses the NODE KEY (WireGuard key), NOT the machine key!
@@ -524,21 +526,6 @@ esp_err_t microlink_derp_init(microlink_t *ml) {
     ESP_LOGI(TAG, "DERP dynamic discovery: DISABLED (using hardcoded: %s)",
              MICROLINK_DERP_SERVER);
 #endif
-
-    // Initialize mbedTLS RNG (once)
-    if (!derp_rng_initialized) {
-        mbedtls_entropy_init(&derp_entropy);
-        mbedtls_ctr_drbg_init(&derp_ctr_drbg);
-
-        const char *pers = "microlink_derp";
-        int ret = mbedtls_ctr_drbg_seed(&derp_ctr_drbg, mbedtls_entropy_func,
-                                         &derp_entropy, (const uint8_t *)pers, strlen(pers));
-        if (ret != 0) {
-            ESP_LOGE(TAG, "mbedtls_ctr_drbg_seed failed: -0x%04x", -ret);
-            return ESP_FAIL;
-        }
-        derp_rng_initialized = true;
-    }
 
     mbedtls_net_init(&derp_server_fd);
     mbedtls_ssl_init(&ml->derp.ssl);
@@ -760,7 +747,6 @@ static esp_err_t derp_connect_once(microlink_t *ml) {
 
     // Skip certificate verification for now (tailscale uses valid certs)
     mbedtls_ssl_conf_authmode(&ml->derp.ssl_conf, MBEDTLS_SSL_VERIFY_NONE);
-    mbedtls_ssl_conf_rng(&ml->derp.ssl_conf, mbedtls_ctr_drbg_random, &derp_ctr_drbg);
 
     ret = mbedtls_ssl_setup(&ml->derp.ssl, &ml->derp.ssl_conf);
     if (ret != 0) {

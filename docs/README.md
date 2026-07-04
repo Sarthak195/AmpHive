@@ -24,7 +24,7 @@ This folder is the **technical reference** for the AmpHive platform, and the
 | [DATA_MODEL.md](DATA_MODEL.md) | PostgreSQL tables, SQLAlchemy models, enums, relationships, and the schema-vs-ORM drift. |
 | [DEPENDENCIES.md](DEPENDENCIES.md) | Backend/frontend/firmware import graphs, package dependencies, high-impact files, and known dead code. |
 | [MQTT_CONTRACT.md](MQTT_CONTRACT.md) | The exact MQTT topic/payload contract between the backend and the ESP32 gateway. |
-| [FIRMWARE.md](FIRMWARE.md) | ESP32-S3 firmware: boot flow, tasks, watchdogs, the Tapo driver stub, and the `microlink` Tailscale-protocol client. |
+| [FIRMWARE.md](FIRMWARE.md) | ESP32-S3 firmware: boot flow, tasks, watchdogs, the Tapo KLAP v2 driver, and the `microlink` Tailscale-protocol client. |
 | [DEPLOYMENT.md](DEPLOYMENT.md) | How the system is deployed (GCP VM + Docker Compose), the helper scripts, and the K8s manifests. |
 | [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) | Honest "what works / what's a stub / what's aspirational" matrix and the full list of doc-vs-code discrepancies. |
 | [SECURITY.md](SECURITY.md) | Committed secrets, the open MQTT broker, auth gaps, and remediation notes. |
@@ -34,7 +34,7 @@ This folder is the **technical reference** for the AmpHive platform, and the
 
 - **`backend/`** — FastAPI app (single `main.py`, 22 REST routes), SQLAlchemy 2.0 + async PostgreSQL, MQTT bridge, Razorpay payments, in-memory telemetry/SSE, and a "Direct Mode" Tapo driver. See [API_REFERENCE](API_REFERENCE.md) / [DATA_MODEL](DATA_MODEL.md).
 - **`frontend/`** — React 19 + Vite SPA (driver web app). Login/register, plug-ID charging, live SSE session monitor, Razorpay top-up, charger groups. See [ARCHITECTURE](ARCHITECTURE.md#frontend).
-- **`firmware/`** — ESP32-S3 (ESP-IDF) gateway. A near-complete from-scratch Tailscale client (`microlink`) + MQTT control loop + safety watchdogs, with a **mocked** Tapo plug driver. See [FIRMWARE](FIRMWARE.md).
+- **`firmware/`** — ESP32-S3 (ESP-IDF) gateway. A near-complete from-scratch Tailscale client (`microlink`) + MQTT control loop + safety watchdogs, with a **real KLAP v2** Tapo plug driver. See [FIRMWARE](FIRMWARE.md).
 - **`deploy/`** — Docker Compose (dev/prod), GCP deploy scripts, K8s manifests, Mosquitto/WireGuard configs, and runbooks. See [DEPLOYMENT](DEPLOYMENT.md).
 - **`tools/`** — Standalone Python helpers for the Direct-Mode Tapo relay and manual on/off testing.
 </content>

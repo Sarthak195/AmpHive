@@ -16,7 +16,7 @@ firmware/
 ├── sdkconfig.defaults        # PSRAM octal, 16MB flash, single-app-large partition
 ├── main/
 │   ├── main.c                # boot, WiFi, captive portal, MQTT loop, watchdogs
-│   ├── tapo_protocol.c/.h    # Tapo P110 driver — ⚠️ MOCK/STUB (no real protocol)
+│   ├── tapo_protocol.c/.h    # Tapo P110 driver — real KLAP v2 (mbedTLS + esp_http_client)
 │   ├── session_nvs.c/.h      # NVS session register — persist active session for crash recovery
 │   ├── offline_log.c/.h      # NVS ring buffer — cache telemetry during MQTT outages
 │   └── CMakeLists.txt
@@ -52,9 +52,11 @@ device name, gateway id, and target plug IP all come from NVS (namespace
 
 If WiFi config is missing/invalid, the device starts SoftAP `AmpHive_Setup_XXXX`
 (open), runs `esp_http_server` on `192.168.4.1`, serves an HTML form, and on POST
-`/save` parses 6 fields (WiFi SSID/password, Tailscale auth key, device name,
-gateway id, target plug IP), writes them to NVS, and reboots. This is one of the
-few fully-delivered product features.
+`/save` parses **8 fields** (WiFi SSID/password, Tailscale/Headscale auth key,
+device name, gateway id, target plug IP, **Tapo account email + password**),
+URL-decodes them, writes them to NVS, and reboots. The Tapo credentials are used
+by the KLAP driver's auth hash (see §4). This is one of the few fully-delivered
+product features.
 
 ## 3. MQTT control loop & watchdogs
 
@@ -68,9 +70,12 @@ few fully-delivered product features.
   - While a session is active, enforces edge cutoffs in both online and offline modes:
     - **Duration:** elapsed ≥ `max_duration_s` → local OFF + NVS clear.
     - **Energy:** consumed ≥ `max_kwh` → local OFF + NVS clear.
-    - **Thermal:** temperature > 75 °C → local OFF + NVS clear + publish `alarms` (if online).
-    - **No over-current cutoff** (the 13 A/5-min rule in `requirements.md` is not
-      implemented; `current` is published but never compared).
+    - **Thermal:** plug reports `overheat_status != "normal"` → local OFF + NVS clear
+      + publish `THERMAL_CUTOFF` alarm (if online). (The P110 has no temperature
+      sensor, so this uses the plug's own overheat flag rather than a °C threshold.)
+    - **Over-current:** plug reports `overcurrent_status != "normal"` → local OFF +
+      NVS clear + publish `OVERCURRENT_CUTOFF` alarm. (The plug does the sensing;
+      this replaces the previously-unimplemented 13 A/5-min rule.)
 - On MQTT reconnect, buffered offline telemetry entries are drained and published
   with `"offline":true` and `"offline_ts"` so the backend can distinguish replayed data.
 
@@ -89,20 +94,38 @@ snapshots as packed blobs (~20 bytes each) while MQTT is down. Metadata (head,
 tail, count) is persisted atomically. The buffer overwrites the oldest entry when
 full (~16 minutes of buffering at 15 s intervals).
 
-## 4. Tapo driver — ⚠️ mock (`main/tapo_protocol.c`)
+## 4. Tapo driver — real KLAP v2 (`main/tapo_protocol.c`)
 
-This is a **stub, not a working driver**:
-- No KLAP, no legacy passthrough, no AES — despite the comments/specs describing
-  the real handshake.
-- `tapo_set_power_state` opens a raw TCP socket to port 80 and sends an
-  **unencrypted** `set_device_info` POST (which real Tapo firmware rejects); on
-  socket failure it returns `ESP_OK` ("simulating").
-- `tapo_get_telemetry` returns **hard-coded simulated EV telemetry**
-  (~230 V, ~13 A, ~3000 W, an incrementing kWh, ~42.5 °C) and ignores any real
-  response.
+The mock is **replaced by a real KLAP v2 driver** (SHA1/SHA256/AES-128-CBC via
+mbedTLS + `esp_http_client`). The exact protocol was validated against a real
+P110 (fw 1.1.3) before porting — see `tools/klap_probe.py`.
 
-Replacing this with a real KLAP implementation (or reusing the `tapo` library
-logic from `tools/`) is the key task to make Path A produce real readings.
+- **Auth:** `auth_hash = SHA256(SHA1(email) || SHA1(password))`. The Tapo account
+  email+password are collected by the captive portal and stored in NVS (see §2).
+- **Handshake:** `POST /app/handshake1` (verify server hash), `POST /app/handshake2`,
+  then per-request AES-CBC with an incrementing signed seq and a SHA256 signature
+  (`POST /app/request?seq=N`). Session cached with a mutex; re-handshakes on HTTP 403.
+- **`tapo_set_power_state`** → `set_device_info {device_on}`.
+- **`tapo_get_telemetry`** → `get_energy_usage` (real `current_power`, **milliwatts**)
+  + `get_device_info` (`device_on`, `overheat_status`, `overcurrent_status`).
+
+**P110 telemetry reality** — the plug exposes power and energy, *not* voltage,
+current, or temperature. So the `tapo_telemetry_t` fields map as:
+
+| Field | Source |
+|-------|--------|
+| `power_w` | **real** — `current_power` (mW) ÷ 1000 |
+| `energy_kwh` | **real** — driver-side monotonic Wh integrator (robust vs the plug's daily `today_energy` reset) |
+| `device_on` / `overheated` / `overcurrent` | **real** — from `get_device_info` status strings |
+| `voltage_v` | **nominal** (configured, default 230 V) |
+| `current_a` | **derived** — `power_w / voltage_v` |
+| `temperature_c` | **nominal** — the P110 has no temperature sensor |
+
+Because there is no real temperature, the thermal watchdog now trips on the plug's
+`overheat_status` flag rather than a 75 °C compare (see §3).
+
+> **Credentials caveat:** the Tapo email/password are stored in NVS in plaintext
+> (acceptable for the prototype; a future hardening item).
 
 ## 5. `microlink` — the Tailscale client (✅ substantial, some TODOs)
 
@@ -150,7 +173,11 @@ idf.py -p COMx flash monitor
 
 A working **demo/prototype**, not production firmware: `microlink` is deep and
 mostly functional (with noted TODOs), the captive portal and watchdogs work,
-**session state is persisted in NVS with offline telemetry buffering**, but the
-**Tapo driver is mocked**, command parsing is fragile, and there is no OTA.
-See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for the full matrix.
+**session state is persisted in NVS with offline telemetry buffering**, and the
+**Tapo driver is now a real KLAP v2 implementation** (protocol-validated against a
+real P110 via `tools/klap_probe.py`; on-device flash verification pending — the
+project builds on **ESP-IDF v5.3**, not v6, see [ESP32_CONNECTION.md](ESP32_CONNECTION.md#8-esp-idf-v6-incompatibilities)).
+Remaining gaps: command parsing is fragile (`strstr`/`sscanf`), there is no OTA,
+and the control-plane host constants still default to Tailscale (Headscale retarget
+pending). See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for the full matrix.
 </content>
