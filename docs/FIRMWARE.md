@@ -137,11 +137,18 @@ A genuine ts2021 client in C (~13.5k LOC). Public API in
 | coordination | `microlink_coordination.c` (~5k LOC) | Control-plane client: Noise ts2021 handshake, HTTP/2-over-Noise, `/machine/register` + MapRequest/MapResponse long-poll. Fetches server key from `/key` → works against **Headscale/Ionscale**, not just Tailscale. Dedicated Core-1 poll task w/ PSRAM buffer. |
 | connection | `microlink_connection.c` | State machine: `IDLE → REGISTERING → FETCHING_PEERS → CONFIGURING_WG → CONNECTED → MONITORING` (heartbeats, reconnect/backoff, key rotation). |
 | derp | `microlink_derp.c` | DERP relay over mbedTLS (defaults to `derp9d.tailscale.com` region 9; dynamic DERPMap supported). |
-| disco | `microlink_disco.c` | Path discovery: ping/pong, CallMeMaybe, direct↔DERP upgrade. (`microlink_disco_zerocopy.c` is **excluded from the build**.) |
-| stun | `microlink_stun.c` | Public IP/port discovery before advertising endpoints. |
+| disco | `microlink_disco.c` | Path discovery: ping/pong, CallMeMaybe, direct↔DERP upgrade. Bound to Tailscale's standard **port 41641** as a unified "magicsock" shared socket (exposing `ml->disco.sock_fd`). |
+| stun | `microlink_stun.c` | Public IP/port discovery before advertising endpoints. Runs probes **through the shared DISCO socket** so that the discovered NAT mapping matches the port where traffic is received. Uses `select()` for non-blocking timeout polling. |
 | wireguard | `microlink_wireguard.c` | Wraps the vendored `wireguard_lwip` netif. **Has TODOs:** payload send relies on lwIP routing (does not push bytes itself), pubkey extraction is a TODO, IPv6 WG endpoints unsupported. |
 | udp | `microlink_udp.c` | Overlay UDP socket abstraction ("nc -u over Tailscale"). |
 | peer_registry | `microlink_peer_registry.c` | NVS-backed registry (up to 1024 peers). **Compiled but never referenced** — currently dead/aspirational. |
+
+**Unified Magicsock Port (NAT Traversal Fix):**
+Previously, STUN used an ephemeral socket, DISCO bound to `51821`, and MapRequest advertised `51820`. This port mismatch caused the VM to send direct traffic to ports where the ESP32 wasn't listening, failing NAT traversal. The unified architecture uses the DISCO socket (port `41641`) for all UDP communication:
+1. STUN probes are sent/received through the DISCO socket (`ml->disco.sock_fd`).
+2. The discovered STUN public port is advertised via MapRequest.
+3. The local endpoint port is advertised as `ml->disco.local_port` (`41641`).
+4. Incoming WireGuard packets arriving on port `41641` are intercepted by the DISCO task and injected into the WireGuard handler via `microlink_wireguard_inject_packet`.
 
 Vendored crypto: `nacl_box.c`, `x25519.c` (in microlink) and the full
 `wireguard_lwip` ref-C crypto (BLAKE2S, ChaCha20-Poly1305, Poly1305, X25519).
@@ -159,25 +166,23 @@ an auth key but not a control-plane host.
   no OTA partitions**, so the spec'd OTA dual-partition rollback is not possible
   without changing this.
 - mbedTLS TLS 1.2 + full cert bundle (for DERP/coordination TLS). lwIP IPv4-only.
-- Main task stack 32768. `CONFIG_MICROLINK_DISCO_PORT=51821`.
+- Main task stack 32768. `CONFIG_MICROLINK_DISCO_PORT=51821` (cosmetic, actual port is hardcoded to `41641` to match standard magicsock).
 
 ## 7. Build & flash
 
 ```bash
 cd firmware
-idf.py set-target esp32s3
-idf.py -p COMx flash monitor
+idf.py set-target esp32
+idf.py -p COM5 flash monitor
 ```
 
 ## 8. Maturity summary
 
 A working **demo/prototype**, not production firmware: `microlink` is deep and
-mostly functional (with noted TODOs), the captive portal and watchdogs work,
+mostly functional (with unified magicsock NAT traversal now fully operational), the captive portal and watchdogs work,
 **session state is persisted in NVS with offline telemetry buffering**, and the
 **Tapo driver is now a real KLAP v2 implementation** (protocol-validated against a
-real P110 via `tools/klap_probe.py`; on-device flash verification pending — the
-project builds on **ESP-IDF v5.3**, not v6, see [ESP32_CONNECTION.md](ESP32_CONNECTION.md#8-esp-idf-v6-incompatibilities)).
+real P110 via `tools/klap_probe.py`; builds on **ESP-IDF v5.3**, not v6).
 Remaining gaps: command parsing is fragile (`strstr`/`sscanf`), there is no OTA,
 and the control-plane host constants still default to Tailscale (Headscale retarget
 pending). See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for the full matrix.
-</content>

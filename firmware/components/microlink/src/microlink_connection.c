@@ -112,6 +112,13 @@ void microlink_state_machine(microlink_t *ml) {
                 break;  // Give STUN time to complete
             }
 
+            // Rate limit MapRequest attempts to prevent flooding on failure
+            static uint64_t last_fetch_attempt = 0;
+            if (now_ms - last_fetch_attempt < 2000) {
+                break;
+            }
+            last_fetch_attempt = now_ms;
+
             // Reset flag for next time we enter this state
             stun_attempted = false;
 
@@ -122,8 +129,8 @@ void microlink_state_machine(microlink_t *ml) {
             if (ret == ESP_OK) {
                 ESP_LOGI(TAG, "Fetched %d peers", ml->peer_count);
                 microlink_set_state(ml, MICROLINK_STATE_CONFIGURING_WG);
-            } else if (time_in_state > 30000) {
-                // Timeout after 30 seconds (longer for Stream=true mode)
+            } else if (time_in_state > 60000) {
+                // Timeout after 60 seconds (longer for Stream=true mode)
                 ESP_LOGE(TAG, "Peer fetch timeout");
                 microlink_set_state(ml, MICROLINK_STATE_ERROR);
             }

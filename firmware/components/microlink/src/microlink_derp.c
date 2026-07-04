@@ -26,6 +26,11 @@
 
 static const char *TAG = "ml_derp";
 
+static int my_rng_func(void *p_rng, unsigned char *output, size_t output_len) {
+    esp_fill_random(output, output_len);
+    return 0;
+}
+
 /* DERP frame types */
 #define DERP_MAGIC_LEN          6
 #define DERP_SERVER_KEY_LEN     32
@@ -747,6 +752,9 @@ static esp_err_t derp_connect_once(microlink_t *ml) {
 
     // Skip certificate verification for now (tailscale uses valid certs)
     mbedtls_ssl_conf_authmode(&ml->derp.ssl_conf, MBEDTLS_SSL_VERIFY_NONE);
+
+    // Provide the hardware RNG to the SSL configuration (required in MbedTLS 3.x)
+    mbedtls_ssl_conf_rng(&ml->derp.ssl_conf, my_rng_func, NULL);
 
     ret = mbedtls_ssl_setup(&ml->derp.ssl, &ml->derp.ssl_conf);
     if (ret != 0) {

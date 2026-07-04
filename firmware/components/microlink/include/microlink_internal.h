@@ -30,7 +30,7 @@ extern "C" {
 #ifdef CONFIG_MICROLINK_COORD_BUFFER_SIZE_KB
 #define MICROLINK_COORD_BUFFER_SIZE  (CONFIG_MICROLINK_COORD_BUFFER_SIZE_KB * 1024)
 #else
-#define MICROLINK_COORD_BUFFER_SIZE  (64 * 1024)  // Default 64KB for large MapResponses
+#define MICROLINK_COORD_BUFFER_SIZE  (24 * 1024)  // Default 24KB for large MapResponses (optimized for ESP32 without PSRAM)
 #endif
 #define MICROLINK_COORD_TASK_STACK   (8 * 1024)   // 8KB stack for coordination task
 #define MICROLINK_COORD_TASK_PRIORITY (configMAX_PRIORITIES - 1)  // Highest priority
@@ -180,6 +180,7 @@ typedef struct {
 
     uint64_t last_global_disco_ms;
     uint16_t local_port;                ///< Local port for DISCO socket (used in CallMeMaybe)
+    int sock_fd;                        ///< DISCO UDP socket fd (shared with STUN for NAT mapping consistency)
 } microlink_disco_t;
 
 /**

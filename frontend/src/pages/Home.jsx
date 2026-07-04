@@ -15,7 +15,7 @@ import MapComponent from '../components/MapComponent';
 
 const Home = () => {
   const { user } = useAuth();
-  const { startSession, error: sessionError } = useSession();
+  const { startSession, isActive, sessionData, error: sessionError } = useSession();
   const navigate = useNavigate();
 
   const [plugId, setPlugId] = useState('');
@@ -79,6 +79,41 @@ const Home = () => {
         </h1>
         <p style={{ fontSize: '1.05rem' }}>Shared EV Charging Network</p>
       </header>
+
+
+      {/* Active Session Banner */}
+      {isActive && (
+        <div 
+          className="glass animate-slide-up"
+          style={{
+            padding: '1rem 1.25rem',
+            background: 'rgba(235, 94, 40, 0.15)',
+            border: '1px solid var(--color-primary)',
+            borderRadius: 'var(--radius-md)',
+            marginBottom: '1.5rem',
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center'
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+            <span style={{ fontSize: '1.25rem' }}>⚡</span>
+            <div>
+              <div style={{ fontWeight: 600 }}>Active charging session in progress</div>
+              <div style={{ fontSize: '0.85rem', color: 'var(--color-text-secondary)' }}>
+                Plug: {sessionData?.plug_name || 'Volt-FastPlug-01'}
+              </div>
+            </div>
+          </div>
+          <button 
+            className="btn btn-accent btn-sm"
+            style={{ whiteSpace: 'nowrap' }}
+            onClick={() => navigate('/session')}
+          >
+            Resume Session
+          </button>
+        </div>
+      )}
 
       {/* Wallet Card */}
       <div style={{ marginBottom: '1.5rem' }}>

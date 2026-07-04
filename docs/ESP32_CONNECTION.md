@@ -264,7 +264,65 @@ impractical without reworking `microlink`.
 
 ---
 
-## 10. Quick reference
+## 10. Verifying the Implementation (NAT Traversal & Magicsock)
+
+To verify that the unified port architecture (magicsock mode) is functioning correctly and a direct connection is established between the ESP32 and the GCP VM:
+
+1. **Monitor the ESP32 logs**:
+   Run the serial monitor at 115200 baud (replace `COM5` with your active port):
+   ```powershell
+   . "C:\Espressif\tools\Microsoft.v6.0.1.PowerShell_profile.ps1"
+   cd firmware
+   idf.py -p COM5 monitor
+   ```
+   Look for the following log outputs:
+   - **Socket Binding**:
+     ```
+     I (1109) ml_disco: Initializing DISCO protocol (IPv4 + IPv6 + fast PONG task)
+     ...
+     I (1144) ml_disco: DISCO/magicsock bound to port 41641 (shared with STUN)
+     ```
+   - **STUN Probing**:
+     ```
+     I (100) ml_connection: Running STUN probe BEFORE MapRequest to discover endpoint...
+     I (230) ml_stun: Trying STUN server stun.l.google.com:19302 (via DISCO socket fd=52, port=41641)
+     I (309) ml_stun: STUN probe successful: public endpoint 106.222.215.123:17014
+     ```
+   - **Endpoint Advertisement**:
+     ```
+     I (2650) ml_coord: Advertising local endpoint: 192.168.1.12:41641 (type: Local, magicsock port)
+     I (2665) ml_coord: Advertising STUN endpoint: 106.222.215.123:17014 (type: STUN)
+     ```
+   - **Simultaneous Hole Punching**:
+     ```
+     I (21990) ml_disco: CallMeMaybe from peer 1 (amphive-vm-in.tail36e589.ts.net)
+     I (22030) ml_disco: SIMULTANEOUS HOLE PUNCH: Probing 5 CMM endpoints IMMEDIATELY!
+     I (22330) ml_disco: Sending DISCO PING to 8.231.81.12:41641
+     ```
+
+2. **Verify status on the GCP VM**:
+   SSH into the VM and query the Tailscale status:
+   ```bash
+   gcloud compute ssh amphive-vm-in --zone=asia-south1-a --command="sudo tailscale status"
+   ```
+   Confirm that the path for `gateway-1` is marked as `active; direct <IP>:<PORT>` instead of `relay "blr"`:
+   ```
+   100.83.175.20  gateway-1        sarthakj1195@  linux    active; direct 106.222.215.123:17014, tx 4268 rx 10884
+   ```
+
+3. **Ping from the GCP VM**:
+   Trigger a direct ping command from the VM to the ESP32:
+   ```bash
+   gcloud compute ssh amphive-vm-in --zone=asia-south1-a --command="sudo tailscale ping 100.83.175.20"
+   ```
+   Ensure it receives a direct response:
+   ```
+   pong from gateway-1 (100.83.175.20) via 106.222.215.123:17014 in 505ms
+   ```
+
+---
+
+## 11. Quick reference
 
 ```bash
 # --- one-time toolchain (v5.3) ---
@@ -273,15 +331,17 @@ impractical without reworking `microlink`.
 # --- every terminal ---
 . ~/esp/esp-idf/export.sh                 # macOS/Linux
 . $HOME\esp\esp-idf\export.ps1            # Windows PowerShell
+# or via EIM installation:
+. "C:\Espressif\tools\Microsoft.v6.0.1.PowerShell_profile.ps1"
 
 # --- build/flash cycle ---
 cd firmware
-idf.py set-target esp32s3                 # first time / chip change
+idf.py set-target esp32                   # classic ESP32 target (used on this workstation)
 idf.py build
-idf.py -p COM3 flash monitor              # replace COM3
+idf.py -p COM5 flash monitor              # replace COM5 with your CP210x COM port
 
 # --- reset ---
-idf.py -p COM3 erase-flash                # wipe everything -> re-provision on boot
+idf.py -p COM5 erase-flash                # wipe everything -> re-provision on boot
 
 # --- validate the plug independently (host, not the ESP32) ---
 python tools/klap_probe.py 192.168.1.5    # handshake + real power read

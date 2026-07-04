@@ -12,7 +12,7 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 ### Backend
 | Capability | Status | Notes |
 |------------|:------:|-------|
-| REST API (auth, groups, plugs, sessions, payments, direct, CPO portal) | ✅ | 35 endpoints — see [API_REFERENCE.md](API_REFERENCE.md) |
+| REST API (auth, groups, plugs, sessions, payments, direct, CPO portal) | ✅ | 36 endpoints — see [API_REFERENCE.md](API_REFERENCE.md) |
 | JWT auth + bcrypt | ✅ | 7-day token, loaded fresh per request |
 | Role-based access control | ✅ | Enforced via `services/rbac.py` `require_role(...)` on all `/api/cpo/*` routes (checks the DB role, not just the token) |
 | MQTT command publish (ON/OFF) | ✅ | QoS 1, 3 s wait |
@@ -40,12 +40,12 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 ### Firmware
 | Capability | Status | Notes |
 |------------|:------:|-------|
-| `microlink` Tailscale client (Noise/ts2021, DERP, DISCO, STUN, WG) | 🟡 | Substantial & mostly working; TODOs in WG send/pubkey, no IPv6, zerocopy excluded |
+| `microlink` Tailscale client (Noise/ts2021, DERP, DISCO, STUN, WG) | ✅ | Fully operational; NAT traversal and direct connections work using the unified magicsock port (41641). |
 | MQTT control loop + topic contract | ✅ | Matches backend topics |
 | Captive portal provisioning | ✅ | `AmpHive_Setup_XXXX` → NVS → reboot |
 | Edge watchdogs (duration/energy/thermal/over-current) | ✅ | Thermal + over-current now use the plug's `overheat_status`/`overcurrent_status` flags (the P110 has no °C sensor) |
 | Over-current cutoff | ✅ | Enforced via the plug's `overcurrent_status` flag → local OFF + `OVERCURRENT_CUTOFF` alarm |
-| Tapo P110 driver (KLAP/AES) | 🟡 | **Real KLAP v2** (mbedTLS SHA/AES + `esp_http_client`); protocol-validated against a real P110 via `tools/klap_probe.py`. On-device flash pending; builds on **ESP-IDF v5.3** (not v6 — see [ESP32_CONNECTION.md](ESP32_CONNECTION.md#8-esp-idf-v6-incompatibilities)) |
+| Tapo P110 driver (KLAP/AES) | ✅ | **Real KLAP v2** (mbedTLS SHA/AES + `esp_http_client`); fully verified on-device; builds on **ESP-IDF v5.3** (not v6) |
 | Session persistence in NVS / offline resync | ✅ | `session_nvs` module persists active session to NVS; `offline_log` ring buffer (64 entries) caches telemetry during MQTT outages; resync on reconnect |
 | OTA updates | ❌ | Single-app partition table; no `esp_https_ota` |
 | Headscale (vs Tailscale defaults) | 🟡 | `/key` fetch supports it, but default host constants point at Tailscale |
@@ -105,11 +105,10 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
     fallback/random coordinates rather than real plug locations.
 13. [Resolved 2026-07-02] The dead `frontend/src/api/mockSse.js` leftover has been
     deleted.
-14. [Resolved 2026-07-03] The firmware Tapo driver is now a **real KLAP v2**
-    implementation (mbedTLS SHA/AES + `esp_http_client`), protocol-validated against
-    a real P110 via `tools/klap_probe.py`. On-device flash verification is pending,
-    and it builds on **ESP-IDF v5.3** (the installed v6.0.1 has breaking changes —
-    see [ESP32_CONNECTION.md §8](ESP32_CONNECTION.md#8-esp-idf-v6-incompatibilities)).
+14. [Resolved 2026-07-04] The firmware Tapo driver is now a **real KLAP v2**
+    implementation (mbedTLS SHA/AES + `esp_http_client`), fully verified on-device.
+    The project builds on **ESP-IDF v5.3.3** (v6.0.1 has breaking changes that cause a
+    LoadProhibited panic on custom netif registration in `netif_callback_fn`).
 15. **No OTA** and the **single-app partition table** precludes the spec'd
     dual-partition rollback without a partition change.
 16. [Resolved 2026-07-02] **NVS session register / offline telemetry resync** now

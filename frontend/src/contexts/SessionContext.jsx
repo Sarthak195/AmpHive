@@ -15,12 +15,14 @@
 
 import React, { createContext, useState, useContext, useEffect, useCallback } from 'react';
 import api from '../api/client';
+import { useAuth } from './AuthContext';
 
 const SessionContext = createContext();
 
 const API_BASE = import.meta.env.VITE_API_URL || '';
 
 export const SessionProvider = ({ children }) => {
+  const { user } = useAuth();
   const [sessionData, setSessionData] = useState(null);
   const [sessionId, setSessionId] = useState(null);
   const [isActive, setIsActive] = useState(false);
@@ -102,6 +104,67 @@ export const SessionProvider = ({ children }) => {
     setIsActive(false);
     setError(null);
   }, []);
+
+  // Check for active session on mount or auth change
+  useEffect(() => {
+    const checkActiveSession = async () => {
+      if (!user) {
+        setSessionData(null);
+        setSessionId(null);
+        setIsActive(false);
+        if (eventSource) {
+          eventSource.close();
+          setEventSource(null);
+        }
+        return;
+      }
+
+      try {
+        const res = await api.get('/api/sessions/active');
+        if (res.active) {
+          setSessionId(res.session_id);
+          setIsActive(true);
+          setSessionData({
+            plug_id: res.plug_id,
+            plug_name: res.plug_name,
+            status: 'charging',
+            duration_sec: 0,
+            power_w: 0.0,
+            energy_kwh: 0.0,
+            current_a: 0.0,
+            cost_coins: 0.0
+          });
+
+          // Connect SSE
+          const token = localStorage.getItem('amphive_token');
+          const sseUrl = `${API_BASE}/api/sessions/live/${res.session_id}?token=${token}`;
+          const sse = new EventSource(sseUrl);
+
+          sse.addEventListener('telemetry', (event) => {
+            try {
+              const data = JSON.parse(event.data);
+              setSessionData(data);
+            } catch (e) {
+              console.error('Failed to parse telemetry event:', e);
+            }
+          });
+
+          sse.onerror = (err) => {
+            console.warn('SSE connection error:', err);
+            if (sse.readyState === EventSource.CLOSED) {
+              setIsActive(false);
+            }
+          };
+
+          setEventSource(sse);
+        }
+      } catch (err) {
+        console.error('Failed to restore active session:', err);
+      }
+    };
+
+    checkActiveSession();
+  }, [user]);
 
   // Cleanup on unmount
   useEffect(() => {

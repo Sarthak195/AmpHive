@@ -64,7 +64,7 @@ const SessionMonitor = () => {
     return [h, m, s].map(v => v.toString().padStart(2, '0')).join(':');
   };
 
-  const powerKw = sessionData?.power_w ? (sessionData.power_w / 1000).toFixed(2) : '0.00';
+  const powerW = sessionData?.power_w ? sessionData.power_w.toFixed(0) : '0';
   const energyKwh = sessionData?.energy_kwh ? sessionData.energy_kwh.toFixed(3) : '0.000';
   const cost = sessionData?.cost_coins ? sessionData.cost_coins.toFixed(2) : '0.00';
   const current = sessionData?.current_a ? parseFloat(sessionData.current_a).toFixed(1) : '0.0';
@@ -121,7 +121,7 @@ const SessionMonitor = () => {
 
       {/* Stats Grid */}
       <div className="stat-grid">
-        <StatBox label="Charging Speed" value={powerKw} unit="kW" colorVar="--color-primary" />
+        <StatBox label="Charging Speed" value={powerW} unit="W" colorVar="--color-primary" />
         <StatBox label="Energy Added" value={energyKwh} unit="kWh" colorVar="--color-accent" />
         <StatBox label="Current Drawn" value={current} unit="A" colorVar="--color-text-primary" />
         <StatBox label="Session Cost" value={cost} unit="Coins" colorVar="--color-danger" />

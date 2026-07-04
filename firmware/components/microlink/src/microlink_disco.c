@@ -1109,20 +1109,23 @@ esp_err_t microlink_disco_init(microlink_t *ml) {
     ESP_LOGI(TAG, "Initializing DISCO protocol (IPv4 + IPv6 + fast PONG task)");
 
     memset(&ml->disco, 0, sizeof(microlink_disco_t));
+    ml->disco.sock_fd = -1;
     memset(pending_probes, 0, sizeof(pending_probes));
 
-    // Create IPv4 UDP socket for direct DISCO probes
+    // Create IPv4 UDP socket for direct DISCO probes + STUN + WG packet reception
+    // This is the "magicsock" — a single socket for all UDP protocols, ensuring
+    // STUN NAT mappings match the port where traffic is actually received.
     disco_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (disco_socket < 0) {
         ESP_LOGE(TAG, "Failed to create IPv4 DISCO socket: errno=%d", errno);
         return ESP_FAIL;
     }
 
-    // Bind IPv4 to WireGuard port 51820 (magicsock mode - single socket for DISCO + WG)
-    // This ensures the port we advertise to coordination server matches what we listen on
+    // Bind to Tailscale magicsock port 41641
+    // All protocols (DISCO, STUN, WG injection) share this single socket
     struct sockaddr_in bind_addr = {
         .sin_family = AF_INET,
-        .sin_port = htons(51821),  // WireGuard standard port
+        .sin_port = htons(41641),  // Tailscale default magicsock port
         .sin_addr.s_addr = INADDR_ANY
     };
     if (bind(disco_socket, (struct sockaddr *)&bind_addr, sizeof(bind_addr)) < 0) {
@@ -1136,14 +1139,15 @@ esp_err_t microlink_disco_init(microlink_t *ml) {
     int flags = fcntl(disco_socket, F_GETFL, 0);
     fcntl(disco_socket, F_SETFL, flags | O_NONBLOCK);
 
-    // Verify we got port 51820
+    // Verify we got the expected port and store fd for cross-module access
     struct sockaddr_in local_addr;
     socklen_t addr_len = sizeof(local_addr);
     getsockname(disco_socket, (struct sockaddr *)&local_addr, &addr_len);
     ml->disco.local_port = ntohs(local_addr.sin_port);
-    ESP_LOGI(TAG, "DISCO/magicsock bound to port %d (WireGuard port)", ml->disco.local_port);
-    if (ml->disco.local_port != 51821) {
-        ESP_LOGW(TAG, "Warning: Expected port 51821, got %d", ml->disco.local_port);
+    ml->disco.sock_fd = disco_socket;  // Expose for STUN to reuse
+    ESP_LOGI(TAG, "DISCO/magicsock bound to port %d (shared with STUN)", ml->disco.local_port);
+    if (ml->disco.local_port != 41641) {
+        ESP_LOGW(TAG, "Warning: Expected port 41641, got %d", ml->disco.local_port);
     }
 
     // Create IPv6 UDP socket (optional - may fail if IPv6 not available)
@@ -1201,6 +1205,7 @@ esp_err_t microlink_disco_deinit(microlink_t *ml) {
     }
 
     memset(&ml->disco, 0, sizeof(microlink_disco_t));
+    ml->disco.sock_fd = -1;  // Ensure invalid after memset zeroes it
     memset(pending_probes, 0, sizeof(pending_probes));
 
     ESP_LOGI(TAG, "DISCO deinitialized");

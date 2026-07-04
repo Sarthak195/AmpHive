@@ -738,6 +738,38 @@ async def stop_charging_session(
         "balance_remaining": round(locked_user.coin_balance, 2),
     }
 
+@app.get("/api/sessions/active")
+async def get_active_session(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get the current active charging session for the logged-in user, if any."""
+    result = await db.execute(
+        select(ChargingSession)
+        .where(
+            and_(
+                ChargingSession.user_id == user.id,
+                ChargingSession.status == SessionStatus.ACTIVE,
+            )
+        )
+        .order_by(ChargingSession.started_at.desc())
+    )
+    sessions = list(result.scalars().all())
+    if not sessions:
+        return {"active": False}
+    session = sessions[0]
+
+    plug_result = await db.execute(select(Plug).where(Plug.id == session.plug_id))
+    plug = plug_result.scalar_one()
+
+    return {
+        "active": True,
+        "session_id": session.id,
+        "plug_id": session.plug_id,
+        "plug_name": plug.name,
+        "started_at": session.started_at.isoformat() if session.started_at else None,
+    }
+
 
 @app.get("/api/sessions/live/{session_id}")
 async def live_session_telemetry(

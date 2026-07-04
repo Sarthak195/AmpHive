@@ -33,8 +33,8 @@ char tapo_password[64] = "";
 bool config_loaded = false;
 
 // The central AmpHive server's Tailscale VPN IP
-#define SERVER_VPN_IP       "100.64.0.1" 
-#define MQTT_BROKER_URL     "mqtt://100.64.0.1:1883"
+#define SERVER_VPN_IP       "100.87.241.70" 
+#define MQTT_BROKER_URL     "mqtt://100.87.241.70:1883"
 #define TARGET_PLUG_ID      1
 // ─────────────────────────────────────────────────────────────────────────────
 

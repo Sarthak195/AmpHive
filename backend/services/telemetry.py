@@ -137,7 +137,10 @@ class TelemetryStore:
 
             snapshot = self.get_latest(plug_id)
             if snapshot:
-                yield snapshot.to_dict()
+                snapshot_dict = snapshot.to_dict()
+                if plug_id in self._session_start_times:
+                    snapshot_dict["duration_sec"] = int(time.time() - self._session_start_times[plug_id])
+                yield snapshot_dict
 
                 # Stop streaming if the session is completed
                 if snapshot.status == "completed":

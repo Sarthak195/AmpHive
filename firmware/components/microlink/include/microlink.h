@@ -51,21 +51,21 @@ extern "C" {
 #define MICROLINK_CONTROL_PORT 443
 
 // DERP relay servers
-// Tailscale DERP regions: 1=NYC, 2=SF, 9=DFW(Dallas), 10=SEA(Seattle), etc.
-// Use derp9d.tailscale.com for Dallas region (region ID 9)
+// Tailscale DERP regions: 1=NYC, 2=SF, 6=Bengaluru, 9=DFW(Dallas), etc.
+// Use derp6.tailscale.com for Bengaluru region (region ID 6)
 // IMPORTANT: DERP hostname number != region ID (derp10 is Seattle/region 10, derp9d is Dallas/region 9)
-#define MICROLINK_DERP_SERVER "derp9d.tailscale.com"  // Dallas (dfw) - Region ID 9
-#define MICROLINK_DERP_REGION 9  // Must match the server! Region 9 = Dallas
-#define MICROLINK_DERP_SERVER_FALLBACK "derp1.tailscale.com"  // NYC fallback (region 1)
+#define MICROLINK_DERP_SERVER "derp6.tailscale.com"  // Bengaluru (blr) - Region ID 6
+#define MICROLINK_DERP_REGION 6  // Must match the server! Region 6 = Bengaluru
+#define MICROLINK_DERP_SERVER_FALLBACK "derp3e.tailscale.com"  // Singapore fallback (region 3)
 #define MICROLINK_DERP_PORT 443
 
 // STUN servers (fallback list)
 // NOTE: Tailscale doesn't have a dedicated "stun.tailscale.com" - STUN runs on DERP servers!
 // derp1.tailscale.com (NYC) serves STUN on port 3478
-#define MICROLINK_STUN_SERVER "derp1.tailscale.com"
-#define MICROLINK_STUN_SERVER_FALLBACK "stun.l.google.com"
-#define MICROLINK_STUN_PORT 3478
-#define MICROLINK_STUN_PORT_GOOGLE 19302
+#define MICROLINK_STUN_SERVER "stun.l.google.com"
+#define MICROLINK_STUN_SERVER_FALLBACK "derp1.tailscale.com"
+#define MICROLINK_STUN_PORT 19302
+#define MICROLINK_STUN_PORT_GOOGLE 3478
 
 /* ============================================================================
  * Type Definitions

@@ -6,7 +6,7 @@ async def main():
     # Tapo App Credentials
     tapo_email = "sjgotnfts1@gmail.com"
     tapo_password = "Nitya@2001"
-    plug_ip = "192.168.1.4"
+    plug_ip = "192.168.1.6"
     
     print(f"Connecting to plug at {plug_ip}...")
     try:

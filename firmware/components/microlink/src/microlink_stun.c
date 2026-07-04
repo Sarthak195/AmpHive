@@ -20,6 +20,7 @@
 #include <netdb.h>
 #include <lwip/sockets.h>
 #include <errno.h>
+#include <sys/select.h>
 
 static const char *TAG = "ml_stun";
 
@@ -194,48 +195,41 @@ static int stun_parse_binding_response(const uint8_t *buf, size_t len,
 }
 
 esp_err_t microlink_stun_init(microlink_t *ml) {
-    ESP_LOGI(TAG, "Initializing STUN client");
+    ESP_LOGI(TAG, "Initializing STUN client (uses shared DISCO socket)");
 
     memset(&ml->stun, 0, sizeof(microlink_stun_t));
-    ml->stun.sock_fd = -1;
+    ml->stun.sock_fd = -1;  // No longer owns a socket
 
-    // Create UDP socket
-    int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (sock < 0) {
-        ESP_LOGE(TAG, "Failed to create UDP socket: %d", errno);
-        return ESP_FAIL;
-    }
-
-    // Set socket timeout
-    struct timeval tv;
-    tv.tv_sec = STUN_TIMEOUT_MS / 1000;
-    tv.tv_usec = (STUN_TIMEOUT_MS % 1000) * 1000;
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-
-    ml->stun.sock_fd = sock;
-
-    ESP_LOGI(TAG, "STUN client initialized, socket=%d", sock);
+    ESP_LOGI(TAG, "STUN client initialized (will use DISCO socket for probes)");
     return ESP_OK;
 }
 
 esp_err_t microlink_stun_deinit(microlink_t *ml) {
     ESP_LOGI(TAG, "Deinitializing STUN client");
 
-    if (ml->stun.sock_fd >= 0) {
-        close(ml->stun.sock_fd);
-        ml->stun.sock_fd = -1;
-    }
-
+    // Don't close any socket — DISCO owns it
     memset(&ml->stun, 0, sizeof(microlink_stun_t));
     return ESP_OK;
 }
 
 /**
- * @brief Try STUN probe to a specific server
+ * @brief Try STUN probe to a specific server using the shared DISCO socket
+ *
+ * Uses ml->disco.sock_fd so the NAT mapping matches the port where
+ * DISCO/WireGuard traffic is actually received. Temporarily sets a
+ * receive timeout on the shared socket, then restores non-blocking mode.
+ *
  * @return ESP_OK on success, ESP_FAIL on failure
  */
 static esp_err_t stun_probe_server(microlink_t *ml, const char *server, uint16_t port) {
-    ESP_LOGI(TAG, "Trying STUN server %s:%d", server, port);
+    int sock = ml->disco.sock_fd;
+    if (sock < 0) {
+        ESP_LOGE(TAG, "DISCO socket not available for STUN probe");
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "Trying STUN server %s:%d (via DISCO socket fd=%d, port=%d)",
+             server, port, sock, ml->disco.local_port);
 
     // Resolve STUN server hostname
     struct hostent *he = gethostbyname(server);
@@ -260,13 +254,17 @@ static esp_err_t stun_probe_server(microlink_t *ml, const char *server, uint16_t
         return ESP_FAIL;
     }
 
+    // NOTE: Socket stays non-blocking! We use select() for timeout to avoid
+    // interfering with the concurrent DISCO receive task that shares this socket.
+
     // Retry loop
     uint8_t response[256];
     int retries = STUN_RETRY_COUNT;
+    esp_err_t result = ESP_FAIL;
 
     while (retries > 0) {
-        // Send request
-        ssize_t sent = sendto(ml->stun.sock_fd, request, req_len, 0,
+        // Send request (sendto works fine on non-blocking sockets)
+        ssize_t sent = sendto(sock, request, req_len, 0,
                               (struct sockaddr *)&server_addr, sizeof(server_addr));
         if (sent < 0) {
             ESP_LOGE(TAG, "Failed to send STUN request: %d", errno);
@@ -276,64 +274,100 @@ static esp_err_t stun_probe_server(microlink_t *ml, const char *server, uint16_t
 
         ESP_LOGD(TAG, "Sent STUN Binding Request (%zd bytes)", sent);
 
-        // Receive response
-        struct sockaddr_in from_addr;
-        socklen_t from_len = sizeof(from_addr);
-        ssize_t recv_len = recvfrom(ml->stun.sock_fd, response, sizeof(response), 0,
-                                    (struct sockaddr *)&from_addr, &from_len);
+        // Wait for response using select() with timeout (socket stays non-blocking)
+        uint64_t deadline = microlink_get_time_ms() + STUN_TIMEOUT_MS;
+        bool got_stun_response = false;
 
-        if (recv_len < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                ESP_LOGW(TAG, "STUN timeout, retrying (%d left)", retries - 1);
-                retries--;
-                continue;
+        while (microlink_get_time_ms() < deadline && !got_stun_response) {
+            fd_set readfds;
+            FD_ZERO(&readfds);
+            FD_SET(sock, &readfds);
+
+            struct timeval tv;
+            uint64_t remaining = deadline - microlink_get_time_ms();
+            if (remaining > STUN_TIMEOUT_MS) remaining = STUN_TIMEOUT_MS;  // Overflow guard
+            tv.tv_sec = remaining / 1000;
+            tv.tv_usec = (remaining % 1000) * 1000;
+
+            int sel = select(sock + 1, &readfds, NULL, NULL, &tv);
+            if (sel <= 0) {
+                // Timeout or error
+                break;
             }
-            ESP_LOGE(TAG, "Failed to receive STUN response: %d", errno);
-            retries--;
-            continue;
+
+            // Data available — read it (non-blocking recvfrom)
+            struct sockaddr_in from_addr;
+            socklen_t from_len = sizeof(from_addr);
+            ssize_t recv_len = recvfrom(sock, response, sizeof(response), MSG_DONTWAIT,
+                                        (struct sockaddr *)&from_addr, &from_len);
+
+            if (recv_len < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    continue;  // Spurious wakeup, retry select
+                }
+                ESP_LOGE(TAG, "Failed to receive STUN response: %d", errno);
+                break;
+            }
+
+            ESP_LOGD(TAG, "Received packet (%zd bytes) during STUN probe", recv_len);
+
+            // Check if this is actually a STUN response (not a DISCO packet)
+            // STUN responses start with 0x01 0x01 (Binding Response)
+            if (recv_len >= STUN_HEADER_SIZE && response[0] == 0x01 && response[1] == 0x01) {
+                uint32_t mapped_ip = 0;
+                uint16_t mapped_port = 0;
+
+                if (stun_parse_binding_response(response, recv_len, &mapped_ip, &mapped_port) == 0) {
+                    ml->stun.public_ip = mapped_ip;
+                    ml->stun.public_port = mapped_port;
+                    ml->stun.nat_detected = true;
+                    ml->stun.last_probe_ms = microlink_get_time_ms();
+
+                    ESP_LOGI(TAG, "STUN probe successful: public endpoint %lu.%lu.%lu.%lu:%u",
+                             (mapped_ip >> 24) & 0xFF,
+                             (mapped_ip >> 16) & 0xFF,
+                             (mapped_ip >> 8) & 0xFF,
+                             mapped_ip & 0xFF,
+                             mapped_port);
+
+                    result = ESP_OK;
+                    got_stun_response = true;
+                }
+            } else {
+                // Not a STUN response — likely a DISCO packet received on this socket.
+                // Ignore it (the DISCO task will also process its own copy on next poll)
+                ESP_LOGD(TAG, "Received non-STUN packet (%d bytes, type=0x%02x%02x), ignoring",
+                         (int)recv_len, response[0], recv_len >= 2 ? response[1] : 0);
+            }
         }
 
-        ESP_LOGD(TAG, "Received STUN response (%zd bytes)", recv_len);
-
-        // Parse response
-        uint32_t mapped_ip = 0;
-        uint16_t mapped_port = 0;
-
-        if (stun_parse_binding_response(response, recv_len, &mapped_ip, &mapped_port) == 0) {
-            // Success!
-            ml->stun.public_ip = mapped_ip;
-            ml->stun.public_port = mapped_port;
-            ml->stun.nat_detected = true;
-            ml->stun.last_probe_ms = microlink_get_time_ms();
-
-            ESP_LOGI(TAG, "STUN probe successful: public endpoint %lu.%lu.%lu.%lu:%u",
-                     (mapped_ip >> 24) & 0xFF,
-                     (mapped_ip >> 16) & 0xFF,
-                     (mapped_ip >> 8) & 0xFF,
-                     mapped_ip & 0xFF,
-                     mapped_port);
-
-            return ESP_OK;
+        if (got_stun_response) {
+            break;
         }
 
+        ESP_LOGW(TAG, "STUN timeout, retrying (%d left)", retries - 1);
         retries--;
     }
 
-    return ESP_FAIL;
+    if (result != ESP_OK) {
+        ESP_LOGW(TAG, "STUN probe to %s failed after %d attempts", server, STUN_RETRY_COUNT);
+    }
+
+    return result;
 }
 
 esp_err_t microlink_stun_probe(microlink_t *ml) {
-    if (ml->stun.sock_fd < 0) {
-        ESP_LOGE(TAG, "STUN socket not initialized");
+    if (ml->disco.sock_fd < 0) {
+        ESP_LOGE(TAG, "DISCO socket not initialized — cannot run STUN probe");
         return ESP_ERR_INVALID_STATE;
     }
 
-    // Try primary STUN server first (Tailscale)
+    // Try primary STUN server first (Google)
     if (stun_probe_server(ml, MICROLINK_STUN_SERVER, MICROLINK_STUN_PORT) == ESP_OK) {
         return ESP_OK;
     }
 
-    // Try fallback server (Google)
+    // Try fallback server (Tailscale DERP1)
     ESP_LOGW(TAG, "Primary STUN server failed, trying fallback...");
     if (stun_probe_server(ml, MICROLINK_STUN_SERVER_FALLBACK, MICROLINK_STUN_PORT_GOOGLE) == ESP_OK) {
         return ESP_OK;
@@ -342,3 +376,4 @@ esp_err_t microlink_stun_probe(microlink_t *ml) {
     ESP_LOGE(TAG, "All STUN servers failed");
     return ESP_FAIL;
 }
+

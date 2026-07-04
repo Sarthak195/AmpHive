@@ -863,21 +863,9 @@ esp_err_t microlink_coordination_init(microlink_t *ml) {
         return ESP_ERR_NO_MEM;
     }
 
-    // Allocate 64KB buffer from PSRAM for large MapResponses
-    // This is the key fix - using external PSRAM instead of limited SRAM
-    ml->coordination.psram_buffer = heap_caps_malloc(MICROLINK_COORD_BUFFER_SIZE, MALLOC_CAP_SPIRAM);
-    if (ml->coordination.psram_buffer == NULL) {
-        ESP_LOGW(TAG, "PSRAM allocation failed, falling back to regular heap");
-        ml->coordination.psram_buffer = malloc(MICROLINK_COORD_BUFFER_SIZE);
-        if (ml->coordination.psram_buffer == NULL) {
-            ESP_LOGE(TAG, "Failed to allocate coordination buffer");
-            vSemaphoreDelete(ml->coordination.mutex);
-            ml->coordination.mutex = NULL;
-            return ESP_ERR_NO_MEM;
-        }
-    } else {
-        ESP_LOGI(TAG, "Allocated %d bytes from PSRAM for coordination buffer", MICROLINK_COORD_BUFFER_SIZE);
-    }
+    // PSRAM/SRAM buffer will be dynamically allocated when the poll task starts
+    // and freed when the task exits to conserve heap space for initial fetches.
+    ml->coordination.psram_buffer = NULL;
 
     ml->coordination.poll_task_handle = NULL;
     ml->coordination.poll_task_running = false;
@@ -2460,8 +2448,78 @@ cleanup:
     return ret;
 }
 
+static void prune_json_key(char *json, const char *key) {
+    char *p = json;
+    size_t key_len = strlen(key);
+    while ((p = strstr(p, key)) != NULL) {
+        // Verify it's a key: check if surrounded by quotes
+        if (p > json && *(p - 1) == '"') {
+            // Find the colon after key
+            char *colon = strchr(p + key_len, ':');
+            if (colon) {
+                // Skip whitespace after colon
+                char *val_start = colon + 1;
+                while (*val_start == ' ' || *val_start == '\t' || *val_start == '\n' || *val_start == '\r') {
+                    val_start++;
+                }
+                char *val_end = val_start;
+                if (*val_start == '{' || *val_start == '[') {
+                    char open_char = *val_start;
+                    char close_char = (open_char == '{') ? '}' : ']';
+                    int depth = 1;
+                    val_end++;
+                    bool in_string = false;
+                    while (*val_end && depth > 0) {
+                        if (*val_end == '"' && *(val_end - 1) != '\\') {
+                            in_string = !in_string;
+                        } else if (!in_string) {
+                            if (*val_end == open_char) depth++;
+                            else if (*val_end == close_char) depth--;
+                        }
+                        val_end++;
+                    }
+                } else if (*val_start == '"') {
+                    val_end++;
+                    while (*val_end && (*val_end != '"' || *(val_end - 1) == '\\')) {
+                        val_end++;
+                    }
+                    if (*val_end == '"') val_end++;
+                } else {
+                    while (*val_end && *val_end != ',' && *val_end != '}' && *val_end != ']') {
+                        val_end++;
+                    }
+                }
+                // Replace content in-place with empty representation
+                if (*val_start == '{') {
+                    memset(val_start + 1, ' ', (val_end - 1) - (val_start + 1));
+                } else if (*val_start == '[') {
+                    memset(val_start + 1, ' ', (val_end - 1) - (val_start + 1));
+                } else {
+                    size_t val_len = val_end - val_start;
+                    if (val_len >= 4) {
+                        memcpy(val_start, "null", 4);
+                        memset(val_start + 4, ' ', val_len - 4);
+                    } else {
+                        memset(val_start, ' ', val_len);
+                    }
+                }
+            }
+        }
+        p += key_len;
+    }
+}
+
 esp_err_t microlink_coordination_fetch_peers(microlink_t *ml) {
     ESP_LOGI(TAG, "Fetching peer list via MapRequest");
+    ESP_LOGI(TAG, "Free heap before MapRequest: %u bytes", (unsigned int)esp_get_free_heap_size());
+
+    // Free the coordination PSRAM buffer temporarily to prevent OOM
+    // It will be re-allocated when the poll task starts
+    if (ml->coordination.psram_buffer != NULL) {
+        heap_caps_free(ml->coordination.psram_buffer);
+        ml->coordination.psram_buffer = NULL;
+        ESP_LOGI(TAG, "Temporarily freed coordination psram_buffer (24KB) to avoid OOM");
+    }
 
     // Check if we have a valid socket from registration
     if (ml->coordination.socket < 0 || !ml->coordination.registered) {
@@ -2561,7 +2619,7 @@ esp_err_t microlink_coordination_fetch_peers(microlink_t *ml) {
     cJSON_AddBoolToObject(netinfo, "WorkingUDP", true);     // We support UDP
     cJSON_AddBoolToObject(netinfo, "WorkingIPv6", false);   // ESP32 doesn't have IPv6 here
     cJSON_AddItemToObject(hostinfo, "NetInfo", netinfo);
-    ESP_LOGI(TAG, "NetInfo.PreferredDERP: %d (Dallas)", MICROLINK_DERP_REGION);
+    ESP_LOGI(TAG, "NetInfo.PreferredDERP: %d (Bengaluru)", MICROLINK_DERP_REGION);
 
     cJSON_AddItemToObject(map_req, "Hostinfo", hostinfo);
 
@@ -2585,11 +2643,11 @@ esp_err_t microlink_coordination_fetch_peers(microlink_t *ml) {
                      (ip_info.ip.addr >> 8) & 0xFF,
                      (ip_info.ip.addr >> 16) & 0xFF,
                      (ip_info.ip.addr >> 24) & 0xFF,
-                     ml->wireguard.listen_port);
+                     ml->disco.local_port);  // Use magicsock port, not WG lwIP port
             cJSON_AddItemToArray(endpoints, cJSON_CreateString(local_ep));
             cJSON_AddItemToArray(endpoint_types, cJSON_CreateNumber(1));  // EndpointLocal
             endpoint_count++;
-            ESP_LOGI(TAG, "Advertising local endpoint: %s (type: Local)", local_ep);
+            ESP_LOGI(TAG, "Advertising local endpoint: %s (type: Local, magicsock port)", local_ep);
         }
 
         // Add STUN endpoint (EndpointSTUN = 2) if available
@@ -2631,6 +2689,8 @@ esp_err_t microlink_coordination_fetch_peers(microlink_t *ml) {
     // with Stream=true for long-poll.
     cJSON_AddBoolToObject(map_req, "Stream", false);  // First request: non-streaming to set DERPRegion!
     cJSON_AddStringToObject(map_req, "Compress", "");  // Disable compression - empty string means no compression
+    cJSON_AddBoolToObject(map_req, "OmitPacketFilter", true);
+    cJSON_AddBoolToObject(map_req, "OmitDNSConfig", true);
 
     // Note: Removed OmitPeers - we need full response to get Node.Addresses with VPN IP
     // The response may be large (includes DERP map) but contains our assigned IP
@@ -2803,15 +2863,17 @@ esp_err_t microlink_coordination_fetch_peers(microlink_t *ml) {
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
     // Buffer to accumulate all HTTP/2 frames from multiple Noise frames
-    uint8_t *h2_buffer = malloc(32768);  // 32KB for HTTP/2 data
+    uint8_t *h2_buffer = malloc(49152);  // 48KB for HTTP/2 data (increased to handle larger peer lists)
     if (!h2_buffer) {
+        ESP_LOGE(TAG, "Failed to allocate h2_buffer (48KB)");
         return ESP_ERR_NO_MEM;
     }
     size_t h2_buffer_len = 0;
 
     // TCP stream buffer - handles Noise frames that span multiple TCP segments
-    uint8_t *tcp_buffer = malloc(32768);  // 32KB for TCP stream reassembly
+    uint8_t *tcp_buffer = malloc(16384);  // 16KB for TCP stream reassembly
     if (!tcp_buffer) {
+        ESP_LOGE(TAG, "Failed to allocate tcp_buffer (16KB)");
         free(h2_buffer);
         return ESP_ERR_NO_MEM;
     }
@@ -2823,7 +2885,7 @@ esp_err_t microlink_coordination_fetch_peers(microlink_t *ml) {
 
     for (int recv_idx = 0; recv_idx < max_recv_calls && !got_end_stream; recv_idx++) {
         // Receive into remaining space in tcp_buffer
-        size_t space = 32768 - tcp_buffer_len;
+        size_t space = 16384 - tcp_buffer_len;
         if (space == 0) {
             ESP_LOGE(TAG, "TCP buffer full!");
             break;
@@ -2924,7 +2986,7 @@ esp_err_t microlink_coordination_fetch_peers(microlink_t *ml) {
             }
 
             // Append to h2_buffer
-            if (h2_buffer_len + decrypted_len <= 32768) {
+            if (h2_buffer_len + decrypted_len <= 49152) {
                 memcpy(h2_buffer + h2_buffer_len, decrypted, decrypted_len);
                 h2_buffer_len += decrypted_len;
             }
@@ -2947,16 +3009,11 @@ esp_err_t microlink_coordination_fetch_peers(microlink_t *ml) {
 
     ESP_LOGI(TAG, "Total HTTP/2 data accumulated: %u bytes", (unsigned int)h2_buffer_len);
 
-    // Accumulate ALL DATA frame payloads into a single JSON buffer
-    // MapResponse can be large (includes all DERP region info)
-    uint8_t *json_buffer = malloc(65536);  // 64KB for full MapResponse
-    if (!json_buffer) {
-        free(h2_buffer);
-        return ESP_ERR_NO_MEM;
-    }
+    // Accumulate ALL DATA frame payloads into the h2_buffer in-place (compaction)
+    // to avoid allocating a separate json_buffer and wasting 16KB-64KB heap memory!
     size_t json_total_len = 0;
 
-    // Parse HTTP/2 frames and accumulate DATA payloads
+    // Parse HTTP/2 frames and accumulate DATA payloads in-place
     size_t pos = 0;
     while (pos + 9 <= h2_buffer_len) {
         int frame_len = (h2_buffer[pos] << 16) | (h2_buffer[pos + 1] << 8) | h2_buffer[pos + 2];
@@ -3015,18 +3072,19 @@ esp_err_t microlink_coordination_fetch_peers(microlink_t *ml) {
                                    (h2_buffer[pos + 11] << 8) | h2_buffer[pos + 12];
             uint32_t error_code = (h2_buffer[pos + 13] << 24) | (h2_buffer[pos + 14] << 16) |
                                   (h2_buffer[pos + 15] << 8) | h2_buffer[pos + 16];
-            ESP_LOGW(TAG, "  GOAWAY: last_stream=%d, error=0x%08x", last_stream, error_code);
+            ESP_LOGW(TAG, "  GOAWAY: last_stream=%d, error=0x%08x", (int)last_stream, (unsigned int)error_code);
             // Mark that we need to reconnect
             ml->coordination.goaway_received = true;
             ESP_LOGI(TAG, "GOAWAY received - will reconnect on next poll");
         }
 
         if (frame_type == 0x00 && frame_len > 0) {  // DATA frame
-            // Append to json_buffer
-            if (json_total_len + frame_len <= 65536) {
-                memcpy(json_buffer + json_total_len, h2_buffer + pos + 9, frame_len);
+            // Append to h2_buffer in-place
+            // Since pos + 9 is always > json_total_len, we can do this in-place safely without overwriting unread data
+            if (json_total_len + frame_len <= 49152) {
+                memmove(h2_buffer + json_total_len, h2_buffer + pos + 9, frame_len);
                 json_total_len += frame_len;
-                ESP_LOGD(TAG, "Accumulated DATA frame: %d bytes (total: %u)", frame_len, (unsigned int)json_total_len);
+                ESP_LOGD(TAG, "Accumulated DATA frame in-place: %d bytes (total: %u)", frame_len, (unsigned int)json_total_len);
             }
         }
 
@@ -3061,38 +3119,34 @@ esp_err_t microlink_coordination_fetch_peers(microlink_t *ml) {
                 }
             }
         }
-        free(json_buffer);
         free(h2_buffer);
         ml->coordination.last_map_poll_ms = microlink_get_time_ms();
         return ESP_OK;
     }
 
-    free(h2_buffer);
-
     // Log first bytes to identify compression/encoding
     ESP_LOGI(TAG, "MapResponse first 32 bytes: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x",
-             json_buffer[0], json_buffer[1], json_buffer[2], json_buffer[3],
-             json_buffer[4], json_buffer[5], json_buffer[6], json_buffer[7],
-             json_buffer[8], json_buffer[9], json_buffer[10], json_buffer[11],
-             json_buffer[12], json_buffer[13], json_buffer[14], json_buffer[15]);
+             h2_buffer[0], h2_buffer[1], h2_buffer[2], h2_buffer[3],
+             h2_buffer[4], h2_buffer[5], h2_buffer[6], h2_buffer[7],
+             h2_buffer[8], h2_buffer[9], h2_buffer[10], h2_buffer[11],
+             h2_buffer[12], h2_buffer[13], h2_buffer[14], h2_buffer[15]);
 
     // Check for zstd magic (28 b5 2f fd)
-    bool is_zstd = (json_buffer[0] == 0x28 && json_buffer[1] == 0xb5 &&
-                    json_buffer[2] == 0x2f && json_buffer[3] == 0xfd);
+    bool is_zstd = (h2_buffer[0] == 0x28 && h2_buffer[1] == 0xb5 &&
+                    h2_buffer[2] == 0x2f && h2_buffer[3] == 0xfd);
 
     // Check for gzip magic (1f 8b)
-    bool is_gzip = (json_buffer[0] == 0x1f && json_buffer[1] == 0x8b);
+    bool is_gzip = (h2_buffer[0] == 0x1f && h2_buffer[1] == 0x8b);
 
     // Check for 4-byte length prefix followed by JSON FIRST (Tailscale binary framing)
     // Format: 4-byte length prefix + JSON payload
     // IMPORTANT: Check this BEFORE plain JSON because the first byte of the length
     // could coincidentally be '{' (0x7b), which would falsely trigger plain JSON detection
-    // Example: length 31585 = 0x7b61 starts with 0x7b = '{'
     bool is_length_prefixed = (!is_zstd && !is_gzip &&
-                               json_total_len > 4 && json_buffer[4] == '{');
+                               json_total_len > 4 && h2_buffer[4] == '{');
 
     // Check if it starts with '{' (plain JSON) - only if not length-prefixed
-    bool is_json = (!is_length_prefixed && json_buffer[0] == '{');
+    bool is_json = (!is_length_prefixed && h2_buffer[0] == '{');
 
     ESP_LOGI(TAG, "Content type: %s",
              is_zstd ? "zstd" :
@@ -3104,59 +3158,63 @@ esp_err_t microlink_coordination_fetch_peers(microlink_t *ml) {
     size_t json_str_len = 0;
 
     if (is_zstd) {
-        // Tailscale uses zstd compression for MapResponse
-        // For now, we need to request uncompressed responses or add zstd decompression
         ESP_LOGW(TAG, "Response is zstd compressed - decompression not yet implemented");
         ESP_LOGW(TAG, "TODO: Add 'compress: false' to MapRequest or implement zstd");
-        free(json_buffer);
+        free(h2_buffer);
         ml->coordination.last_map_poll_ms = microlink_get_time_ms();
         return ESP_OK;
     } else if (is_gzip) {
         ESP_LOGW(TAG, "Response is gzip compressed - not supported");
-        free(json_buffer);
+        free(h2_buffer);
         ml->coordination.last_map_poll_ms = microlink_get_time_ms();
         return ESP_OK;
     } else if (is_length_prefixed) {
-        // Tailscale binary framing: 4-byte length prefix followed by JSON
-        // Skip the 4-byte header, JSON starts at offset 4
-        json_str = (char *)json_buffer + 4;
+        json_str = (char *)h2_buffer + 4;
         json_str_len = json_total_len - 4;
         ESP_LOGI(TAG, "Skipping 4-byte length prefix, JSON at offset 4");
     } else if (is_json) {
-        json_str = (char *)json_buffer;
+        json_str = (char *)h2_buffer;
         json_str_len = json_total_len;
     } else {
-        // Unknown format - try to parse anyway
         ESP_LOGW(TAG, "Unknown response format, attempting JSON parse");
-        json_str = (char *)json_buffer;
+        json_str = (char *)h2_buffer;
         json_str_len = json_total_len;
     }
 
-    // Null-terminate the JSON string (json_str may point to offset 4 for KV-prefixed)
+    // Null-terminate the JSON string
     if (json_str && json_str_len > 0) {
         json_str[json_str_len] = '\0';
     }
 
     ESP_LOGI(TAG, "MapResponse JSON (%u bytes): %.200s%s", (unsigned int)json_str_len, json_str, json_str_len > 200 ? "..." : "");
 
-    cJSON *root = cJSON_Parse(json_str);
+    // Copy to a tightly-sized buffer to save heap, then free h2_buffer
+    char *json_copy = malloc(json_str_len + 1);
+    if (!json_copy) {
+        ESP_LOGE(TAG, "Failed to allocate memory for json_copy");
+        free(h2_buffer);
+        return ESP_FAIL;
+    }
+    memcpy(json_copy, json_str, json_str_len);
+    json_copy[json_str_len] = '\0';
+
+    free(h2_buffer);
+    h2_buffer = NULL;
+
+    // Prune unneeded fields in-place to drastically reduce parse heap usage
+    prune_json_key(json_copy, "Hostinfo");
+    prune_json_key(json_copy, "AllowedIPs");
+    prune_json_key(json_copy, "PacketFilter");
+    prune_json_key(json_copy, "DNSConfig");
+
+    ESP_LOGI(TAG, "Pruned MapResponse JSON: parsing now...");
+    cJSON *root = cJSON_Parse(json_copy);
+    free(json_copy);
 
     if (!root) {
         ESP_LOGE(TAG, "Failed to parse MapResponse JSON (len=%u)", (unsigned int)json_str_len);
-        // Log the first 64 bytes to help debug the format
-        if (json_str && json_str_len > 0) {
-            ESP_LOGE(TAG, "JSON start: %.64s", json_str);
-        }
-        // Check cJSON error position
-        const char *error_ptr = cJSON_GetErrorPtr();
-        if (error_ptr != NULL) {
-            ESP_LOGE(TAG, "cJSON error near offset: %td", error_ptr - json_str);
-        }
-        free(json_buffer);  // Free after logging
         return ESP_FAIL;
     }
-
-    free(json_buffer);  // json_str points to json_buffer, safe to free after cJSON_Parse copies it
 
     // Debug: List all top-level fields in the MapResponse
     ESP_LOGI(TAG, "MapResponse top-level fields:");
@@ -3501,6 +3559,8 @@ esp_err_t microlink_coordination_fetch_peers(microlink_t *ml) {
     cJSON_AddBoolToObject(longpoll_req, "KeepAlive", true);  // CRITICAL: Required for Stream=true!
     cJSON_AddStringToObject(longpoll_req, "Compress", "");   // Disable compression - empty string means no compression
     cJSON_AddBoolToObject(longpoll_req, "OmitPeers", true);  // We already have peers
+    cJSON_AddBoolToObject(longpoll_req, "OmitPacketFilter", true);
+    cJSON_AddBoolToObject(longpoll_req, "OmitDNSConfig", true);
 
     char *longpoll_str = cJSON_PrintUnformatted(longpoll_req);
     cJSON_Delete(longpoll_req);
@@ -3684,6 +3744,8 @@ esp_err_t microlink_coordination_heartbeat(microlink_t *ml) {
     cJSON_AddBoolToObject(map_req, "Stream", false);    // Non-streaming for endpoint updates
     cJSON_AddBoolToObject(map_req, "OmitPeers", true);  // Server returns minimal response
     cJSON_AddStringToObject(map_req, "Compress", "");   // Disable compression - empty string means no compression
+    cJSON_AddBoolToObject(map_req, "OmitPacketFilter", true);
+    cJSON_AddBoolToObject(map_req, "OmitDNSConfig", true);
 
     // Include NodeKey so server knows who we are
     uint8_t *wg_pubkey = ml->wireguard.public_key;
@@ -3736,7 +3798,7 @@ esp_err_t microlink_coordination_heartbeat(microlink_t *ml) {
                      (ip_info.ip.addr >> 8) & 0xFF,
                      (ip_info.ip.addr >> 16) & 0xFF,
                      (ip_info.ip.addr >> 24) & 0xFF,
-                     ml->wireguard.listen_port);
+                     ml->disco.local_port);  // Use magicsock port, not WG lwIP port
             cJSON_AddItemToArray(endpoints, cJSON_CreateString(local_ep));
             cJSON_AddItemToArray(endpoint_types, cJSON_CreateNumber(1));  // EndpointLocal
             endpoint_count++;
@@ -4841,6 +4903,13 @@ static void coordination_poll_task(void *pvParameters) {
 
     ESP_LOGI(TAG, "Coordination poll task exiting");
 
+    // Free dynamic coordination buffer on task exit
+    if (ml->coordination.psram_buffer != NULL) {
+        heap_caps_free(ml->coordination.psram_buffer);
+        ml->coordination.psram_buffer = NULL;
+        ESP_LOGI(TAG, "Freed coordination poll buffer");
+    }
+
     // Clear our own handle before exiting so stop_poll_task knows we're done
     // This must be done BEFORE vTaskDelete to avoid race condition
     ml->coordination.poll_task_handle = NULL;
@@ -4869,8 +4938,16 @@ esp_err_t microlink_coordination_start_poll_task(microlink_t *ml) {
     }
 
     if (ml->coordination.psram_buffer == NULL) {
-        ESP_LOGE(TAG, "PSRAM buffer not allocated");
-        return ESP_ERR_INVALID_STATE;
+        ESP_LOGI(TAG, "Allocating coordination poll buffer (%d bytes)...", MICROLINK_COORD_BUFFER_SIZE);
+        ml->coordination.psram_buffer = heap_caps_malloc(MICROLINK_COORD_BUFFER_SIZE, MALLOC_CAP_SPIRAM);
+        if (ml->coordination.psram_buffer == NULL) {
+            ESP_LOGW(TAG, "PSRAM allocation failed, falling back to regular heap");
+            ml->coordination.psram_buffer = malloc(MICROLINK_COORD_BUFFER_SIZE);
+            if (ml->coordination.psram_buffer == NULL) {
+                ESP_LOGE(TAG, "Failed to allocate coordination poll buffer");
+                return ESP_ERR_NO_MEM;
+            }
+        }
     }
 
     ml->coordination.poll_task_running = true;
@@ -4891,6 +4968,10 @@ esp_err_t microlink_coordination_start_poll_task(microlink_t *ml) {
     if (ret != pdPASS) {
         ESP_LOGE(TAG, "Failed to create coordination poll task");
         ml->coordination.poll_task_running = false;
+        if (ml->coordination.psram_buffer != NULL) {
+            heap_caps_free(ml->coordination.psram_buffer);
+            ml->coordination.psram_buffer = NULL;
+        }
         return ESP_FAIL;
     }
 
