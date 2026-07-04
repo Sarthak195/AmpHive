@@ -18,7 +18,7 @@
 
 | Direction | Topic | QoS | Retained | Payload |
 |-----------|-------|-----|----------|---------|
-| backend → gateway | `amphive/gateways/{gateway_id}/plugs/{plug_id}/commands` | 1 | no | `{"action":"ON"\|"OFF","max_duration_seconds":<int>,"max_kwh":<float>}` |
+| backend → gateway | `amphive/gateways/{gateway_id}/plugs/{plug_id}/commands` | 1 | no | `{"action":"ON"\|"OFF","max_duration_seconds":<int>,"max_kwh":<float>}` OR `{"action":"SET_INTERVAL","interval_ms":<int>}` |
 | gateway → backend | `amphive/gateways/{gateway_id}/telemetry` | 0 | no | `{"plug_id":<int>,"watts":<f>,"kwh":<f>,"voltage":<f>,"current":<f>,"status":"occupied"\|"available"}` |
 | gateway → backend | `amphive/gateways/{gateway_id}/status` | 1 | yes | `{"status":"online"}` (on connect) / `{"status":"offline"}` (LWT) |
 | gateway → backend | `amphive/gateways/{gateway_id}/alarms` | 1 | no | `{"error":"THERMAL_CUTOFF"}` |
@@ -37,10 +37,12 @@ and `amphive/gateways/+/status` (QoS 1). It does **not** currently subscribe to
 
 ## Command publishing (backend)
 
-`MQTTManager.send_plug_command(gateway_id, plug_id, action, max_duration=14400, max_kwh=30.0)`
-publishes to the command topic at QoS 1 and `wait_for_publish(timeout=3.0)`,
-returning `is_published()`. `/api/sessions/start` returns HTTP 500 if this fails;
-`/api/sessions/stop` ignores the result (best-effort OFF).
+- `MQTTManager.send_plug_command(gateway_id, plug_id, action, max_duration=14400, max_kwh=30.0)`
+  publishes to the command topic at QoS 1 and `wait_for_publish(timeout=3.0)`,
+  returning `is_published()`. `/api/sessions/start` returns HTTP 500 if this fails;
+  `/api/sessions/stop` ignores the result (best-effort OFF).
+- `MQTTManager.send_plug_interval(gateway_id, plug_id, interval_ms)`
+  publishes the `SET_INTERVAL` command at QoS 1 to configure the gateway's telemetry reporting interval.
 
 ## Inbound handling (backend) — ⚠️ stubbed
 
@@ -62,7 +64,8 @@ LWT/`offline` message is published by the *gateway* firmware.
 ## Firmware side (summary)
 
 The ESP32 publishes `online` status (retained) + subscribes to its commands on
-connect; runs a 15-second telemetry/watchdog loop; parses commands with
+connect; runs a dynamically adjustable telemetry/watchdog loop (default 10 seconds,
+updated via `SET_INTERVAL` between 500ms and 60000ms); parses commands with
 `strstr`/`sscanf` (not a JSON parser); and enforces local safety cutoffs
 (duration, energy, 75 °C thermal → publishes the thermal alarm). See
 [FIRMWARE.md](FIRMWARE.md).

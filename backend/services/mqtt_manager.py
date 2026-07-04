@@ -289,3 +289,26 @@ class MQTTManager:
         except Exception as e:
             logger.error(f"Failed to publish command to {topic}: {e}")
             return False
+
+    def send_plug_interval(self, gateway_id: str, plug_id: int, interval_ms: int) -> bool:
+        """
+        Sends a SET_INTERVAL command to a specific plug registered under a gateway.
+        Topic: amphive/gateways/{gateway_id}/plugs/{plug_id}/commands
+        Payload: {"action": "SET_INTERVAL", "interval_ms": X}
+        """
+        topic = f"amphive/gateways/{gateway_id}/plugs/{plug_id}/commands"
+        payload = {
+            "action": "SET_INTERVAL",
+            "interval_ms": interval_ms
+        }
+        
+        try:
+            payload_str = json.dumps(payload)
+            info = self.client.publish(topic, payload_str, qos=1)
+            info.wait_for_publish(timeout=3.0)
+            logger.info(f"Published interval command to {topic}: {payload_str}")
+            return info.is_published()
+        except Exception as e:
+            logger.error(f"Failed to publish interval command to {topic}: {e}")
+            return False
+

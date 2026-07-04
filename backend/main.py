@@ -75,6 +75,45 @@ telemetry_store = TelemetryStore()
 # Buffered batch-flush service for time-series telemetry persistence (lifespan-owned)
 telemetry_persistence: Optional[TelemetryPersistenceService] = None
 
+async def set_plug_telemetry_interval(db: AsyncSession, plug_id: int, interval_ms: int):
+    """
+    Update the polling interval for a specific plug in telemetry_store
+    and publish the SET_INTERVAL MQTT command to the gateway.
+    """
+    if telemetry_store.get_interval(plug_id) == interval_ms:
+        return
+
+    result = await db.execute(select(Plug).where(Plug.id == plug_id))
+    plug = result.scalar_one_or_none()
+    if not plug:
+        logger.warning(f"Plug {plug_id} not found when trying to set telemetry interval.")
+        return
+
+    telemetry_store.set_interval(plug_id, interval_ms)
+
+    from backend.services.mqtt_manager import MQTTManager
+    manager = MQTTManager()
+    if hasattr(manager, "client") and manager.client:
+        manager.send_plug_interval(plug.gateway_id, plug_id, interval_ms)
+
+async def check_and_speed_up_active_session(db: AsyncSession, user_id: int):
+    """
+    Check if the user has an active charging session, and if so,
+    speed up the telemetry interval for the corresponding plug to 1000ms.
+    """
+    result = await db.execute(
+        select(ChargingSession).where(
+            and_(
+                ChargingSession.user_id == user_id,
+                ChargingSession.status == SessionStatus.ACTIVE,
+            )
+        )
+    )
+    active_session = result.scalar_one_or_none()
+    if active_session:
+        await set_plug_telemetry_interval(db, active_session.plug_id, 1000)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage MQTT and Tapo Direct connection lifecycles with the FastAPI application."""
@@ -227,7 +266,7 @@ class PlugResponse(BaseModel):
 # --- Payment Schemas ---
 
 class CreateOrderRequest(BaseModel):
-    amount_inr: int  # Amount in Rupees (e.g. 100 for ₹100)
+    amount_inr: float  # Amount in Rupees (e.g. 100 for ₹100)
 
 class CreateOrderResponse(BaseModel):
     order_id: str
@@ -239,7 +278,7 @@ class VerifyPaymentRequest(BaseModel):
     razorpay_order_id: str
     razorpay_payment_id: str
     razorpay_signature: str
-    amount_inr: int
+    amount_inr: float
 
 
 # ===========================================================================
@@ -306,6 +345,8 @@ async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
     token = create_access_token(user.id, user.role.value, user.email)
     logger.info(f"User logged in: {user.email}")
 
+    await check_and_speed_up_active_session(db, user.id)
+
     return AuthResponse(
         token=token,
         user={"id": user.id, "email": user.email, "full_name": user.full_name,
@@ -314,11 +355,16 @@ async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
 
 
 @app.get("/api/auth/me", response_model=UserResponse)
-async def get_me(user: User = Depends(get_current_user)):
+async def get_me(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     """
     Return the current authenticated user's profile.
     Used by the frontend on app load to restore the session from a stored JWT.
     """
+    await check_and_speed_up_active_session(db, user.id)
+
     return UserResponse(
         id=user.id,
         email=user.email,
@@ -638,6 +684,7 @@ async def start_charging_session(
 
     # 6. Initialize the telemetry stream for this plug
     telemetry_store.start_session(plug.id)
+    await set_plug_telemetry_interval(db, plug.id, 1000)
 
     logger.info(f"Session {session.id} started: user={user.email}, plug={plug.id}")
 
@@ -727,6 +774,7 @@ async def stop_charging_session(
 
     # 6. End telemetry stream
     telemetry_store.end_session(plug.id)
+    await set_plug_telemetry_interval(db, plug.id, 10000)
 
     logger.info(f"Session {session.id} stopped: {final_energy:.3f} kWh, {final_cost:.2f} coins")
 
@@ -802,9 +850,19 @@ async def live_session_telemetry(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found.")
 
+    # Increment active listeners in telemetry store
+    telemetry_store.increment_listeners(session.plug_id)
+    await set_plug_telemetry_interval(db, session.plug_id, 1000)
+
     async def event_generator():
-        async for snapshot in telemetry_store.stream(session.plug_id):
-            yield {"event": "telemetry", "data": json.dumps(snapshot)}
+        try:
+            async for snapshot in telemetry_store.stream(session.plug_id):
+                yield {"event": "telemetry", "data": json.dumps(snapshot)}
+        finally:
+            listeners = telemetry_store.decrement_listeners(session.plug_id)
+            if listeners == 0:
+                async with async_session_factory() as local_db:
+                    await set_plug_telemetry_interval(local_db, session.plug_id, 10000)
 
     return EventSourceResponse(event_generator())
 
@@ -927,13 +985,13 @@ async def verify_payment(
         user_id=locked_user.id,
         amount=coins,  # Positive = credit
         transaction_type=TransactionType.TOPUP,
-        description=f"Wallet top-up: ₹{req.amount_inr} → {coins} coins (Razorpay: {req.razorpay_payment_id})",
+        description=f"Wallet top-up: ₹{req.amount_inr:.2f} → {coins:.2f} coins (Razorpay: {req.razorpay_payment_id})",
         balance_after=locked_user.coin_balance,
     )
     db.add(ledger_entry)
     await db.commit()
 
-    logger.info(f"Payment verified: user={locked_user.email}, ₹{req.amount_inr} → {coins} coins")
+    logger.info(f"Payment verified: user={locked_user.email}, ₹{req.amount_inr:.2f} → {coins:.2f} coins")
 
     return {
         "status": "success",
@@ -1021,14 +1079,14 @@ async def razorpay_webhook(request: Request, db: AsyncSession = Depends(get_db))
         user_id=locked_user.id,
         amount=coins,  # Positive = credit
         transaction_type=TransactionType.TOPUP,
-        description=f"Wallet top-up (webhook): ₹{payment['amount_inr']} → {coins} coins (Razorpay: {payment_id})",
+        description=f"Wallet top-up (webhook): ₹{payment['amount_inr']:.2f} → {coins:.2f} coins (Razorpay: {payment_id})",
         balance_after=locked_user.coin_balance,
     )
     db.add(ledger_entry)
     await db.commit()
 
     logger.info(
-        f"Webhook credited user={locked_user.email}: ₹{payment['amount_inr']} → {coins} coins "
+        f"Webhook credited user={locked_user.email}: ₹{payment['amount_inr']:.2f} → {coins:.2f} coins "
         f"(payment={payment_id})"
     )
 

@@ -72,7 +72,7 @@ const WalletCard = () => {
             color: 'var(--color-accent)',
             lineHeight: 1,
           }}>
-            {Math.round(balance)}
+            {balance.toFixed(2)}
           </span>
           <span style={{
             fontSize: '1.1rem',

@@ -31,6 +31,7 @@ char tapo_email[64] = "";
 char tapo_password[64] = "";
 
 bool config_loaded = false;
+static uint32_t telemetry_interval_ms = 10000; // Default 10s (10000ms)
 
 // The central AmpHive server's Tailscale VPN IP
 #define SERVER_VPN_IP       "100.87.241.70" 
@@ -425,6 +426,16 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
                 tapo_set_power_state(target_plug_ip, false);
                 active_session.active = false;
                 session_nvs_clear();
+            } else if (strstr(data, "\"action\":\"SET_INTERVAL\"") || strstr(data, "\"action\": \"SET_INTERVAL\"")) {
+                uint32_t interval = 10000;
+                char *int_ptr = strstr(data, "\"interval_ms\":");
+                if (int_ptr) {
+                    sscanf(int_ptr, "\"interval_ms\":%lu", &interval);
+                }
+                if (interval < 500) interval = 500;
+                if (interval > 60000) interval = 60000;
+                telemetry_interval_ms = interval;
+                ESP_LOGI(TAG, "Telemetry interval updated to %lu ms", interval);
             }
             break;
         }
@@ -575,7 +586,7 @@ static void telemetry_task(void *pvParameters) {
                 }
             }
         }
-        vTaskDelay(pdMS_TO_TICKS(15000));
+        vTaskDelay(pdMS_TO_TICKS(telemetry_interval_ms));
     }
 }
 

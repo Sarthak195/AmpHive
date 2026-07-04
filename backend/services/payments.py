@@ -53,7 +53,7 @@ def get_razorpay_client() -> Optional[razorpay.Client]:
     return razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET))
 
 
-def create_order(amount_inr: int, user_id: int, receipt_prefix: str = "amphive") -> Optional[dict]:
+def create_order(amount_inr: float, user_id: int, receipt_prefix: str = "amphive") -> Optional[dict]:
     """
     Create a Razorpay order for a wallet top-up.
 
@@ -74,12 +74,12 @@ def create_order(amount_inr: int, user_id: int, receipt_prefix: str = "amphive")
 
     try:
         order_data = {
-            "amount": amount_inr * 100,  # Convert to paise
+            "amount": int(round(amount_inr * 100)),  # Convert to paise
             "currency": "INR",
-            "receipt": f"{receipt_prefix}_user{user_id}_{amount_inr}",
+            "receipt": f"{receipt_prefix}_user{user_id}_{int(amount_inr)}",
             "notes": {
                 "user_id": str(user_id),
-                "coins": str(int(amount_inr * COINS_PER_RUPEE)),
+                "coins": str(calculate_coins(amount_inr)),
                 "platform": "amphive",
             },
         }
@@ -146,12 +146,12 @@ def verify_webhook_signature(body: bytes, signature: str) -> bool:
     return hmac.compare_digest(expected, signature)
 
 
-def calculate_coins(amount_inr: int) -> int:
+def calculate_coins(amount_inr: float) -> float:
     """
     Calculate the number of coins to credit for a given INR amount.
     Uses the COINS_PER_RUPEE conversion rate (default 1:1).
     """
-    return int(amount_inr * COINS_PER_RUPEE)
+    return round(float(amount_inr * COINS_PER_RUPEE), 2)
 
 
 def extract_payment_from_webhook(event: dict) -> Optional[dict]:
@@ -212,13 +212,13 @@ def extract_payment_from_webhook(event: dict) -> Optional[dict]:
         return None
 
     # Amount is authoritative from Razorpay, in paise. Convert to rupees.
-    amount_inr = int(entity.get("amount", 0)) // 100
+    amount_inr = float(entity.get("amount", 0)) / 100.0
 
     # Prefer the coins we pre-computed at order time; fall back to deriving
     # them from the settled amount so the credit is never zero due to notes.
     coins_raw = notes.get("coins")
     try:
-        coins = int(coins_raw) if coins_raw is not None else calculate_coins(amount_inr)
+        coins = float(coins_raw) if coins_raw is not None else calculate_coins(amount_inr)
     except (TypeError, ValueError):
         coins = calculate_coins(amount_inr)
 

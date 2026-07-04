@@ -32,7 +32,7 @@ Interactive docs: `http://<host>:8000/docs`.
 | POST | `/api/auth/login` | none | `{email, password}` | `{token, user}` — 401 on bad credentials. |
 | GET | `/api/auth/me` | JWT | — | `{id, email, full_name, role, coin_balance}` |
 
-`user` object shape: `{id, email, full_name, role, coin_balance}`.
+`user` object shape: `{id, email, full_name, role, coin_balance}` (where `coin_balance` is a float).
 Token: HS256 JWT, claims `sub`/`role`/`email`/`iat`/`exp`, **7-day** expiry.
 
 ## Charger groups
@@ -72,10 +72,10 @@ do not actually append it — see [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STAT
 ## Payments — Razorpay (`services/payments.py`)
 
 | Method | Path | Auth | Body | Behaviour |
-|--------|------|------|------|-----------|
-| POST | `/api/payments/create-order` | JWT | `{amount_inr}` (₹10–₹10,000) | Creates a Razorpay order → `{order_id, amount(paise), currency, key_id}`. 503 if Razorpay unconfigured. |
-| POST | `/api/payments/verify` | JWT | `{razorpay_order_id, razorpay_payment_id, razorpay_signature, amount_inr}` | HMAC verify (400 if bad) → credit coins (`COINS_PER_RUPEE`) → ledger `topup` → `{status:"success", coins_credited, new_balance}` |
-| POST | `/api/payments/webhook` | none (HMAC-gated) | raw body + `X-Razorpay-Signature` | HMAC verify (400 if bad) → on `payment.captured`, auto-credit coins from the payment's `notes`/`amount` (atomic, row-locked) → ledger `topup`. Idempotent vs. `/verify` (dedupes on `razorpay_payment_id`). → `{status:"credited"\|"already_credited"\|"ignored"\|"user_not_found"}` |
+|--------|------|------|------|----------|
+| POST | `/api/payments/create-order` | JWT | `{amount_inr: float}` (₹10–₹10,000, supporting decimals) | Creates a Razorpay order → `{order_id, amount(paise), currency, key_id}`. 503 if Razorpay unconfigured. |
+| POST | `/api/payments/verify` | JWT | `{razorpay_order_id, razorpay_payment_id, razorpay_signature, amount_inr: float}` | HMAC verify (400 if bad) → credit coins (`COINS_PER_RUPEE` conversion, supporting decimals) → ledger `topup` → `{status:"success", coins_credited, new_balance}` |
+| POST | `/api/payments/webhook` | none (HMAC-gated) | raw body + `X-Razorpay-Signature` | HMAC verify (400 if bad) → on `payment.captured`, auto-credit coins from the payment's `notes`/`amount` (atomic, row-locked, supporting decimals) → ledger `topup`. Idempotent vs. `/verify` (dedupes on `razorpay_payment_id`). → `{status:"credited"\|"already_credited"\|"ignored"\|"user_not_found"}` |
 
 ## Direct Mode — Tapo P110 (dev/test, ESP32 bypass)
 

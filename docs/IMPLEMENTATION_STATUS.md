@@ -1,6 +1,6 @@
 # AmpHive — Implementation Status & Discrepancies
 
-*Verified against source on 2026-07-02. This page reconciles the aspirational
+*Verified against source on 2026-07-04. This page reconciles the aspirational
 product specs ([requirements.md](../requirements.md), [features_list.md](../features_list.md))
 with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub/mock ·
 ❌ not implemented.*
@@ -12,15 +12,15 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 ### Backend
 | Capability | Status | Notes |
 |------------|:------:|-------|
-| REST API (auth, groups, plugs, sessions, payments, direct, CPO portal) | ✅ | 36 endpoints — see [API_REFERENCE.md](API_REFERENCE.md) |
+| REST API (auth, groups, plugs, sessions, payments, direct, CPO portal) | ✅ | 37 endpoints — see [API_REFERENCE.md](API_REFERENCE.md) |
 | JWT auth + bcrypt | ✅ | 7-day token, loaded fresh per request |
 | Role-based access control | ✅ | Enforced via `services/rbac.py` `require_role(...)` on all `/api/cpo/*` routes (checks the DB role, not just the token) |
 | MQTT command publish (ON/OFF) | ✅ | QoS 1, 3 s wait |
 | MQTT inbound telemetry/status handling | ✅ | Telemetry updates TelemetryStore and session DB. Status updates gateway state in DB. |
-| Live telemetry / SSE | ✅ | Fully functional, streams real telemetry from TelemetryStore |
+| Live telemetry / SSE | ✅ | Fully functional, streams real telemetry from TelemetryStore. Automatically triggers the plug to report telemetry at 1s intervals when there are active SSE listeners or an active session. |
 | Time-series telemetry persistence | ✅ | Persistent `telemetry_readings` table fed by a buffered background batch-flush from the MQTT handler (`services/telemetry_persistence.py`); queried by `GET /api/cpo/analytics/telemetry` via `date_trunc`. Plain Postgres (no TimescaleDB) — hypertables/retention/continuous-aggregates noted as a future upgrade. Live SSE still uses the in-memory TelemetryStore. |
-| Razorpay create-order + verify | ✅ | HMAC-verified; credits coins + ledger |
-| Razorpay webhook auto-credit | ✅ | Credits coins on `payment.captured`; atomic + idempotent vs. `/verify` (dedupes on `razorpay_payment_id`) |
+| Razorpay create-order + verify | ✅ | HMAC-verified; credits coins + ledger. Supports decimal INR amounts and coin balances (floats). |
+| Razorpay webhook auto-credit | ✅ | Credits coins on `payment.captured`; atomic + idempotent vs. `/verify` (dedupes on `razorpay_payment_id`). Supports decimal INR amounts and coin balances (floats). |
 | Wallet debit on stop + ledger | ✅ | Row-locked (`SELECT ... FOR UPDATE`) in stop/verify/webhook paths |
 | Direct Mode Tapo endpoints | ✅ | Gated by `DIRECT_MODE`; lib or relay mode |
 
@@ -30,7 +30,7 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 | Login/register, protected routes | ✅ | |
 | Plug-ID start + available-plugs list | ✅ | |
 | Live session monitor (SSE) | ✅ | Uses real `EventSource` with token query parameter |
-| Razorpay top-up flow | ✅ | CDN script + `window.Razorpay`; key comes from backend order |
+| Razorpay top-up flow | ✅ | CDN script + `window.Razorpay`; key comes from backend order. Formats and displays decimal coin balances. |
 | Charger groups (join/list) | ✅ | |
 | CPO operator portal (setup, dashboard, plugs, groups, sessions) | ✅ | `pages/cpo/*` behind `CpoProtectedRoute`; charts via `recharts` |
 | Map of available plugs | 🟡 | Leaflet/OpenStreetMap `MapComponent` on Home; plug coordinates not persisted, so markers use fallback/random positions |

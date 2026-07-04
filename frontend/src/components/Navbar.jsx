@@ -86,7 +86,7 @@ const Navbar = () => {
             }}
           >
             <span style={{ fontWeight: 600, color: 'var(--color-accent)', fontSize: '0.9rem' }}>
-              🪙 {balance}
+              🪙 {Number(balance).toFixed(2)}
             </span>
             <span style={{ color: 'var(--color-text-muted)', fontSize: '0.85rem' }}>
               {user.full_name || user.email}

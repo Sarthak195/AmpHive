@@ -61,10 +61,10 @@ product features.
 ## 3. MQTT control loop & watchdogs
 
 - Lazy MQTT start once the overlay is up; topics per [MQTT_CONTRACT.md](MQTT_CONTRACT.md).
-- Commands parsed with `strstr`/`sscanf` (looks for `"action":"ON"`/`"OFF"`,
-  optional `max_duration_seconds` / `max_kwh` / `session_id`). Defaults: 14400 s, 30.0 kWh.
-- `telemetry_safety` runs every **15 s** and **always polls the plug regardless
-  of MQTT connectivity**:
+- Commands parsed with `strstr`/`sscanf` (looks for `"action":"ON"`/`"OFF"`, `"action":"SET_INTERVAL"`,
+  optional `max_duration_seconds` / `max_kwh` / `session_id`, `interval_ms`). Defaults: 14400 s, 30.0 kWh, 10000 ms.
+- `telemetry_safety` runs at a **configurable interval** (`telemetry_interval_ms`, default **10 s** / 10000 ms) and **always polls the plug regardless of MQTT connectivity**:
+  - If a `"SET_INTERVAL"` command with `"interval_ms"` is received, the interval is updated (clamped between 500 ms and 60000 ms).
   - If MQTT is connected: publishes telemetry normally.
   - If MQTT is disconnected: buffers the reading in `offline_log` (NVS ring buffer).
   - While a session is active, enforces edge cutoffs in both online and offline modes:

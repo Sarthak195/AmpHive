@@ -58,7 +58,32 @@ class TelemetryStore:
             cls._instance._data: Dict[int, TelemetrySnapshot] = {}
             cls._instance._events: Dict[int, asyncio.Event] = {}
             cls._instance._session_start_times: Dict[int, float] = {}
+            cls._instance._intervals: Dict[int, int] = {}
+            cls._instance._active_listeners: Dict[int, int] = {}
         return cls._instance
+
+    def increment_listeners(self, plug_id: int) -> int:
+        """Increment the number of active SSE listeners for a plug."""
+        self._active_listeners[plug_id] = self._active_listeners.get(plug_id, 0) + 1
+        return self._active_listeners[plug_id]
+
+    def decrement_listeners(self, plug_id: int) -> int:
+        """Decrement the number of active SSE listeners for a plug."""
+        current = self._active_listeners.get(plug_id, 0)
+        if current > 0:
+            self._active_listeners[plug_id] = current - 1
+        else:
+            self._active_listeners[plug_id] = 0
+        return self._active_listeners[plug_id]
+
+    def get_interval(self, plug_id: int) -> int:
+        """Get the current polling interval (in ms) configured for a plug."""
+        return self._intervals.get(plug_id, 10000)
+
+    def set_interval(self, plug_id: int, interval: int) -> None:
+        """Set the current polling interval (in ms) configured for a plug."""
+        self._intervals[plug_id] = interval
+
 
     def update(self, plug_id: int, power_w: float, current_a: float,
                energy_kwh: float, status: str = "charging",
