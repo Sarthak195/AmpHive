@@ -62,19 +62,32 @@ Token: HS256 JWT, claims `sub`/`role`/`email`/`iat`/`exp`, **7-day** expiry.
 | POST | `/api/sessions/start` | JWT | `{plug_id, max_duration_seconds=14400, max_kwh=30.0}` | Access check → require balance ≥ 50 (402) → reject if OCCUPIED (409) → MQTT `ON` (500 on publish fail) → create session, mark plug OCCUPIED → `{status:"started", session_id, plug_id, plug_name, message}` |
 | POST | `/api/sessions/stop` | JWT | `{session_id}` | Owner+active check → MQTT `OFF` (best-effort) → finalize from telemetry → debit wallet → ledger `session_debit` → plug AVAILABLE → `{status:"completed", session_id, energy_kwh, coins_spent, balance_remaining}` |
 | GET | `/api/sessions/active` | JWT | — | Retrieve the currently active session for the logged-in user, if any (returns the most recent active session) → `{active:true, session_id, plug_id, plug_name, started_at}` or `{active:false}` |
-| GET | `/api/sessions/live/{session_id}` | JWT* | path `session_id:int` | **SSE** (`text/event-stream`); emits named `telemetry` events `{event:"telemetry", data:<json>}` |
+| GET | `/api/sessions/live/{session_id}` | JWT | path `session_id:int` | **SSE** (`text/event-stream`); legacy fallback endpoint. Emits named `telemetry` events `{event:"telemetry", data:<json>}` |
+| — | `Socket.io` connection | JWT | connection query or auth dict | Real-time bi-directional channel for telemetry updates and session status. |
 | GET | `/api/sessions/history` | JWT | — | Last 50 sessions, newest first → `[{id, plug_id, started_at, ended_at, energy_kwh, coins_spent, status}]` |
 
-\* The frontend opens the SSE stream with `EventSource`, which **cannot send the
-`Authorization` header**. The code comments intend a `?token=` query param but
-do not actually append it — see [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md).
+### Socket.io Events Reference
+- **Connection**: Pass JWT token via connection auth dict: `{ token: "<JWT_TOKEN>" }` or in connection query string: `?token=<JWT_TOKEN>`.
+- **Subscribe Session**:
+  - Event: `subscribe_session`
+  - Payload: `{ "session_id": <int> }`
+  - Responses:
+    - On success: Emits `subscription_success` event: `{ "session_id": <int> }`
+    - On failure: Emits `subscription_error` event: `{ "detail": "<error_message>" }`
+- **Telemetry Stream**:
+  - Event: `telemetry` (pushed from server to rooms)
+  - Payload: `{ "plug_id": <int>, "power_w": <float>, "current_a": <float>, "voltage_v": <float>, "energy_kwh": <float>, "duration_sec": <int>, "cost_coins": <float>, "status": "charging"|"completed"|"starting" }`
+- **Unsubscribe Session**:
+  - Event: `unsubscribe_session`
+  - Payload: `{ "session_id": <int> }`
+
 
 ## Payments — Razorpay (`services/payments.py`)
 
 | Method | Path | Auth | Body | Behaviour |
 |--------|------|------|------|----------|
 | POST | `/api/payments/create-order` | JWT | `{amount_inr: float}` (₹10–₹10,000, supporting decimals) | Creates a Razorpay order → `{order_id, amount(paise), currency, key_id}`. 503 if Razorpay unconfigured. |
-| POST | `/api/payments/verify` | JWT | `{razorpay_order_id, razorpay_payment_id, razorpay_signature, amount_inr: float}` | HMAC verify (400 if bad) → credit coins (`COINS_PER_RUPEE` conversion, supporting decimals) → ledger `topup` → `{status:"success", coins_credited, new_balance}` |
+| POST | `/api/payments/verify` | JWT | `{razorpay_order_id, razorpay_payment_id, razorpay_signature}` (`amount_inr` is deprecated and **ignored**) | HMAC verify (400 if bad) → fetch the payment from Razorpay's API and credit the **Razorpay-confirmed amount**, never a client-sent one (502 if Razorpay unreachable; 409 if not yet captured — the webhook credits on capture; 403 if the payment's order was created for another user) → ledger `topup` → `{status:"success", coins_credited, new_balance}` |
 | POST | `/api/payments/webhook` | none (HMAC-gated) | raw body + `X-Razorpay-Signature` | HMAC verify (400 if bad) → on `payment.captured`, auto-credit coins from the payment's `notes`/`amount` (atomic, row-locked, supporting decimals) → ledger `topup`. Idempotent vs. `/verify` (dedupes on `razorpay_payment_id`). → `{status:"credited"\|"already_credited"\|"ignored"\|"user_not_found"}` |
 
 ## Direct Mode — Tapo P110 (dev/test, ESP32 bypass)
@@ -137,4 +150,3 @@ scoped to the caller's `tenant_id`, so operators only ever see their own assets.
 | `TELEMETRY_BUFFER_MAX` | `10000` | Max buffered readings; oldest dropped if the DB is unavailable |
 | `TELEMETRY_RETENTION_DAYS` | `0` | Prune `telemetry_readings` older than N days. `0` = retention disabled (keep all) |
 | `TELEMETRY_PRUNE_EVERY_N_FLUSHES` | `360` | Run the retention prune every N flushes (~hourly at the default interval) |
-</content>

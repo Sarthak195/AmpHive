@@ -16,7 +16,7 @@ network, or (today, for dev/test) directly over a WireGuard tunnel.
 ```
 ┌───────────────┐   REST/JSON    ┌─────────────────────┐   asyncpg    ┌──────────────────┐
 │  Driver Web   │ ◄────────────► │   FastAPI backend   │ ◄──────────► │   PostgreSQL 15  │
-│  App (React)  │   + SSE live   │   (Uvicorn, main.py)│              │ (Docker on VM)   │
+│  App (React)  │  + Socket.io   │   (Uvicorn, main.py)│              │ (Docker on VM)   │
 └───────────────┘                └──────┬──────────────┘              └──────────────────┘
                                         │ MQTT (paho)
                                   ┌─────▼──────────┐
@@ -61,7 +61,7 @@ Path A as "done" while the committed configuration actually runs Path B.
 **Status:** the firmware control loop, overlay client, and MQTT contract are
 implemented and the topic strings match the backend. The backend's inbound
 handlers are **live** — telemetry updates the in-memory `TelemetryStore` (feeding
-the SSE stream) and persists `energy_kwh`/`peak_power_w` to the session row, and
+the Socket.io stream) and persists `energy_kwh`/`peak_power_w` to the session row, and
 status messages update gateway online/offline state in the DB. The ESP32 now implements a **real KLAP v2** Tapo driver (mbedTLS SHA/AES + esp_http_client), with on-device flash verification pending. See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md).
 
 ### Path B — Direct Mode over WireGuard (current dev/test reality)
@@ -95,7 +95,7 @@ POST /api/sessions/start            (JWT required)
   • telemetry_store.start_session()
         │
         ▼
-GET /api/sessions/live/{id}          (SSE, text/event-stream)
+Socket.io: subscribe_session          (WebSocket)
   • streams telemetry snapshots from the in-memory TelemetryStore
   • the store is fed by inbound MQTT telemetry (Path A), where the ESP32 drives
     real P110 hardware via the local KLAP v2 protocol.
@@ -120,11 +120,11 @@ POST /api/sessions/stop              (JWT required)
   at session stop. Conversion is `COINS_PER_RUPEE` (default 1.0). Credits and
   debits are **row-locked** (`SELECT ... FOR UPDATE`) so concurrent updates
   don't race.
-- **Telemetry/live data:** live SSE is still served from an **in-memory**
+- **Telemetry/live data:** live telemetry is served in real time via **Socket.io** (with legacy SSE endpoint kept as fallback) from an **in-memory**
   `TelemetryStore` singleton (`backend/services/telemetry.py`). Raw samples are
   **also** persisted to the `telemetry_readings` time-series table via a buffered
   background batch-flush (`backend/services/telemetry_persistence.py`), decoupled
-  from the SSE path, and queried by `GET /api/cpo/analytics/telemetry`. This uses
+  from the live streaming path, and queried by `GET /api/cpo/analytics/telemetry`. This uses
   **plain Postgres** + `date_trunc` aggregation; the product spec's "TimescaleDB"
   is not present (a possible future upgrade).
 
@@ -139,13 +139,13 @@ React 19 + Vite SPA in `frontend/`. Served by Nginx, which also reverse-proxies
 |-------|------|--------|---------|
 | `/` | `Home.jsx` | public (content gated on login) | Wallet card + available chargers + "start by Plug ID" |
 | `/login` | `Login.jsx` | public | Combined sign-in / register |
-| `/session` | `Session.jsx` | protected | Live session monitor (`SessionMonitor` + SSE) |
+| `/session` | `Session.jsx` | protected | Live session monitor (`SessionMonitor` + Socket.io) |
 | `/topup` | `TopUp.jsx` | protected | Razorpay checkout to buy coins |
 | `/groups` | `Groups.jsx` | protected | Join private charger groups by access code |
 
 State lives in three React contexts: `AuthContext` (JWT in `localStorage`,
-`/api/auth/me` on load), `SessionContext` (opens a real `EventSource` to the SSE
-endpoint), and `WalletContext` (derives balance from the user object). Razorpay
+`/api/auth/me` on load), `SessionContext` (manages Socket.io connection and subscription
+for live telemetry), and `WalletContext` (derives balance from the user object). Razorpay
 is loaded via a CDN `<script>` and used through `window.Razorpay`. Home renders a
 **Leaflet/OpenStreetMap** map (`MapComponent`, `react-leaflet`) of available
 plugs — though plug **coordinates aren't persisted** in the data model yet, so
@@ -182,4 +182,3 @@ tunnel are unrelated despite both being "VPNs".
 | Overlay VPN | Headscale control plane + the custom `microlink` Tailscale client on the ESP32. |
 | Firmware | ESP-IDF (targets ESP32-S3-N16R8), FreeRTOS, `microlink`, vendored `wireguard_lwip`. |
 | Infra | Docker / Docker Compose on a GCP Compute Engine VM (`asia-south1`); K8s/K3s manifests also present but not the live deployment. |
-</content>

@@ -17,9 +17,9 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 | Role-based access control | ✅ | Enforced via `services/rbac.py` `require_role(...)` on all `/api/cpo/*` routes (checks the DB role, not just the token) |
 | MQTT command publish (ON/OFF) | ✅ | QoS 1, 3 s wait |
 | MQTT inbound telemetry/status handling | ✅ | Telemetry updates TelemetryStore and session DB. Status updates gateway state in DB. |
-| Live telemetry / SSE | ✅ | Fully functional, streams real telemetry from TelemetryStore. Automatically triggers the plug to report telemetry at 1s intervals when there are active SSE listeners or an active session. |
-| Time-series telemetry persistence | ✅ | Persistent `telemetry_readings` table fed by a buffered background batch-flush from the MQTT handler (`services/telemetry_persistence.py`); queried by `GET /api/cpo/analytics/telemetry` via `date_trunc`. Plain Postgres (no TimescaleDB) — hypertables/retention/continuous-aggregates noted as a future upgrade. Live SSE still uses the in-memory TelemetryStore. |
-| Razorpay create-order + verify | ✅ | HMAC-verified; credits coins + ledger. Supports decimal INR amounts and coin balances (floats). |
+| Live telemetry / Socket.io & SSE | ✅ | Streams real telemetry from TelemetryStore via Socket.io (with SSE as legacy/fallback). Automatically triggers the plug to report telemetry at 1s intervals when there are active listeners or an active session. **Correction 2026-07-05:** the stream task called a non-existent `await sio.get_participants(room=...)` API, which raised on every iteration and killed each stream before the first emit — the earlier "fully functional/verified" claim was wrong. Fixed (room-manager membership check) with a regression test in `backend/tests/test_socketio.py`. |
+| Time-series telemetry persistence | ✅ | Persistent `telemetry_readings` table fed by a buffered background batch-flush from the MQTT handler (`services/telemetry_persistence.py`); queried by `GET /api/cpo/analytics/telemetry` via `date_trunc`. Plain Postgres (no TimescaleDB) — hypertables/retention/continuous-aggregates noted as a future upgrade. Live Socket.io/SSE still uses the in-memory TelemetryStore. |
+| Razorpay create-order + verify | ✅ | HMAC-verified; credits coins + ledger. Supports decimal INR amounts and coin balances (floats). **2026-07-05:** `/verify` now credits the **Razorpay-confirmed** amount fetched server-side (the client-sent `amount_inr` is deprecated/ignored — it was previously trusted, allowing arbitrary wallet inflation). |
 | Razorpay webhook auto-credit | ✅ | Credits coins on `payment.captured`; atomic + idempotent vs. `/verify` (dedupes on `razorpay_payment_id`). Supports decimal INR amounts and coin balances (floats). |
 | Wallet debit on stop + ledger | ✅ | Row-locked (`SELECT ... FOR UPDATE`) in stop/verify/webhook paths |
 | Direct Mode Tapo endpoints | ✅ | Gated by `DIRECT_MODE`; lib or relay mode |
@@ -29,7 +29,7 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 |------------|:------:|-------|
 | Login/register, protected routes | ✅ | |
 | Plug-ID start + available-plugs list | ✅ | |
-| Live session monitor (SSE) | ✅ | Uses real `EventSource` with token query parameter |
+| Live session monitor (Socket.io) | ✅ | Uses real Socket.io client with token-based connection authentication |
 | Razorpay top-up flow | ✅ | CDN script + `window.Razorpay`; key comes from backend order. Formats and displays decimal coin balances. |
 | Charger groups (join/list) | ✅ | |
 | CPO operator portal (setup, dashboard, plugs, groups, sessions) | ✅ | `pages/cpo/*` behind `CpoProtectedRoute`; charts via `recharts` |
@@ -99,7 +99,7 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 9. [Resolved] `charging_sessions.peak_power_w` is now populated.
 10. [Resolved 2026-07-02] Wallet updates are now row-locked (`SELECT ... FOR
     UPDATE`) in the stop, verify, and webhook paths.
-11. [Resolved 2026-07-02] **Frontend SSE auth gap:** The frontend now passes the JWT token as a `?token=` query parameter, and the backend decodes/verifies it.
+11. [Resolved 2026-07-04] **Real-time Communication (Socket.io):** Replaced live SSE with Socket.io for session telemetry updates. Auth is verified using JWT token on connection (via auth payload or query parameters).
 12. [Partly resolved 2026-07-02] A Leaflet/OpenStreetMap map (`MapComponent`) is
     now on Home, but plug **geolocation isn't in the data model**, so markers use
     fallback/random coordinates rather than real plug locations.
@@ -131,4 +131,19 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 24. **Relay port mismatch:** `wireguard_tunnel_setup.md` says `:80`,
     `relay_server.py` listens on `:8000`.
 25. **`frontend/README.md`** is the stock Vite template (not project docs).
-</content>
+26. [Resolved 2026-07-05] **Socket.io telemetry was non-functional** despite
+    being documented as verified: `stream_telemetry_task` awaited a
+    non-existent `sio.get_participants(room=...)` API and died before the
+    first emit. Fixed via the room manager's registry; regression-tested.
+27. [Resolved 2026-07-05] **`/api/payments/verify` trusted the client-sent
+    `amount_inr`** (the checkout signature does not cover the amount). It now
+    fetches and credits the Razorpay-confirmed captured amount, and rejects
+    payments whose order was created for a different user.
+28. [Changed 2026-07-05] Security hardening: JWT known-default secrets are
+    refused (backend generates an ephemeral key; `deploy.ps1` aborts),
+    committed credentials were stripped from `tools/`, `setup_duckdns.sh`,
+    and `amphive_tunnel.conf` (now untracked, `.example` added), the DB
+    password and MQTT bind interface are `.env`-driven
+    (`POSTGRES_PASSWORD`, `MQTT_BIND_IP`), and mosquitto's unused 9001 port
+    is no longer published. **Rotation of the burned secrets is still
+    pending** — see [SECURITY.md](SECURITY.md).

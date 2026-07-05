@@ -15,4 +15,3 @@ moved here on 2026-06-20 to declutter the root.)
 > submodules under [`../../context_repos/`](../../context_repos/)
 > (`ESP32-Tailscale-WoL`, `headscale`, and `ChargeHub`). The folders here hold the
 > distilled *notes*; the submodules hold the actual source.
-</content>

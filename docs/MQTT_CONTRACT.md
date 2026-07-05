@@ -81,4 +81,3 @@ updated via `SET_INTERVAL` between 500ms and 60000ms); parses commands with
    the P110 reports neither). On-device flash verification pending. See
    [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) and
    [FIRMWARE.md §4](FIRMWARE.md#4-tapo-driver--real-klap-v2-maintapo_protocolc).
-</content>

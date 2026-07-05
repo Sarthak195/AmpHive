@@ -13,39 +13,57 @@ known security gaps, not a formal audit. Items are roughly ordered by severity.*
 
 ---
 
-## 1. Committed secrets (rotate these)
+## 1. Committed secrets (ROTATION STILL REQUIRED)
 
-| File (tracked in git) | Secret |
-|-----------------------|--------|
-| `deploy/config/amphive_tunnel.conf` | WireGuard **private key** + peer public key |
-| `setup_duckdns.sh` | Live **DuckDNS token** (contradicts `deploy_guide.md`, which says it must never be committed) |
-| `tools/local_tapo_test.py`, `tools/relay_server.py`, `tools/turn_on.py`, `tools/turn_off.py` | Hard-coded **Tapo account email + password** |
-| `deploy/scripts/deploy.ps1`, `scripts/start-vm.bat`, `deploy/docs/gcp_migration_runbook.md` | DB password `amphive_db_admin` (plaintext) |
+*Updated 2026-07-05: the secrets below were removed from the tracked files
+(env-var-ified / untracked), but they remain in **git history** — every one of
+them must still be rotated. Removing them from HEAD is not remediation.*
 
-✅ **Good news:** the application `.env` files are **gitignored** (`.gitignore`
-lines 5–9) and are *not* committed. Backend Razorpay/JWT/Tapo secrets live only
-in the local/VM `.env`, not in the repo.
+| File | Secret | HEAD status (2026-07-05) |
+|------|--------|--------------------------|
+| `deploy/config/amphive_tunnel.conf` | WireGuard **private key** | Untracked + gitignored; `amphive_tunnel.conf.example` added |
+| `scripts/setup_duckdns.sh` | Live **DuckDNS token** | Now requires `DUCKDNS_TOKEN` env var |
+| `tools/local_tapo_test.py`, `tools/relay_server.py`, `tools/turn_on.py`, `tools/turn_off.py`, `tools/klap_probe.py` | **Tapo account email + password** | Now read `TAPO_EMAIL` / `TAPO_PASSWORD` / `TAPO_PLUG_IP` env vars |
+| `deploy/scripts/deploy.ps1`, `docker-compose.prod.yml` | DB password `amphive_db_admin` | Now interpolated from `.env` `POSTGRES_PASSWORD` (deploy.ps1 falls back to the legacy value with a warning until rotated) |
+| `scripts/start-vm.bat`, `deploy/docs/gcp_migration_runbook.md` | DB password references | Still present (docs/scripts) — rotate the password itself |
 
-**Remediation:** move the Tapo credentials and DuckDNS token to env vars / a
-local untracked config; remove `amphive_tunnel.conf` from tracking (keep a
-`.example` with placeholders); rotate the WireGuard keypair, the DuckDNS token,
-the Tapo account password, and the DB password; scrub git history if feasible.
+✅ The application `.env` files are **gitignored** and *not* committed. Backend
+Razorpay/JWT/Tapo secrets live only in the local/VM `.env`, not in the repo.
+
+**Still to do:** rotate the WireGuard keypair, the DuckDNS token, the Tapo
+account password, and the DB password (they are all burned — history retains
+them); scrub git history if feasible.
 
 ## 2. Default / weak credentials
 
-- `JWT_SECRET_KEY` default is the literal `amphive-dev-secret-change-in-production`.
-  If unset in prod, **all JWTs are forgeable**. Set a strong secret in `.env`.
-- The PostgreSQL container on the VM uses user `postgres` with the known password
-  `amphive_db_admin` (hardcoded in `docker-compose.prod.yml` / `deploy.ps1`).
+- [Mitigated 2026-07-05] `JWT_SECRET_KEY`: the backend now **refuses** a
+  missing/known-default secret and generates a random *ephemeral* key instead
+  (sessions won't survive restarts until a real secret is set), and
+  `deploy.ps1` **aborts the deploy** if `.env` has a missing/short/default
+  `JWT_SECRET_KEY`. The old behavior (silently signing with the public literal
+  `amphive-dev-secret-change-in-production`) is gone. Still set a strong
+  secret in every environment.
+- The PostgreSQL container on the VM uses user `postgres` with the known
+  password `amphive_db_admin` unless `POSTGRES_PASSWORD` is set in `.env` —
+  **rotate it** (the old value is in git history).
 
 ## 3. Open / unauthenticated surfaces
 
 - **MQTT broker is anonymous + no TLS** (`mosquitto.conf`: `allow_anonymous true`)
   and the firewall opens **1883 to `0.0.0.0/0`**. Anyone on the internet can
-  publish/subscribe — including sending plug `ON`/`OFF` commands. Confidentiality
-  was *intended* to come from running MQTT inside the overlay, but the broker is
-  also exposed publicly. **Lock down**: bind to the overlay interface, require
-  auth, and/or remove the public firewall rule.
+  publish/subscribe — including sending plug `ON`/`OFF` commands and **forging
+  telemetry, which feeds billing**. Confidentiality was *intended* to come from
+  running MQTT inside the overlay, but the broker is also exposed publicly.
+  - [Partial 2026-07-05] `docker-compose.prod.yml` now binds the published port
+    via `${MQTT_BIND_IP}` from `.env`. Set `MQTT_BIND_IP=<VM overlay IP>`
+    (e.g. `100.87.241.70`) so only overlay peers reach 1883 — the ESP32
+    connects over the overlay, and the backend uses the internal compose
+    network, so nothing needs the public port. Default is `0.0.0.0` (legacy)
+    until flipped. The unused websocket port 9001 is no longer published.
+  - Still to do: remove the public GCP firewall rule for 1883
+    (`gcloud compute firewall-rules list --filter="allowed[].ports=1883"`,
+    then delete/restrict it) and add broker auth (needs a firmware
+    credentials field before `allow_anonymous false` can be enabled).
 - **CORS is fully open** (`allow_origins=["*"]`). Restrict to the known frontend
   origin(s) before production.
 - **`/api/payments/webhook`** is unauthenticated by design but HMAC-gated. It now
@@ -79,8 +97,23 @@ the Tapo account password, and the DB password; scrub git history if feasible.
 
 ## 7. Recently fixed
 
-*Previously listed as gaps here; resolved as of 2026-07-02. Kept for context so
-older references don't read as still-open.*
+*Previously listed as gaps here; kept for context so older references don't
+read as still-open.*
+
+**2026-07-05:**
+
+- **Client-controlled payment amount (wallet inflation).** `/api/payments/verify`
+  used to credit `amount_inr` straight from the request body — the Razorpay
+  checkout signature covers only `(order_id, payment_id)`, *not* the amount, so
+  a user could pay ₹10 and claim ₹10,000. The endpoint now fetches the payment
+  from Razorpay's API and credits the confirmed captured amount, rejects
+  order/payment mismatches, and refuses to credit a payment whose order was
+  created for a different user. Covered by `backend/tests/test_payments.py`.
+- **Insecure JWT defaults removed** (see §2) — backend + deploy.ps1 both refuse
+  known-default/weak secrets.
+- **Secrets stripped from tracked files** (see §1) — rotation still pending.
+
+**2026-07-02:**
 
 - **RBAC is enforced.** `require_role("cpo","admin")` (`backend/services/rbac.py`)
   gates every `/api/cpo/*` route and checks the live DB role, not just the token.
@@ -98,16 +131,25 @@ older references don't read as still-open.*
 ## Quick remediation checklist
 
 Still open:
-- [ ] Rotate WireGuard keys, DuckDNS token, Tapo password, DB password.
-- [ ] Remove committed secrets from tracking; add `.example` templates.
-- [ ] Set a strong `JWT_SECRET_KEY` in every environment.
-- [ ] Restrict the MQTT broker (auth + bind to overlay; drop public 1883 rule).
+- [ ] **Rotate** WireGuard keys, DuckDNS token, Tapo password, DB password
+      (values remain in git history even though HEAD is clean).
+- [ ] Set a strong `JWT_SECRET_KEY` in every environment (enforced by
+      deploy.ps1 as of 2026-07-05; backend falls back to an ephemeral key).
+- [ ] Set `MQTT_BIND_IP=<overlay IP>` in the VM `.env` and redeploy; then drop
+      the public 1883 firewall rule; longer-term add broker auth.
 - [ ] Restrict CORS to the known frontend origin(s).
 - [ ] Consider a DB-level non-negative-balance constraint.
+- [ ] Unique `razorpay_payment_id` ledger column (the idempotency check is a
+      pre-lock SELECT — concurrent /verify + webhook can still double-credit).
+
+Done (2026-07-05):
+- [x] Remove committed secrets from tracked files; add `.example` /
+      env-var paths (`tools/*`, `setup_duckdns.sh`, `amphive_tunnel.conf`).
+- [x] Server-authoritative payment amounts in `/api/payments/verify`.
+- [x] Refuse known-default JWT secrets (backend + deploy gate).
 
 Done (2026-07-02):
 - [x] Implement role checks for CPO/admin actions (`require_role`).
 - [x] Remove/authenticate `gateways/register` / `plugs/register`.
 - [x] Make wallet credit/debit atomic (row lock).
 - [x] Pass JWT token to SSE live telemetry connection to authenticate users.
-</content>

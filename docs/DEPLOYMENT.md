@@ -168,4 +168,3 @@ Reference repos under the author's GitHub (read-only context, not build inputs):
 | `gcp_migration_runbook.md` | Full AWS EC2 → GCP, then region migration log |
 | `wireguard_tunnel_setup.md` | Direct-Mode WireGuard setup (pre-generated keys/configs) |
 | `phase2_walkthrough.md` | Phase-2 work log |
-</content>

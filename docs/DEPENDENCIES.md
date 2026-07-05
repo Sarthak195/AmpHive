@@ -27,6 +27,7 @@ main.py  (FastAPI app — 35 REST endpoints, all schemas, lifespan)
 ├── services/mqtt_manager.py  paho-mqtt bridge: publishes ON/OFF; ingests telemetry
 │                             (updates TelemetryStore + persists energy/peak_power) & status
 ├── services/telemetry.py  in-memory TelemetryStore singleton + SSE generator (COINS pricing)
+├── services/socketio_manager.py Socket.io server, auth, session rooms, and telemetry broadcasting
 ├── services/payments.py   razorpay create-order / verify / webhook (HMAC, idempotent credit)
 ├── services/tapo_direct.py  Direct-Mode Tapo driver (tapo lib or HTTP relay via TAPO_RELAY_URL)
 │
@@ -45,7 +46,8 @@ main.py  (FastAPI app — 35 REST endpoints, all schemas, lifespan)
 | `passlib[bcrypt]`, `bcrypt==4.0.1` | Password hashing |
 | `python-dotenv` | `.env` loading |
 | `razorpay` | Payment gateway SDK |
-| `sse-starlette` | Server-Sent Events for the live session stream |
+| `python-socketio`, `python-engineio` | Socket.io server and engine for real-time WebSockets |
+| `sse-starlette` | Server-Sent Events (legacy fallback) |
 | `tapo` | Rust-backed TP-Link Tapo control (Direct Mode) |
 
 ---
@@ -60,7 +62,7 @@ main.jsx  (ReactDOM.createRoot, StrictMode)
 ├── styles/global.css                  design system (glassmorphic dark theme)
 ├── contexts/AuthContext.jsx           JWT in localStorage, /api/auth/me on load  → api/client.js
 ├── contexts/WalletContext.jsx         derives balance from user                  → AuthContext
-├── contexts/SessionContext.jsx        real EventSource → SSE endpoint            → api/client.js
+├── contexts/SessionContext.jsx        Socket.io-client connection & subscription → api/client.js
 └── App.jsx  (BrowserRouter, ProtectedRoute + CpoProtectedRoute)
     ├── components/Navbar.jsx
     │

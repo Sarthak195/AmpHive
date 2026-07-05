@@ -139,4 +139,3 @@ DB created by the running app will not have them):
   `/api/cpo/*` routes via `require_role(...)` (`backend/services/rbac.py`).
 - `backend/seed.py` populates sample tenants/users/gateways/plugs/sessions for
   development (default password `password123`) — see [DEPLOYMENT.md](DEPLOYMENT.md#database-seeding).
-</content>
