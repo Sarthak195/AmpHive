@@ -21,18 +21,18 @@ them must still be rotated. Removing them from HEAD is not remediation.*
 
 | File | Secret | HEAD status (2026-07-05) |
 |------|--------|--------------------------|
-| `deploy/config/amphive_tunnel.conf` | WireGuard **private key** | Untracked + gitignored; `amphive_tunnel.conf.example` added |
+| `deploy/config/amphive_tunnel.conf` **and** `deploy/docs/wireguard_tunnel_setup.md` | WireGuard **private key** | Config untracked + gitignored; the key was *also* hardcoded in the setup doc — now placeholdered (2026-07-05). `amphive_tunnel.conf.example` added |
 | `scripts/setup_duckdns.sh` | Live **DuckDNS token** | Now requires `DUCKDNS_TOKEN` env var |
-| `tools/local_tapo_test.py`, `tools/relay_server.py`, `tools/turn_on.py`, `tools/turn_off.py`, `tools/klap_probe.py` | **Tapo account email + password** | Now read `TAPO_EMAIL` / `TAPO_PASSWORD` / `TAPO_PLUG_IP` env vars |
+| `tools/local_tapo_test.py`, `tools/relay_server.py`, `tools/turn_on.py`, `tools/turn_off.py`, `tools/klap_probe.py` | **Tapo account email + password** | Env-var'd across all five tools, committed `3e20dbd`; read `TAPO_EMAIL` / `TAPO_PASSWORD` / `TAPO_PLUG_IP`. **Password rotated 2026-07-05**, set only in the gitignored `.env` |
 | `deploy/scripts/deploy.ps1`, `docker-compose.prod.yml` | DB password `amphive_db_admin` | Now interpolated from `.env` `POSTGRES_PASSWORD` (deploy.ps1 falls back to the legacy value with a warning until rotated) |
 | `scripts/start-vm.bat`, `deploy/docs/gcp_migration_runbook.md` | DB password references | Still present (docs/scripts) — rotate the password itself |
 
 ✅ The application `.env` files are **gitignored** and *not* committed. Backend
 Razorpay/JWT/Tapo secrets live only in the local/VM `.env`, not in the repo.
 
-**Still to do:** rotate the WireGuard keypair, the DuckDNS token, the Tapo
-account password, and the DB password (they are all burned — history retains
-them); scrub git history if feasible.
+**Still to do:** rotate the WireGuard keypair, the DuckDNS token, and the DB
+password **at the source** (all burned — history retains them). The Tapo account
+password was rotated 2026-07-05. Scrub git history if feasible.
 
 ## 2. Default / weak credentials
 
@@ -111,7 +111,10 @@ read as still-open.*
   created for a different user. Covered by `backend/tests/test_payments.py`.
 - **Insecure JWT defaults removed** (see §2) — backend + deploy.ps1 both refuse
   known-default/weak secrets.
-- **Secrets stripped from tracked files** (see §1) — rotation still pending.
+- **Secrets stripped from tracked files** (see §1) — `tools/*` env-var'd and
+  committed (`3e20dbd`); the WireGuard private key was also removed from
+  `wireguard_tunnel_setup.md`. **Tapo password rotated**; the WireGuard keypair,
+  DuckDNS token, and DB password still need rotation at the source.
 
 **2026-07-02:**
 
@@ -131,8 +134,9 @@ read as still-open.*
 ## Quick remediation checklist
 
 Still open:
-- [ ] **Rotate** WireGuard keys, DuckDNS token, Tapo password, DB password
+- [ ] **Rotate** WireGuard keys, DuckDNS token, DB password at the source
       (values remain in git history even though HEAD is clean).
+      *(Tapo password rotated 2026-07-05.)*
 - [ ] Set a strong `JWT_SECRET_KEY` in every environment (enforced by
       deploy.ps1 as of 2026-07-05; backend falls back to an ephemeral key).
 - [ ] Set `MQTT_BIND_IP=<overlay IP>` in the VM `.env` and redeploy; then drop
@@ -143,8 +147,10 @@ Still open:
       pre-lock SELECT — concurrent /verify + webhook can still double-credit).
 
 Done (2026-07-05):
-- [x] Remove committed secrets from tracked files; add `.example` /
-      env-var paths (`tools/*`, `setup_duckdns.sh`, `amphive_tunnel.conf`).
+- [x] Remove committed secrets from tracked files; add `.example` / env-var paths
+      (`tools/*` committed `3e20dbd`, `setup_duckdns.sh`, `amphive_tunnel.conf`,
+      `wireguard_tunnel_setup.md`).
+- [x] Rotate the Tapo account password.
 - [x] Server-authoritative payment amounts in `/api/payments/verify`.
 - [x] Refuse known-default JWT secrets (backend + deploy gate).
 

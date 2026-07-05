@@ -140,19 +140,25 @@ Open the WireGuard application and click **"Add Tunnel" → "Add empty tunnel...
 or import the pre-generated config file at:
 [`deploy/config/amphive_tunnel.conf`](file:///c:/Users/Sarthak/Documents/AmpHive/deploy/config/amphive_tunnel.conf)
 
-The config contains:
+The config contains (see [`amphive_tunnel.conf.example`](file:///c:/Users/Sarthak/Documents/AmpHive/deploy/config/amphive_tunnel.conf.example)):
 
 ```ini
 [Interface]
-PrivateKey = GMtd/AiU2IilcpG+OXYEJcnDoGOSq3zzeHporRMHvX8=
+PrivateKey = <PC-private-key>          # generate with `wg genkey` — NEVER commit a real key
 Address = 10.10.0.2/24
 
 [Peer]
-PublicKey = xgx+hojIqrK4dENlNBzomgvm+WTad+am0K0+D1frr3U=
-Endpoint = 34.100.200.152:51820
+PublicKey = <VM-server-public-key>     # from the VM: `wg genkey | tee sk | wg pubkey`
+Endpoint = <VM-public-ip>:51820
 AllowedIPs = 10.10.0.0/24
 PersistentKeepalive = 25
 ```
+
+> ⚠️ **Burned keypair.** An earlier revision of this doc committed a real
+> `PrivateKey` (and the matching server `PublicKey`/endpoint). Those values are
+> **compromised and in git history** — regenerate the WireGuard keypair on both
+> ends and never paste a private key back into this file. Keep the live config
+> only in the gitignored `deploy/config/amphive_tunnel.conf`.
 
 ### 2.3 Activate the Tunnel
 

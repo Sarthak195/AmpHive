@@ -41,9 +41,11 @@ Everything cloud-side is identical between the two; only the last hop differs.
 
 ## 3. Golden rules (from AGENTS.md — do not break these)
 
-1. **⛔ Never deploy or test on this Windows box.** No `docker compose up`,
-   `deploy.ps1`, migrations, or seeds locally. All deploy/test happens on the GCP
-   VM (`amphive-vm-in`, `asia-south1-a`).
+1. **Don't run the app stack or a database on this Windows box** (dev workstation
+   — no local `docker compose up`, no local Postgres, no migrations/seeds against
+   a local DB). Operating the GCP VM (`amphive-vm-in`, `asia-south1-a`) *from*
+   this box is allowed — `deploy.ps1`, `gcloud compute ssh`, secret rotation;
+   confirm before destructive/irreversible VM actions. (Updated 2026-07-05.)
 2. **Deploy via the script**, not by hand: `.\deploy\scripts\deploy.ps1`. It
    validates `.env` (aborts on a weak/default `JWT_SECRET_KEY`), tars
    `backend` + `frontend`, copies configs, and rebuilds containers on the VM.

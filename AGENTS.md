@@ -29,10 +29,14 @@ Path B (Direct Mode over WireGuard, the current dev/test reality). See
 
 ## Hard rules
 
-1. **⛔ Never deploy or test on the local machine.** This Windows box is a dev
-   workstation only. Do **not** run `docker compose up`, `deploy.ps1`, DB
-   migrations, or seeds locally. All deploy/test happens on the GCP VM
-   (`amphive-vm-in`) via `gcloud compute ssh` or `deploy/scripts/deploy.ps1`.
+1. **Don't run the app stack or a database on this Windows box.** It's a dev
+   workstation — no local `docker compose up` of the full stack, no local
+   Postgres, no DB migrations or seeds against a local database. *Operating the
+   GCP VM from this box is allowed* (updated 2026-07-05): `deploy/scripts/deploy.ps1`,
+   `gcloud compute ssh amphive-vm-in`, and secret-rotation commands act on the
+   VM/providers, not the local machine, and are fine. **Confirm before any
+   destructive or irreversible action** — DB wipe/migration on the live VM,
+   `git push --force`, or deleting a firewall rule.
 2. **Deploy via the script.** Backend/frontend changes ship through
    `deploy/scripts/deploy.ps1`, which uploads code and rebuilds containers on the
    VM. See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).

@@ -8,12 +8,12 @@ Cross-references [TECH_DEBT.md](TECH_DEBT.md) items as `TD#n` and
 
 ## Immediate (this week) — security & correctness
 
-- [ ] **Commit the `tools/` secret strip.** HEAD still hardcodes the Tapo
-      account (`tools/turn_on.py`, `turn_off.py`, `relay_server.py`,
-      `local_tapo_test.py`, `klap_probe.py`). `turn_on.py` keeps the real
-      password as an env default even in the working copy. (TD#1)
-- [ ] **Rotate every burned secret**: WireGuard keypair, DuckDNS token, Tapo
-      password, DB password. They remain in git history regardless of HEAD. (TD#2, SEC §1)
+- [x] **Commit the `tools/` secret strip.** Done (`3e20dbd`, 2026-07-05) — all
+      five helpers now read `TAPO_EMAIL` / `TAPO_PASSWORD` / `TAPO_PLUG_IP` from
+      env and fail closed; no real secret remains in HEAD. (TD#1)
+- [ ] **Rotate every burned secret**: WireGuard keypair, DuckDNS token, DB
+      password (**Tapo password rotated 2026-07-05**). They remain in git
+      history regardless of HEAD. (TD#2, SEC §1)
 - [ ] **Take MQTT off the public internet**: set `MQTT_BIND_IP=<overlay IP>` in
       the VM `.env`, redeploy, then delete the GCP firewall rule for tcp:1883. (TD#3, SEC §3)
 - [ ] **Lock CORS** to the known frontend origin(s); drop the `["*"]` +
