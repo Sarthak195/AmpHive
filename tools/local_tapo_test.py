@@ -1,15 +1,18 @@
 import asyncio
+import os
+import sys
 from tapo import ApiClient
 
 async def main():
-    # Tapo App Credentials
-    tapo_email = "sjgotnfts1@gmail.com"
-    tapo_password = "Nitya@2001"
-    
-    # Update this to the actual IP of the plug on your local network!
-    # You can find this in the Tapo App under Device Settings -> Device Info.
-    plug_ip = "192.168.1.4"
-    
+    # Tapo App Credentials — from environment, never hardcoded.
+    tapo_email = os.environ.get("TAPO_EMAIL", "")
+    tapo_password = os.environ.get("TAPO_PASSWORD", "")
+    if not tapo_email or not tapo_password:
+        sys.exit("Set TAPO_EMAIL and TAPO_PASSWORD environment variables before running.")
+
+    # Plug IP on your local network (Tapo App: Device Settings -> Device Info).
+    plug_ip = os.environ.get("TAPO_PLUG_IP", "192.168.1.4")
+
     print(f"Authenticating with Tapo account: {tapo_email}")
     client = ApiClient(tapo_email, tapo_password)
     

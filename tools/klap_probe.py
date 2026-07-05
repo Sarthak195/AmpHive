@@ -26,10 +26,13 @@ import requests
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives import padding
 
-# Defaults mirror the other tools/ scripts.
-IP = sys.argv[1] if len(sys.argv) > 1 else "192.168.1.4"
-EMAIL = sys.argv[2] if len(sys.argv) > 2 else "sjgotnfts1@gmail.com"
-PASSWORD = sys.argv[3] if len(sys.argv) > 3 else "Nitya@2001"
+# Credentials come from argv or the environment — never hardcoded.
+import os
+IP = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("TAPO_PLUG_IP", "192.168.1.4")
+EMAIL = sys.argv[2] if len(sys.argv) > 2 else os.environ.get("TAPO_EMAIL", "")
+PASSWORD = sys.argv[3] if len(sys.argv) > 3 else os.environ.get("TAPO_PASSWORD", "")
+if not EMAIL or not PASSWORD:
+    sys.exit("Pass email/password as argv or set TAPO_EMAIL / TAPO_PASSWORD env vars.")
 
 BASE = f"http://{IP}/app"
 PACK_L = struct.Struct(">l").pack  # big-endian signed 4-byte

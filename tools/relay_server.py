@@ -1,14 +1,22 @@
 import asyncio
 import json
+import os
+import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse
 from tapo import ApiClient
 
-# Configuration
-TAPO_EMAIL = "sjgotnfts1@gmail.com"
-TAPO_PASSWORD = "Nitya@2001"
-PLUG_IP = "192.168.1.4"
-PORT = 8000
+# Configuration — credentials come from the environment, never from source.
+#   set TAPO_EMAIL=you@example.com
+#   set TAPO_PASSWORD=...
+#   set TAPO_PLUG_IP=192.168.1.4   (optional, defaults below)
+TAPO_EMAIL = os.environ.get("TAPO_EMAIL", "")
+TAPO_PASSWORD = os.environ.get("TAPO_PASSWORD", "")
+PLUG_IP = os.environ.get("TAPO_PLUG_IP", "192.168.1.4")
+PORT = int(os.environ.get("RELAY_PORT", "8000"))
+
+if not TAPO_EMAIL or not TAPO_PASSWORD:
+    sys.exit("Set TAPO_EMAIL and TAPO_PASSWORD environment variables before running.")
 
 class RelayHandler(BaseHTTPRequestHandler):
     def do_GET(self):
