@@ -256,3 +256,15 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
     back, and return the same 400 as the sequential duplicate path (same
     pattern `_credit_topup` already used). Tests:
     `backend/tests/test_registration_races.py`.
+42. [Resolved 2026-07-06] **No backend session reaper** — a gateway dying
+    mid-session left the session ACTIVE forever (the only timeout lived in the
+    firmware, on the dead device). A lifespan-owned `SessionReaperService`
+    (`services/session_reaper.py`) now auto-finalizes ACTIVE sessions with no
+    telemetry for `SESSION_STALE_TIMEOUT_SEC` (default 300 s; sessions carry a
+    `last_telemetry_at` stamp fed by `_persist_telemetry`, falling back to
+    `started_at`). Reaped sessions bill persisted energy through the same
+    `finalize_charging_session` used by `/api/sessions/stop`, which now locks
+    the session row and re-checks ACTIVE — also fixing the pre-existing
+    **double-stop double-debit race** (two concurrent stops both passed the
+    unlocked ACTIVE check and each debited the wallet). Tests:
+    `backend/tests/test_session_reaper.py`.

@@ -303,6 +303,8 @@ class MQTTManager:
                     # Track peak power — only update if this reading is higher
                     if watts > active_session.peak_power_w:
                         active_session.peak_power_w = watts
+                    # Staleness signal read by the session reaper.
+                    active_session.last_telemetry_at = datetime.now(timezone.utc)
 
                 await session.commit()
         except Exception as e:

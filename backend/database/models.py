@@ -147,6 +147,10 @@ class ChargingSession(Base):
     ended_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     energy_kwh: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     peak_power_w: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    # Staleness signal for the session reaper: stamped by MQTTManager's
+    # _persist_telemetry on every reading attributed to this session. NULL
+    # until the first reading arrives (the reaper falls back to started_at).
+    last_telemetry_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     # Money: NUMERIC(12,2) → Decimal (energy_kwh/peak_power_w stay Float — measurements).
     coins_spent: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal("0.00"), nullable=False)
     status: Mapped[SessionStatus] = mapped_column(SQLEnum(SessionStatus, name="session_status", values_callable=lambda x: [e.value for e in x]), default=SessionStatus.ACTIVE, nullable=False)

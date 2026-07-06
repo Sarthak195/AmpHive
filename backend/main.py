@@ -45,6 +45,7 @@ from backend.services.mqtt_manager import MQTTManager
 from backend.services.telemetry import TelemetryStore, COINS_PER_KWH
 from backend.services.money import to_money, ZERO_MONEY
 from backend.services.telemetry_persistence import TelemetryPersistenceService
+from backend.services.session_reaper import SessionReaperService
 # [Direct Mode] Import the Tapo direct driver for ESP32-bypass plug control
 from backend.services.tapo_direct import TapoDirectDriver
 from backend.services import payments as payment_service
@@ -85,6 +86,8 @@ tapo_driver: Optional[TapoDirectDriver] = None
 telemetry_store = TelemetryStore()
 # Buffered batch-flush service for time-series telemetry persistence (lifespan-owned)
 telemetry_persistence: Optional[TelemetryPersistenceService] = None
+# Auto-finalizer for sessions whose telemetry went silent (lifespan-owned)
+session_reaper: Optional[SessionReaperService] = None
 
 async def set_plug_telemetry_interval(db: AsyncSession, plug_id: int, interval_ms: int):
     """
@@ -150,7 +153,7 @@ async def check_and_speed_up_active_session(db: AsyncSession, user_id: int):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage MQTT and Tapo Direct connection lifecycles with the FastAPI application."""
-    global mqtt_manager, tapo_driver, telemetry_persistence
+    global mqtt_manager, tapo_driver, telemetry_persistence, session_reaper
 
     # Initialize the database tables
     await init_db()
@@ -194,9 +197,20 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("Direct Mode DISABLED — using standard ESP32/MQTT path")
 
+    # Auto-finalize ACTIVE sessions whose telemetry has gone silent (dead
+    # gateway mid-session). Shares finalize_charging_session with the stop
+    # route, so reaping bills/frees exactly like a user-initiated stop.
+    session_reaper = SessionReaperService(
+        db_session_factory=async_session_factory,
+        finalize=finalize_charging_session,
+    )
+    session_reaper.start(loop)
+
     yield
     # Stop MQTT first (no new enqueues), then drain + stop the flush loop so the
     # buffered tail is persisted.
+    if session_reaper:
+        await session_reaper.stop()
     if mqtt_manager:
         mqtt_manager.stop()
     if telemetry_persistence:
@@ -799,40 +813,40 @@ async def start_charging_session(
     }
 
 
-@app.post("/api/sessions/stop")
-async def stop_charging_session(
-    req: SessionStopRequest,
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
+async def finalize_charging_session(
+    db: AsyncSession,
+    session_id: int,
+    *,
+    expected_user_id: Optional[int] = None,
+    reason: Optional[str] = None,
+) -> Optional[dict]:
     """
-    Stop an active charging session.
-    1. Send the OFF command to the ESP32 gateway via MQTT.
-    2. Finalize the session record (end time, total energy, total cost).
-    3. Create a ledger debit transaction.
-    4. End the telemetry stream.
+    Shared stop path for /api/sessions/stop and the session reaper: bill the
+    session, debit the wallet, write the ledger row, free the plug, and tear
+    down the telemetry stream.
+
+    The session row is locked (SELECT ... FOR UPDATE) and its ACTIVE status
+    re-checked under the lock, so concurrent finalizers (double stop click,
+    user racing the reaper) settle exactly once — the loser gets None.
+    Returns None when the session doesn't exist (for the caller's filter) or
+    is no longer ACTIVE; otherwise returns the stop-response payload.
     """
-    # Load the session
+    filters = [ChargingSession.id == session_id]
+    if expected_user_id is not None:
+        filters.append(ChargingSession.user_id == expected_user_id)
     result = await db.execute(
-        select(ChargingSession).where(
-            and_(
-                ChargingSession.id == req.session_id,
-                ChargingSession.user_id == user.id,
-            )
-        )
+        select(ChargingSession).where(and_(*filters)).with_for_update()
     )
     session = result.scalar_one_or_none()
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found.")
-
-    if session.status != SessionStatus.ACTIVE:
-        raise HTTPException(status_code=400, detail="This session is not active.")
+    if not session or session.status != SessionStatus.ACTIVE:
+        return None
 
     # Load the plug
     plug_result = await db.execute(select(Plug).where(Plug.id == session.plug_id))
     plug = plug_result.scalar_one()
 
-    # 1. Send MQTT OFF command
+    # 1. Send MQTT OFF command (best-effort — the gateway may be gone; its
+    #    on-device watchdogs bound the hardware side)
     success = mqtt_manager.send_plug_command(
         gateway_id=plug.gateway_id,
         plug_id=plug.id,
@@ -865,7 +879,7 @@ async def stop_charging_session(
 
     # 4. Deduct coins from user wallet and create ledger entry (Atomic)
     user_result = await db.execute(
-        select(User).where(User.id == user.id).with_for_update()
+        select(User).where(User.id == session.user_id).with_for_update()
     )
     locked_user = user_result.scalar_one()
 
@@ -881,6 +895,8 @@ async def stop_charging_session(
     session.coins_spent = actual_debit  # what was actually collected from the wallet
 
     description = f"Charging session on {plug.name}: {final_energy:.3f} kWh"
+    if reason:
+        description += f" [{reason}]"
     if shortfall > 0:
         description += f" (shortfall {shortfall:.2f} coins uncollected)"
         logger.warning(
@@ -910,7 +926,10 @@ async def stop_charging_session(
     telemetry_store.end_session(plug.id)
     await set_plug_telemetry_interval(db, plug.id, 10000)
 
-    logger.info(f"Session {session.id} stopped: {final_energy:.3f} kWh, {actual_debit:.2f} coins")
+    logger.info(
+        f"Session {session.id} stopped{f' ({reason})' if reason else ''}: "
+        f"{final_energy:.3f} kWh, {actual_debit:.2f} coins"
+    )
 
     return {
         "status": "completed",
@@ -919,6 +938,39 @@ async def stop_charging_session(
         "coins_spent": round(actual_debit, 2),
         "balance_remaining": round(locked_user.coin_balance, 2),
     }
+
+
+@app.post("/api/sessions/stop")
+async def stop_charging_session(
+    req: SessionStopRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Stop an active charging session (billing + cleanup happen in
+    finalize_charging_session, shared with the session reaper).
+    """
+    result = await finalize_charging_session(
+        db, req.session_id, expected_user_id=user.id
+    )
+    if result is not None:
+        return result
+
+    # Nothing was finalized — distinguish "not yours/doesn't exist" from
+    # "already finished" for the API contract. Race-safe: finalization
+    # definitively did not happen in this request.
+    check = await db.execute(
+        select(ChargingSession).where(
+            and_(
+                ChargingSession.id == req.session_id,
+                ChargingSession.user_id == user.id,
+            )
+        )
+    )
+    if check.scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail="Session not found.")
+    raise HTTPException(status_code=400, detail="This session is not active.")
+
 
 @app.get("/api/sessions/active")
 async def get_active_session(

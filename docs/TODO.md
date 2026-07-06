@@ -45,10 +45,14 @@ Cross-references [TECH_DEBT.md](TECH_DEBT.md) items as `TD#n` and
       so long-connected gateways stay live without reconnecting; the model's
       misleading `onupdate=now` hook is removed. Tests:
       `backend/tests/test_gateway_liveness.py`. (IMPL §3.40)
-- [ ] **Add a backend session reaper**: periodic task that auto-stops ACTIVE
-      sessions with no telemetry for N minutes (bill persisted energy). Today the
-      only timeout lives in the firmware — useless if the gateway never got the
-      ON or died mid-session.
+- [x] **Add a backend session reaper** (2026-07-06): lifespan-owned
+      `SessionReaperService` sweeps every `SESSION_REAPER_INTERVAL_SEC` (60 s)
+      and finalizes ACTIVE sessions with no telemetry for
+      `SESSION_STALE_TIMEOUT_SEC` (300 s; `COALESCE(last_telemetry_at,
+      started_at)`). Reaping goes through the same `finalize_charging_session`
+      path as a user stop — which now **locks the session row** and re-checks
+      ACTIVE, also closing the pre-existing double-stop double-debit race.
+      Tests: `backend/tests/test_session_reaper.py`. (IMPL §3.42)
 - [ ] **Decide one-active-session-per-user** (enforce at start) or make
       `/api/sessions/active` + the UI handle several; today older active
       sessions are unreachable/un-stoppable by the user.

@@ -16,6 +16,7 @@ prioritized roadmap to close the biggest coverage gaps.*
 | `test_active_session_speedup.py` | **Regression** for the login/`/me` `MultipleResultsFound` crash: `check_and_speed_up_active_session` must handle a user with 0/1/many ACTIVE sessions (mock result mirrors SQLAlchemy's raise-on-many semantics) | Unit |
 | `test_gateway_liveness.py` | Session-start liveness gate: `gateway_is_live` matrix (offline/stale/fresh/naive-legacy/missing `last_seen_at`) + `MQTTManager` telemetry-driven `last_seen_at` refresh and its 1/min throttle | Unit |
 | `test_registration_races.py` | **Regression** for duplicate-insert races: `/api/auth/register` + `/api/cpo/setup` must map a concurrent-duplicate `IntegrityError` to the same 400 as the sequential path (and roll back) | Unit |
+| `test_session_reaper.py` | Reaper sweep logic: every stale id finalized with the reap reason, user-stop races not double-counted, one failure doesn't abort the sweep, staleness query COALESCEs `last_telemetry_at`/`started_at` | Unit |
 
 Run:
 ```bash

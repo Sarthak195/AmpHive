@@ -101,6 +101,9 @@ _INPLACE_UPGRADES = (
     # Plug geolocation for the map (falls back to the gateway's coords when NULL).
     "ALTER TABLE plugs ADD COLUMN IF NOT EXISTS latitude DOUBLE PRECISION",
     "ALTER TABLE plugs ADD COLUMN IF NOT EXISTS longitude DOUBLE PRECISION",
+    # Session-reaper staleness signal (NULL until the first telemetry reading).
+    "ALTER TABLE charging_sessions "
+    "ADD COLUMN IF NOT EXISTS last_telemetry_at TIMESTAMPTZ",
 )
 
 

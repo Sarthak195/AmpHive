@@ -57,8 +57,13 @@ freshly seen.
 `id` PK · `tenant_id` → tenants (CASCADE) · `user_id` → users (CASCADE) ·
 `plug_id` → plugs (CASCADE) · `started_at` · `ended_at` (nullable) ·
 `energy_kwh` float · `peak_power_w` float *(populated from inbound telemetry in
-`mqtt_manager.py`)* · `coins_spent` **NUMERIC(12,2)** (Decimal) · `status`
-(default `active`).
+`mqtt_manager.py`)* · `last_telemetry_at` (nullable) · `coins_spent`
+**NUMERIC(12,2)** (Decimal) · `status` (default `active`).
+
+`last_telemetry_at` (added 2026-07-06) is the session reaper's staleness
+signal — stamped by `MQTTManager._persist_telemetry` on every reading
+attributed to the session; the reaper judges sessions by
+`COALESCE(last_telemetry_at, started_at)`.
 
 ### `ledger_transactions`
 Double-entry-style wallet audit. `id` PK · `user_id` → users (CASCADE) ·
