@@ -62,16 +62,24 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 
 ## 2. End-to-end reality check
 
-- **Path A (ESP32 + MQTT)** is the operating path as of 2026-07-06: telemetry
-  ingestion, TelemetryStore updates, DB persistence, and gateway status updates
-  are implemented, and plug control now routes through the ESP32 gateway
-  (`DIRECT_MODE=false`). Earlier notes flagged the firmware plug driver as mocked
-  — confirm the on-device KLAP v2 driver is feeding real telemetry end-to-end.
+- **Path A (ESP32 + MQTT)** is the operating path and has now been run
+  **end-to-end on physical hardware** (2026-07-06): a real ESP32 gateway + P110
+  drove a billed session over MQTT — the plug delivered the correct energy and
+  real telemetry flowed through TelemetryStore → DB → the live stream →
+  wallet debit (`DIRECT_MODE=false`).
+- **Billing correction (2026-07-06):** the first hardware run surfaced a
+  **session overbilling bug** — the firmware published its *lifetime* energy
+  integrator as the telemetry `kwh`, so every session after the first billed the
+  plug's entire accumulated history (`kwh × COINS_PER_KWH`). The firmware now
+  reports **session-relative** energy (`meter − session_baseline`, the same value
+  the watchdog uses); idle reports 0. **Requires an on-device reflash** to take
+  effect — the code fix is committed but the dev box has no ESP-IDF toolchain.
+  Also fixed alongside: the inbound telemetry `TelemetryStore.update()` was called
+  from the paho thread, invoking `asyncio.Event.set()` cross-thread; it is now
+  marshaled onto the event loop (`tests/test_mqtt_manager.py`).
 - **Path B (Direct Mode + WireGuard relay)** has been **retired** — the WireGuard
   tunnel is no longer used. `tapo_direct` and the `/direct/*` endpoints remain in
   code but are dormant (`DIRECT_MODE=false` makes them return 503).
-- A fully working billed session with a real plug over Path A depends on the
-  firmware Tapo driver reporting real telemetry (vs. the earlier mock).
 
 ## 3. Full discrepancy list (doc says X → code does Y)
 
@@ -174,3 +182,35 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
     reset on reboot** — `s_energy_wh` now persists to NVS (restored on `tapo_init`,
     written throttled per 50 Wh), so post-reboot `consumed_kwh` no longer goes
     negative and the energy safety watchdog stays armed. Pending on-device flash.
+35. [Fixed in code 2026-07-06, pending on-device flash] **Firmware billed the
+    lifetime energy integrator, not the session.** `telemetry_task` published the
+    raw monotonic `telemetry.energy_kwh` (a cross-reboot cumulative meter) as the
+    telemetry `kwh`, while the backend bills that field as session energy. The
+    first session on a fresh plug billed ~correctly; every subsequent one overbilled
+    by the plug's entire history. Firmware now publishes session-relative energy
+    (`telemetry.energy_kwh − active_session.start_energy_kwh`, clamped ≥ 0) in both
+    the live payload and the offline-log buffer (`firmware/main/main.c`). Requires
+    an on-device reflash.
+36. [Resolved 2026-07-06] **Inbound telemetry crossed a thread boundary unsafely.**
+    `_handle_gateway_telemetry` runs on the paho network thread and called
+    `TelemetryStore.update()` inline, which calls `asyncio.Event.set()` to wake
+    stream consumers — not thread-safe cross-thread (can miss wakeups / corrupt loop
+    state). The store update is now marshaled onto the event loop via
+    `loop.call_soon_threadsafe`, keeping the store single-threaded. Regression test:
+    `backend/tests/test_mqtt_manager.py`.
+37. [Fixed in code 2026-07-06, pending on-device flash] **Firmware energy
+    integrator updated outside the KLAP mutex.** `tapo_get_telemetry` mutated
+    `s_energy_wh`/`s_energy_last_tick`/`s_energy_persisted_wh` after releasing
+    `s_mutex`; the telemetry task and the ON-handler baseline read can overlap and
+    race the read-modify-write (double-count / drop a slice). The integrator update
+    and throttled NVS persist now run inside the lock, with the kWh snapshotted for
+    the caller (`firmware/main/tapo_protocol.c`).
+38. [Resolved 2026-07-06] **`session_id` now round-trips on the live path.** The
+    backend sends the DB session id (string) on `ON`; the firmware echoes it in
+    telemetry; `_persist_telemetry` attributes the reading to that exact session
+    (guarded ACTIVE + same plug), falling back to the plug's active session when
+    absent. Previously the firmware parsed/persisted a `session_id` the backend
+    never sent, so the crash-recovery field was always empty. Offline-resynced
+    readings still attribute by `plug_id` (the NVS ring-buffer entry has no room
+    for the id). Backend parsing regression-tested in `test_mqtt_manager.py`;
+    firmware echo pending on-device flash.

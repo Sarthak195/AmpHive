@@ -82,8 +82,15 @@ Cross-references [TECH_DEBT.md](TECH_DEBT.md) items as `TD#n` and
 
 - [ ] **MQTT broker auth + TLS** (needs a firmware credentials field before
       `allow_anonymous false`). (SEC §3)
-- [ ] **Finish Path A end-to-end**: real billed session on physical hardware over
-      ESP32+MQTT, feeding the session/telemetry pipeline. (IMPL §2)
+- [~] **Finish Path A end-to-end**: real billed session on physical hardware over
+      ESP32+MQTT, feeding the session/telemetry pipeline. **Achieved 2026-07-06** —
+      a real ESP32 + P110 ran a billed session; the plug delivered correct energy
+      and telemetry flowed through to the wallet debit. The run surfaced (and we
+      fixed in code) a **session overbilling bug**: firmware published its lifetime
+      energy meter instead of session-relative energy, so every session after the
+      first re-billed the plug's history. **Blocking to close:** reflash the ESP32
+      with the fix (no ESP-IDF toolchain on the dev box) and re-verify one clean
+      billed session bills only its own kWh. (IMPL §2, §3.35)
 - [ ] **OTA firmware updates**: current single-app partition table precludes the
       spec'd dual-partition rollback. (IMPL 15)
 - [ ] **Reconcile or retire K8s manifests** — they diverge from the live VM
