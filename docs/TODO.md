@@ -20,11 +20,14 @@ Cross-references [TECH_DEBT.md](TECH_DEBT.md) items as `TD#n` and
 - [~] **Lock CORS** to the known frontend origin(s): wildcard removed in
       `backend/main.py` (working tree, 2026-07-06) — **still needs commit +
       deploy** to reach HEAD/prod. (TD#4)
-- [ ] **Fix the `stop_charging_session` ledger inconsistency**: when
-      `final_cost > balance`, the `max(0, …)` clamp forgives debt but writes a
-      ledger `amount = -final_cost` with `balance_after = 0` — the ledger no
-      longer reconciles. Debit only what's available (or block on insufficient
-      funds) and make `amount` match the balance delta. (`main.py:784`)
+- [x] **Fix the `stop_charging_session` ledger inconsistency** (2026-07-06):
+      previously, when `final_cost > balance`, the `max(0, …)` clamp forgave debt
+      but still wrote a ledger `amount = -final_cost` with `balance_after = 0`, so
+      the ledger no longer reconciled (running balance couldn't be derived by
+      summing `amount`). Now debits `actual_debit = min(final_cost, balance)`, and
+      the ledger `amount`, `balance_after`, `session.coins_spent`, and the API
+      response all use that same delta. Any forgiven shortfall is noted in the
+      ledger description and logged as a warning. (`backend/main.py:797`)
 
 ## Next week — reliability & structure
 

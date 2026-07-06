@@ -787,21 +787,38 @@ async def stop_charging_session(
     session.status = SessionStatus.COMPLETED
     session.ended_at = datetime.now(timezone.utc)
     session.energy_kwh = final_energy
-    session.coins_spent = final_cost
 
     # 4. Deduct coins from user wallet and create ledger entry (Atomic)
     user_result = await db.execute(
         select(User).where(User.id == user.id).with_for_update()
     )
     locked_user = user_result.scalar_one()
-    locked_user.coin_balance = max(0, locked_user.coin_balance - final_cost)
+
+    # Debit only what the wallet actually holds. Writing a ledger row whose
+    # `amount` disagrees with the real balance delta (as `max(0, ...)` used to,
+    # while still recording -final_cost) breaks reconciliation: the running
+    # balance can no longer be derived by summing `amount`. If the bill exceeds
+    # the balance, the shortfall is forgiven but recorded for observability.
+    prev_balance = max(0.0, locked_user.coin_balance)
+    actual_debit = round(min(final_cost, prev_balance), 2)
+    shortfall = round(final_cost - actual_debit, 2)
+    locked_user.coin_balance = round(prev_balance - actual_debit, 2)
+    session.coins_spent = actual_debit  # what was actually collected from the wallet
+
+    description = f"Charging session on {plug.name}: {final_energy:.3f} kWh"
+    if shortfall > 0:
+        description += f" (shortfall {shortfall:.2f} coins uncollected)"
+        logger.warning(
+            f"Session {session.id}: billed {final_cost:.2f} coins but wallet held "
+            f"only {prev_balance:.2f}; {shortfall:.2f} coins uncollected"
+        )
 
     ledger_entry = LedgerTransaction(
         user_id=locked_user.id,
         session_id=session.id,
-        amount=-final_cost,  # Negative = debit
+        amount=-actual_debit,  # Negative = debit; matches the real balance delta
         transaction_type=TransactionType.SESSION_DEBIT,
-        description=f"Charging session on {plug.name}: {final_energy:.3f} kWh",
+        description=description,
         balance_after=locked_user.coin_balance,
     )
     db.add(ledger_entry)
@@ -818,13 +835,13 @@ async def stop_charging_session(
     telemetry_store.end_session(plug.id)
     await set_plug_telemetry_interval(db, plug.id, 10000)
 
-    logger.info(f"Session {session.id} stopped: {final_energy:.3f} kWh, {final_cost:.2f} coins")
+    logger.info(f"Session {session.id} stopped: {final_energy:.3f} kWh, {actual_debit:.2f} coins")
 
     return {
         "status": "completed",
         "session_id": session.id,
         "energy_kwh": round(final_energy, 3),
-        "coins_spent": round(final_cost, 2),
+        "coins_spent": round(actual_debit, 2),
         "balance_remaining": round(locked_user.coin_balance, 2),
     }
 
