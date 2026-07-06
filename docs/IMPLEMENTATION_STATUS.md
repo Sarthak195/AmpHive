@@ -249,3 +249,10 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
     Telemetry refreshes `last_seen_at` (throttled 1/min per gateway); the
     `Gateway.last_seen_at` `onupdate=now` hook was removed so unrelated row
     edits can't fake liveness. Tests: `backend/tests/test_gateway_liveness.py`.
+41. [Resolved 2026-07-06] **Duplicate-insert races returned 500.**
+    `/api/auth/register` and `/api/cpo/setup` did exists-check-then-insert; a
+    concurrent duplicate slipped past the SELECT and surfaced the unique-index
+    `IntegrityError` as a raw 500. Both now catch it at commit/flush, roll
+    back, and return the same 400 as the sequential duplicate path (same
+    pattern `_credit_topup` already used). Tests:
+    `backend/tests/test_registration_races.py`.

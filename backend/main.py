@@ -351,7 +351,9 @@ async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
     Creates the user with a hashed password and returns a JWT token.
     New users start with 0 coin balance and the 'driver' role.
     """
-    # Check if email already exists
+    # Check if email already exists (fast path for a clean error message; the
+    # unique index is the real guard — a concurrent duplicate slips past this
+    # SELECT and must be caught at commit).
     result = await db.execute(select(User).where(User.email == req.email))
     if result.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="An account with this email already exists.")
@@ -365,7 +367,12 @@ async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
         coin_balance=0.0,
     )
     db.add(user)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        # Lost the race to a concurrent registration with the same email.
+        await db.rollback()
+        raise HTTPException(status_code=400, detail="An account with this email already exists.")
     await db.refresh(user)
 
     # Generate JWT token
@@ -1573,12 +1580,21 @@ async def cpo_setup(
     # Create the tenant
     tenant = Tenant(name=req.tenant_name)
     db.add(tenant)
-    await db.flush()  # Get the tenant.id before committing
+    try:
+        await db.flush()  # Get the tenant.id before committing
 
-    # Promote user to CPO role and link to the new tenant
-    user.role = UserRole.CPO
-    user.tenant_id = tenant.id
-    await db.commit()
+        # Promote user to CPO role and link to the new tenant
+        user.role = UserRole.CPO
+        user.tenant_id = tenant.id
+        await db.commit()
+    except IntegrityError:
+        # Lost the race to a concurrent setup with the same tenant name (the
+        # name-uniqueness SELECT above can't see an uncommitted twin).
+        await db.rollback()
+        raise HTTPException(
+            status_code=400,
+            detail=f"A tenant with the name '{req.tenant_name}' already exists.",
+        )
     await db.refresh(user)
     await db.refresh(tenant)
 

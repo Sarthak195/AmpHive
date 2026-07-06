@@ -52,10 +52,12 @@ Cross-references [TECH_DEBT.md](TECH_DEBT.md) items as `TD#n` and
 - [ ] **Decide one-active-session-per-user** (enforce at start) or make
       `/api/sessions/active` + the UI handle several; today older active
       sessions are unreachable/un-stoppable by the user.
-- [ ] **Map duplicate-registration race to 400**: `/api/auth/register` (and
-      `cpo_setup` tenant name) does exists-check-then-insert; a concurrent
-      duplicate escapes as a raw `IntegrityError` 500. Catch it like
-      `_credit_topup` does.
+- [x] **Map duplicate-registration race to 400** (2026-07-06):
+      `/api/auth/register` and `/api/cpo/setup` caught only the sequential
+      duplicate via exists-check; the concurrent one escaped as a raw
+      `IntegrityError` 500. Both now catch it at commit/flush and return the
+      same 400 as the sequential path. Tests:
+      `backend/tests/test_registration_races.py`. (IMPL §3.41)
 - [ ] **Set `TELEMETRY_RETENTION_DAYS` in prod** — default `0` keeps telemetry
       forever; `telemetry_readings` grows ~1 row/s during live streaming.
 - [ ] **Add CI** (GitHub Actions): `pytest backend/tests` with a `postgres:15`
