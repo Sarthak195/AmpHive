@@ -41,6 +41,25 @@ static uint32_t telemetry_interval_ms = 10000; // Default 10s (10000ms)
 
 static const char *TAG = "amphive_gateway";
 
+// The DB plug id this gateway currently drives. The backend is the source of
+// truth for plug ids (it addresses every command to
+// amphive/gateways/{gw}/plugs/{plug_id}/commands), so we adopt the id from the
+// commands we receive rather than hardcoding it. Until the first command
+// arrives we fall back to TARGET_PLUG_ID; telemetry for an unknown id is simply
+// dropped by the backend, and the id self-corrects the moment a real ON/
+// SET_INTERVAL command (i.e. a session) targets this plug.
+static int active_plug_id = TARGET_PLUG_ID;
+
+// Extract the plug id from a command topic ".../plugs/{id}/commands".
+// Returns the parsed id, or -1 if the segment isn't present.
+static int parse_plug_id_from_topic(const char *topic) {
+    const char *p = strstr(topic, "/plugs/");
+    if (!p) return -1;
+    p += strlen("/plugs/");
+    if (*p < '0' || *p > '9') return -1;
+    return atoi(p);
+}
+
 static EventGroupHandle_t wifi_event_group;
 #define WIFI_CONNECTED_BIT BIT0
 #define WIFI_FAIL_BIT      BIT1
@@ -353,17 +372,24 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
             break;
             
         case MQTT_EVENT_DATA: {
-            char topic[64] = {0};
+            char topic[128] = {0};
             char data[128] = {0};
-            
-            int topic_len = event->topic_len > 63 ? 63 : event->topic_len;
+
+            int topic_len = event->topic_len > 127 ? 127 : event->topic_len;
             int data_len = event->data_len > 127 ? 127 : event->data_len;
-            
+
             memcpy(topic, event->topic, topic_len);
             memcpy(data, event->data, data_len);
-            
+
             ESP_LOGI(TAG, "MQTT Message Received - Topic: %s, Data: %s", topic, data);
-            
+
+            // Adopt the plug id this command is addressed to, so telemetry we
+            // publish is attributed to the same DB plug the backend is billing.
+            int cmd_plug_id = parse_plug_id_from_topic(topic);
+            if (cmd_plug_id >= 0) {
+                active_plug_id = cmd_plug_id;
+            }
+
             // Handle ON/OFF command parsing
             if (strstr(data, "\"action\":\"ON\"") || strstr(data, "\"action\": \"ON\"")) {
                 ESP_LOGI(TAG, "Command: Turning Smart Plug ON.");
@@ -517,7 +543,7 @@ static void telemetry_task(void *pvParameters) {
             char payload[256];
             snprintf(payload, sizeof(payload),
                      "{\"plug_id\":%d,\"watts\":%.1f,\"kwh\":%.4f,\"voltage\":%.1f,\"current\":%.2f,\"status\":\"%s\"}",
-                     TARGET_PLUG_ID,
+                     active_plug_id,
                      telemetry.power_w,
                      telemetry.energy_kwh,
                      telemetry.voltage_v,
@@ -536,7 +562,7 @@ static void telemetry_task(void *pvParameters) {
                     .voltage_x10   = (uint16_t)(telemetry.voltage_v * 10.0f),
                     .current_x100  = (uint16_t)(telemetry.current_a * 100.0f),
                     .temperature_x10 = (int16_t)(telemetry.temperature_c * 10.0f),
-                    .plug_id       = TARGET_PLUG_ID,
+                    .plug_id       = (uint8_t)active_plug_id,
                     .status        = active_session.active ? 1 : 0,
                 };
                 offline_log_append(&log_entry);
