@@ -19,6 +19,7 @@
 #include "esp_http_server.h"
 #include "session_nvs.h"
 #include "offline_log.h"
+#include "cJSON.h"
 
 // ─── Configuration Variables ──────────────────────────────────────────────────
 char wifi_ssid[32] = "";
@@ -372,14 +373,24 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
             break;
             
         case MQTT_EVENT_DATA: {
-            char topic[128] = {0};
-            char data[128] = {0};
+            char topic[256] = {0};
+            char data[512]  = {0};
 
-            int topic_len = event->topic_len > 127 ? 127 : event->topic_len;
-            int data_len = event->data_len > 127 ? 127 : event->data_len;
+            // Commands are small JSON objects. Anything larger than our buffers —
+            // or fragmented across multiple MQTT_EVENT_DATA callbacks — is not a
+            // command we understand, so drop it rather than act on a partial
+            // payload. (The old code capped data at 127 bytes, which truncated a
+            // command carrying a session_id and corrupted the parse.)
+            if (event->total_data_len > (int)sizeof(data) - 1) {
+                ESP_LOGW(TAG, "MQTT payload too large (%d bytes); ignoring.", event->total_data_len);
+                break;
+            }
+
+            int topic_len = event->topic_len > (int)sizeof(topic) - 1 ? (int)sizeof(topic) - 1 : event->topic_len;
+            int data_len  = event->data_len  > (int)sizeof(data)  - 1 ? (int)sizeof(data)  - 1 : event->data_len;
 
             memcpy(topic, event->topic, topic_len);
-            memcpy(data, event->data, data_len);
+            memcpy(data,  event->data,  data_len);
 
             ESP_LOGI(TAG, "MQTT Message Received - Topic: %s, Data: %s", topic, data);
 
@@ -390,34 +401,33 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
                 active_plug_id = cmd_plug_id;
             }
 
-            // Handle ON/OFF command parsing
-            if (strstr(data, "\"action\":\"ON\"") || strstr(data, "\"action\": \"ON\"")) {
-                ESP_LOGI(TAG, "Command: Turning Smart Plug ON.");
-                
-                uint32_t duration = 14400; // 4 hours
-                float kwh_limit = 30.0f;
-                
-                char *dur_ptr = strstr(data, "\"max_duration_seconds\":");
-                if (dur_ptr) {
-                    sscanf(dur_ptr, "\"max_duration_seconds\":%lu", &duration);
-                }
-                char *kwh_ptr = strstr(data, "\"max_kwh\":");
-                if (kwh_ptr) {
-                    sscanf(kwh_ptr, "\"max_kwh\":%f", &kwh_limit);
-                }
+            // Parse with a real JSON parser: robust to whitespace and field
+            // ordering, and immune to the truncation/corruption the old
+            // strstr/sscanf scan suffered on longer payloads.
+            cJSON *root = cJSON_Parse(data);
+            if (!root) {
+                ESP_LOGW(TAG, "Command JSON parse failed; ignoring payload.");
+                break;
+            }
+            const cJSON *action_item = cJSON_GetObjectItemCaseSensitive(root, "action");
+            const char *action = cJSON_IsString(action_item) ? action_item->valuestring : NULL;
 
-                // Parse optional session_id (forward-compatible with backend)
+            if (action && strcmp(action, "ON") == 0) {
+                ESP_LOGI(TAG, "Command: Turning Smart Plug ON.");
+
+                uint32_t duration = 14400;  // 4 hours default
+                float    kwh_limit = 30.0f;
+                const cJSON *dur = cJSON_GetObjectItemCaseSensitive(root, "max_duration_seconds");
+                if (cJSON_IsNumber(dur)) duration = (uint32_t)dur->valuedouble;
+                const cJSON *kwh = cJSON_GetObjectItemCaseSensitive(root, "max_kwh");
+                if (cJSON_IsNumber(kwh)) kwh_limit = (float)kwh->valuedouble;
+
+                // Optional backend session_id
                 active_session.session_id[0] = '\0';
-                char *sid_ptr = strstr(data, "\"session_id\":\"");
-                if (sid_ptr) {
-                    sid_ptr += strlen("\"session_id\":\"");
-                    char *end = strchr(sid_ptr, '"');
-                    if (end) {
-                        size_t len = end - sid_ptr;
-                        if (len >= SESSION_ID_MAX_LEN) len = SESSION_ID_MAX_LEN - 1;
-                        memcpy(active_session.session_id, sid_ptr, len);
-                        active_session.session_id[len] = '\0';
-                    }
+                const cJSON *sid = cJSON_GetObjectItemCaseSensitive(root, "session_id");
+                if (cJSON_IsString(sid) && sid->valuestring) {
+                    strncpy(active_session.session_id, sid->valuestring, SESSION_ID_MAX_LEN - 1);
+                    active_session.session_id[SESSION_ID_MAX_LEN - 1] = '\0';
                 }
 
                 // Call local Tapo Driver
@@ -426,14 +436,14 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
                     active_session.start_time_s = xTaskGetTickCount() * portTICK_PERIOD_MS / 1000;
                     active_session.max_duration_s = duration;
                     active_session.max_kwh = kwh_limit;
-                    
+
                     tapo_telemetry_t telemetry;
                     if (tapo_get_telemetry(target_plug_ip, &telemetry) == ESP_OK) {
                         active_session.start_energy_kwh = telemetry.energy_kwh;
                     } else {
                         active_session.start_energy_kwh = 0.0f;
                     }
-                    
+
                     ESP_LOGI(TAG, "Session initialized. Limit: %lu s, %f kWh", duration, kwh_limit);
 
                     // Persist session to NVS for crash recovery
@@ -447,22 +457,22 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
                     strncpy(nvs_params.session_id, active_session.session_id, SESSION_ID_MAX_LEN);
                     session_nvs_save(&nvs_params);
                 }
-            } else if (strstr(data, "\"action\":\"OFF\"") || strstr(data, "\"action\": \"OFF\"")) {
+            } else if (action && strcmp(action, "OFF") == 0) {
                 ESP_LOGI(TAG, "Command: Turning Smart Plug OFF.");
                 tapo_set_power_state(target_plug_ip, false);
                 active_session.active = false;
                 session_nvs_clear();
-            } else if (strstr(data, "\"action\":\"SET_INTERVAL\"") || strstr(data, "\"action\": \"SET_INTERVAL\"")) {
+            } else if (action && strcmp(action, "SET_INTERVAL") == 0) {
                 uint32_t interval = 10000;
-                char *int_ptr = strstr(data, "\"interval_ms\":");
-                if (int_ptr) {
-                    sscanf(int_ptr, "\"interval_ms\":%lu", &interval);
-                }
+                const cJSON *iv = cJSON_GetObjectItemCaseSensitive(root, "interval_ms");
+                if (cJSON_IsNumber(iv)) interval = (uint32_t)iv->valuedouble;
                 if (interval < 500) interval = 500;
                 if (interval > 60000) interval = 60000;
                 telemetry_interval_ms = interval;
                 ESP_LOGI(TAG, "Telemetry interval updated to %lu ms", interval);
             }
+
+            cJSON_Delete(root);
             break;
         }
         default:

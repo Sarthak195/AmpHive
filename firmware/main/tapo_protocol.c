@@ -29,6 +29,7 @@
 #include "esp_log.h"
 #include "esp_random.h"
 #include "esp_http_client.h"
+#include "nvs.h"
 #include "mbedtls/md.h"
 #if MBEDTLS_MAJOR_VERSION >= 4
 #define MBEDTLS_DECLARE_PRIVATE_IDENTIFIERS
@@ -51,9 +52,47 @@ static float            s_nominal_voltage = 230.0f;
 static uint8_t          s_auth_hash[32];
 static SemaphoreHandle_t s_mutex = NULL;
 
-/* driver-side monotonic energy meter (session watchdog needs a monotonic kWh) */
+/* driver-side monotonic energy meter (session watchdog needs a monotonic kWh).
+ * Persisted to NVS so a mid-session reboot doesn't reset the meter to 0 while
+ * active_session.start_energy_kwh is restored to its pre-reboot value — that
+ * made consumed_kwh (= meter - start) go negative and disarmed the energy
+ * watchdog until the meter re-accrued. Restoring the meter on init keeps both
+ * on the same scale, so the watchdog stays armed across a crash. */
 static double     s_energy_wh = 0.0;
 static TickType_t s_energy_last_tick = 0;
+static double     s_energy_persisted_wh = 0.0;
+
+#define ENERGY_NVS_NAMESPACE         "energy"
+#define ENERGY_NVS_KEY               "wh"
+/* Persist at most once per this many Wh accrued. Writes therefore only happen
+ * while actually charging (idle power ~0 never crosses the threshold), which
+ * bounds NVS wear while capping the worst-case crash energy loss to <threshold. */
+#define ENERGY_PERSIST_THRESHOLD_WH  50.0
+
+/* Restore the integrator from NVS (blob = the exact double, so no overflow or
+ * precision loss). No-op when nothing is stored (fresh device). */
+static void energy_load_nvs(void) {
+    nvs_handle_t h;
+    if (nvs_open(ENERGY_NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) return;
+    double wh = 0.0;
+    size_t sz = sizeof(wh);
+    if (nvs_get_blob(h, ENERGY_NVS_KEY, &wh, &sz) == ESP_OK && sz == sizeof(wh)) {
+        s_energy_wh = wh;
+        s_energy_persisted_wh = wh;
+        ESP_LOGI(TAG, "Restored energy integrator from NVS: %.1f Wh", wh);
+    }
+    nvs_close(h);
+}
+
+static void energy_persist_nvs(void) {
+    nvs_handle_t h;
+    if (nvs_open(ENERGY_NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) return;
+    if (nvs_set_blob(h, ENERGY_NVS_KEY, &s_energy_wh, sizeof(s_energy_wh)) == ESP_OK &&
+        nvs_commit(h) == ESP_OK) {
+        s_energy_persisted_wh = s_energy_wh;
+    }
+    nvs_close(h);
+}
 
 typedef struct {
     bool       valid;
@@ -387,6 +426,7 @@ esp_err_t tapo_init(const char *tapo_email, const char *tapo_password, float nom
     s_sess.valid = false;
     s_energy_wh = 0.0;
     s_energy_last_tick = 0;
+    energy_load_nvs();  /* resume the cross-reboot integrator so the watchdog stays armed */
     s_initialized = true;
     ESP_LOGI(TAG, "Tapo KLAP driver initialized (account %s, nominal %.0f V)", s_email, s_nominal_voltage);
     return ESP_OK;
@@ -458,6 +498,12 @@ esp_err_t tapo_get_telemetry(const char *plug_ip, tapo_telemetry_t *out) {
     }
     s_energy_last_tick = now;
     out->energy_kwh = (float)(s_energy_wh / 1000.0);
+
+    /* Persist the integrator across reboots (throttled by accrual threshold) so
+     * a mid-session crash doesn't disarm the energy watchdog. */
+    if (s_energy_wh - s_energy_persisted_wh >= ENERGY_PERSIST_THRESHOLD_WH) {
+        energy_persist_nvs();
+    }
 
     return ESP_OK;
 }
