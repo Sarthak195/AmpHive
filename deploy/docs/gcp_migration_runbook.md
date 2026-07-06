@@ -20,7 +20,7 @@ gcloud sql instances create amphive-db \
   --database-version=POSTGRES_15 \
   --tier=db-f1-micro \
   --region=us-central1 \
-  --root-password="amphive_db_admin"
+  --root-password="<DB_PASSWORD>"
 
 # Compute Engine VM (e2-micro)
 gcloud compute instances create amphive-vm \
@@ -73,7 +73,7 @@ gcloud sql instances create amphive-db-in \
   --database-version=POSTGRES_15 \
   --tier=db-f1-micro \
   --region=asia-south1 \
-  --root-password="amphive_db_admin"
+  --root-password="<DB_PASSWORD>"
 
 # New Compute Engine VM in Mumbai (upgraded specs)
 gcloud compute instances create amphive-vm-in \
@@ -218,7 +218,7 @@ gcloud compute instances add-access-config amphive-vm-in --zone=asia-south1-a --
 ### docker-compose Changes
 `deploy/docker/docker-compose.prod.yml` was updated to add a `db` service:
 - Image: `postgres:15-alpine`
-- Password hardcoded (`amphive_db_admin`) \u2014 `${VAR:-default}` syntax not supported by docker-compose v1.x on VM
+- Password hardcoded (a weak literal — since rotated 2026-07-06) \u2014 `${VAR:-default}` syntax not supported by docker-compose v1.x on VM
 - Volume: `postgres_data` (named Docker volume, survives container rebuilds)
 - `DATABASE_URL` in `.env` changed from `@<cloud-sql-ip>:5432` \u2192 `@db:5432`
 

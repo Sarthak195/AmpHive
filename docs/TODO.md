@@ -11,13 +11,15 @@ Cross-references [TECH_DEBT.md](TECH_DEBT.md) items as `TD#n` and
 - [x] **Commit the `tools/` secret strip.** Done (`3e20dbd`, 2026-07-05) — all
       five helpers now read `TAPO_EMAIL` / `TAPO_PASSWORD` / `TAPO_PLUG_IP` from
       env and fail closed; no real secret remains in HEAD. (TD#1)
-- [ ] **Rotate every burned secret**: WireGuard keypair, DuckDNS token, DB
-      password (**Tapo password rotated 2026-07-05**). They remain in git
-      history regardless of HEAD. (TD#2, SEC §1)
-- [ ] **Take MQTT off the public internet**: set `MQTT_BIND_IP=<overlay IP>` in
-      the VM `.env`, redeploy, then delete the GCP firewall rule for tcp:1883. (TD#3, SEC §3)
-- [ ] **Lock CORS** to the known frontend origin(s); drop the `["*"]` +
-      `allow_credentials=True` combo. (TD#4, `main.py:185`)
+- [x] **Rotate every burned secret**: WireGuard keypair, DuckDNS token, Tapo &
+      DB passwords — all rotated at the source 2026-07-06. Dead old values remain
+      in git history (optional scrub). (TD#2, SEC §1)
+- [x] **Take MQTT off the public internet**: broker bound to the overlay IP
+      `100.87.241.70` and the GCP firewall restricted to tcp:80/8000 (1883
+      dropped), 2026-07-06. Broker *auth* still pending. (TD#3, SEC §3)
+- [~] **Lock CORS** to the known frontend origin(s): wildcard removed in
+      `backend/main.py` (working tree, 2026-07-06) — **still needs commit +
+      deploy** to reach HEAD/prod. (TD#4)
 - [ ] **Fix the `stop_charging_session` ledger inconsistency**: when
       `final_cost > balance`, the `max(0, …)` clamp forgives debt but writes a
       ledger `amount = -final_cost` with `balance_after = 0` — the ledger no

@@ -50,7 +50,7 @@ This script now does the following sequentially:
 call gcloud sql instances patch amphive-db-in --activation-policy=ALWAYS
 call gcloud compute instances start amphive-vm-in --zone=asia-south1-a
 for /f "tokens=*" %%i in ('gcloud sql instances describe amphive-db-in --format="value(ipAddresses[0].ipAddress)"') do set DB_IP=%%i
-call gcloud compute ssh amphive-vm-in --zone=asia-south1-a --command="sed -i '/^DATABASE_URL=/d' ~/amphive/.env && echo DATABASE_URL=postgresql+asyncpg://postgres:amphive_db_admin@%DB_IP%:5432/amphive >> ~/amphive/.env && cd ~/amphive && sudo docker-compose down && sudo docker-compose up -d"
+call gcloud compute ssh amphive-vm-in --zone=asia-south1-a --command="sed -i '/^DATABASE_URL=/d' ~/amphive/.env && echo DATABASE_URL=postgresql+asyncpg://postgres:<DB_PASSWORD>@%DB_IP%:5432/amphive >> ~/amphive/.env && cd ~/amphive && sudo docker-compose down && sudo docker-compose up -d"
 ```
 
 #### `stop-vm.bat`

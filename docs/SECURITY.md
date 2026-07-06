@@ -3,8 +3,11 @@
 *Verified against source on 2026-07-02. This is a developer-facing inventory of
 known security gaps, not a formal audit. Items are roughly ordered by severity.*
 
-> Several real secrets are committed to the git history. Even after removing them
-> from `HEAD`, they remain in history and must be **rotated**, not just deleted.
+> Several real secrets were committed to git history. **As of 2026-07-06 all four
+> — WireGuard keypair, DuckDNS token, Tapo password, DB password — have been
+> rotated at the source**, so the history copies are now dead. Removing them from
+> `HEAD` was never remediation on its own; rotation was. A history scrub remains
+> optional hygiene.
 
 > **Recently fixed** (see [§7](#7-recently-fixed)): RBAC is now enforced on all
 > `/api/cpo/*` routes, the unauthenticated `gateways/register` / `plugs/register`
@@ -13,26 +16,28 @@ known security gaps, not a formal audit. Items are roughly ordered by severity.*
 
 ---
 
-## 1. Committed secrets (ROTATION STILL REQUIRED)
+## 1. Committed secrets (ROTATED 2026-07-06)
 
-*Updated 2026-07-05: the secrets below were removed from the tracked files
-(env-var-ified / untracked), but they remain in **git history** — every one of
-them must still be rotated. Removing them from HEAD is not remediation.*
+*Updated 2026-07-06: the secrets below were removed from tracked files
+(env-var-ified / untracked) **and rotated at the source**. The old values remain
+in **git history** but are now dead. Removing from HEAD was not remediation —
+rotation was.*
 
-| File | Secret | HEAD status (2026-07-05) |
+| File | Secret | Status (2026-07-06) |
 |------|--------|--------------------------|
-| `deploy/config/amphive_tunnel.conf` **and** `deploy/docs/wireguard_tunnel_setup.md` | WireGuard **private key** | Config untracked + gitignored; the key was *also* hardcoded in the setup doc — now placeholdered (2026-07-05). `amphive_tunnel.conf.example` added |
-| `scripts/setup_duckdns.sh` | Live **DuckDNS token** | Now requires `DUCKDNS_TOKEN` env var |
-| `tools/local_tapo_test.py`, `tools/relay_server.py`, `tools/turn_on.py`, `tools/turn_off.py`, `tools/klap_probe.py` | **Tapo account email + password** | Env-var'd across all five tools, committed `3e20dbd`; read `TAPO_EMAIL` / `TAPO_PASSWORD` / `TAPO_PLUG_IP`. **Password rotated 2026-07-05**, set only in the gitignored `.env` |
-| `deploy/scripts/deploy.ps1`, `docker-compose.prod.yml` | DB password `amphive_db_admin` | Now interpolated from `.env` `POSTGRES_PASSWORD` (deploy.ps1 falls back to the legacy value with a warning until rotated) |
-| `scripts/start-vm.bat`, `deploy/docs/gcp_migration_runbook.md` | DB password references | Still present (docs/scripts) — rotate the password itself |
+| `deploy/config/amphive_tunnel.conf` **and** `deploy/docs/wireguard_tunnel_setup.md` | WireGuard **private key** | Config untracked + gitignored; the key was *also* hardcoded in the setup doc — now placeholdered. `amphive_tunnel.conf.example` added. **Keypair rotated 2026-07-06.** |
+| `scripts/setup_duckdns.sh` | Live **DuckDNS token** | Requires `DUCKDNS_TOKEN` env var. **Token rotated 2026-07-06.** |
+| `tools/local_tapo_test.py`, `tools/relay_server.py`, `tools/turn_on.py`, `tools/turn_off.py`, `tools/klap_probe.py` | **Tapo account email + password** | Env-var'd across all five tools, committed `3e20dbd`; read `TAPO_EMAIL` / `TAPO_PASSWORD` / `TAPO_PLUG_IP`. **Password rotated 2026-07-06**, set only in the gitignored `.env` |
+| `deploy/scripts/deploy.ps1`, `docker-compose.prod.yml` | DB password (was `amphive_db_admin`) | **Rotated 2026-07-06** (`ALTER USER` on the live DB + `.env`); `deploy.ps1` now **rejects** the legacy value as insecure |
+| `deploy/docs/*` (migration / setup / walkthrough) | DB password references | Old literal scrubbed to `<DB_PASSWORD>` placeholders 2026-07-06; password rotated |
 
 ✅ The application `.env` files are **gitignored** and *not* committed. Backend
 Razorpay/JWT/Tapo secrets live only in the local/VM `.env`, not in the repo.
 
-**Still to do:** rotate the WireGuard keypair, the DuckDNS token, and the DB
-password **at the source** (all burned — history retains them). The Tapo account
-password was rotated 2026-07-05. Scrub git history if feasible.
+**Done 2026-07-06:** all four burned secrets — WireGuard keypair, DuckDNS token,
+Tapo password, DB password — were rotated at the source. The old values remain in
+git **history** but are now dead. **Optional:** scrub history (`git filter-repo` /
+BFG + force-push) to purge the dead values entirely.
 
 ## 2. Default / weak credentials
 
@@ -43,29 +48,31 @@ password was rotated 2026-07-05. Scrub git history if feasible.
   `JWT_SECRET_KEY`. The old behavior (silently signing with the public literal
   `amphive-dev-secret-change-in-production`) is gone. Still set a strong
   secret in every environment.
-- The PostgreSQL container on the VM uses user `postgres` with the known
-  password `amphive_db_admin` unless `POSTGRES_PASSWORD` is set in `.env` —
-  **rotate it** (the old value is in git history).
+- [Rotated 2026-07-06] The PostgreSQL `postgres` user password was rotated on the
+  live DB and is set via `.env` `POSTGRES_PASSWORD`; `deploy.ps1` now **rejects**
+  the old `amphive_db_admin` literal as insecure. (The dead old value remains in
+  git history.)
 
 ## 3. Open / unauthenticated surfaces
 
-- **MQTT broker is anonymous + no TLS** (`mosquitto.conf`: `allow_anonymous true`)
-  and the firewall opens **1883 to `0.0.0.0/0`**. Anyone on the internet can
-  publish/subscribe — including sending plug `ON`/`OFF` commands and **forging
-  telemetry, which feeds billing**. Confidentiality was *intended* to come from
-  running MQTT inside the overlay, but the broker is also exposed publicly.
-  - [Partial 2026-07-05] `docker-compose.prod.yml` now binds the published port
-    via `${MQTT_BIND_IP}` from `.env`. Set `MQTT_BIND_IP=<VM overlay IP>`
-    (e.g. `100.87.241.70`) so only overlay peers reach 1883 — the ESP32
-    connects over the overlay, and the backend uses the internal compose
-    network, so nothing needs the public port. Default is `0.0.0.0` (legacy)
-    until flipped. The unused websocket port 9001 is no longer published.
-  - Still to do: remove the public GCP firewall rule for 1883
-    (`gcloud compute firewall-rules list --filter="allowed[].ports=1883"`,
-    then delete/restrict it) and add broker auth (needs a firmware
-    credentials field before `allow_anonymous false` can be enabled).
-- **CORS is fully open** (`allow_origins=["*"]`). Restrict to the known frontend
-  origin(s) before production.
+- **MQTT broker is anonymous + no TLS** (`mosquitto.conf`: `allow_anonymous true`).
+  It *used* to be reachable on **1883 from `0.0.0.0/0`** — anyone could
+  publish/subscribe, send plug `ON`/`OFF`, and **forge telemetry that feeds
+  billing**. The public exposure was closed 2026-07-06 (see below); broker
+  **auth** is still missing, so any overlay peer can still publish.
+  - [Done 2026-07-06] MQTT now binds to the VM overlay IP `100.87.241.70`
+    (`MQTT_BIND_IP` in `.env`), and the GCP firewall rule was restricted to
+    tcp:80 + tcp:8000 — **1883 is no longer publicly reachable**. The ESP32
+    connects over the overlay and the backend uses the internal compose network,
+    so nothing needs the public port. The unused websocket port 9001 is no longer
+    published.
+  - Still to do: add broker **auth** (needs a firmware credentials field before
+    `allow_anonymous false` can be enabled) so overlay peers can't publish
+    anonymously.
+- [Fixed in working tree 2026-07-06 — pending commit + deploy] **CORS** is
+  restricted to an explicit allowlist (localhost, `amphive.duckdns.org`, VM IP;
+  http+https) with the wildcard removed, in `backend/main.py`. ⚠️ **HEAD/prod
+  still run the old `["*"]`** until that backend change is committed and deployed.
 - **`/api/payments/webhook`** is unauthenticated by design but HMAC-gated. It now
   auto-credits coins on `payment.captured`; abuse via replay is mitigated by the
   HMAC signature check plus idempotency on `razorpay_payment_id`, but a leaked
@@ -100,6 +107,16 @@ password was rotated 2026-07-05. Scrub git history if feasible.
 *Previously listed as gaps here; kept for context so older references don't
 read as still-open.*
 
+**2026-07-06:**
+
+- **All burned secrets rotated at the source** — WireGuard keypair, DuckDNS token,
+  Tapo password, and DB password regenerated; the old values in git history are
+  now dead, and the old DB-password literal was scrubbed from the deploy docs.
+- **MQTT taken off the public internet** — broker bound to the overlay IP
+  `100.87.241.70`; GCP firewall restricted to tcp:80/8000 (1883 no longer public).
+- **CORS locked to an allowlist** in `backend/main.py` (wildcard removed) —
+  *pending commit + deploy* to reach HEAD/prod.
+
 **2026-07-05:**
 
 - **Client-controlled payment amount (wallet inflation).** `/api/payments/verify`
@@ -133,15 +150,16 @@ read as still-open.*
 
 ## Quick remediation checklist
 
-Still open:
-- [ ] **Rotate** WireGuard keys, DuckDNS token, DB password at the source
-      (values remain in git history even though HEAD is clean).
-      *(Tapo password rotated 2026-07-05.)*
+Status — open items and recently closed:
+- [x] **Rotate** WireGuard keys, DuckDNS token, Tapo & DB passwords at the source
+      (2026-07-06). Dead old values remain in git history — *optional* scrub.
+- [ ] **Commit + deploy** the CORS allowlist — the working-tree fix isn't in
+      HEAD/prod yet.
+- [ ] Add MQTT broker **auth** (firmware credentials field needed).
 - [ ] Set a strong `JWT_SECRET_KEY` in every environment (enforced by
       deploy.ps1 as of 2026-07-05; backend falls back to an ephemeral key).
-- [ ] Set `MQTT_BIND_IP=<overlay IP>` in the VM `.env` and redeploy; then drop
-      the public 1883 firewall rule; longer-term add broker auth.
-- [ ] Restrict CORS to the known frontend origin(s).
+- [x] MQTT bound to the overlay IP + public 1883 firewall rule dropped (2026-07-06).
+- [x] CORS restricted to an allowlist in `backend/main.py` (2026-07-06, working tree).
 - [ ] Consider a DB-level non-negative-balance constraint.
 - [ ] Unique `razorpay_payment_id` ledger column (the idempotency check is a
       pre-lock SELECT — concurrent /verify + webhook can still double-credit).

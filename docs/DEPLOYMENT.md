@@ -26,7 +26,7 @@ The VM runs `docker-compose.prod.yml` (version `3.7`) from a flat `~/amphive/` d
 
 | Container | Image/build | Port | Notes |
 |-----------|-------------|------|---------|
-| `amphive-db` | `postgres:15-alpine` | internal | Postgres on the VM itself. `POSTGRES_PASSWORD=amphive_db_admin` hardcoded for compose v3.7 compat. |
+| `amphive-db` | `postgres:15-alpine` | internal | Postgres on the VM itself. `POSTGRES_PASSWORD` interpolated from `.env` (value rotated 2026-07-06). |
 | `amphive-backend` | build `./backend` | 8000 | env via `${...}` from `.env`; depends on `db` + `mqtt`. |
 | `amphive-frontend` | build `./frontend` | 80 | Nginx serves the SPA + proxies `/api/` → backend |
 | `amphive-mqtt` | `eclipse-mosquitto:2.0` | 1883, 9001 | persistence volumes + healthcheck |
@@ -49,7 +49,7 @@ file omits all secrets, so Direct Mode / Razorpay won't work there.
 
 ### Deploy script — `deploy/scripts/deploy.ps1`
 
-1. Set `DATABASE_URL=postgresql+asyncpg://postgres:amphive_db_admin@db:5432/amphive` in
+1. Set `DATABASE_URL=postgresql+asyncpg://postgres:<POSTGRES_PASSWORD>@db:5432/amphive` in
    local `.env` (the hostname `db` resolves within the Docker Compose network).
 2. `tar` up `backend/` + `frontend/` (excluding node_modules/.venv/.git) and
    `gcloud compute scp` the tarball to `~/amphive/`.

@@ -15,9 +15,9 @@ Legend — **Impact**: how much it costs if left. **Effort**: rough work to fix.
 | # | Debt | Where | Cause | Impact | Effort | Prio |
 |---|------|-------|-------|--------|--------|------|
 | 1 | ✅ ~~**Tapo credentials in committed `tools/*.py`**~~ **Done (`3e20dbd`, 2026-07-05)** | `tools/turn_on.py`, `turn_off.py`, `relay_server.py`, `local_tapo_test.py`, `klap_probe.py` | Env-var refactor committed; all five scripts read `TAPO_EMAIL` / `TAPO_PASSWORD` / `TAPO_PLUG_IP` and fail closed when unset. | Removed from HEAD; **password rotated 2026-07-05**. Values remain in git history (see TD#2). | — | ~~P0~~ Done |
-| 2 | **Burned secrets not fully rotated** | WireGuard key, DuckDNS token, DB password (~~Tapo~~ rotated 2026-07-05) | Removing from HEAD ≠ rotation; all remain in history. | Anyone with repo history has working credentials until each is rotated at the source. | 1–2 h | **P0** |
-| 3 | **MQTT broker anonymous, no TLS, publicly reachable** | `deploy/config/mosquitto.conf`, GCP firewall 1883/0.0.0.0 | Confidentiality was meant to come from the overlay, but the port is also bound publicly (`MQTT_BIND_IP` default `0.0.0.0`). | Anyone can publish forged telemetry that **feeds billing**, or send ON/OFF. | 30 min (bind overlay IP + drop firewall rule); broker auth needs a firmware credential field | **P0** |
-| 4 | **CORS wildcard + credentials** | `backend/main.py:185` | `allow_origins=["*"]` with `allow_credentials=True`. | Invalid/insecure combo; must be a fixed origin before prod. | 10 min | **P1** |
+| 2 | ✅ ~~**Burned secrets not rotated**~~ **Done 2026-07-06** | WireGuard key, DuckDNS token, Tapo password, DB password | All four rotated at the source. Dead old values remain in git history. | Repo-history copies are now worthless; *optional* history scrub to purge them entirely. | — | ~~P0~~ Done |
+| 3 | 🟡 ~~**MQTT publicly reachable**~~ **Network exposure closed 2026-07-06** | `deploy/config/mosquitto.conf`, GCP firewall | Broker now binds to overlay IP `100.87.241.70`; firewall restricted to tcp:80/8000 (1883 dropped). | Public forge / ON-OFF path closed. **Still open:** broker *auth* — anonymous overlay peers can still publish; needs a firmware credentials field. | — | P2 (auth) |
+| 4 | 🟡 **CORS wildcard + credentials** — fixed in working tree, pending commit+deploy | `backend/main.py:187` | Was `allow_origins=["*"]` with `allow_credentials=True`; replaced with an explicit allowlist (wildcard removed). | **HEAD/prod still serve `["*"]`** until the backend change is committed + deployed. | commit + deploy | **P1** |
 | 5 | **No DB migration tool** | `backend/database/db.py` `_INPLACE_UPGRADES` | Schema evolves via `create_all` + hand-written idempotent `ALTER`s. `schema.sql`/`schema_v2.sql` are never executed and have drifted. | Column/constraint changes are manual and error-prone; unique constraints in the SQL files are silently missing from the live DB. | 2–4 h (adopt Alembic) | **P1** |
 | 6 | **Money stored as `Float`** | `models.py` `coin_balance`, `coins_spent`, `amount`, `balance_after` | Float chosen for simplicity. | Rounding drift on repeated credit/debit; `round(...)` everywhere is a workaround, not a fix. | 2–3 h (migrate to `Numeric(12,2)`) | **P1** |
 
@@ -48,9 +48,10 @@ Legend — **Impact**: how much it costs if left. **Effort**: rough work to fix.
 
 ## How to burn it down
 
-1. **This week (P0):** ~~commit the `tools/` secret strip~~ (done `3e20dbd`),
-   rotate the remaining burned secrets (WireGuard / DuckDNS / DB — Tapo done),
-   take MQTT off the public internet (`MQTT_BIND_IP` + firewall).
+1. **This week (P0):** ✅ done — `tools/` secret strip (`3e20dbd`), all four
+   secrets rotated at the source (2026-07-06), and MQTT taken off the public
+   internet (overlay bind + firewall). **Remaining:** commit + deploy the CORS
+   lock, add MQTT broker auth.
 2. **This month (P1):** lock CORS, adopt Alembic, move money to `Numeric`,
    split `main.py` into routers, add a GitHub Actions CI pipeline.
 3. **Backlog (P2/P3):** kill N+1s, unify telemetry transport, cJSON on the

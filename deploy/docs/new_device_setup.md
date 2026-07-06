@@ -17,7 +17,7 @@ Because certain files containing secrets and local variables are listed in `.git
 ### 1.1. Environment Variables Configuration (`.env`)
 Copy the `.env` file to the root of the project (`AmpHive/.env`):
 ```ini
-DATABASE_URL=postgresql+asyncpg://postgres:amphive_db_admin@8.231.89.63:5432/amphive
+DATABASE_URL=postgresql+asyncpg://postgres:<DB_PASSWORD>@8.231.89.63:5432/amphive
 MQTT_BROKER_HOST=mqtt
 MQTT_BROKER_PORT=1883
 ```
