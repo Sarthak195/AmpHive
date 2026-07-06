@@ -165,3 +165,12 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 32. [Resolved 2026-07-06] **`CpoSetup` redirect-during-render** replaced with a
     declarative `<Navigate … replace />` (the render-body `navigate()` triggered a
     React "update during render" warning and could loop under StrictMode).
+33. [Fixed in code 2026-07-06, pending on-device flash] **Firmware command
+    parsing** moved from `strstr`/`sscanf` to cJSON, and the MQTT buffers were
+    widened (topic 256, data 512) with an oversized/fragmented-payload guard, so a
+    command carrying a `session_id` no longer truncates/corrupts. Not compiled or
+    flashed here — no ESP-IDF toolchain on the dev box.
+34. [Fixed in code 2026-07-06, pending on-device flash] **Firmware energy meter
+    reset on reboot** — `s_energy_wh` now persists to NVS (restored on `tapo_init`,
+    written throttled per 50 Wh), so post-reboot `consumed_kwh` no longer goes
+    negative and the energy safety watchdog stays armed. Pending on-device flash.

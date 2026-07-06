@@ -49,8 +49,10 @@ Cross-references [TECH_DEBT.md](TECH_DEBT.md) items as `TD#n` and
       creates `uq_ledger_razorpay_payment_id`, and `_credit_topup` relies on the
       `IntegrityError` from a concurrent insert (not just the pre-lock SELECT) to
       stay idempotent across the /verify + webhook race. (SEC checklist)
-- [ ] **Persist the firmware energy integrator** to NVS so crash recovery keeps
-      the energy watchdog armed. (TD#19)
+- [x] **Persist the firmware energy integrator** to NVS (2026-07-06, code):
+      `s_energy_wh` is restored on `tapo_init` and written throttled (per 50 Wh),
+      so crash recovery keeps the energy watchdog armed. **Pending on-device flash
+      + verification** (no ESP-IDF toolchain on the dev box). (TD#19)
 
 ## Next month — scale & polish
 
@@ -59,8 +61,10 @@ Cross-references [TECH_DEBT.md](TECH_DEBT.md) items as `TD#n` and
 - [ ] **Extract the access-code generator** (duplicated 3× across CPO routes). (TD#10)
 - [ ] **Unify live telemetry**: retire the SSE endpoint + `sse-starlette` dep,
       or document it as an explicit fallback. (TD#12)
-- [ ] **cJSON on the firmware command path** instead of `strstr`/`sscanf`; raise
-      the 128-byte MQTT topic/data buffers so a `session_id` can't truncate. (TD#11)
+- [x] **cJSON on the firmware command path** (2026-07-06, code) instead of
+      `strstr`/`sscanf`; MQTT buffers raised (topic 256, data 512) with an
+      oversized/fragmented guard so a `session_id` can't truncate. **Pending
+      on-device flash + verification.** (TD#11)
 - [x] **Model plug geolocation** (2026-07-06): `Plug` now has nullable
       `latitude`/`longitude`; the driver/plug APIs return effective coords (the
       plug's own, else its gateway's site), and CPOs can set them via
