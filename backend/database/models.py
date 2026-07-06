@@ -14,7 +14,8 @@ Phase 2 additions (marked with [P2]):
 import enum
 from datetime import datetime
 from typing import List, Optional
-from sqlalchemy import Column, Integer, BigInteger, String, Float, Boolean, ForeignKey, DateTime, Enum as SQLEnum, Index, text
+from decimal import Decimal
+from sqlalchemy import Column, Integer, BigInteger, String, Float, Numeric, Boolean, ForeignKey, DateTime, Enum as SQLEnum, Index, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 class Base(DeclarativeBase):
@@ -74,7 +75,9 @@ class User(Base):
     hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
     full_name: Mapped[str] = mapped_column(String(150), nullable=False)
     role: Mapped[UserRole] = mapped_column(SQLEnum(UserRole, name="user_role", values_callable=lambda x: [e.value for e in x]), default=UserRole.DRIVER, nullable=False)
-    coin_balance: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    # Money: NUMERIC(12,2) → Decimal in Python. All wallet math goes through
+    # services.money.to_money to avoid float rounding drift. See models money note.
+    coin_balance: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal("0.00"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
 
     # Relationships
@@ -113,6 +116,10 @@ class Plug(Base):
     plug_model: Mapped[str] = mapped_column(String(50), default="tapo_p110", nullable=False)
     status: Mapped[PlugStatus] = mapped_column(SQLEnum(PlugStatus, name="plug_status", values_callable=lambda x: [e.value for e in x]), default=PlugStatus.OFFLINE, nullable=False)
     current_power_w: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    # Geolocation for the map. NULL = unknown → callers fall back to the plug's
+    # gateway coordinates (a plug is physically at its gateway's site).
+    latitude: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    longitude: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
     # [P2] Link each plug to a charger group. NULL = ungrouped/legacy (visible to all users).
@@ -136,7 +143,8 @@ class ChargingSession(Base):
     ended_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     energy_kwh: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     peak_power_w: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
-    coins_spent: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    # Money: NUMERIC(12,2) → Decimal (energy_kwh/peak_power_w stay Float — measurements).
+    coins_spent: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal("0.00"), nullable=False)
     status: Mapped[SessionStatus] = mapped_column(SQLEnum(SessionStatus, name="session_status", values_callable=lambda x: [e.value for e in x]), default=SessionStatus.ACTIVE, nullable=False)
 
     # Relationships
@@ -152,7 +160,7 @@ class LedgerTransaction(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     session_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("charging_sessions.id", ondelete="SET NULL"), nullable=True)
-    amount: Mapped[float] = mapped_column(Float, nullable=False) # positive (topup), negative (debit)
+    amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False) # money: positive (topup), negative (debit)
     transaction_type: Mapped[TransactionType] = mapped_column(SQLEnum(TransactionType, name="tx_type", values_callable=lambda x: [e.value for e in x]), nullable=False)
     description: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     # Razorpay payment id for topups (e.g. "pay_XXionia"). UNIQUE so a concurrent
@@ -161,7 +169,7 @@ class LedgerTransaction(Base):
     # non-topup rows (session debits), and Postgres allows many NULLs under a
     # UNIQUE constraint, so debits are unaffected.
     razorpay_payment_id: Mapped[Optional[str]] = mapped_column(String(64), unique=True, nullable=True)
-    balance_after: Mapped[float] = mapped_column(Float, nullable=False)
+    balance_after: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)  # money
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
 
     # Relationships

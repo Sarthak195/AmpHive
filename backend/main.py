@@ -43,6 +43,7 @@ from backend.services.auth import (
 from backend.services.rbac import require_role
 from backend.services.mqtt_manager import MQTTManager
 from backend.services.telemetry import TelemetryStore, COINS_PER_KWH
+from backend.services.money import to_money, ZERO_MONEY
 from backend.services.telemetry_persistence import TelemetryPersistenceService
 # [Direct Mode] Import the Tapo direct driver for ESP32-bypass plug control
 from backend.services.tapo_direct import TapoDirectDriver
@@ -273,6 +274,9 @@ class PlugResponse(BaseModel):
     current_power_w: float
     plug_model: str
     group_name: Optional[str] = None
+    # Effective map coordinates: the plug's own, else its gateway's, else None.
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
 
 
 # --- Payment Schemas ---
@@ -525,6 +529,17 @@ async def get_available_plugs(
 
     plugs = list(plugs_result.scalars().all())
 
+    # Batch-load gateway coordinates once: a plug with no coords of its own
+    # falls back to its gateway's location (avoids an N+1 lookup per plug).
+    gateway_ids = {p.gateway_id for p in plugs}
+    gateway_coords = {}
+    if gateway_ids:
+        gw_rows = await db.execute(
+            select(Gateway.id, Gateway.latitude, Gateway.longitude)
+            .where(Gateway.id.in_(gateway_ids))
+        )
+        gateway_coords = {gid: (lat, lng) for gid, lat, lng in gw_rows.all()}
+
     response = []
     for plug in plugs:
         # Get group name if the plug belongs to a group
@@ -536,6 +551,7 @@ async def get_available_plugs(
             row = group_result.first()
             group_name = row[0] if row else None
 
+        gw_lat, gw_lng = gateway_coords.get(plug.gateway_id, (None, None))
         response.append(PlugResponse(
             id=plug.id,
             name=plug.name,
@@ -543,6 +559,8 @@ async def get_available_plugs(
             current_power_w=plug.current_power_w,
             plug_model=plug.plug_model,
             group_name=group_name,
+            latitude=plug.latitude if plug.latitude is not None else gw_lat,
+            longitude=plug.longitude if plug.longitude is not None else gw_lng,
         ))
 
     return response
@@ -596,6 +614,13 @@ async def get_plug(
         row = gn_result.first()
         group_name = row[0] if row else None
 
+    # Effective coords: the plug's own, else its gateway's site location.
+    gw_row = await db.execute(
+        select(Gateway.latitude, Gateway.longitude).where(Gateway.id == plug.gateway_id)
+    )
+    gw_coords = gw_row.first()
+    gw_lat, gw_lng = (gw_coords[0], gw_coords[1]) if gw_coords else (None, None)
+
     return PlugResponse(
         id=plug.id,
         name=plug.name,
@@ -603,6 +628,8 @@ async def get_plug(
         current_power_w=plug.current_power_w,
         plug_model=plug.plug_model,
         group_name=group_name,
+        latitude=plug.latitude if plug.latitude is not None else gw_lat,
+        longitude=plug.longitude if plug.longitude is not None else gw_lng,
     )
 
 
@@ -781,7 +808,7 @@ async def stop_charging_session(
     persisted_energy = session.energy_kwh or 0.0
     live_energy = latest.energy_kwh if latest else 0.0
     final_energy = max(live_energy, persisted_energy)
-    final_cost = round(final_energy * COINS_PER_KWH, 2)
+    final_cost = to_money(final_energy * COINS_PER_KWH)  # Decimal, 2 dp
 
     # 3. Finalize session
     session.status = SessionStatus.COMPLETED
@@ -799,10 +826,10 @@ async def stop_charging_session(
     # while still recording -final_cost) breaks reconciliation: the running
     # balance can no longer be derived by summing `amount`. If the bill exceeds
     # the balance, the shortfall is forgiven but recorded for observability.
-    prev_balance = max(0.0, locked_user.coin_balance)
-    actual_debit = round(min(final_cost, prev_balance), 2)
-    shortfall = round(final_cost - actual_debit, 2)
-    locked_user.coin_balance = round(prev_balance - actual_debit, 2)
+    prev_balance = locked_user.coin_balance if locked_user.coin_balance > 0 else ZERO_MONEY
+    actual_debit = min(final_cost, prev_balance)  # both Decimal
+    shortfall = final_cost - actual_debit
+    locked_user.coin_balance = prev_balance - actual_debit
     session.coins_spent = actual_debit  # what was actually collected from the wallet
 
     description = f"Charging session on {plug.name}: {final_energy:.3f} kWh"
@@ -993,10 +1020,11 @@ async def _credit_topup(
     if locked_user is None:
         return None
 
-    locked_user.coin_balance += coins
+    credit = to_money(coins)  # normalise the float from the payment service
+    locked_user.coin_balance = locked_user.coin_balance + credit
     db.add(LedgerTransaction(
         user_id=locked_user.id,
-        amount=coins,  # Positive = credit
+        amount=credit,  # Positive = credit
         transaction_type=TransactionType.TOPUP,
         description=description,
         razorpay_payment_id=payment_id,
@@ -1440,6 +1468,9 @@ class CpoPlugCreateRequest(BaseModel):
     local_ip: str
     plug_model: str = "tapo_p110"
     group_id: Optional[int] = None
+    # Optional geolocation; when omitted the plug inherits its gateway's coords.
+    latitude: Optional[float] = Field(default=None, ge=-90, le=90)
+    longitude: Optional[float] = Field(default=None, ge=-180, le=180)
 
 
 class CpoPlugUpdateRequest(BaseModel):
@@ -1448,6 +1479,8 @@ class CpoPlugUpdateRequest(BaseModel):
     group_id: Optional[int] = None
     # Status string matching PlugStatus enum values: available, occupied, offline, maintenance
     status: Optional[str] = None
+    latitude: Optional[float] = Field(default=None, ge=-90, le=90)
+    longitude: Optional[float] = Field(default=None, ge=-180, le=180)
 
 
 class CpoGroupCreateRequest(BaseModel):
@@ -1682,6 +1715,8 @@ async def cpo_list_plugs(
             "current_power_w": plug.current_power_w,
             "group_id": plug.group_id,
             "group_name": group_name,
+            "latitude": plug.latitude,
+            "longitude": plug.longitude,
             "last_seen_at": plug.last_seen_at.isoformat() if plug.last_seen_at else None,
             "created_at": plug.created_at.isoformat() if plug.created_at else None,
         })
@@ -1731,6 +1766,8 @@ async def cpo_create_plug(
         local_ip=req.local_ip,
         plug_model=req.plug_model,
         group_id=req.group_id,
+        latitude=req.latitude,
+        longitude=req.longitude,
     )
     db.add(plug)
     await db.commit()
@@ -1791,6 +1828,10 @@ async def cpo_update_plug(
                 status_code=400,
                 detail=f"Invalid status '{req.status}'. Valid values: {[s.value for s in PlugStatus]}",
             )
+    if req.latitude is not None:
+        plug.latitude = req.latitude
+    if req.longitude is not None:
+        plug.longitude = req.longitude
 
     await db.commit()
     await db.refresh(plug)

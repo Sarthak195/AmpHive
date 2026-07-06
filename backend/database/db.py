@@ -66,12 +66,41 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 # to be safe to run on every startup (IF NOT EXISTS), and to no-op on a fresh
 # DB where create_all already produced the column. Postgres-specific DDL,
 # which matches the only supported database (asyncpg/Postgres).
+def _money_col_upgrade(table: str, column: str) -> str:
+    """DDL that converts a legacy ``double precision`` money column to
+    ``NUMERIC(12,2)``, but only when it isn't numeric already.
+
+    Guarded by an information_schema check inside a DO block so it is a true
+    no-op on repeat startups (a bare ``ALTER COLUMN … TYPE`` would rewrite the
+    whole table on every boot). The ``USING …::numeric(12,2)`` cast rounds the
+    existing float values to 2 dp — lossless in practice, since every write
+    already quantised to 2 dp.
+    """
+    return (
+        f"DO $$ BEGIN "
+        f"IF EXISTS (SELECT 1 FROM information_schema.columns "
+        f"WHERE table_name='{table}' AND column_name='{column}' "
+        f"AND data_type <> 'numeric') THEN "
+        f"ALTER TABLE {table} ALTER COLUMN {column} "
+        f"TYPE NUMERIC(12,2) USING {column}::numeric(12,2); "
+        f"END IF; END $$;"
+    )
+
+
 _INPLACE_UPGRADES = (
     # razorpay_payment_id + UNIQUE: dedupes concurrent /verify + webhook credits.
     "ALTER TABLE ledger_transactions "
     "ADD COLUMN IF NOT EXISTS razorpay_payment_id VARCHAR(64)",
     "CREATE UNIQUE INDEX IF NOT EXISTS uq_ledger_razorpay_payment_id "
     "ON ledger_transactions (razorpay_payment_id)",
+    # Money columns: Float → NUMERIC(12,2) so wallet math stops drifting.
+    _money_col_upgrade("users", "coin_balance"),
+    _money_col_upgrade("charging_sessions", "coins_spent"),
+    _money_col_upgrade("ledger_transactions", "amount"),
+    _money_col_upgrade("ledger_transactions", "balance_after"),
+    # Plug geolocation for the map (falls back to the gateway's coords when NULL).
+    "ALTER TABLE plugs ADD COLUMN IF NOT EXISTS latitude DOUBLE PRECISION",
+    "ALTER TABLE plugs ADD COLUMN IF NOT EXISTS longitude DOUBLE PRECISION",
 )
 
 

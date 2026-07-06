@@ -1,0 +1,39 @@
+"""
+AmpHive money helpers
+======================
+Coin/rupee wallet amounts are stored as ``NUMERIC(12,2)`` (see the four money
+columns in ``database/models.py``: ``User.coin_balance``,
+``ChargingSession.coins_spent``, ``LedgerTransaction.amount`` /
+``.balance_after``). In Python those columns surface as :class:`decimal.Decimal`.
+
+All wallet arithmetic must go through :class:`~decimal.Decimal` so repeated
+credit/debit cycles don't accumulate binary-float rounding drift — that drift is
+exactly why the columns moved off ``Float``. Mixing a ``Decimal`` balance with a
+``float`` in the same expression raises ``TypeError``, so any value entering the
+wallet math from a float source (energy × rate, Razorpay amounts, env rates)
+must be normalised with :func:`to_money` first.
+
+Physical quantities (``energy_kwh``, ``power_w``, voltage, current) intentionally
+stay ``float`` — they are measurements, not currency, and don't need base-10
+exactness.
+"""
+
+from decimal import Decimal, ROUND_HALF_UP
+
+# Two decimal places — coins mirror rupees (paise-level granularity).
+MONEY_QUANT = Decimal("0.01")
+
+ZERO_MONEY = Decimal("0.00")
+
+
+def to_money(value) -> Decimal:
+    """Coerce an int/float/str/Decimal to a 2-dp :class:`~decimal.Decimal`.
+
+    Rounds half-up to 2 places. Goes via ``Decimal(str(value))`` for float
+    inputs so a value like ``0.1`` doesn't smuggle in its binary tail
+    (``Decimal(0.1)`` is ``0.1000000000000000055…``, whereas
+    ``Decimal("0.1")`` is exact).
+    """
+    if not isinstance(value, Decimal):
+        value = Decimal(str(value))
+    return value.quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
