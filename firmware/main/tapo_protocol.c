@@ -484,26 +484,34 @@ esp_err_t tapo_get_telemetry(const char *plug_ip, tapo_telemetry_t *out) {
         out->overcurrent = json_status_abnormal((const char *)plain, "\"overcurrent_status\":");
     }
 
-    xSemaphoreGive(s_mutex);
-    free(plain);
-
-    out->power_w   = power_w;
-    out->current_a = (s_nominal_voltage > 1.0f) ? power_w / s_nominal_voltage : 0.0f;
-
-    /* monotonic energy integrator (Wh) — robust vs the plug's daily today_energy reset */
+    /* monotonic energy integrator (Wh) — robust vs the plug's daily today_energy
+     * reset. Updated INSIDE s_mutex: the telemetry task and the ON-handler's
+     * baseline read both call tapo_get_telemetry and can overlap, so an unlocked
+     * read-modify-write of s_energy_last_tick / s_energy_wh could double-count or
+     * drop an integration slice. */
     TickType_t now = xTaskGetTickCount();
     if (s_energy_last_tick != 0) {
         float dt_h = (float)(now - s_energy_last_tick) * portTICK_PERIOD_MS / 3600000.0f;
         s_energy_wh += (double)power_w * dt_h;
     }
     s_energy_last_tick = now;
-    out->energy_kwh = (float)(s_energy_wh / 1000.0);
+    double energy_wh_snapshot = s_energy_wh;
 
-    /* Persist the integrator across reboots (throttled by accrual threshold) so
-     * a mid-session crash doesn't disarm the energy watchdog. */
+    /* Persist across reboots (throttled by accrual threshold) so a mid-session
+     * crash doesn't disarm the energy watchdog. Kept under the lock so the NVS
+     * write and the s_energy_persisted_wh update stay consistent; it is rare
+     * (only every ENERGY_PERSIST_THRESHOLD_WH) and cheap next to the KLAP HTTP
+     * calls already made above under the same lock. */
     if (s_energy_wh - s_energy_persisted_wh >= ENERGY_PERSIST_THRESHOLD_WH) {
         energy_persist_nvs();
     }
+
+    xSemaphoreGive(s_mutex);
+    free(plain);
+
+    out->power_w   = power_w;
+    out->current_a = (s_nominal_voltage > 1.0f) ? power_w / s_nominal_voltage : 0.0f;
+    out->energy_kwh = (float)(energy_wh_snapshot / 1000.0);
 
     return ESP_OK;
 }

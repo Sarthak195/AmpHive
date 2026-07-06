@@ -550,15 +550,31 @@ static void telemetry_task(void *pvParameters) {
         /* ALWAYS poll the plug — safety enforcement must not depend on MQTT */
         esp_err_t ret = tapo_get_telemetry(target_plug_ip, &telemetry);
         if (ret == ESP_OK) {
+            /* Report SESSION energy, not the lifetime integrator. telemetry.energy_kwh
+               is a monotonic meter persisted across reboots (never reset); the backend
+               bills this "kwh" field as energy-consumed-this-session (COINS_PER_KWH),
+               and the MQTT contract / TelemetryStore define it that way. Publishing the
+               raw meter re-bills the plug's whole charging history every session.
+               Subtract the session baseline (same value the watchdog uses); clamp against
+               meter/NVS-restore skew; idle (no session) reports 0. */
+            float session_kwh = 0.0f;
+            if (active_session.active) {
+                session_kwh = telemetry.energy_kwh - active_session.start_energy_kwh;
+                if (session_kwh < 0.0f) session_kwh = 0.0f;
+            }
+
+            /* Echo the backend session_id (empty when idle) so the backend can
+               attribute this reading to the exact session, not just the plug. */
             char payload[256];
             snprintf(payload, sizeof(payload),
-                     "{\"plug_id\":%d,\"watts\":%.1f,\"kwh\":%.4f,\"voltage\":%.1f,\"current\":%.2f,\"status\":\"%s\"}",
+                     "{\"plug_id\":%d,\"watts\":%.1f,\"kwh\":%.4f,\"voltage\":%.1f,\"current\":%.2f,\"status\":\"%s\",\"session_id\":\"%s\"}",
                      active_plug_id,
                      telemetry.power_w,
-                     telemetry.energy_kwh,
+                     session_kwh,
                      telemetry.voltage_v,
                      telemetry.current_a,
-                     active_session.active ? "occupied" : "available");
+                     active_session.active ? "occupied" : "available",
+                     active_session.active ? active_session.session_id : "");
 
             if (mqtt_connected) {
                 /* Online: publish telemetry normally */
@@ -568,7 +584,8 @@ static void telemetry_task(void *pvParameters) {
                 offline_telemetry_entry_t log_entry = {
                     .timestamp_s   = xTaskGetTickCount() * portTICK_PERIOD_MS / 1000,
                     .watts_x10     = (uint16_t)(telemetry.power_w * 10.0f),
-                    .kwh_x1000     = (uint32_t)(telemetry.energy_kwh * 1000.0f),
+                    /* session-relative energy, matching the online payload above */
+                    .kwh_x1000     = (uint32_t)(session_kwh * 1000.0f),
                     .voltage_x10   = (uint16_t)(telemetry.voltage_v * 10.0f),
                     .current_x100  = (uint16_t)(telemetry.current_a * 100.0f),
                     .temperature_x10 = (int16_t)(telemetry.temperature_c * 10.0f),
