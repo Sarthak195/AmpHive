@@ -11,7 +11,7 @@
  */
 
 import React, { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, Navigate } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext';
 import api from '../../api/client';
 
@@ -22,10 +22,12 @@ const CpoSetup = () => {
   const navigate = useNavigate();
   const { user, refreshUser } = useAuth();
 
-  // If user is already a CPO, redirect to dashboard
+  // If the user is already a CPO, redirect to the dashboard. Use the
+  // declarative <Navigate> element instead of calling navigate() in the render
+  // body — an imperative navigate during render updates the router mid-render,
+  // which React warns about and can loop under StrictMode.
   if (user?.role === 'cpo') {
-    navigate('/cpo/dashboard', { replace: true });
-    return null;
+    return <Navigate to="/cpo/dashboard" replace />;
   }
 
   const handleSubmit = async (e) => {

@@ -13,11 +13,17 @@ export default function MapComponent({ plugs, onPlugSelect }) {
           attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
           url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
         />
-        {plugs.map((plug) => {
-          // Fallback location for the mock/test
-          const lat = plug.latitude || (28.6139 + Math.random() * 2 - 1);
-          const lng = plug.longitude || (77.2090 + Math.random() * 2 - 1);
-          
+        {plugs
+          // Only plot plugs with real coordinates (the backend fills these from
+          // the plug's own lat/long, falling back to its gateway's location).
+          // Previously this used Math.random() as a fallback, which scattered
+          // markers AND moved them on every re-render. Plugs without a known
+          // location are simply omitted from the map (they stay in the list).
+          .filter((plug) => plug.latitude != null && plug.longitude != null)
+          .map((plug) => {
+          const lat = plug.latitude;
+          const lng = plug.longitude;
+
           return (
             <Marker key={plug.id} position={[lat, lng]}>
               <Popup>
