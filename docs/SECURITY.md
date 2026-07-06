@@ -69,10 +69,10 @@ BFG + force-push) to purge the dead values entirely.
   - Still to do: add broker **auth** (needs a firmware credentials field before
     `allow_anonymous false` can be enabled) so overlay peers can't publish
     anonymously.
-- [Fixed in working tree 2026-07-06 — pending commit + deploy] **CORS** is
-  restricted to an explicit allowlist (localhost, `amphive.duckdns.org`, VM IP;
-  http+https) with the wildcard removed, in `backend/main.py`. ⚠️ **HEAD/prod
-  still run the old `["*"]`** until that backend change is committed and deployed.
+- [Fixed + deployed 2026-07-06] **CORS** is restricted to an explicit allowlist
+  (localhost, `amphive.duckdns.org`, VM IP; http+https) with the wildcard removed,
+  in `backend/main.py:187`. Verified in prod: an allowed origin is echoed, a
+  foreign origin gets no `Access-Control-Allow-Origin` header.
 - **`/api/payments/webhook`** is unauthenticated by design but HMAC-gated. It now
   auto-credits coins on `payment.captured`; abuse via replay is mitigated by the
   HMAC signature check plus idempotency on `razorpay_payment_id`, but a leaked
@@ -92,6 +92,13 @@ BFG + force-push) to purge the dead values entirely.
   verify, and webhook paths — the previous race is closed. Remaining hardening:
   consider a single atomic `UPDATE ... SET balance = balance + :n` and DB-level
   check constraints to prevent negative balances.
+- [2026-07-06] Money columns migrated from `Float` to `Numeric(12,2)` (Decimal),
+  and all wallet math goes through `services/money.to_money` — float rounding
+  drift is closed. A DB-level non-negative-balance CHECK is still not in place.
+- [2026-07-06] The `stop_charging_session` ledger now debits only what the wallet
+  holds (`min(final_cost, balance)`) and records that same delta in `amount` /
+  `balance_after` / `coins_spent`, so the ledger reconciles even when a bill
+  exceeds the balance (the forgiven shortfall is logged).
 
 ## 6. Operational notes
 
@@ -115,7 +122,12 @@ read as still-open.*
 - **MQTT taken off the public internet** — broker bound to the overlay IP
   `100.87.241.70`; GCP firewall restricted to tcp:80/8000 (1883 no longer public).
 - **CORS locked to an allowlist** in `backend/main.py` (wildcard removed) —
-  *pending commit + deploy* to reach HEAD/prod.
+  committed and deployed to prod (verified: allowed origin echoed, foreign
+  origin gets no ACAO header).
+- **Money → `Numeric(12,2)`** across the wallet columns, math via
+  `services/money.to_money` — float rounding drift closed.
+- **Ledger reconciliation fix** in `stop_charging_session` — debits only the
+  available balance and records a matching `amount`/`balance_after`.
 
 **2026-07-05:**
 
@@ -153,16 +165,17 @@ read as still-open.*
 Status — open items and recently closed:
 - [x] **Rotate** WireGuard keys, DuckDNS token, Tapo & DB passwords at the source
       (2026-07-06). Dead old values remain in git history — *optional* scrub.
-- [ ] **Commit + deploy** the CORS allowlist — the working-tree fix isn't in
-      HEAD/prod yet.
+- [x] **Commit + deploy** the CORS allowlist (2026-07-06) — live in prod.
 - [ ] Add MQTT broker **auth** (firmware credentials field needed).
 - [ ] Set a strong `JWT_SECRET_KEY` in every environment (enforced by
       deploy.ps1 as of 2026-07-05; backend falls back to an ephemeral key).
 - [x] MQTT bound to the overlay IP + public 1883 firewall rule dropped (2026-07-06).
-- [x] CORS restricted to an allowlist in `backend/main.py` (2026-07-06, working tree).
-- [ ] Consider a DB-level non-negative-balance constraint.
-- [ ] Unique `razorpay_payment_id` ledger column (the idempotency check is a
-      pre-lock SELECT — concurrent /verify + webhook can still double-credit).
+- [x] CORS restricted to an allowlist in `backend/main.py` (2026-07-06, deployed).
+- [ ] Consider a DB-level non-negative-balance constraint (money is now
+      `Numeric(12,2)`, but no CHECK enforces `coin_balance >= 0` yet).
+- [x] Unique `razorpay_payment_id` ledger column (2026-07-06) —
+      `uq_ledger_razorpay_payment_id` + `IntegrityError` handling in
+      `_credit_topup` closes the concurrent /verify + webhook double-credit race.
 
 Done (2026-07-05):
 - [x] Remove committed secrets from tracked files; add `.example` / env-var paths

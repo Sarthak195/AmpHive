@@ -19,8 +19,8 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 | MQTT inbound telemetry/status handling | ✅ | Telemetry updates TelemetryStore and session DB. Status updates gateway state in DB. |
 | Live telemetry / Socket.io & SSE | ✅ | Streams real telemetry from TelemetryStore via Socket.io (with SSE as legacy/fallback). Automatically triggers the plug to report telemetry at 1s intervals when there are active listeners or an active session. **Correction 2026-07-05:** the stream task called a non-existent `await sio.get_participants(room=...)` API, which raised on every iteration and killed each stream before the first emit — the earlier "fully functional/verified" claim was wrong. Fixed (room-manager membership check) with a regression test in `backend/tests/test_socketio.py`. |
 | Time-series telemetry persistence | ✅ | Persistent `telemetry_readings` table fed by a buffered background batch-flush from the MQTT handler (`services/telemetry_persistence.py`); queried by `GET /api/cpo/analytics/telemetry` via `date_trunc`. Plain Postgres (no TimescaleDB) — hypertables/retention/continuous-aggregates noted as a future upgrade. Live Socket.io/SSE still uses the in-memory TelemetryStore. |
-| Razorpay create-order + verify | ✅ | HMAC-verified; credits coins + ledger. Supports decimal INR amounts and coin balances (floats). **2026-07-05:** `/verify` now credits the **Razorpay-confirmed** amount fetched server-side (the client-sent `amount_inr` is deprecated/ignored — it was previously trusted, allowing arbitrary wallet inflation). |
-| Razorpay webhook auto-credit | ✅ | Credits coins on `payment.captured`; atomic + idempotent vs. `/verify` (dedupes on `razorpay_payment_id`). Supports decimal INR amounts and coin balances (floats). |
+| Razorpay create-order + verify | ✅ | HMAC-verified; credits coins + ledger. Supports decimal INR amounts and coin balances (money columns are `Numeric(12,2)`/Decimal as of 2026-07-06). **2026-07-05:** `/verify` now credits the **Razorpay-confirmed** amount fetched server-side (the client-sent `amount_inr` is deprecated/ignored — it was previously trusted, allowing arbitrary wallet inflation). |
+| Razorpay webhook auto-credit | ✅ | Credits coins on `payment.captured`; atomic + idempotent vs. `/verify` (dedupes on the UNIQUE `razorpay_payment_id` via `IntegrityError`). Money columns are `Numeric(12,2)`/Decimal (2026-07-06). |
 | Wallet debit on stop + ledger | ✅ | Row-locked (`SELECT ... FOR UPDATE`) in stop/verify/webhook paths |
 | Direct Mode Tapo endpoints | ✅ | Gated by `DIRECT_MODE`; lib or relay mode |
 
@@ -33,7 +33,7 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 | Razorpay top-up flow | ✅ | CDN script + `window.Razorpay`; key comes from backend order. Formats and displays decimal coin balances. |
 | Charger groups (join/list) | ✅ | |
 | CPO operator portal (setup, dashboard, plugs, groups, sessions) | ✅ | `pages/cpo/*` behind `CpoProtectedRoute`; charts via `recharts` |
-| Map of available plugs | 🟡 | Leaflet/OpenStreetMap `MapComponent` on Home; plug coordinates not persisted, so markers use fallback/random positions |
+| Map of available plugs | ✅ | Leaflet/OpenStreetMap `MapComponent` on Home. Plug geolocation is now persisted (`Plug.latitude`/`longitude`, falling back to the gateway's coords); markers use real coordinates and plugs without a known location are omitted — the old `Math.random()` fallback (which also jittered markers on every re-render) is gone. |
 | "View History" button (WalletCard) | ✅ | `WalletCard` button → `/history` route (`App.jsx`) → `History.jsx`, which fetches `GET /api/sessions/history`. Shows charging-session debits; does not yet show a unified ledger with top-up credits. |
 | TypeScript usage | ❌ | TS toolchain + `@types/*` present, but all app code is `.jsx`/`.js` |
 
@@ -101,9 +101,11 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 10. [Resolved 2026-07-02] Wallet updates are now row-locked (`SELECT ... FOR
     UPDATE`) in the stop, verify, and webhook paths.
 11. [Resolved 2026-07-04] **Real-time Communication (Socket.io):** Replaced live SSE with Socket.io for session telemetry updates. Auth is verified using JWT token on connection (via auth payload or query parameters).
-12. [Partly resolved 2026-07-02] A Leaflet/OpenStreetMap map (`MapComponent`) is
-    now on Home, but plug **geolocation isn't in the data model**, so markers use
-    fallback/random coordinates rather than real plug locations.
+12. [Resolved 2026-07-06] A Leaflet/OpenStreetMap map (`MapComponent`) is on Home,
+    and plug **geolocation is now in the data model** (`Plug.latitude`/`longitude`,
+    with a fallback to the gateway's coords). Markers use real coordinates; plugs
+    without a known location are omitted. The old `Math.random()` fallback — which
+    also moved markers on every re-render — is gone.
 13. [Resolved 2026-07-02] The dead `frontend/src/api/mockSse.js` leftover has been
     deleted.
 14. [Resolved 2026-07-04] The firmware Tapo driver is now a **real KLAP v2**
@@ -148,3 +150,18 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
     (`POSTGRES_PASSWORD`, `MQTT_BIND_IP`), and mosquitto's unused 9001 port
     is no longer published. **Rotation of the burned secrets is still
     pending** — see [SECURITY.md](SECURITY.md).
+29. [Resolved 2026-07-06] **CORS** locked to an explicit allowlist (wildcard
+    removed) in `backend/main.py:187`; committed and deployed.
+30. [Resolved 2026-07-06] **`stop_charging_session` ledger reconciliation.** The
+    `max(0, …)` clamp used to forgive debt while still writing `amount = -final_cost`
+    / `balance_after = 0`, so the ledger didn't reconcile. It now debits
+    `min(final_cost, balance)` and records that same delta in `amount`,
+    `balance_after`, and `coins_spent`; a forgiven shortfall is logged.
+31. [Resolved 2026-07-06] **Money is now `Numeric(12,2)`** (Decimal), not `Float`,
+    for `coin_balance`, `coins_spent`, ledger `amount`/`balance_after`. Wallet math
+    routes through `services/money.to_money` (half-up, 2 dp); columns migrated in
+    place via a guarded `ALTER … TYPE` in `db.py:_INPLACE_UPGRADES`. Energy/power
+    stay `Float`. A DB-level non-negative-balance CHECK is still not present.
+32. [Resolved 2026-07-06] **`CpoSetup` redirect-during-render** replaced with a
+    declarative `<Navigate … replace />` (the render-body `navigate()` triggered a
+    React "update during render" warning and could loop under StrictMode).

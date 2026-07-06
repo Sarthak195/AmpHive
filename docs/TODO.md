@@ -17,9 +17,10 @@ Cross-references [TECH_DEBT.md](TECH_DEBT.md) items as `TD#n` and
 - [x] **Take MQTT off the public internet**: broker bound to the overlay IP
       `100.87.241.70` and the GCP firewall restricted to tcp:80/8000 (1883
       dropped), 2026-07-06. Broker *auth* still pending. (TD#3, SEC §3)
-- [~] **Lock CORS** to the known frontend origin(s): wildcard removed in
-      `backend/main.py` (working tree, 2026-07-06) — **still needs commit +
-      deploy** to reach HEAD/prod. (TD#4)
+- [x] **Lock CORS** to the known frontend origin(s): the wildcard is replaced by
+      an explicit allowlist in `backend/main.py:187` (localhost, `amphive.duckdns.org`,
+      VM IP; http+https). Committed and **deployed** 2026-07-06 (verified in prod:
+      allowed origin echoed, evil origin gets no ACAO header). (TD#4)
 - [x] **Fix the `stop_charging_session` ledger inconsistency** (2026-07-06):
       previously, when `final_cost > balance`, the `max(0, …)` clamp forgave debt
       but still wrote a ledger `amount = -final_cost` with `balance_after = 0`, so
@@ -38,10 +39,16 @@ Cross-references [TECH_DEBT.md](TECH_DEBT.md) items as `TD#n` and
       unexecuted `schema.sql`/`schema_v2.sql`. (TD#5)
 - [ ] **Split `backend/main.py`** (2,291 lines) into `routers/` + `schemas/`;
       keep the lifespan in `main.py`. (TD#7)
-- [ ] **Money → `Numeric(12,2)`** for `coin_balance`, `coins_spent`, ledger
-      `amount`/`balance_after`; add a DB-level non-negative-balance check. (TD#6, SEC §5)
-- [ ] **Unique `razorpay_payment_id`** is in place — confirm the pre-lock SELECT
-      is backed by it under load, then drop the redundant SELECT if desired. (SEC checklist)
+- [x] **Money → `Numeric(12,2)`** (2026-07-06) for `coin_balance`, `coins_spent`,
+      ledger `amount`/`balance_after`. Columns migrated in place via a guarded
+      `ALTER … TYPE NUMERIC(12,2)` in `db.py:_INPLACE_UPGRADES`; all wallet math now
+      goes through `services/money.to_money` (Decimal, half-up 2 dp), eliminating
+      float drift. Energy/power stay `Float` (measurements). **Still open:** a
+      DB-level non-negative-balance CHECK constraint. (TD#6, SEC §5)
+- [x] **Unique `razorpay_payment_id`** is in place and enforced — `db.py`
+      creates `uq_ledger_razorpay_payment_id`, and `_credit_topup` relies on the
+      `IntegrityError` from a concurrent insert (not just the pre-lock SELECT) to
+      stay idempotent across the /verify + webhook race. (SEC checklist)
 - [ ] **Persist the firmware energy integrator** to NVS so crash recovery keeps
       the energy watchdog armed. (TD#19)
 
@@ -54,11 +61,16 @@ Cross-references [TECH_DEBT.md](TECH_DEBT.md) items as `TD#n` and
       or document it as an explicit fallback. (TD#12)
 - [ ] **cJSON on the firmware command path** instead of `strstr`/`sscanf`; raise
       the 128-byte MQTT topic/data buffers so a `session_id` can't truncate. (TD#11)
-- [ ] **Model plug geolocation** (lat/long on `Plug`) so the map stops using
-      random fallback coordinates. (TD#17)
+- [x] **Model plug geolocation** (2026-07-06): `Plug` now has nullable
+      `latitude`/`longitude`; the driver/plug APIs return effective coords (the
+      plug's own, else its gateway's site), and CPOs can set them via
+      create/update. `MapComponent` plots only plugs with real coords and no
+      longer uses `Math.random()` (which also moved markers on every re-render).
+      (TD#17)
 - [ ] **Decide TypeScript**: adopt it (all app code is `.jsx` despite the TS
       toolchain + `@types/*`) or remove the toolchain. (TD#14)
-- [ ] **Fix `CpoSetup` redirect-during-render** (`useEffect`/`<Navigate>`). (TD#18)
+- [x] **Fix `CpoSetup` redirect-during-render** (2026-07-06): the render-body
+      `navigate()` is replaced with a declarative `<Navigate to=… replace />`. (TD#18)
 - [ ] **Add frontend tests** (Vitest + RTL) for auth, payment handler, protected
       routes. (TESTING Phase 4)
 
