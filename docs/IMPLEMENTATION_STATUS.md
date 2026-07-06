@@ -62,15 +62,16 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 
 ## 2. End-to-end reality check
 
-- **Path A (ESP32 + MQTT)** is functional on the backend: telemetry ingestion,
-  TelemetryStore updates, DB persistence, and gateway status updates are fully
-  implemented. However, the ESP32 firmware plug driver is currently mocked (returns
-  simulated telemetry), so the values are not yet from a physical smart plug.
-- **Path B (Direct Mode + WireGuard relay)** is the path that actually controls a
-  physical plug today, and it's what the committed env enables. It does not feed
-  the session/telemetry pipeline either — it's a separate on/off/info surface.
-- A fully working billed session with a real plug over Path A requires finishing
-  the firmware Tapo driver (real Tapo driver instead of the mock).
+- **Path A (ESP32 + MQTT)** is the operating path as of 2026-07-06: telemetry
+  ingestion, TelemetryStore updates, DB persistence, and gateway status updates
+  are implemented, and plug control now routes through the ESP32 gateway
+  (`DIRECT_MODE=false`). Earlier notes flagged the firmware plug driver as mocked
+  — confirm the on-device KLAP v2 driver is feeding real telemetry end-to-end.
+- **Path B (Direct Mode + WireGuard relay)** has been **retired** — the WireGuard
+  tunnel is no longer used. `tapo_direct` and the `/direct/*` endpoints remain in
+  code but are dormant (`DIRECT_MODE=false` makes them return 503).
+- A fully working billed session with a real plug over Path A depends on the
+  firmware Tapo driver reporting real telemetry (vs. the earlier mock).
 
 ## 3. Full discrepancy list (doc says X → code does Y)
 

@@ -12,13 +12,13 @@ AmpHive turns TP-Link Tapo P110 smart plugs into a billed, shared EV-charging
 network. A driver enters a **Plug ID** in a React app → FastAPI authorizes and
 bills a prepaid **coin** wallet → a command reaches the plug one of two ways:
 
-- **Path A (product design):** backend → MQTT → **ESP32-S3 gateway** (over a
-  Headscale/WireGuard overlay) → local Tapo plug. Backend-complete; the on-device
-  Tapo driver is real (KLAP v2) but the end-to-end billed session on hardware
-  is not yet the committed reality.
-- **Path B (current dev/test reality):** backend calls a **relay/tapo lib** over
-  a WireGuard tunnel straight to a plug on the developer's home LAN. This is what
-  the committed `.env` enables (`DIRECT_MODE`).
+- **Path A (product design — now the operating path):** backend → MQTT →
+  **ESP32-S3 gateway** (over a Headscale/WireGuard overlay) → local Tapo plug.
+  As of 2026-07-06 this is what the deployment runs (`DIRECT_MODE=false`); the
+  on-device Tapo driver is KLAP v2.
+- **Path B (Direct Mode over WireGuard — retired 2026-07-06):** backend called a
+  **relay/tapo lib** over a WireGuard tunnel to a plug on the developer's home LAN.
+  No longer used; the `tapo_direct` / `/direct/*` code remains but is dormant.
 
 Everything cloud-side is identical between the two; only the last hop differs.
 

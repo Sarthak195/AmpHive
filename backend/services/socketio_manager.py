@@ -11,8 +11,18 @@ from sqlalchemy import select, and_
 
 logger = logging.getLogger("amphive.socketio")
 
-# Create the Socket.io server
-sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')
+# Create the Socket.io server.
+# cors_allowed_origins mirrors the FastAPI CORS allowlist in main.py (no
+# wildcard). Keep the two lists in sync when the frontend origin changes.
+_ALLOWED_ORIGINS = [
+    "http://localhost:5173",
+    "http://localhost:3000",
+    "http://amphive.duckdns.org",
+    "https://amphive.duckdns.org",
+    "http://8.231.81.12",
+    "https://8.231.81.12",
+]
+sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins=_ALLOWED_ORIGINS)
 
 # Active background telemetry tasks by session_id
 active_streams: Dict[int, asyncio.Task] = {}

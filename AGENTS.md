@@ -11,8 +11,10 @@ actually works vs. stub/aspirational) and [docs/SECURITY.md](docs/SECURITY.md)
 A shared EV-charging PaaS that turns off-the-shelf TP-Link Tapo P110 smart plugs
 into a monetizable charging network: a FastAPI backend + React SPA in the cloud,
 ESP32-S3 gateways at each site, connected over a Headscale/WireGuard overlay.
-There are **two operating modes** — Path A (ESP32 + MQTT, the product design) and
-Path B (Direct Mode over WireGuard, the current dev/test reality). See
+There are **two operating modes** — Path A (ESP32 + MQTT, the product design and,
+as of 2026-07-06, the operating path) and Path B (Direct Mode over WireGuard,
+**retired 2026-07-06** — the tunnel is no longer used and `DIRECT_MODE=false`; the
+`tapo_direct` / `/direct/*` code remains but is dormant). See
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Where things live

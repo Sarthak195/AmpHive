@@ -45,9 +45,10 @@ last hop to the physical plug is reached**.
 
 ## 2. The two operating modes
 
-AmpHive can drive a plug two ways. This is the single most important thing to
-understand about the current codebase, because the docs historically describe
-Path A as "done" while the committed configuration actually runs Path B.
+AmpHive can drive a plug two ways. As of 2026-07-06 the deployment runs **Path A**
+(ESP32 gateway over MQTT); **Path B (Direct Mode over WireGuard) has been retired**
+— the WireGuard tunnel is no longer used and `DIRECT_MODE=false`. The Direct-Mode
+code (`tapo_direct`, `/direct/*`) remains but is dormant, kept for reference.
 
 ### Path A — ESP32 gateway over MQTT (the product design)
 1. The ESP32 joins the **Headscale/Tailscale overlay** via the `microlink`
@@ -64,7 +65,7 @@ handlers are **live** — telemetry updates the in-memory `TelemetryStore` (feed
 the Socket.io stream) and persists `energy_kwh`/`peak_power_w` to the session row, and
 status messages update gateway online/offline state in the DB. The ESP32 now implements a **real KLAP v2** Tapo driver (mbedTLS SHA/AES + esp_http_client), with on-device flash verification pending. See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md).
 
-### Path B — Direct Mode over WireGuard (current dev/test reality)
+### Path B — Direct Mode over WireGuard (retired 2026-07-06 — kept for reference)
 1. A WireGuard tunnel links the GCP VM (`10.10.0.1`) to the developer's home PC
    (`10.10.0.2`) on UDP/51820.
 2. The backend's `tapo_direct` service calls a small HTTP **relay**
@@ -163,7 +164,7 @@ endpoints (tenant setup, gateway/plug/group CRUD, and analytics).
 | Network | Range | Purpose | Used by |
 |---------|-------|---------|---------|
 | Headscale/Tailscale overlay | `100.64.0.0/10` | Secure mesh between server and ESP32 gateways | Path A (firmware `microlink`, K8s `headscale.yaml`) |
-| WireGuard Direct-Mode tunnel | `10.10.0.0/24` | Cloud VM ↔ home PC for Direct Mode | Path B (`amphive_tunnel.conf`, `tapo_direct`) |
+| WireGuard Direct-Mode tunnel | `10.10.0.0/24` | Cloud VM ↔ home PC for Direct Mode (**retired 2026-07-06**) | Path B (`amphive_tunnel.conf`, `tapo_direct`) |
 | Site IoT VLAN (VLAN 20) | site-defined | Physically isolate plugs + gateway from the resident network | Product design (CPO router config) |
 
 These are three independent networks; the `100.64.x` overlay and the `10.10.0.x`
