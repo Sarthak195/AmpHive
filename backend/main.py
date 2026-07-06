@@ -685,6 +685,10 @@ async def start_charging_session(
     await db.commit()
     await db.refresh(session)
 
+    # Broadcast the claim so other clients' plug lists flip to OCCUPIED live.
+    from backend.services.socketio_manager import emit_plug_status
+    await emit_plug_status(plug.id, PlugStatus.OCCUPIED.value)
+
     # 4. Now command the gateway. If this fails, undo the claim so the plug
     #    doesn't stay OCCUPIED with a live ACTIVE session nobody can drive.
     success = mqtt_manager.send_plug_command(
@@ -699,6 +703,7 @@ async def start_charging_session(
         session.ended_at = datetime.now(timezone.utc)
         plug.status = PlugStatus.AVAILABLE
         await db.commit()
+        await emit_plug_status(plug.id, PlugStatus.AVAILABLE.value)
         raise HTTPException(
             status_code=500,
             detail="Failed to publish start command to the gateway. The gateway may be offline.",
@@ -804,6 +809,10 @@ async def stop_charging_session(
     # 5. Update plug status back to available
     plug.status = PlugStatus.AVAILABLE
     await db.commit()
+
+    # Broadcast so other clients' plug lists flip back to AVAILABLE live.
+    from backend.services.socketio_manager import emit_plug_status
+    await emit_plug_status(plug.id, PlugStatus.AVAILABLE.value)
 
     # 6. End telemetry stream
     telemetry_store.end_session(plug.id)

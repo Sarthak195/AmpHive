@@ -19,6 +19,21 @@ active_streams: Dict[int, asyncio.Task] = {}
 
 telemetry_store = TelemetryStore()
 
+
+async def emit_plug_status(plug_id: int, status: str) -> None:
+    """
+    Broadcast a plug's availability change to every connected client so their
+    charger lists flip OCCUPIED/AVAILABLE live, without a page refresh. Called
+    from the session start/stop paths (and any other plug-status transition).
+    The broadcast is global — plug availability isn't sensitive, and the frontend
+    only updates plugs it is already displaying (a non-matching id is a no-op).
+    """
+    try:
+        await sio.emit("plug_status", {"plug_id": plug_id, "status": status})
+    except Exception as e:
+        logger.error(f"Failed to emit plug_status for plug {plug_id}: {e}")
+
+
 @sio.event
 async def connect(sid, environ, auth=None):
     """

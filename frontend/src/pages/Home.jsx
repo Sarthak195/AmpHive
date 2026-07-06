@@ -15,7 +15,7 @@ import MapComponent from '../components/MapComponent';
 
 const Home = () => {
   const { user } = useAuth();
-  const { startSession, isActive, sessionData, error: sessionError } = useSession();
+  const { startSession, isActive, sessionData, error: sessionError, socket } = useSession();
   const navigate = useNavigate();
 
   const [plugId, setPlugId] = useState('');
@@ -29,6 +29,20 @@ const Home = () => {
     if (!user) return;
     fetchPlugs();
   }, [user]);
+
+  // Live plug-availability: when any plug flips OCCUPIED/AVAILABLE (someone
+  // else started/stopped a session), update its badge in place so the list
+  // stays current without a manual refresh.
+  useEffect(() => {
+    if (!socket) return;
+    const handlePlugStatus = ({ plug_id, status }) => {
+      setPlugs((prev) =>
+        prev.map((p) => (p.id === plug_id ? { ...p, status } : p))
+      );
+    };
+    socket.on('plug_status', handlePlugStatus);
+    return () => socket.off('plug_status', handlePlugStatus);
+  }, [socket]);
 
   const fetchPlugs = async () => {
     setLoadingPlugs(true);

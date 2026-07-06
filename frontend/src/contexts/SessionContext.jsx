@@ -2,18 +2,21 @@
  * AmpHive Session Context
  * =======================
  * Manages the active charging session state using real backend APIs
- * and Server-Sent Events (SSE) for live telemetry streaming.
+ * and Socket.io for live telemetry streaming.
  *
- * Replaces the Phase 1 MockEventSource with a real EventSource
- * connected to GET /api/sessions/live/{session_id}.
+ * Replaces the Server-Sent Events (SSE) implementation with a robust
+ * bi-directional WebSocket connection.
  *
  * Flow:
- * 1. startSession(plugId) → POST /api/sessions/start → receives session_id
- * 2. Opens EventSource to /api/sessions/live/{session_id} for SSE telemetry
- * 3. stopSession() → POST /api/sessions/stop → closes SSE
+ * 1. user logs in → opens Socket.io connection using JWT auth
+ * 2. startSession(plugId) → POST /api/sessions/start → receives session_id
+ *    - Automatically emits 'subscribe_session' and listens for 'telemetry' events
+ * 3. stopSession() → POST /api/sessions/stop
+ *    - Automatically emits 'unsubscribe_session' and stops telemetry listener
  */
 
 import React, { createContext, useState, useContext, useEffect, useCallback } from 'react';
+import { io } from 'socket.io-client';
 import api from '../api/client';
 import { useAuth } from './AuthContext';
 
@@ -26,46 +29,71 @@ export const SessionProvider = ({ children }) => {
   const [sessionData, setSessionData] = useState(null);
   const [sessionId, setSessionId] = useState(null);
   const [isActive, setIsActive] = useState(false);
-  const [eventSource, setEventSource] = useState(null);
+  const [socket, setSocket] = useState(null);
   const [error, setError] = useState(null);
+
+  // Manage the Socket.io lifecycle (connect on login, disconnect on logout)
+  useEffect(() => {
+    if (!user) {
+      if (socket) {
+        socket.disconnect();
+        setSocket(null);
+      }
+      return;
+    }
+
+    const token = localStorage.getItem('amphive_token');
+    const newSocket = io(API_BASE, {
+      auth: { token },
+      transports: ['websocket', 'polling'],
+    });
+
+    newSocket.on('connect', () => {
+      console.log('Socket.io connected (sid:', newSocket.id, ')');
+    });
+
+    newSocket.on('connect_error', (err) => {
+      console.error('Socket.io connection error:', err);
+    });
+
+    newSocket.on('disconnect', (reason) => {
+      console.log('Socket.io disconnected:', reason);
+    });
+
+    setSocket(newSocket);
+
+    return () => {
+      newSocket.disconnect();
+    };
+  }, [user]);
+
+  // Manage telemetry subscription reactively
+  useEffect(() => {
+    if (!socket || !sessionId || !isActive) return;
+
+    const handleTelemetry = (data) => {
+      setSessionData(data);
+    };
+
+    socket.on('telemetry', handleTelemetry);
+    socket.emit('subscribe_session', { session_id: sessionId });
+    console.log(`Subscribed to Socket.io telemetry for session ${sessionId}`);
+
+    return () => {
+      socket.off('telemetry', handleTelemetry);
+      socket.emit('unsubscribe_session', { session_id: sessionId });
+      console.log(`Unsubscribed from Socket.io telemetry for session ${sessionId}`);
+    };
+  }, [socket, sessionId, isActive]);
 
   const startSession = useCallback(async (plugId) => {
     setError(null);
     try {
-      // Call the backend to start the session and get the session_id
+      // Call backend to start session
       const result = await api.post('/api/sessions/start', { plug_id: parseInt(plugId) });
       const newSessionId = result.session_id;
       setSessionId(newSessionId);
       setIsActive(true);
-
-      // Open SSE connection for real-time telemetry
-      const token = localStorage.getItem('amphive_token');
-      const sseUrl = `${API_BASE}/api/sessions/live/${newSessionId}?token=${token}`;
-
-      // EventSource doesn't natively support Authorization headers,
-      // so we pass the token as a query parameter for SSE.
-      // The backend should also accept ?token= for SSE endpoints.
-      const sse = new EventSource(sseUrl);
-
-      sse.addEventListener('telemetry', (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          setSessionData(data);
-        } catch (e) {
-          console.error('Failed to parse telemetry event:', e);
-        }
-      });
-
-      sse.onerror = (err) => {
-        console.warn('SSE connection error:', err);
-        // SSE will auto-reconnect, but if it's a fatal error, clean up
-        if (sse.readyState === EventSource.CLOSED) {
-          setIsActive(false);
-        }
-      };
-
-      setEventSource(sse);
-
       return result;
     } catch (err) {
       setError(err.message);
@@ -75,13 +103,6 @@ export const SessionProvider = ({ children }) => {
 
   const stopSession = useCallback(async () => {
     setError(null);
-
-    // Close the SSE connection
-    if (eventSource) {
-      eventSource.close();
-      setEventSource(null);
-    }
-
     try {
       if (sessionId) {
         const result = await api.post('/api/sessions/stop', { session_id: sessionId });
@@ -92,11 +113,10 @@ export const SessionProvider = ({ children }) => {
       }
     } catch (err) {
       setError(err.message);
-      // Still mark as inactive even if the API call fails
       setIsActive(false);
       throw err;
     }
-  }, [eventSource, sessionId]);
+  }, [sessionId]);
 
   const clearSession = useCallback(() => {
     setSessionData(null);
@@ -112,10 +132,6 @@ export const SessionProvider = ({ children }) => {
         setSessionData(null);
         setSessionId(null);
         setIsActive(false);
-        if (eventSource) {
-          eventSource.close();
-          setEventSource(null);
-        }
         return;
       }
 
@@ -134,29 +150,6 @@ export const SessionProvider = ({ children }) => {
             current_a: 0.0,
             cost_coins: 0.0
           });
-
-          // Connect SSE
-          const token = localStorage.getItem('amphive_token');
-          const sseUrl = `${API_BASE}/api/sessions/live/${res.session_id}?token=${token}`;
-          const sse = new EventSource(sseUrl);
-
-          sse.addEventListener('telemetry', (event) => {
-            try {
-              const data = JSON.parse(event.data);
-              setSessionData(data);
-            } catch (e) {
-              console.error('Failed to parse telemetry event:', e);
-            }
-          });
-
-          sse.onerror = (err) => {
-            console.warn('SSE connection error:', err);
-            if (sse.readyState === EventSource.CLOSED) {
-              setIsActive(false);
-            }
-          };
-
-          setEventSource(sse);
         }
       } catch (err) {
         console.error('Failed to restore active session:', err);
@@ -166,17 +159,9 @@ export const SessionProvider = ({ children }) => {
     checkActiveSession();
   }, [user]);
 
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => {
-      if (eventSource) {
-        eventSource.close();
-      }
-    };
-  }, [eventSource]);
-
   return (
     <SessionContext.Provider value={{
+      socket,
       sessionData, sessionId, isActive, error,
       startSession, stopSession, clearSession,
     }}>
