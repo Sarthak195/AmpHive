@@ -61,6 +61,14 @@ MQTT_BROKER_PORT = int(os.getenv("MQTT_BROKER_PORT", 1883))
 MQTT_USERNAME = os.getenv("MQTT_USERNAME", None)
 MQTT_PASSWORD = os.getenv("MQTT_PASSWORD", None)
 
+# A gateway counts as live only if it reported (status or telemetry) within
+# this window. The DB status flag alone is not enough: seeded/mock rows can
+# say ONLINE with no MQTT client behind them, and a missed LWT leaves a dead
+# gateway ONLINE forever. Telemetry arrives every ~10 s from a healthy
+# gateway (bumped into last_seen_at at most once a minute), so 120 s gives
+# comfortable slack without letting sessions start against dead hardware.
+GATEWAY_LIVENESS_WINDOW_SEC = int(os.getenv("GATEWAY_LIVENESS_WINDOW_SEC", "120"))
+
 # --- [Direct Mode] Tapo P110 Configuration ---
 # When DIRECT_MODE=true, the backend can control the plug directly via the
 # `tapo` Python library, bypassing the ESP32 gateway and MQTT broker.
@@ -98,6 +106,24 @@ async def set_plug_telemetry_interval(db: AsyncSession, plug_id: int, interval_m
     manager = MQTTManager()
     if hasattr(manager, "client") and manager.client:
         manager.send_plug_interval(plug.gateway_id, plug_id, interval_ms)
+
+def gateway_is_live(gateway: Gateway, now: Optional[datetime] = None) -> bool:
+    """
+    Whether a gateway is actually reachable, not just flagged ONLINE in the DB.
+    Requires both the ONLINE status and a last_seen_at within
+    GATEWAY_LIVENESS_WINDOW_SEC (status messages and telemetry both refresh it).
+    """
+    if gateway.status != GatewayStatus.ONLINE:
+        return False
+    if gateway.last_seen_at is None:
+        return False
+    last_seen = gateway.last_seen_at
+    if last_seen.tzinfo is None:
+        # Legacy rows written by the old naive-datetime onupdate hook.
+        last_seen = last_seen.replace(tzinfo=timezone.utc)
+    now = now or datetime.now(timezone.utc)
+    return (now - last_seen).total_seconds() <= GATEWAY_LIVENESS_WINDOW_SEC
+
 
 async def check_and_speed_up_active_session(db: AsyncSession, user_id: int):
     """
@@ -703,6 +729,16 @@ async def start_charging_session(
 
     gw_result = await db.execute(select(Gateway).where(Gateway.id == plug.gateway_id))
     gateway = gw_result.scalar_one()
+
+    # Refuse to start against a gateway that isn't demonstrably alive: the MQTT
+    # publish below only confirms the *broker* accepted the command, so without
+    # this check a session on a dead gateway starts "successfully" and then
+    # sits ACTIVE forever with the plug pinned OCCUPIED and no telemetry.
+    if not gateway_is_live(gateway):
+        raise HTTPException(
+            status_code=409,
+            detail="This charger's gateway is offline. Try again once it reconnects.",
+        )
 
     session = ChargingSession(
         tenant_id=gateway.tenant_id,

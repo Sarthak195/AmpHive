@@ -37,7 +37,15 @@ Owns users, gateways, sessions, charger_groups (cascade delete-orphan).
 ### `gateways`
 `id` **VARCHAR(50) PK** (caller-supplied MAC/UUID) · `tenant_id` → tenants
 (CASCADE, **not null**) · `name` · `vpn_ip` unique · `status` (default `offline`)
-· `last_seen_at` (`onupdate=now`) · `created_at`. Owns plugs.
+· `last_seen_at` · `created_at`. Owns plugs.
+
+`last_seen_at` is the **liveness marker**: written only by the MQTT handlers
+(status connect/LWT, plus a telemetry-driven refresh throttled to once per
+gateway per minute) and read by the session-start liveness gate
+(`gateway_is_live`: status ONLINE **and** seen within
+`GATEWAY_LIVENESS_WINDOW_SEC`, default 120 s). The old `onupdate=now` hook was
+removed 2026-07-06 — an unrelated row edit must not make a dead gateway look
+freshly seen.
 
 ### `plugs`
 `id` PK · `gateway_id` → gateways (CASCADE) · `name` · `local_ip` ·

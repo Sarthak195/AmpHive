@@ -37,11 +37,14 @@ Cross-references [TECH_DEBT.md](TECH_DEBT.md) items as `TD#n` and
       user and 500'd login/session-restore for users with more (observed in prod
       with 3). Now iterates all; regression tests in
       `backend/tests/test_active_session_speedup.py`. (IMPL §3.39)
-- [ ] **Reject session start when the gateway is offline.** `send_plug_command`
-      only confirms the broker PUBACK, so sessions start "successfully" against
-      dead/mock gateways and sit ACTIVE forever with 0 energy (sessions 72–76).
-      The `Gateway` row is already loaded in the start handler — check its
-      `status`/`last_seen_at`.
+- [x] **Reject session start when the gateway is offline** (2026-07-06):
+      `/api/sessions/start` now 409s unless the gateway is *live* —
+      `gateway_is_live` requires status ONLINE **and** `last_seen_at` within
+      `GATEWAY_LIVENESS_WINDOW_SEC` (env, default 120 s). Telemetry now
+      refreshes `last_seen_at` (throttled 1/min per gateway in `MQTTManager`),
+      so long-connected gateways stay live without reconnecting; the model's
+      misleading `onupdate=now` hook is removed. Tests:
+      `backend/tests/test_gateway_liveness.py`. (IMPL §3.40)
 - [ ] **Add a backend session reaper**: periodic task that auto-stops ACTIVE
       sessions with no telemetry for N minutes (bill persisted energy). Today the
       only timeout lives in the firmware — useless if the gateway never got the

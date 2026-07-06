@@ -239,5 +239,13 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
     a 500 on login and session restore, locking them out of the app (observed in
     prod with 3 concurrent ACTIVE sessions). Now iterates `scalars().all()`.
     Regression tests: `backend/tests/test_active_session_speedup.py`. Related
-    open gaps: sessions can start against offline gateways and there is no
-    backend session reaper — see [TODO.md](TODO.md).
+    open gap: there is no backend session reaper — see [TODO.md](TODO.md).
+40. [Resolved 2026-07-06] **Sessions could start against dead gateways and sit
+    ACTIVE forever.** `send_plug_command` only confirms the broker PUBACK, so a
+    start against a mock/offline gateway "succeeded", pinning the plug OCCUPIED
+    with no telemetry and no way to time out server-side (prod sessions 72–76).
+    `/api/sessions/start` now 409s unless `gateway_is_live`: status ONLINE
+    **and** `last_seen_at` within `GATEWAY_LIVENESS_WINDOW_SEC` (default 120 s).
+    Telemetry refreshes `last_seen_at` (throttled 1/min per gateway); the
+    `Gateway.last_seen_at` `onupdate=now` hook was removed so unrelated row
+    edits can't fake liveness. Tests: `backend/tests/test_gateway_liveness.py`.

@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 from datetime import datetime, timezone
 from typing import Callable, Dict, Any, Optional
 
@@ -9,6 +10,11 @@ import paho.mqtt.client as mqtt
 
 logger = logging.getLogger("amphive.mqtt")
 logging.basicConfig(level=logging.INFO)
+
+# Telemetry refreshes gateways.last_seen_at (the liveness signal that gates
+# session starts) at most this often per gateway — it arrives every ~1-10 s
+# and each refresh is a DB write.
+GATEWAY_SEEN_BUMP_INTERVAL_SEC = 60.0
 
 
 class MQTTManager:
@@ -43,6 +49,9 @@ class MQTTManager:
         self.event_loop = event_loop
         # Buffered batch-flush sink for time-series persistence (optional).
         self.telemetry_persistence = telemetry_persistence
+        # Per-gateway monotonic timestamp of the last last_seen_at refresh
+        # (see GATEWAY_SEEN_BUMP_INTERVAL_SEC). Only touched on the paho thread.
+        self._gateway_seen_bumped: Dict[str, float] = {}
         
         self.client = mqtt.Client(client_id="amphive_backend_server", callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
         
@@ -204,6 +213,44 @@ class MQTTManager:
                 self._persist_telemetry(plug_id, watts, kwh, session_id),
                 self.event_loop,
             )
+            # Telemetry proves the gateway is alive — refresh its liveness
+            # marker (throttled). Status messages alone only arrive on
+            # connect/LWT, so a long-connected gateway would otherwise look
+            # stale to the session-start liveness gate.
+            if self._should_bump_gateway_seen(gateway_id):
+                asyncio.run_coroutine_threadsafe(
+                    self._persist_gateway_seen(gateway_id),
+                    self.event_loop,
+                )
+
+    def _should_bump_gateway_seen(self, gateway_id: str) -> bool:
+        """Rate-limit last_seen_at refreshes to one per gateway per
+        GATEWAY_SEEN_BUMP_INTERVAL_SEC. Runs on the paho thread only."""
+        now = time.monotonic()
+        last = self._gateway_seen_bumped.get(gateway_id)
+        if last is not None and (now - last) < GATEWAY_SEEN_BUMP_INTERVAL_SEC:
+            return False
+        self._gateway_seen_bumped[gateway_id] = now
+        return True
+
+    async def _persist_gateway_seen(self, gateway_id: str):
+        """Mark a gateway ONLINE + freshly seen because telemetry arrived from
+        it (also heals a gateway stuck OFFLINE after a missed retained status)."""
+        from backend.database.models import Gateway, GatewayStatus
+        from sqlalchemy import select
+
+        try:
+            async with self.db_session_factory() as session:
+                result = await session.execute(
+                    select(Gateway).where(Gateway.id == gateway_id)
+                )
+                gateway = result.scalar_one_or_none()
+                if gateway:
+                    gateway.status = GatewayStatus.ONLINE
+                    gateway.last_seen_at = datetime.now(timezone.utc)
+                    await session.commit()
+        except Exception as e:
+            logger.error(f"Failed to refresh last_seen_at for gateway {gateway_id}: {e}")
 
     async def _persist_telemetry(self, plug_id: int, watts: float, kwh: float, session_id: Optional[int] = None):
         """
