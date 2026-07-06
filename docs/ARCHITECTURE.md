@@ -1,6 +1,6 @@
 # AmpHive — System Architecture
 
-*Verified against source on 2026-07-02. For per-component status and the gap
+*Verified against source on 2026-07-06. For per-component status and the gap
 between this and the product specs, see [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md).*
 
 AmpHive turns off-the-shelf smart plugs (TP-Link Tapo P110) into a shared,
@@ -63,7 +63,13 @@ code (`tapo_direct`, `/direct/*`) remains but is dormant, kept for reference.
 implemented and the topic strings match the backend. The backend's inbound
 handlers are **live** — telemetry updates the in-memory `TelemetryStore` (feeding
 the Socket.io stream) and persists `energy_kwh`/`peak_power_w` to the session row, and
-status messages update gateway online/offline state in the DB. The ESP32 now implements a **real KLAP v2** Tapo driver (mbedTLS SHA/AES + esp_http_client), with on-device flash verification pending. See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md).
+status messages update gateway online/offline state in the DB. The ESP32 runs a
+**real KLAP v2** Tapo driver (mbedTLS SHA/AES + esp_http_client). Path A has now
+been run **end-to-end on physical hardware** — a real ESP32 + P110 drove a billed
+session with correct energy delivery. That run surfaced a session-overbilling bug
+(firmware published its lifetime energy meter instead of session-relative energy),
+now fixed in code but **pending an on-device reflash**. See
+[IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md).
 
 ### Path B — Direct Mode over WireGuard (retired 2026-07-06 — kept for reference)
 1. A WireGuard tunnel links the GCP VM (`10.10.0.1`) to the developer's home PC
@@ -116,11 +122,13 @@ POST /api/sessions/stop              (JWT required)
   tenant). **Role-based access control is enforced** on every `/api/cpo/*` route
   by `require_role("cpo","admin")` (`backend/services/rbac.py`), which checks the
   live DB role rather than trusting the token.
-- **Wallet:** a single `users.coin_balance` float. Credited by Razorpay
-  top-ups (`/api/payments/verify` and the server-authoritative webhook), debited
-  at session stop. Conversion is `COINS_PER_RUPEE` (default 1.0). Credits and
-  debits are **row-locked** (`SELECT ... FOR UPDATE`) so concurrent updates
-  don't race.
+- **Wallet:** a single `users.coin_balance` `NUMERIC(12,2)` (Decimal — moved off
+  `float` to kill rounding drift; all wallet math goes through
+  `services/money.to_money`). Credited by Razorpay top-ups
+  (`/api/payments/verify` and the server-authoritative webhook), debited at
+  session stop (energy × `COINS_PER_KWH`). Conversion is `COINS_PER_RUPEE`
+  (default 1.0). Credits and debits are **row-locked** (`SELECT ... FOR UPDATE`)
+  so concurrent updates don't race.
 - **Telemetry/live data:** live telemetry is served in real time via **Socket.io** (with legacy SSE endpoint kept as fallback) from an **in-memory**
   `TelemetryStore` singleton (`backend/services/telemetry.py`). Raw samples are
   **also** persisted to the `telemetry_readings` time-series table via a buffered
@@ -149,8 +157,9 @@ State lives in three React contexts: `AuthContext` (JWT in `localStorage`,
 for live telemetry), and `WalletContext` (derives balance from the user object). Razorpay
 is loaded via a CDN `<script>` and used through `window.Razorpay`. Home renders a
 **Leaflet/OpenStreetMap** map (`MapComponent`, `react-leaflet`) of available
-plugs — though plug **coordinates aren't persisted** in the data model yet, so
-markers currently use fallback/random positions near India.
+plugs — plug **coordinates are persisted** (`Plug.latitude`/`longitude`, falling
+back to the gateway's coords); markers use real coordinates and plugs without a
+known location are omitted (the old `Math.random()` fallback is gone).
 
 **CPO operator portal** — a second set of pages under `frontend/src/pages/cpo/`
 (`CpoSetup`, `CpoDashboard`, `CpoPlugs`, `CpoGroups`, `CpoSessions`) sits behind

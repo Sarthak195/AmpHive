@@ -2,7 +2,7 @@
 
 > Quick setup? See [ESP32_CONNECTION.md](ESP32_CONNECTION.md) for build/flash/monitor commands and common connection issues.
 
-*Verified against `firmware/` on 2026-06-20.*
+*Verified against `firmware/` on 2026-07-06.*
 
 The gateway is an ESP-IDF application targeting **ESP32-S3-N16R8** (16 MB flash /
 8 MB PSRAM). It joins a Tailscale-style overlay, receives MQTT commands, drives a
@@ -33,13 +33,13 @@ firmware/
 1. `wifi_init()` — init NVS, load saved config, connect STA (blocking).
 2. If no config / WiFi fails → `start_captive_portal()` and idle until the user
    submits the setup form (which triggers `esp_restart()`).
-3. `tapo_init()`.
-4. Create `telemetry_safety` task (stack 4096, prio 5).
+3. `tapo_init()` (also restores the persisted energy integrator from NVS).
+4. Create `telemetry_safety` task (stack 8192, prio 5).
 5. Create `microlink_vpn` task (stack 32768, prio 6).
 
 | Task | Stack | Prio | Core |
 |------|-------|------|------|
-| `telemetry_safety` | 4096 | 5 | floating |
+| `telemetry_safety` | 8192 | 5 | floating |
 | `microlink_vpn` | 32768 | 6 | floating |
 | `ml_coord_poll` (inside microlink) | 8 KB | max-1 | pinned Core 1 |
 
@@ -61,12 +61,18 @@ product features.
 ## 3. MQTT control loop & watchdogs
 
 - Lazy MQTT start once the overlay is up; topics per [MQTT_CONTRACT.md](MQTT_CONTRACT.md).
-- Commands parsed with `strstr`/`sscanf` (looks for `"action":"ON"`/`"OFF"`, `"action":"SET_INTERVAL"`,
-  optional `max_duration_seconds` / `max_kwh` / `session_id`, `interval_ms`). Defaults: 14400 s, 30.0 kWh, 10000 ms.
+- Commands parsed with **cJSON** (`"action":"ON"`/`"OFF"`/`"SET_INTERVAL"`, optional
+  `max_duration_seconds` / `max_kwh` / `session_id`, `interval_ms`); topic/data
+  buffers 256/512 B with an oversized/fragmented-payload guard. Defaults: 14400 s,
+  30.0 kWh, 10000 ms.
 - `telemetry_safety` runs at a **configurable interval** (`telemetry_interval_ms`, default **10 s** / 10000 ms) and **always polls the plug regardless of MQTT connectivity**:
   - If a `"SET_INTERVAL"` command with `"interval_ms"` is received, the interval is updated (clamped between 500 ms and 60000 ms).
+  - The published telemetry `kwh` is **session-relative** (`meter − start_energy_kwh`,
+    clamped ≥ 0; 0 when idle), and the active `session_id` is echoed back — see
+    [MQTT_CONTRACT.md](MQTT_CONTRACT.md). The raw lifetime meter is never billed.
   - If MQTT is connected: publishes telemetry normally.
-  - If MQTT is disconnected: buffers the reading in `offline_log` (NVS ring buffer).
+  - If MQTT is disconnected: buffers the reading in `offline_log` (NVS ring buffer,
+    session-relative `kwh`, no `session_id` field).
   - While a session is active, enforces edge cutoffs in both online and offline modes:
     - **Duration:** elapsed ≥ `max_duration_s` → local OFF + NVS clear.
     - **Energy:** consumed ≥ `max_kwh` → local OFF + NVS clear.
@@ -115,11 +121,18 @@ current, or temperature. So the `tapo_telemetry_t` fields map as:
 | Field | Source |
 |-------|--------|
 | `power_w` | **real** — `current_power` (mW) ÷ 1000 |
-| `energy_kwh` | **real** — driver-side monotonic Wh integrator (robust vs the plug's daily `today_energy` reset) |
+| `energy_kwh` | **real** — driver-side monotonic **lifetime** Wh integrator (robust vs the plug's daily `today_energy` reset); persisted to NVS across reboots and updated under the driver mutex |
 | `device_on` / `overheated` / `overcurrent` | **real** — from `get_device_info` status strings |
 | `voltage_v` | **nominal** (configured, default 230 V) |
 | `current_a` | **derived** — `power_w / voltage_v` |
 | `temperature_c` | **nominal** — the P110 has no temperature sensor |
+
+> **Lifetime meter vs billed energy:** `tapo_telemetry_t.energy_kwh` is the
+> *lifetime* integrator. `main.c` subtracts the session baseline before publishing,
+> so the MQTT `kwh` the backend bills is session-relative (see §3 and
+> [MQTT_CONTRACT.md](MQTT_CONTRACT.md)). The integrator is mutex-protected because
+> the telemetry task and the `ON`-handler's baseline read can call
+> `tapo_get_telemetry` concurrently.
 
 Because there is no real temperature, the thermal watchdog now trips on the plug's
 `overheat_status` flag rather than a 75 °C compare (see §3).
@@ -183,6 +196,9 @@ mostly functional (with unified magicsock NAT traversal now fully operational), 
 **session state is persisted in NVS with offline telemetry buffering**, and the
 **Tapo driver is now a real KLAP v2 implementation** (protocol-validated against a
 real P110 via `tools/klap_probe.py`; builds on **ESP-IDF v5.3**, not v6).
-Remaining gaps: command parsing is fragile (`strstr`/`sscanf`), there is no OTA,
-and the control-plane host constants still default to Tailscale (Headscale retarget
-pending). See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for the full matrix.
+Path A has now been run end-to-end on real hardware (a billed session with correct
+energy delivery); the firmware-side billing fix (session-relative `kwh`) and the
+`session_id` echo are in code but **need an on-device reflash** to take effect.
+Remaining gaps: there is no OTA, and the control-plane host constants still default
+to Tailscale (Headscale retarget pending). See
+[IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for the full matrix.

@@ -1,6 +1,6 @@
 # AmpHive — Data Model
 
-*Verified against `backend/database/models.py`, `schema.sql`, `schema_v2.sql` on 2026-07-02.*
+*Verified against `backend/database/models.py`, `schema.sql`, `schema_v2.sql` on 2026-07-06.*
 
 > **Source of truth at runtime is `models.py`.** `init_db()` (`backend/database/db.py`)
 > calls SQLAlchemy `Base.metadata.create_all` on startup — the `.sql` files are
@@ -32,7 +32,7 @@ Owns users, gateways, sessions, charger_groups (cascade delete-orphan).
 ### `users`
 `id` PK · `tenant_id` → tenants (SET NULL, nullable) · `email` unique ·
 `hashed_password` · `full_name` · `role` (default `driver`) ·
-`coin_balance` float (default 0.0) · `created_at`.
+`coin_balance` **NUMERIC(12,2)** (Decimal, default 0.00) · `created_at`.
 
 ### `gateways`
 `id` **VARCHAR(50) PK** (caller-supplied MAC/UUID) · `tenant_id` → tenants
@@ -49,13 +49,20 @@ Owns users, gateways, sessions, charger_groups (cascade delete-orphan).
 `id` PK · `tenant_id` → tenants (CASCADE) · `user_id` → users (CASCADE) ·
 `plug_id` → plugs (CASCADE) · `started_at` · `ended_at` (nullable) ·
 `energy_kwh` float · `peak_power_w` float *(populated from inbound telemetry in
-`mqtt_manager.py`)* · `coins_spent` float · `status` (default `active`).
+`mqtt_manager.py`)* · `coins_spent` **NUMERIC(12,2)** (Decimal) · `status`
+(default `active`).
 
 ### `ledger_transactions`
 Double-entry-style wallet audit. `id` PK · `user_id` → users (CASCADE) ·
-`session_id` → charging_sessions (SET NULL, nullable) · `amount` float (signed:
-`+` topups, `-` debits) · `transaction_type` · `description` (nullable) ·
-`balance_after` float · `created_at`.
+`session_id` → charging_sessions (SET NULL, nullable) · `amount` **NUMERIC(12,2)**
+(Decimal, signed: `+` topups, `-` debits) · `transaction_type` · `description`
+(nullable) · `balance_after` **NUMERIC(12,2)** · `razorpay_payment_id`
+(unique, nullable) · `created_at`.
+
+> **Money columns are `NUMERIC(12,2)` (Decimal), not float** — moved off `float`
+> to eliminate rounding drift; all wallet math routes through
+> `services/money.to_money`. `energy_kwh` / `peak_power_w` / `current_power_w`
+> stay `float` (physical measurements, not currency).
 
 ### `charger_groups`
 `id` PK · `tenant_id` → tenants (CASCADE) · `name` · `is_public` bool (default
@@ -71,9 +78,10 @@ Append-only time-series of raw plug samples (~1 row/plug/~15s). `id` **BIGINT PK
 plug→gateway→tenant join) · `plug_id` → plugs (CASCADE) · `session_id` →
 charging_sessions (**SET NULL, nullable** — telemetry can arrive with no active
 session, and deleting a session must not erase audit history) · `recorded_at`
-(stamped in the MQTT handler) · `power_w` · `energy_kwh` *(cumulative, as reported
-by firmware)* · `voltage_v` · `current_a` · `status` VARCHAR(20) (raw firmware
-signal, nullable). Composite indexes on `(plug_id, recorded_at)`,
+(stamped in the MQTT handler) · `power_w` · `energy_kwh` *(session-relative kWh, as
+reported by firmware — not the plug's lifetime meter; see
+[MQTT_CONTRACT.md](MQTT_CONTRACT.md))* · `voltage_v` · `current_a` · `status`
+VARCHAR(20) (raw firmware signal, nullable). Composite indexes on `(plug_id, recorded_at)`,
 `(session_id, recorded_at)`, `(tenant_id, recorded_at)` — declared in `models.py`
 (unlike other tables' indexes) so `create_all` actually creates them. Written by
 the buffered batch-flush service `backend/services/telemetry_persistence.py`; read
