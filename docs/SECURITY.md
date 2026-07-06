@@ -14,6 +14,12 @@ known security gaps, not a formal audit. Items are roughly ordered by severity.*
 > endpoints were removed, wallet updates are row-locked, and the Razorpay webhook
 > credits idempotently. The items in §1–§6 are the gaps that **remain**.
 
+> **2026-07-06 follow-up audit:** [§8](#8-firmware--gateway-device-security--backend-follow-up-gaps-2026-07-06-audit)
+> adds the **firmware/gateway device attack surface** (open provisioning AP, no
+> flash-encryption, reusable overlay key + anonymous broker) plus a few
+> backend authn/integrity gaps. These are the highest-severity *open* items —
+> read §8 first.
+
 ---
 
 ## 1. Committed secrets (ROTATED 2026-07-06)
@@ -78,6 +84,16 @@ BFG + force-push) to purge the dead values entirely.
   HMAC signature check plus idempotency on `razorpay_payment_id`, but a leaked
   `RAZORPAY_WEBHOOK_SECRET` would allow forged credits — keep it secret and rotate
   if exposed.
+- [2026-07-06 audit] **Backend trusts the payload `plug_id`.**
+  `_handle_gateway_telemetry` bills whatever `plug_id` the telemetry body claims
+  without checking it belongs to the topic's `gateway_id`. Even once broker ACLs
+  land, add a `plug.gateway_id == <topic gateway>` check so a compromised or
+  spoofing gateway can't attribute energy/billing to another tenant's plug.
+  (TECH_DEBT — related to TD#24/§8.)
+- [2026-07-06 audit] **Firmware safety alarms are never consumed.** The firmware
+  publishes `THERMAL_CUTOFF`/`OVERCURRENT_CUTOFF` to `amphive/gateways/{id}/alarms`,
+  but the backend subscribes only to `+/telemetry` + `+/status`, so cutoffs are
+  dropped — no record, no alert (accountability gap; TECH_DEBT #21).
 
 ## 4. AuthZ gaps
 
@@ -160,6 +176,88 @@ read as still-open.*
 
 ---
 
+## 8. Firmware / gateway device security & backend follow-up gaps (2026-07-06 audit)
+
+*New in the 2026-07-06 follow-up audit. These are **open** and, for the device
+items, the highest-severity gaps in the project — an attacker with brief Wi-Fi
+proximity or physical access to a gateway can take it over or harvest the owner's
+Tapo account. Ordered by severity.*
+
+### 8.1 Provisioning portal is an open, unauthenticated door — **CRITICAL**
+
+- The setup Access Point is `WIFI_AUTH_OPEN` with an empty password
+  (`firmware/main/main.c:245-247`), and the `/save` handler requires **no
+  authentication** (`main.c:191`).
+- Anyone within Wi-Fi range during provisioning can (a) **sniff** the submitted
+  Tapo password, Wi-Fi password, and Headscale auth key over the open air, and
+  (b) **POST** arbitrary config to overwrite all of them → full device takeover /
+  redirect to attacker infrastructure.
+- **Fix:** WPA2 on the setup AP with a per-device password (derive from the MAC,
+  print on the unit label), a setup PIN/token gating `/save`, and a portal
+  timeout. Serve the portal only on the AP interface.
+
+### 8.2 No flash encryption / secure boot — secrets are extractable — **HIGH**
+
+- `firmware/sdkconfig`: `CONFIG_SECURE_FLASH_ENC_ENABLED` and `CONFIG_SECURE_BOOT`
+  are both **unset**. Wi-Fi password, the full **Tapo account email + password**,
+  and the overlay auth key sit in **plaintext NVS**, readable with
+  `esptool read_flash` given brief physical access.
+- That yields the victim's entire Tapo account plus a working overlay credential.
+- **Fix:** enable flash encryption + Secure Boot v2 for production units; at
+  minimum use NVS encryption.
+
+### 8.3 Reusable overlay key + anonymous broker = forge anything — **HIGH**
+
+- The Headscale/Tailscale auth key stored on-device is typically reusable.
+  Extracted (§8.2) or sniffed (§8.1), an attacker joins the overlay. The MQTT
+  broker is `allow_anonymous true`, no ACLs, no TLS (`deploy/config/mosquitto.conf`),
+  so **any** overlay node can publish forged telemetry for **any** `plug_id`
+  (drives billing) and send `ON`/`OFF` to **any** gateway's command topic.
+- This is the "bad actor on the overlay" threat and is currently unmitigated
+  beyond "you must be on the overlay" (which §8.1/§8.2 make cheap to breach).
+- **Fix:** (a) ephemeral, single-use, **tagged** auth keys with Headscale ACLs
+  restricting each gateway to just the broker; (b) broker **auth** (per-gateway
+  credentials or client-cert) + **ACLs** limiting a gateway to
+  `amphive/gateways/<own-id>/#` publish and its own command topic subscribe;
+  (c) **TLS** on 1883. (Extends §3's open-broker note; TD#3 auth item.)
+
+### 8.4 Boot-time fallback into the open portal — **MEDIUM**
+
+- On boot with Wi-Fi down, the device drops into the open portal
+  (`main.c:701-708`). An attacker who deauths/jams the STA link and forces a
+  reboot lands the gateway in §8.1's unauthenticated portal.
+- **Fix:** require a physical button-hold to enter provisioning instead of
+  auto-opening it on transient Wi-Fi loss; keep retrying STA otherwise.
+
+### 8.5 Multi-plug refactor must stay security-safe
+
+The single-plug → multi-plug refactor (TECH_DEBT #20) touches this surface, so
+capture it here:
+
+- `tapo_protocol.c` holds **one** global KLAP session (`s_sess`) and **one**
+  energy integrator (`s_energy_wh`); multi-plug needs a **per-plug** KLAP session
+  + meter so plug A's crypto/session can't be reused to act on plug B.
+- Prefer carrying the target `local_ip` in the backend `ON` command payload (the
+  backend already stores `plugs.local_ip`) over shipping a plug roster to the
+  device — fewer secrets on-device.
+- Broker ACLs stay **per-gateway**, not per-plug: one gateway legitimately drives
+  several plugs under `amphive/gateways/<id>/plugs/+/…`.
+- Backend must validate `plug.gateway_id == <topic gateway>` before billing (see
+  §3) so a gateway can only report for plugs it actually owns.
+
+### 8.6 Backend authn hardening — **LOW/MEDIUM**
+
+- **JWT: 7-day expiry, no revocation/blacklist** (`backend/services/auth.py`). A
+  stolen token is valid for a week. Consider short-lived access tokens + refresh,
+  or a revocation list — especially for CPO/admin.
+- **No rate limiting** on `/api/auth/login` and `/api/auth/register` —
+  brute-force / account-enumeration open. Add rate limiting (login already returns
+  a generic "Invalid email or password").
+- **Registration input** isn't validated: `email` is a bare `str` (not the
+  imported `EmailStr`) and there's no password-strength rule (`backend/main.py:210`).
+
+---
+
 ## Quick remediation checklist
 
 Status — open items and recently closed:
@@ -176,6 +274,21 @@ Status — open items and recently closed:
 - [x] Unique `razorpay_payment_id` ledger column (2026-07-06) —
       `uq_ledger_razorpay_payment_id` + `IntegrityError` handling in
       `_credit_topup` closes the concurrent /verify + webhook double-credit race.
+
+Device security — open (2026-07-06 audit, see [§8](#8-firmware--gateway-device-security--backend-follow-up-gaps-2026-07-06-audit)):
+- [ ] **Lock down the provisioning portal** — WPA2 setup AP + PIN/token on
+      `/save` + timeout (§8.1, CRITICAL).
+- [ ] **Enable flash encryption + Secure Boot v2** so NVS secrets (Tapo account,
+      overlay key) aren't extractable (§8.2, HIGH).
+- [ ] **Ephemeral/tagged overlay keys + broker auth/ACL/TLS** so an overlay peer
+      can't forge telemetry or ON/OFF for arbitrary plugs (§8.3, HIGH).
+- [ ] **Require a button-hold for provisioning** instead of auto-opening the open
+      portal on Wi-Fi loss (§8.4, MEDIUM).
+- [ ] **Validate `plug.gateway_id` against the topic gateway** before billing
+      telemetry (§3, §8.5).
+- [ ] **Consume `+/alarms`** so THERMAL/OVERCURRENT cutoffs are recorded/alerted
+      (§3, TD#21).
+- [ ] **Shorter-lived JWTs / revocation + auth rate limiting** (§8.6).
 
 Done (2026-07-05):
 - [x] Remove committed secrets from tracked files; add `.example` / env-var paths

@@ -4,9 +4,24 @@
 Cross-references [TECH_DEBT.md](TECH_DEBT.md) items as `TD#n` and
 [SECURITY.md](SECURITY.md).*
 
+*Updated 2026-07-06 (follow-up audit): new items are tagged **[2026-07-06]** and
+carry their `TD#`/`SEC §` cross-refs.*
+
 ---
 
 ## Immediate (this week) — security & correctness
+
+- [ ] **[2026-07-06] Lock down the ESP32 provisioning portal** — the setup AP is
+      open (`WIFI_AUTH_OPEN`) and `/save` is unauthenticated, so anyone in Wi-Fi
+      range can sniff Tapo/Wi-Fi/overlay secrets and overwrite config. Add WPA2 +
+      a setup PIN/token + timeout. (SEC §8.1, **CRITICAL**)
+- [ ] **[2026-07-06] Reject session starts on OFFLINE/MAINTENANCE plugs** —
+      `start_charging_session` blocks only `OCCUPIED`, so a plug pins OCCUPIED with
+      no charge (bills 0) and maintenance plugs stay usable. Require `AVAILABLE`.
+      (TD#22, `backend/main.py:697`)
+- [ ] **[2026-07-06] Consume `+/alarms`** on the backend — the firmware's
+      THERMAL/OVERCURRENT cutoffs are currently dropped (no record, no alert).
+      (TD#21, SEC §3)
 
 - [x] **Commit the `tools/` secret strip.** Done (`3e20dbd`, 2026-07-05) — all
       five helpers now read `TAPO_EMAIL` / `TAPO_PASSWORD` / `TAPO_PLUG_IP` from
@@ -53,6 +68,17 @@ Cross-references [TECH_DEBT.md](TECH_DEBT.md) items as `TD#n` and
       `s_energy_wh` is restored on `tapo_init` and written throttled (per 50 Wh),
       so crash recovery keeps the energy watchdog armed. **Pending on-device flash
       + verification** (no ESP-IDF toolchain on the dev box). (TD#19)
+- [ ] **[2026-07-06] Guard telemetry ingestion** — wrap the `float(...)` casts in
+      `_handle_gateway_telemetry` and validate `plug.gateway_id` against the topic
+      gateway before billing. (TD#25, SEC §3/§8.5)
+- [ ] **[2026-07-06] Gateway staleness sweep** — mark a gateway OFFLINE when
+      `last_seen_at` goes stale, not only on its LWT, so dashboards reflect reality.
+      (TD#27)
+- [ ] **[2026-07-06] CPO admin audit log** — record gateway/plug/group
+      create-delete, status changes, and access-code regen. (TD#26)
+- [ ] **[2026-07-06] Fix crash-recovery duration watchdog** — the recovered
+      session resets its start time each reboot, so the time cap restarts from
+      zero (energy cap still holds). Needs an SNTP wall-clock baseline. (TD#23)
 
 ## Next month — scale & polish
 
@@ -77,11 +103,37 @@ Cross-references [TECH_DEBT.md](TECH_DEBT.md) items as `TD#n` and
       `navigate()` is replaced with a declarative `<Navigate to=… replace />`. (TD#18)
 - [ ] **Add frontend tests** (Vitest + RTL) for auth, payment handler, protected
       routes. (TESTING Phase 4)
+- [ ] **[2026-07-06] Structured logging + correlation ids** across backend
+      (JSON, request ids) and a firmware log topic for field diagnostics;
+      persist the broker log. (TD#28)
+- [ ] **[2026-07-06] Unified wallet ledger view** — show TOPUP credits alongside
+      session debits (History shows debits only). (TD#29)
+- [ ] **[2026-07-06] Low-balance UX** — warn before/at start and auto-stop before
+      the wallet is exhausted, instead of silently forgiving the shortfall.
+- [ ] **[2026-07-06] Registration validation** — `EmailStr` + a password-strength
+      rule. (TD#30)
+- [ ] **[2026-07-06] Portal input CSS + reachability test** — fix `width:100%%`
+      and test Wi-Fi/plug reachability before saving config (onboarding). (TD#31)
 
 ## Long term — productionization
 
+- [ ] **[2026-07-06] Multi-plug gateway support** — the firmware drives a single
+      plug: `main.c` has one `target_plug_ip`/`active_session` and
+      `tapo_protocol.c` one global KLAP session + energy integrator, so a command
+      for plug B toggles plug A and telemetry is misattributed. Needs a per-plug
+      state table + an instance-based KLAP driver, and (recommended) the target
+      `local_ip` carried in the `ON` payload. Keep broker ACLs per-gateway.
+      (TD#20, SEC §8.5)
+- [ ] **[2026-07-06] Device security hardening** — flash encryption + Secure Boot
+      v2 (secrets are plaintext-extractable from NVS), ephemeral/tagged overlay
+      keys, and button-hold provisioning instead of the boot-time open portal.
+      (SEC §8.2/§8.3/§8.4)
+- [ ] **[2026-07-06] Notifications** — session start/stop, low balance, plug
+      offline, and safety cutoffs (once `+/alarms` is consumed, TD#21).
+- [ ] **[2026-07-06] Shorter-lived JWTs / revocation + auth rate limiting**
+      (currently 7-day, no blacklist; no login/register throttle). (SEC §8.6)
 - [ ] **MQTT broker auth + TLS** (needs a firmware credentials field before
-      `allow_anonymous false`). (SEC §3)
+      `allow_anonymous false`). (SEC §3, SEC §8.3)
 - [~] **Finish Path A end-to-end**: real billed session on physical hardware over
       ESP32+MQTT, feeding the session/telemetry pipeline. **Achieved 2026-07-06** —
       a real ESP32 + P110 ran a billed session; the plug delivered correct energy

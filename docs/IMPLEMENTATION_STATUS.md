@@ -16,7 +16,7 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 | JWT auth + bcrypt | ✅ | 7-day token, loaded fresh per request |
 | Role-based access control | ✅ | Enforced via `services/rbac.py` `require_role(...)` on all `/api/cpo/*` routes (checks the DB role, not just the token) |
 | MQTT command publish (ON/OFF) | ✅ | QoS 1, 3 s wait |
-| MQTT inbound telemetry/status handling | ✅ | Telemetry updates TelemetryStore and session DB. Status updates gateway state in DB. |
+| MQTT inbound telemetry/status handling | 🟡 | Telemetry updates TelemetryStore and session DB. Status updates gateway state in DB. **2026-07-06 audit:** the firmware's `+/alarms` topic (THERMAL/OVERCURRENT cutoffs) is **not** subscribed, so those alarms are dropped; the payload `plug_id` is trusted without checking it belongs to the topic gateway; and the `float(...)` casts are unguarded. (§3.39–41, TD#21/#25) |
 | Live telemetry / Socket.io & SSE | ✅ | Streams real telemetry from TelemetryStore via Socket.io (with SSE as legacy/fallback). Automatically triggers the plug to report telemetry at 1s intervals when there are active listeners or an active session. **Correction 2026-07-05:** the stream task called a non-existent `await sio.get_participants(room=...)` API, which raised on every iteration and killed each stream before the first emit — the earlier "fully functional/verified" claim was wrong. Fixed (room-manager membership check) with a regression test in `backend/tests/test_socketio.py`. |
 | Time-series telemetry persistence | ✅ | Persistent `telemetry_readings` table fed by a buffered background batch-flush from the MQTT handler (`services/telemetry_persistence.py`); queried by `GET /api/cpo/analytics/telemetry` via `date_trunc`. Plain Postgres (no TimescaleDB) — hypertables/retention/continuous-aggregates noted as a future upgrade. Live Socket.io/SSE still uses the in-memory TelemetryStore. |
 | Razorpay create-order + verify | ✅ | HMAC-verified; credits coins + ledger. Supports decimal INR amounts and coin balances (money columns are `Numeric(12,2)`/Decimal as of 2026-07-06). **2026-07-05:** `/verify` now credits the **Razorpay-confirmed** amount fetched server-side (the client-sent `amount_inr` is deprecated/ignored — it was previously trusted, allowing arbitrary wallet inflation). |
@@ -41,7 +41,7 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 | Capability | Status | Notes |
 |------------|:------:|-------|
 | `microlink` Tailscale client (Noise/ts2021, DERP, DISCO, STUN, WG) | ✅ | Fully operational; NAT traversal and direct connections work using the unified magicsock port (41641). |
-| MQTT control loop + topic contract | ✅ | Matches backend topics |
+| MQTT control loop + topic contract | 🟡 | Matches backend topics. **2026-07-06 audit: single-plug only** — `main.c` has one `target_plug_ip`/`active_session` and `tapo_protocol.c` one global KLAP session + energy integrator, so on a gateway with >1 plug a command for plug B toggles plug A and telemetry is misattributed. Multi-plug needs a per-plug state table + instance-based KLAP driver. (§3.42, TD#20, SEC §8.5) |
 | Captive portal provisioning | ✅ | `AmpHive_Setup_XXXX` → NVS → reboot |
 | Edge watchdogs (duration/energy/thermal/over-current) | ✅ | Thermal + over-current now use the plug's `overheat_status`/`overcurrent_status` flags (the P110 has no °C sensor) |
 | Over-current cutoff | ✅ | Enforced via the plug's `overcurrent_status` flag → local OFF + `OVERCURRENT_CUTOFF` alarm |
@@ -214,3 +214,49 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
     readings still attribute by `plug_id` (the NVS ring-buffer entry has no room
     for the id). Backend parsing regression-tested in `test_mqtt_manager.py`;
     firmware echo pending on-device flash.
+
+### 2026-07-06 follow-up audit — new open discrepancies
+
+*Found by a code audit on 2026-07-06; all **open**. Cross-referenced to
+[TECH_DEBT.md](TECH_DEBT.md) (`TD#n`) and [SECURITY.md](SECURITY.md) (`SEC §n`).*
+
+39. **[Open] Firmware safety alarms are dropped.** The firmware publishes
+    `THERMAL_CUTOFF`/`OVERCURRENT_CUTOFF` to `amphive/gateways/{id}/alarms`
+    (`main.c`), but `MQTTManager` subscribes only to `+/telemetry` + `+/status`,
+    so no handler ever sees them — cutoffs are unrecorded and un-alerted.
+    (TD#21, SEC §3)
+40. **[Open] Backend trusts the payload `plug_id`.** `_handle_gateway_telemetry`
+    bills whatever `plug_id` the body claims without verifying it belongs to the
+    topic's `gateway_id`, so a compromised/spoofing gateway can bill another
+    tenant's plug. (SEC §3, §8.5)
+41. **[Open] Unguarded telemetry casts.** `float(payload.get(...))` in
+    `_handle_gateway_telemetry` has no try/except; a malformed value (the broker
+    is anonymous) throws in the paho callback and drops the message. (TD#25)
+42. **[Open] Firmware is single-plug.** `main.c` (`target_plug_ip`,
+    `active_session`, `active_plug_id`, `telemetry_interval_ms`) and
+    `tapo_protocol.c` (global `s_sess`, `s_energy_wh`) are single-instance:
+    commands for a second plug on the same gateway actuate the first, and
+    telemetry is published under the last-commanded id. The data model already
+    allows many plugs per gateway. (TD#20, SEC §8.5)
+43. **[Open] Sessions startable on OFFLINE/MAINTENANCE plugs.**
+    `start_charging_session` (`backend/main.py:697`) rejects only `OCCUPIED`; a
+    driver can start on an offline/maintenance plug — it pins OCCUPIED, bills 0,
+    and defeats a CPO's maintenance flag. (TD#22)
+44. **[Open] Crash-recovery resets the duration watchdog.** On reboot the
+    recovered session's `start_time_s` is reset to "now" (`main.c:738`, tick-based,
+    no wall clock), so the time cap restarts from zero each reboot (the energy cap
+    still holds). (TD#23)
+45. **[Open] Offline-resync telemetry can bill the wrong session.** Ring-buffer
+    entries carry no `session_id`; on resync the backend attributes them to the
+    plug's current ACTIVE session, so a plug reused between buffering and
+    reconnect can have the new session's kWh overwritten by stale readings.
+    (TD#24)
+46. **[Open] Device / provisioning security.** Open setup AP + unauthenticated
+    `/save`, no flash-encryption/secure-boot (plaintext NVS secrets), reusable
+    overlay key + anonymous broker, and a boot-time fallback into the open portal.
+    (SEC §8)
+47. **[Open] Observability / onboarding polish.** Unstructured stdout-only logging
+    (no correlation ids), no CPO admin audit log, no gateway staleness sweep,
+    history shows debits but not top-up credits, registration skips
+    `EmailStr`/password rules, and the captive-portal inputs render narrow
+    (`width:100%%`). (TD#26–31)
