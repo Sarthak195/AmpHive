@@ -155,6 +155,12 @@ class LedgerTransaction(Base):
     amount: Mapped[float] = mapped_column(Float, nullable=False) # positive (topup), negative (debit)
     transaction_type: Mapped[TransactionType] = mapped_column(SQLEnum(TransactionType, name="tx_type", values_callable=lambda x: [e.value for e in x]), nullable=False)
     description: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    # Razorpay payment id for topups (e.g. "pay_XXionia"). UNIQUE so a concurrent
+    # /verify + webhook for the same payment can't both credit — the second
+    # INSERT hits the constraint and is treated as already-credited. NULL for
+    # non-topup rows (session debits), and Postgres allows many NULLs under a
+    # UNIQUE constraint, so debits are unaffected.
+    razorpay_payment_id: Mapped[Optional[str]] = mapped_column(String(64), unique=True, nullable=True)
     balance_after: Mapped[float] = mapped_column(Float, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
 

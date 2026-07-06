@@ -16,6 +16,10 @@ python-dotenv>=1.0.0
 razorpay>=1.4.0
 # Server-Sent Events support for FastAPI (real-time telemetry streaming)
 sse-starlette>=1.6.0
+# Socket.io support for real-time bi-directional communications
+python-socketio>=5.11.0
+python-engineio>=4.9.0
 # [Direct Mode] TP-Link Tapo P110 smart plug control library (Rust-backed)
 # Used for development/testing to control the plug directly without ESP32
 tapo
+

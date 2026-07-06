@@ -123,6 +123,46 @@ def verify_payment_signature(order_id: str, payment_id: str, signature: str) -> 
         return False
 
 
+def fetch_captured_payment(payment_id: str, expected_order_id: str) -> Optional[dict]:
+    """
+    Fetch the authoritative payment entity from Razorpay's server API.
+
+    The checkout signature (HMAC of "order_id|payment_id") proves the pair is
+    genuine, but it does NOT cover the amount — so the amount to credit must
+    always come from Razorpay itself, never from the client request.
+
+    Returns {payment_id, order_id, status, amount_inr, notes} on success, or
+    None if the payment can't be fetched or doesn't belong to
+    expected_order_id (a mismatched order means the caller is replaying a
+    signature from a different purchase).
+    """
+    client = get_razorpay_client()
+    if client is None:
+        return None
+
+    try:
+        payment = client.payment.fetch(payment_id)
+    except Exception as e:
+        logger.error(f"Failed to fetch payment {payment_id} from Razorpay: {e}")
+        return None
+
+    if payment.get("order_id") != expected_order_id:
+        logger.warning(
+            f"Payment {payment_id} belongs to order {payment.get('order_id')!r}, "
+            f"not the claimed {expected_order_id!r} — refusing to credit."
+        )
+        return None
+
+    return {
+        "payment_id": payment_id,
+        "order_id": payment.get("order_id"),
+        "status": payment.get("status", ""),
+        # Razorpay reports the amount in paise; convert to rupees.
+        "amount_inr": float(payment.get("amount", 0)) / 100.0,
+        "notes": payment.get("notes") or {},
+    }
+
+
 def verify_webhook_signature(body: bytes, signature: str) -> bool:
     """
     Verify the webhook signature from Razorpay's server-to-server callbacks.

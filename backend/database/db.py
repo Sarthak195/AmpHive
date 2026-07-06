@@ -58,17 +58,39 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
             await session.close()
 
 
+# Lightweight, idempotent in-place schema upgrades.
+#
+# create_all() only creates *missing tables* — it never adds a column to a
+# table that already exists. Since this project has no migration tool, columns
+# added to existing models must be reconciled here. Each statement is written
+# to be safe to run on every startup (IF NOT EXISTS), and to no-op on a fresh
+# DB where create_all already produced the column. Postgres-specific DDL,
+# which matches the only supported database (asyncpg/Postgres).
+_INPLACE_UPGRADES = (
+    # razorpay_payment_id + UNIQUE: dedupes concurrent /verify + webhook credits.
+    "ALTER TABLE ledger_transactions "
+    "ADD COLUMN IF NOT EXISTS razorpay_payment_id VARCHAR(64)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_ledger_razorpay_payment_id "
+    "ON ledger_transactions (razorpay_payment_id)",
+)
+
+
 async def init_db():
     """
-    Creates all database tables defined in the SQLAlchemy models.
-    Called during application startup.
+    Creates all database tables defined in the SQLAlchemy models, then applies
+    idempotent in-place column/index upgrades. Called during application startup.
     """
+    from sqlalchemy import text
     from backend.database.models import Base
     import logging
     logger = logging.getLogger("amphive.db")
-    
+
     logger.info("Initializing database tables...")
     async with engine.begin() as conn:
         # Create all tables if they don't exist
         await conn.run_sync(Base.metadata.create_all)
+        # Reconcile columns/indexes added to existing tables after their
+        # initial create_all (no-ops on a fresh DB and on repeat runs).
+        for stmt in _INPLACE_UPGRADES:
+            await conn.execute(text(stmt))
     logger.info("Database tables initialized.")

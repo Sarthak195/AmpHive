@@ -13,7 +13,9 @@ Design decisions:
   GPU-based brute force attacks.
 """
 
+import logging
 import os
+import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -31,7 +33,24 @@ from backend.database.models import User
 
 # Secret key for signing JWT tokens. MUST be set in production via env var.
 # Generate a strong key with: python -c "import secrets; print(secrets.token_urlsafe(64))"
-JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "amphive-dev-secret-change-in-production")
+#
+# If the env var is missing (or still set to the old, publicly-known dev
+# default), we refuse to use a guessable key: a random ephemeral secret is
+# generated instead. Tokens then won't survive a restart — a visible symptom
+# that forces the misconfiguration to be fixed, instead of silently leaving
+# every JWT forgeable by anyone who has read this repo.
+_KNOWN_INSECURE_SECRETS = {
+    "amphive-dev-secret-change-in-production",  # old hardcoded default
+    "change-me-in-production",                  # deploy/config/.env.template placeholder
+}
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "")
+if not JWT_SECRET_KEY or JWT_SECRET_KEY in _KNOWN_INSECURE_SECRETS:
+    JWT_SECRET_KEY = secrets.token_urlsafe(64)
+    logging.getLogger("amphive.auth").critical(
+        "JWT_SECRET_KEY is unset or uses a known-insecure default. Generated an "
+        "EPHEMERAL signing key — all sessions will be invalidated on restart. "
+        "Set a strong JWT_SECRET_KEY in the environment/.env to fix this."
+    )
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRY_DAYS = 7
 

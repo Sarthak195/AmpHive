@@ -14,6 +14,7 @@ Phase 2 additions:
 - Session history endpoint
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -24,8 +25,9 @@ from typing import List, Optional
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import select, or_, and_, func, cast, Date
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 
@@ -40,7 +42,7 @@ from backend.services.auth import (
 )
 from backend.services.rbac import require_role
 from backend.services.mqtt_manager import MQTTManager
-from backend.services.telemetry import TelemetryStore
+from backend.services.telemetry import TelemetryStore, COINS_PER_KWH
 from backend.services.telemetry_persistence import TelemetryPersistenceService
 # [Direct Mode] Import the Tapo direct driver for ESP32-bypass plug control
 from backend.services.tapo_direct import TapoDirectDriver
@@ -182,11 +184,19 @@ app = FastAPI(
 # In production, restrict origins to the actual frontend domain.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # TODO: restrict to amphive.duckdns.org in production
+    allow_origins=[
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "http://amphive.duckdns.org",
+        "https://amphive.duckdns.org",
+        "http://8.231.81.12",
+        "https://8.231.81.12",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 
 # ===========================================================================
@@ -220,8 +230,10 @@ class UserResponse(BaseModel):
 
 class SessionStartRequest(BaseModel):
     plug_id: int
-    max_duration_seconds: int = 14400  # 4 hours default
-    max_kwh: float = 30.0             # 30 kWh limit default
+    # Bounded so a client can't disable the firmware safety watchdog by sending
+    # an absurd limit. 1 s .. 24 h, and 0.1 .. 100 kWh.
+    max_duration_seconds: int = Field(default=14400, gt=0, le=86400)  # 4 h default, 24 h cap
+    max_kwh: float = Field(default=30.0, gt=0, le=100.0)              # 30 kWh default, 100 kWh cap
 
 class SessionStopRequest(BaseModel):
     session_id: int
@@ -278,7 +290,10 @@ class VerifyPaymentRequest(BaseModel):
     razorpay_order_id: str
     razorpay_payment_id: str
     razorpay_signature: str
-    amount_inr: float
+    # Deprecated and IGNORED: the credited amount is always fetched from
+    # Razorpay's API server-side. Kept optional so older clients that still
+    # send it don't get a 422.
+    amount_inr: Optional[float] = None
 
 
 # ===========================================================================
@@ -606,13 +621,18 @@ async def start_charging_session(
     Start a charging session on a specific plug.
     1. Verify user has access to the plug (group check).
     2. Check user has sufficient wallet balance (minimum ₹50).
-    3. Look up the plug's gateway for MQTT routing.
-    4. Send the ON command to the ESP32 gateway via MQTT.
-    5. Create a session record in the database.
-    6. Start the telemetry stream.
+    3. Lock the plug row and claim it (avoids two concurrent starts on one plug).
+    4. Commit the session + OCCUPIED status FIRST, then publish MQTT ON.
+       (Publishing first could leave the plug live with no session billing it
+       if the DB write then fails. If the publish fails we roll the claim back.)
+    5. Start the telemetry stream.
     """
-    # 1. Verify plug exists and user has access
-    result = await db.execute(select(Plug).where(Plug.id == req.plug_id))
+    # 1. Verify plug exists and lock the row for the duration of this txn, so a
+    #    concurrent start blocks here and then sees OCCUPIED (closes the TOCTOU
+    #    between the availability check and the claim below).
+    result = await db.execute(
+        select(Plug).where(Plug.id == req.plug_id).with_for_update()
+    )
     plug = result.scalar_one_or_none()
     if not plug:
         raise HTTPException(status_code=404, detail=f"Plug {req.plug_id} not found.")
@@ -645,27 +665,11 @@ async def start_charging_session(
             detail=f"Insufficient balance. You have {user.coin_balance} coins. Minimum 50 required.",
         )
 
-    # 3. Check plug is available
+    # 3. Claim the plug (still holding the row lock). Only OCCUPIED blocks a
+    #    start; offline/maintenance plugs are handled by the gateway/telemetry.
     if plug.status == PlugStatus.OCCUPIED:
         raise HTTPException(status_code=409, detail="This plug is currently in use.")
 
-    # 4. Send MQTT command to the gateway
-    success = mqtt_manager.send_plug_command(
-        gateway_id=plug.gateway_id,
-        plug_id=plug.id,
-        action="ON",
-        max_duration=req.max_duration_seconds,
-        max_kwh=req.max_kwh,
-    )
-
-    if not success:
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to publish start command to the gateway. The gateway may be offline.",
-        )
-
-    # 5. Create session record in the database
-    # Get the tenant_id from the plug's gateway
     gw_result = await db.execute(select(Gateway).where(Gateway.id == plug.gateway_id))
     gateway = gw_result.scalar_one()
 
@@ -676,13 +680,31 @@ async def start_charging_session(
         status=SessionStatus.ACTIVE,
     )
     db.add(session)
-
-    # Update plug status to occupied
     plug.status = PlugStatus.OCCUPIED
+    # Commit the claim + session BEFORE touching hardware, releasing the lock.
     await db.commit()
     await db.refresh(session)
 
-    # 6. Initialize the telemetry stream for this plug
+    # 4. Now command the gateway. If this fails, undo the claim so the plug
+    #    doesn't stay OCCUPIED with a live ACTIVE session nobody can drive.
+    success = mqtt_manager.send_plug_command(
+        gateway_id=plug.gateway_id,
+        plug_id=plug.id,
+        action="ON",
+        max_duration=req.max_duration_seconds,
+        max_kwh=req.max_kwh,
+    )
+    if not success:
+        session.status = SessionStatus.CANCELLED
+        session.ended_at = datetime.now(timezone.utc)
+        plug.status = PlugStatus.AVAILABLE
+        await db.commit()
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to publish start command to the gateway. The gateway may be offline.",
+        )
+
+    # 5. Initialize the telemetry stream for this plug
     telemetry_store.start_session(plug.id)
     await set_plug_telemetry_interval(db, plug.id, 1000)
 
@@ -740,10 +762,21 @@ async def stop_charging_session(
     if not success:
         logger.warning(f"Failed to send OFF command for session {session.id}, but proceeding with DB cleanup.")
 
-    # 2. Get final telemetry data
+    # 2. Determine final energy, then derive cost from it.
+    #    Prefer the live in-memory snapshot, but fall back to the energy
+    #    persisted on the session row (updated from inbound MQTT telemetry by
+    #    MQTTManager._persist_telemetry). This matters after a backend restart:
+    #    TelemetryStore is empty, and session.coins_spent is NEVER written
+    #    mid-session — so the old `latest.cost_coins if latest else
+    #    session.coins_spent` billed 0 for any session that outlived a restart.
+    #    Take the max so a stale/empty store can't bill LESS than what was
+    #    already recorded, and always compute cost from energy * COINS_PER_KWH
+    #    (the same formula TelemetryStore uses) for a single source of truth.
     latest = telemetry_store.get_latest(plug.id)
-    final_energy = latest.energy_kwh if latest else session.energy_kwh
-    final_cost = latest.cost_coins if latest else session.coins_spent
+    persisted_energy = session.energy_kwh or 0.0
+    live_energy = latest.energy_kwh if latest else 0.0
+    final_energy = max(live_energy, persisted_energy)
+    final_cost = round(final_energy * COINS_PER_KWH, 2)
 
     # 3. Finalize session
     session.status = SessionStatus.COMPLETED
@@ -899,6 +932,59 @@ async def get_session_history(
 # Payment Endpoints (Razorpay)
 # ===========================================================================
 
+async def _already_credited(db: AsyncSession, payment_id: str) -> bool:
+    """True if a TOPUP ledger row already exists for this razorpay_payment_id."""
+    existing = await db.execute(
+        select(LedgerTransaction.id).where(
+            LedgerTransaction.razorpay_payment_id == payment_id
+        )
+    )
+    return existing.first() is not None
+
+
+async def _credit_topup(
+    db: AsyncSession,
+    *,
+    user_id: int,
+    coins: float,
+    payment_id: str,
+    description: str,
+) -> Optional[float]:
+    """
+    Atomically credit `coins` to a user and write the TOPUP ledger row keyed by
+    `payment_id`. The UNIQUE constraint on razorpay_payment_id makes this
+    idempotent even under a concurrent /verify + webhook race: the loser's
+    INSERT raises IntegrityError, we roll back (undoing the balance bump), and
+    return None so the caller reports an idempotent no-op.
+
+    Returns the new balance on success, or None if this payment was already
+    credited by a concurrent request.
+    """
+    user_result = await db.execute(
+        select(User).where(User.id == user_id).with_for_update()
+    )
+    locked_user = user_result.scalar_one_or_none()
+    if locked_user is None:
+        return None
+
+    locked_user.coin_balance += coins
+    db.add(LedgerTransaction(
+        user_id=locked_user.id,
+        amount=coins,  # Positive = credit
+        transaction_type=TransactionType.TOPUP,
+        description=description,
+        razorpay_payment_id=payment_id,
+        balance_after=locked_user.coin_balance,
+    ))
+    try:
+        await db.commit()
+    except IntegrityError:
+        # Another request (webhook vs verify) already inserted this payment_id.
+        await db.rollback()
+        return None
+    return locked_user.coin_balance
+
+
 @app.post("/api/payments/create-order", response_model=CreateOrderResponse)
 async def create_payment_order(
     req: CreateOrderRequest,
@@ -950,53 +1036,75 @@ async def verify_payment(
     if not is_valid:
         raise HTTPException(status_code=400, detail="Payment verification failed. Invalid signature.")
 
-    # --- Idempotency guard -------------------------------------------------
-    # Both the webhook and the client-side /verify path credit the same payment.
-    # We check if a LedgerTransaction TOPUP row with this razorpay_payment_id
-    # already exists. If it does, we return successfully without double-crediting.
-    existing = await db.execute(
-        select(LedgerTransaction).where(
-            and_(
-                LedgerTransaction.transaction_type == TransactionType.TOPUP,
-                LedgerTransaction.description.contains(req.razorpay_payment_id),
-            )
+    # --- Authoritative amount ----------------------------------------------
+    # The checkout signature only proves (order_id, payment_id) are genuine —
+    # it does NOT cover the amount, so the client-sent amount must never be
+    # trusted. Fetch the payment from Razorpay and credit what was actually
+    # paid. (razorpay SDK is sync/blocking → offload to a thread.)
+    payment = await asyncio.to_thread(
+        payment_service.fetch_captured_payment,
+        req.razorpay_payment_id,
+        req.razorpay_order_id,
+    )
+    if payment is None:
+        raise HTTPException(
+            status_code=502,
+            detail="Could not confirm the payment with Razorpay. If you were "
+                   "charged, your wallet will be credited automatically shortly.",
         )
-    )
-    if existing.scalar_one_or_none():
+
+    # Only credit money that has actually settled. Authorized-but-uncaptured
+    # payments are credited by the webhook once capture happens.
+    if payment["status"] != "captured":
+        raise HTTPException(
+            status_code=409,
+            detail="Payment not captured yet. Your wallet will be credited "
+                   "automatically once the payment settles.",
+        )
+
+    # The order's notes carry the user it was created for — refuse to credit
+    # this caller with a payment made for a different account.
+    notes_user_id = payment["notes"].get("user_id")
+    if notes_user_id is not None and str(notes_user_id) != str(user.id):
+        raise HTTPException(
+            status_code=403,
+            detail="This payment belongs to a different account.",
+        )
+
+    amount_inr = payment["amount_inr"]
+
+    # --- Idempotency (fast path) -------------------------------------------
+    # Both the webhook and the client-side /verify path credit the same
+    # payment. A prior TOPUP row for this razorpay_payment_id means it's
+    # already done. The UNIQUE constraint on razorpay_payment_id is the
+    # authoritative guard for the concurrent case (handled below); this check
+    # just avoids the wasted work in the common already-credited case.
+    already = await _already_credited(db, req.razorpay_payment_id)
+    if already:
         logger.info(f"Payment {req.razorpay_payment_id} already credited — skipping verify (idempotent).")
-        return {
-            "status": "success",
-            "coins_credited": 0,
-            "new_balance": round(user.coin_balance, 2),
-        }
+        return {"status": "success", "coins_credited": 0, "new_balance": round(user.coin_balance, 2)}
 
-    # Calculate coins to credit
-    coins = payment_service.calculate_coins(req.amount_inr)
+    # Calculate coins to credit from the Razorpay-confirmed amount
+    coins = payment_service.calculate_coins(amount_inr)
 
-    # Credit coins to user wallet (thread-safe via database transaction)
-    user_result = await db.execute(
-        select(User).where(User.id == user.id).with_for_update()
+    credited = await _credit_topup(
+        db,
+        user_id=user.id,
+        coins=coins,
+        payment_id=req.razorpay_payment_id,
+        description=f"Wallet top-up: ₹{amount_inr:.2f} → {coins:.2f} coins (Razorpay: {req.razorpay_payment_id})",
     )
-    locked_user = user_result.scalar_one()
-    locked_user.coin_balance += coins
+    if credited is None:
+        # Lost the race to the webhook (or a duplicate submit). Not an error.
+        logger.info(f"Payment {req.razorpay_payment_id} credited concurrently — treating verify as idempotent.")
+        fresh = await db.execute(select(User.coin_balance).where(User.id == user.id))
+        return {"status": "success", "coins_credited": 0, "new_balance": round(fresh.scalar_one(), 2)}
 
-    # Create ledger top-up transaction
-    ledger_entry = LedgerTransaction(
-        user_id=locked_user.id,
-        amount=coins,  # Positive = credit
-        transaction_type=TransactionType.TOPUP,
-        description=f"Wallet top-up: ₹{req.amount_inr:.2f} → {coins:.2f} coins (Razorpay: {req.razorpay_payment_id})",
-        balance_after=locked_user.coin_balance,
-    )
-    db.add(ledger_entry)
-    await db.commit()
-
-    logger.info(f"Payment verified: user={locked_user.email}, ₹{req.amount_inr:.2f} → {coins:.2f} coins")
-
+    logger.info(f"Payment verified: user={user.email}, ₹{amount_inr:.2f} → {coins:.2f} coins")
     return {
         "status": "success",
         "coins_credited": coins,
-        "new_balance": round(locked_user.coin_balance, 2),
+        "new_balance": round(credited, 2),
     }
 
 
@@ -1043,58 +1151,40 @@ async def razorpay_webhook(request: Request, db: AsyncSession = Depends(get_db))
 
     payment_id = payment["payment_id"]
 
-    # --- Idempotency guard -------------------------------------------------
-    # Both the webhook and the client-side /verify path credit the same
-    # payment. We embed the razorpay_payment_id in the ledger description
-    # (see /verify and below), so a matching TOPUP row means this payment was
-    # already credited. Matching on the payment_id substring is safe because
-    # Razorpay payment IDs (e.g. "pay_XXXXXXXX") are globally unique.
-    existing = await db.execute(
-        select(LedgerTransaction).where(
-            and_(
-                LedgerTransaction.transaction_type == TransactionType.TOPUP,
-                LedgerTransaction.description.contains(payment_id),
-            )
-        )
-    )
-    if existing.scalar_one_or_none():
+    # --- Idempotency (fast path) -------------------------------------------
+    # A prior TOPUP row for this razorpay_payment_id means it was already
+    # credited (by an earlier webhook retry or by /verify). The authoritative
+    # guard for the concurrent case is the UNIQUE constraint, handled by
+    # _credit_topup below.
+    if await _already_credited(db, payment_id):
         logger.info(f"Webhook payment {payment_id} already credited — skipping (idempotent).")
         return {"status": "already_credited", "payment_id": payment_id}
 
-    # --- Credit the wallet (atomic, row-locked) ----------------------------
-    user_result = await db.execute(
-        select(User).where(User.id == payment["user_id"]).with_for_update()
+    coins = payment["coins"]
+    new_balance = await _credit_topup(
+        db,
+        user_id=payment["user_id"],
+        coins=coins,
+        payment_id=payment_id,
+        description=f"Wallet top-up (webhook): ₹{payment['amount_inr']:.2f} → {coins:.2f} coins (Razorpay: {payment_id})",
     )
-    locked_user = user_result.scalar_one_or_none()
-    if locked_user is None:
-        # User was deleted, or notes carried a stale id. Acknowledge to stop
-        # retries; nothing we can credit.
+    if new_balance is None:
+        # Either the user doesn't exist, or /verify won the race. Distinguish
+        # so Razorpay gets a truthful ack and stops retrying in both cases.
+        if await _already_credited(db, payment_id):
+            return {"status": "already_credited", "payment_id": payment_id}
         logger.warning(f"Webhook payment {payment_id} references unknown user {payment['user_id']}.")
         return {"status": "user_not_found", "payment_id": payment_id}
 
-    coins = payment["coins"]
-    locked_user.coin_balance += coins
-
-    ledger_entry = LedgerTransaction(
-        user_id=locked_user.id,
-        amount=coins,  # Positive = credit
-        transaction_type=TransactionType.TOPUP,
-        description=f"Wallet top-up (webhook): ₹{payment['amount_inr']:.2f} → {coins:.2f} coins (Razorpay: {payment_id})",
-        balance_after=locked_user.coin_balance,
-    )
-    db.add(ledger_entry)
-    await db.commit()
-
     logger.info(
-        f"Webhook credited user={locked_user.email}: ₹{payment['amount_inr']:.2f} → {coins:.2f} coins "
+        f"Webhook credited user={payment['user_id']}: ₹{payment['amount_inr']:.2f} → {coins:.2f} coins "
         f"(payment={payment_id})"
     )
-
     return {
         "status": "credited",
         "payment_id": payment_id,
         "coins_credited": coins,
-        "new_balance": round(locked_user.coin_balance, 2),
+        "new_balance": round(new_balance, 2),
     }
 
 
@@ -2200,3 +2290,10 @@ async def cpo_analytics_telemetry(
         }
         for row in rows
     ]
+
+
+# Wrap FastAPI app with Socket.io ASGI wrapper so they run on the same port
+import socketio
+from backend.services.socketio_manager import sio
+app = socketio.ASGIApp(sio, other_asgi_app=app)
+
