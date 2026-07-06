@@ -120,7 +120,8 @@ class MQTTManager:
             "kwh": 0.45,
             "voltage": 230.0,
             "current": 5.2,
-            "status": "occupied" | "available"
+            "status": "occupied" | "available",
+            "session_id": "42"   # optional; echoed from the ON command, "" when idle
         }
 
         Actions:
@@ -139,6 +140,19 @@ class MQTTManager:
         current = float(payload.get("current", 0.0))
         status = payload.get("status", "occupied")
 
+        # Optional backend session id echoed by the firmware. Empty/absent when
+        # the plug is idle, or on pre-session_id firmware. Used to attribute the
+        # reading to the exact session rather than "the active session on this
+        # plug" (matters if a reading arrives late / after the plug was reused).
+        session_id = None
+        raw_sid = payload.get("session_id")
+        if raw_sid not in (None, ""):
+            try:
+                sid = int(raw_sid)
+                session_id = sid if sid > 0 else None
+            except (ValueError, TypeError):
+                session_id = None
+
         # Map firmware status to telemetry store status
         telem_status = "charging" if status == "occupied" else "idle"
 
@@ -147,15 +161,26 @@ class MQTTManager:
             f"{watts:.1f}W, {kwh:.3f}kWh, {current:.1f}A, {voltage:.0f}V [{status}]"
         )
 
-        # --- 1. Feed the in-memory TelemetryStore (for SSE streaming) ---
-        if self.telemetry_store:
+        # --- 1. Feed the in-memory TelemetryStore (for the live stream) ---
+        # This callback runs on the paho network thread. TelemetryStore.update()
+        # signals asyncio.Events that live on the server's event loop, and
+        # asyncio.Event.set() is NOT thread-safe when called from another thread —
+        # it can fail to wake stream() waiters or corrupt loop state. Marshal the
+        # update onto the loop so the whole store stays single-threaded.
+        # (cost_coins is left to TelemetryStore to auto-calc via COINS_PER_KWH.)
+        if self.telemetry_store and self.event_loop:
+            self.event_loop.call_soon_threadsafe(
+                self.telemetry_store.update,
+                plug_id, watts, current, kwh, telem_status,
+            )
+        elif self.telemetry_store:
+            # No loop reference (e.g. unit tests): safe to call directly.
             self.telemetry_store.update(
                 plug_id=plug_id,
                 power_w=watts,
                 current_a=current,
                 energy_kwh=kwh,
                 status=telem_status,
-                # cost_coins=None → auto-calculated by TelemetryStore using COINS_PER_KWH
             )
 
         # --- 2. Enqueue a raw sample for time-series persistence ---
@@ -176,17 +201,24 @@ class MQTTManager:
         # --- 3. Persist authoritative session totals (async, fire-and-forget) ---
         if self.db_session_factory and self.event_loop:
             asyncio.run_coroutine_threadsafe(
-                self._persist_telemetry(plug_id, watts, kwh),
+                self._persist_telemetry(plug_id, watts, kwh, session_id),
                 self.event_loop,
             )
 
-    async def _persist_telemetry(self, plug_id: int, watts: float, kwh: float):
+    async def _persist_telemetry(self, plug_id: int, watts: float, kwh: float, session_id: Optional[int] = None):
         """
         Persist the latest telemetry snapshot to the database:
         - Update `plugs.current_power_w` so the plug list shows real-time power.
-        - Update the active `charging_sessions` row with cumulative energy and
+        - Update the target `charging_sessions` row with cumulative energy and
           peak power, so that even if the server crashes, the last-known values
           are saved.
+
+        Session selection: prefer the firmware-reported `session_id` (guarded so
+        it must be ACTIVE and on this plug — never mutate a finalized, already
+        billed session), and fall back to "the ACTIVE session on this plug" when
+        no id was reported. The plug-id fallback is unambiguous in normal
+        operation (one ACTIVE session per plug), but the explicit id avoids
+        misattributing a late/replayed reading after the plug was reused.
         """
         # Import here to avoid circular imports at module level
         from backend.database.models import Plug, ChargingSession, SessionStatus
@@ -203,14 +235,20 @@ class MQTTManager:
                 if plug:
                     plug.current_power_w = watts
 
-                # Find the active session for this plug and update it
-                sess_result = await session.execute(
-                    select(ChargingSession).where(
-                        and_(
-                            ChargingSession.plug_id == plug_id,
-                            ChargingSession.status == SessionStatus.ACTIVE,
-                        )
+                # Find the session to update (see docstring for selection rules).
+                if session_id is not None:
+                    where_clause = and_(
+                        ChargingSession.id == session_id,
+                        ChargingSession.plug_id == plug_id,
+                        ChargingSession.status == SessionStatus.ACTIVE,
                     )
+                else:
+                    where_clause = and_(
+                        ChargingSession.plug_id == plug_id,
+                        ChargingSession.status == SessionStatus.ACTIVE,
+                    )
+                sess_result = await session.execute(
+                    select(ChargingSession).where(where_clause)
                 )
                 active_session = sess_result.scalar_one_or_none()
                 if active_session:
@@ -267,11 +305,16 @@ class MQTTManager:
     # Outbound command publisher
     # -----------------------------------------------------------------------
 
-    def send_plug_command(self, gateway_id: str, plug_id: int, action: str, max_duration: int = 14400, max_kwh: float = 30.0) -> bool:
+    def send_plug_command(self, gateway_id: str, plug_id: int, action: str, max_duration: int = 14400, max_kwh: float = 30.0, session_id: Optional[int] = None) -> bool:
         """
         Sends an ON/OFF command to a specific plug registered under a gateway.
         Topic: amphive/gateways/{gateway_id}/plugs/{plug_id}/commands
         Payload: {"action": "ON"/"OFF", "max_duration_seconds": X, "max_kwh": Y}
+
+        When `session_id` is given (session start), it is included as a string.
+        The firmware persists it for crash recovery and echoes it back in
+        telemetry so the backend can attribute a reading to the exact session
+        rather than just "the active session on this plug".
         """
         topic = f"amphive/gateways/{gateway_id}/plugs/{plug_id}/commands"
         payload = {
@@ -279,6 +322,8 @@ class MQTTManager:
             "max_duration_seconds": max_duration,
             "max_kwh": max_kwh
         }
+        if session_id is not None:
+            payload["session_id"] = str(session_id)
         
         try:
             payload_str = json.dumps(payload)

@@ -256,7 +256,7 @@ class TelemetryReading(Base):
     session_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("charging_sessions.id", ondelete="SET NULL"), nullable=True)
     recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
     power_w: Mapped[float] = mapped_column(Float, nullable=False)
-    energy_kwh: Mapped[float] = mapped_column(Float, nullable=False)   # cumulative, as reported by firmware
+    energy_kwh: Mapped[float] = mapped_column(Float, nullable=False)   # session-relative kWh, as reported by firmware
     voltage_v: Mapped[float] = mapped_column(Float, nullable=False)
     current_a: Mapped[float] = mapped_column(Float, nullable=False)
     status: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)  # raw firmware signal

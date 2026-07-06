@@ -724,6 +724,7 @@ async def start_charging_session(
         action="ON",
         max_duration=req.max_duration_seconds,
         max_kwh=req.max_kwh,
+        session_id=session.id,
     )
     if not success:
         session.status = SessionStatus.CANCELLED

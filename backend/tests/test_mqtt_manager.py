@@ -1,0 +1,133 @@
+"""
+Tests for MQTTManager inbound handling.
+
+Run:
+    pip install -r backend/requirements.txt -r backend/requirements-dev.txt
+    pytest backend/tests/test_mqtt_manager.py
+
+DB-free: exercises the paho-thread -> event-loop marshaling of TelemetryStore
+updates. asyncio.Event.set() (which TelemetryStore.update() calls to wake
+stream() consumers) is not thread-safe, so the update must be scheduled onto
+the loop via call_soon_threadsafe rather than run inline on the paho network
+thread.
+"""
+
+import asyncio
+import threading
+from unittest.mock import MagicMock
+
+import pytest
+
+from backend.services.mqtt_manager import MQTTManager
+
+
+@pytest.mark.asyncio
+async def test_telemetry_update_marshaled_onto_loop_not_paho_thread():
+    """
+    When an event loop is available, _handle_gateway_telemetry (called on the
+    paho network thread) must NOT invoke telemetry_store.update() inline — it
+    must schedule it on the loop. We prove this by calling the handler from a
+    worker thread and asserting update() has not run when the handler returns,
+    then that it runs (on the loop thread) once the loop gets a turn.
+    """
+    calls = []  # thread name for each update() invocation
+
+    store = MagicMock()
+    store.update.side_effect = lambda *a, **k: calls.append(threading.current_thread().name)
+
+    MQTTManager._instance = None
+    loop = asyncio.get_running_loop()
+    mgr = MQTTManager(telemetry_store=store, event_loop=loop)
+
+    worker_name = "paho-sim"
+    handler_returned = threading.Event()
+
+    def paho_thread():
+        mgr._handle_gateway_telemetry("gw-1", {
+            "plug_id": 1, "watts": 10.0, "kwh": 0.1,
+            "voltage": 230.0, "current": 0.04, "status": "occupied",
+        })
+        handler_returned.set()
+
+    t = threading.Thread(target=paho_thread, name=worker_name)
+    t.start()
+    handler_returned.wait(2.0)
+    t.join(2.0)
+
+    # The loop hasn't had a turn yet (this coroutine has been running), so the
+    # scheduled callback can't have fired. update() must not have run inline.
+    assert calls == [], "update() ran on the paho thread instead of being marshaled onto the loop"
+
+    # Give the loop a turn so it processes the scheduled callback.
+    await asyncio.sleep(0.05)
+
+    assert len(calls) == 1, "scheduled telemetry update did not run on the loop"
+    assert worker_name not in calls, "update() must run on the loop thread, not the paho thread"
+    # Args are forwarded positionally: (plug_id, power_w, current_a, energy_kwh, status)
+    store.update.assert_called_once_with(1, 10.0, 0.04, 0.1, "charging")
+
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reported_sid,expected", [
+    ("77", 77),         # normal: firmware echoes the backend session id
+    (None, None),       # key absent (pre-session_id firmware)
+    ("", None),         # idle firmware reports an empty string
+    ("not-a-number", None),
+    ("0", None),        # 0 is not a valid session id
+])
+async def test_session_id_parsed_and_forwarded_to_persist(reported_sid, expected):
+    """
+    _handle_gateway_telemetry must parse the firmware-echoed session_id (a JSON
+    string) into an int and forward it to _persist_telemetry, so the reading is
+    attributed to the exact session. Bad/empty/absent values forward None (the
+    handler then falls back to the plug's active session).
+    """
+    MQTTManager._instance = None
+    loop = asyncio.get_running_loop()
+    # db_session_factory just needs to be truthy — _persist_telemetry is stubbed.
+    mgr = MQTTManager(db_session_factory=lambda: None, event_loop=loop)
+
+    captured = {}
+
+    async def fake_persist(plug_id, watts, kwh, session_id=None):
+        captured.update(plug_id=plug_id, watts=watts, kwh=kwh, session_id=session_id)
+
+    mgr._persist_telemetry = fake_persist
+
+    payload = {"plug_id": 3, "watts": 100.0, "kwh": 0.5, "status": "occupied"}
+    if reported_sid is not None:
+        payload["session_id"] = reported_sid
+
+    mgr._handle_gateway_telemetry("gw-1", payload)
+    await asyncio.sleep(0.05)  # let the scheduled coroutine run
+
+    assert captured.get("plug_id") == 3
+    assert captured.get("kwh") == 0.5
+    assert captured.get("session_id") == expected
+
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_telemetry_update_direct_when_no_loop():
+    """
+    Without an event_loop reference (e.g. unit-test construction), the handler
+    falls back to a direct update() call so behavior is still exercised.
+    """
+    store = MagicMock()
+
+    MQTTManager._instance = None
+    mgr = MQTTManager(telemetry_store=store)  # no event_loop
+
+    mgr._handle_gateway_telemetry("gw-1", {
+        "plug_id": 2, "watts": 20.0, "kwh": 0.2,
+        "voltage": 230.0, "current": 0.087, "status": "available",
+    })
+
+    store.update.assert_called_once_with(
+        plug_id=2, power_w=20.0, current_a=0.087, energy_kwh=0.2, status="idle"
+    )
+
+    MQTTManager._instance = None
