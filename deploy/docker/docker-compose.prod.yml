@@ -16,8 +16,10 @@ services:
     restart: always
     environment:
       POSTGRES_USER: postgres
-      # Password hardcoded here for compose compatibility (not a production secret)
-      POSTGRES_PASSWORD: amphive_db_admin
+      # Interpolated from .env (deploy.ps1 ensures it exists and builds the
+      # matching DATABASE_URL). Plain ${VAR} syntax — no :-defaults, which the
+      # VM's docker-compose v1 can't parse.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: amphive
     volumes:
       - postgres_data:/var/lib/postgresql/data
@@ -32,8 +34,14 @@ services:
     container_name: amphive-mqtt
     restart: always
     ports:
-      - "1883:1883"
-      - "9001:9001"
+      # MQTT_BIND_IP controls which HOST interface the broker is reachable on.
+      # 0.0.0.0 = public internet (legacy, insecure: the broker is anonymous).
+      # Set it to the VM's overlay/Tailscale IP (e.g. 100.87.241.70) in .env so
+      # only overlay peers (the ESP32 gateways) can reach port 1883. The
+      # backend is unaffected — it reaches 'mqtt' over the compose network,
+      # not via this published port.
+      - "${MQTT_BIND_IP}:1883:1883"
+      # (9001 removed: it was published but mosquitto has no websocket listener.)
     volumes:
       - ./mosquitto.conf:/mosquitto/config/mosquitto.conf
       - mosquitto_data:/mosquitto/data

@@ -1,0 +1,15 @@
+# WireGuard Direct-Mode tunnel: developer PC (10.10.0.2) <-> GCP VM (10.10.0.1)
+#
+# Copy to amphive_tunnel.conf (which is gitignored) and fill in real values.
+# NEVER commit the real file — it contains the interface PRIVATE key.
+# Generate a fresh keypair with:  wg genkey | tee privatekey | wg pubkey > publickey
+
+[Interface]
+PrivateKey = <YOUR_WIREGUARD_PRIVATE_KEY>
+Address = 10.10.0.2/24
+
+[Peer]
+PublicKey = <VM_WIREGUARD_PUBLIC_KEY>
+Endpoint = <VM_PUBLIC_IP_OR_DUCKDNS_HOSTNAME>:51820
+AllowedIPs = 10.10.0.0/24
+PersistentKeepalive = 25

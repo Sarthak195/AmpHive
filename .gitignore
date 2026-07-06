@@ -8,6 +8,9 @@
 .env.test.local
 .env.production.local
 
+# WireGuard tunnel config carries a private key — only the .example is tracked
+deploy/config/amphive_tunnel.conf
+
 # Dependency directories
 node_modules/
 jspm_packages/
