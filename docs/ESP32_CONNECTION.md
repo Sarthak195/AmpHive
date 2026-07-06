@@ -260,7 +260,7 @@ impractical without reworking `microlink`.
 | Garbled monitor output | Baud mismatch — `idf.py monitor` uses **115200**; don't override it |
 | `Permission denied: /dev/ttyUSB0` (Linux) | `sudo usermod -aG dialout $USER`, then log out/in |
 | Plug commands do nothing after provisioning | Wrong Target Plug IP (DHCP changed it) or Tapo creds; re-provision ([§6](#6-first-boot--captive-portal-provisioning)). Validate creds with `python tools/klap_probe.py <ip>` |
-| KLAP `handshake1 auth mismatch` in serial log | Wrong Tapo email/password, or "Third-Party Compatibility" disabled in the Tapo app |
+| KLAP `handshake1 auth mismatch` in serial log | Wrong Tapo email/password, or "Third-Party Compatibility" disabled in the Tapo app. **Also happens after rotating the Tapo account password** — the gateway's NVS still holds the old one (bit us 2026-07-06). Update the `tapo_pwd` key in NVS namespace `storage` (a minimal one-off app calling `nvs_set_str` works, and preserves the machine key/Wi-Fi/energy state) or erase NVS and re-provision |
 
 ---
 
@@ -331,8 +331,8 @@ To verify that the unified port architecture (magicsock mode) is functioning cor
 # --- every terminal ---
 . ~/esp/esp-idf/export.sh                 # macOS/Linux
 . $HOME\esp\esp-idf\export.ps1            # Windows PowerShell
-# or via EIM installation:
-. "C:\Espressif\tools\Microsoft.v6.0.1.PowerShell_profile.ps1"
+# on this workstation (v5.3.3 lives at C:\esp\v5.3.3; don't use the EIM v6.0.1 profile):
+$env:IDF_TOOLS_PATH = "$env:USERPROFILE\.espressif"; . C:\esp\v5.3.3\esp-idf\export.ps1
 
 # --- build/flash cycle ---
 cd firmware

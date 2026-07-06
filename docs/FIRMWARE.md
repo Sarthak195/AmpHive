@@ -198,7 +198,8 @@ mostly functional (with unified magicsock NAT traversal now fully operational), 
 real P110 via `tools/klap_probe.py`; builds on **ESP-IDF v5.3**, not v6).
 Path A has now been run end-to-end on real hardware (a billed session with correct
 energy delivery); the firmware-side billing fix (session-relative `kwh`) and the
-`session_id` echo are in code but **need an on-device reflash** to take effect.
+`session_id` echo were **reflashed and verified on-device 2026-07-06** (raw MQTT
+payloads show `kwh` starting at 0 per session and the echoed `session_id`).
 Remaining gaps: there is no OTA, and the control-plane host constants still default
 to Tailscale (Headscale retarget pending). See
 [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for the full matrix.

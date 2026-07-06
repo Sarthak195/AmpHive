@@ -49,10 +49,12 @@ Cross-references [TECH_DEBT.md](TECH_DEBT.md) items as `TD#n` and
       creates `uq_ledger_razorpay_payment_id`, and `_credit_topup` relies on the
       `IntegrityError` from a concurrent insert (not just the pre-lock SELECT) to
       stay idempotent across the /verify + webhook race. (SEC checklist)
-- [x] **Persist the firmware energy integrator** to NVS (2026-07-06, code):
+- [x] **Persist the firmware energy integrator** to NVS (2026-07-06):
       `s_energy_wh` is restored on `tapo_init` and written throttled (per 50 Wh),
-      so crash recovery keeps the energy watchdog armed. **Pending on-device flash
-      + verification** (no ESP-IDF toolchain on the dev box). (TD#19)
+      so crash recovery keeps the energy watchdog armed. **Flashed on-device
+      2026-07-06** (ESP-IDF v5.3.3 now installed at `C:\esp\v5.3.3`); the
+      cross-reboot restore hasn't been explicitly exercised yet — needs ≥ 50 Wh
+      accrued to hit the throttled write. (TD#19)
 
 ## Next month — scale & polish
 
@@ -61,10 +63,11 @@ Cross-references [TECH_DEBT.md](TECH_DEBT.md) items as `TD#n` and
 - [ ] **Extract the access-code generator** (duplicated 3× across CPO routes). (TD#10)
 - [ ] **Unify live telemetry**: retire the SSE endpoint + `sse-starlette` dep,
       or document it as an explicit fallback. (TD#12)
-- [x] **cJSON on the firmware command path** (2026-07-06, code) instead of
+- [x] **cJSON on the firmware command path** (2026-07-06) instead of
       `strstr`/`sscanf`; MQTT buffers raised (topic 256, data 512) with an
-      oversized/fragmented guard so a `session_id` can't truncate. **Pending
-      on-device flash + verification.** (TD#11)
+      oversized/fragmented guard so a `session_id` can't truncate. **Flashed +
+      verified on-device 2026-07-06** — ON commands carrying `session_id` parsed
+      correctly through E2E sessions #77–79. (TD#11)
 - [x] **Model plug geolocation** (2026-07-06): `Plug` now has nullable
       `latitude`/`longitude`; the driver/plug APIs return effective coords (the
       plug's own, else its gateway's site), and CPOs can set them via
@@ -82,15 +85,18 @@ Cross-references [TECH_DEBT.md](TECH_DEBT.md) items as `TD#n` and
 
 - [ ] **MQTT broker auth + TLS** (needs a firmware credentials field before
       `allow_anonymous false`). (SEC §3)
-- [~] **Finish Path A end-to-end**: real billed session on physical hardware over
+- [x] **Finish Path A end-to-end**: real billed session on physical hardware over
       ESP32+MQTT, feeding the session/telemetry pipeline. **Achieved 2026-07-06** —
       a real ESP32 + P110 ran a billed session; the plug delivered correct energy
       and telemetry flowed through to the wallet debit. The run surfaced (and we
-      fixed in code) a **session overbilling bug**: firmware published its lifetime
-      energy meter instead of session-relative energy, so every session after the
-      first re-billed the plug's history. **Blocking to close:** reflash the ESP32
-      with the fix (no ESP-IDF toolchain on the dev box) and re-verify one clean
-      billed session bills only its own kWh. (IMPL §2, §3.35)
+      fixed) a **session overbilling bug**: firmware published its lifetime energy
+      meter instead of session-relative energy. **Closed later the same day:** the
+      ESP32 was reflashed (ESP-IDF v5.3.3 toolchain installed) and consecutive
+      billed sessions #77–79 verified each session's `kwh` starts at 0 and bills
+      only its own energy; raw broker payloads confirmed the session-relative
+      `kwh` + `session_id` echo. Note: the reflash also required refreshing the
+      NVS `tapo_pwd` (the Tapo password rotation had stranded the gateway's
+      provisioned copy → KLAP `handshake1 auth mismatch`). (IMPL §2, §3.35)
 - [ ] **OTA firmware updates**: current single-app partition table precludes the
       spec'd dual-partition rollback. (IMPL 15)
 - [ ] **Reconcile or retire K8s manifests** — they diverge from the live VM

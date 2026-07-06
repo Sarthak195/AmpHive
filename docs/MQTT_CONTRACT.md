@@ -32,7 +32,9 @@ and `amphive/gateways/+/status` (QoS 1). It does **not** currently subscribe to
 > plug's lifetime meter. The backend bills it directly (`kwh × COINS_PER_KWH`),
 > so the firmware subtracts the baseline captured at `ON`; publishing the raw
 > lifetime integrator re-bills the plug's whole history every session (fixed
-> 2026-07-06 in `firmware/main/main.c`). Idle (no active session) reports `0`.
+> 2026-07-06 in `firmware/main/main.c`, **verified on-device the same day** —
+> consecutive sessions each started at `kwh: 0.0000` on the wire). Idle (no
+> active session) reports `0`.
 
 > **`session_id` round-trip.** On `ON` the backend includes the DB session id as
 > a **string** (`send_plug_command(..., session_id=…)`); the firmware persists it
@@ -107,9 +109,11 @@ verification-and-polish, not missing plumbing:
    and `kwh` is a driver-side energy integrator (voltage/current are nominal/derived;
    the P110 reports neither).
 4. ~~Firmware reported the raw lifetime energy integrator, so every session after
-   the first overbilled~~ **Fixed 2026-07-06** — telemetry now reports
-   session-relative `kwh` (see the `kwh` note above). **Requires an on-device
-   reflash** to take effect (no ESP-IDF toolchain on the dev box).
+   the first overbilled~~ **Fixed + verified on-device 2026-07-06** — telemetry
+   reports session-relative `kwh` (see the `kwh` note above); `mosquitto_sub` on
+   the live broker showed `"kwh":0.0000` at each session start with the
+   `session_id` echoed, and consecutive billed sessions (#77–79) each billed only
+   their own energy.
 
 See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) and
 [FIRMWARE.md §4](FIRMWARE.md#4-tapo-driver--real-klap-v2-maintapo_protocolc).

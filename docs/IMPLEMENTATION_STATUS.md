@@ -67,16 +67,25 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
   drove a billed session over MQTT — the plug delivered the correct energy and
   real telemetry flowed through TelemetryStore → DB → the live stream →
   wallet debit (`DIRECT_MODE=false`).
-- **Billing correction (2026-07-06):** the first hardware run surfaced a
-  **session overbilling bug** — the firmware published its *lifetime* energy
-  integrator as the telemetry `kwh`, so every session after the first billed the
-  plug's entire accumulated history (`kwh × COINS_PER_KWH`). The firmware now
+- **Billing correction (2026-07-06, verified on-device):** the first hardware run
+  surfaced a **session overbilling bug** — the firmware published its *lifetime*
+  energy integrator as the telemetry `kwh`, so every session after the first billed
+  the plug's entire accumulated history (`kwh × COINS_PER_KWH`). The firmware now
   reports **session-relative** energy (`meter − session_baseline`, the same value
-  the watchdog uses); idle reports 0. **Requires an on-device reflash** to take
-  effect — the code fix is committed but the dev box has no ESP-IDF toolchain.
+  the watchdog uses); idle reports 0. **Reflashed and re-verified later the same
+  day** (ESP-IDF v5.3.3 toolchain now installed at `C:\esp\v5.3.3`): consecutive
+  billed sessions (#77–79) each started at `kwh = 0.0000` — the second/third did
+  **not** inherit the first's accrual — and raw broker payloads confirmed both the
+  session-relative `kwh` and the `session_id` echo on the wire.
   Also fixed alongside: the inbound telemetry `TelemetryStore.update()` was called
   from the paho thread, invoking `asyncio.Event.set()` cross-thread; it is now
   marshaled onto the event loop (`tests/test_mqtt_manager.py`).
+- **Operational gotcha found during the 2026-07-06 reflash:** the gateway's NVS
+  held the **pre-rotation Tapo password** (secrets were rotated 2026-07-06 after
+  the board was provisioned), so every KLAP handshake failed with `handshake1
+  auth mismatch` until the `tapo_pwd` NVS key was rewritten (done via a one-off
+  fixer app; no NVS erase / re-provisioning needed). Rotating the Tapo account
+  password **always** requires updating the provisioned copy on each gateway.
 - **Path B (Direct Mode + WireGuard relay)** has been **retired** — the WireGuard
   tunnel is no longer used. `tapo_direct` and the `/direct/*` endpoints remain in
   code but are dormant (`DIRECT_MODE=false` makes them return 503).
@@ -173,24 +182,29 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 32. [Resolved 2026-07-06] **`CpoSetup` redirect-during-render** replaced with a
     declarative `<Navigate … replace />` (the render-body `navigate()` triggered a
     React "update during render" warning and could loop under StrictMode).
-33. [Fixed in code 2026-07-06, pending on-device flash] **Firmware command
-    parsing** moved from `strstr`/`sscanf` to cJSON, and the MQTT buffers were
-    widened (topic 256, data 512) with an oversized/fragmented-payload guard, so a
-    command carrying a `session_id` no longer truncates/corrupts. Not compiled or
-    flashed here — no ESP-IDF toolchain on the dev box.
-34. [Fixed in code 2026-07-06, pending on-device flash] **Firmware energy meter
-    reset on reboot** — `s_energy_wh` now persists to NVS (restored on `tapo_init`,
-    written throttled per 50 Wh), so post-reboot `consumed_kwh` no longer goes
-    negative and the energy safety watchdog stays armed. Pending on-device flash.
-35. [Fixed in code 2026-07-06, pending on-device flash] **Firmware billed the
-    lifetime energy integrator, not the session.** `telemetry_task` published the
-    raw monotonic `telemetry.energy_kwh` (a cross-reboot cumulative meter) as the
+33. [Resolved 2026-07-06, flashed + verified] **Firmware command parsing** moved
+    from `strstr`/`sscanf` to cJSON, and the MQTT buffers were widened (topic 256,
+    data 512) with an oversized/fragmented-payload guard, so a command carrying a
+    `session_id` no longer truncates/corrupts. Verified on-device: ON commands
+    carrying `session_id` parsed correctly through three E2E sessions (#77–79).
+34. [Resolved 2026-07-06, flashed] **Firmware energy meter reset on reboot** —
+    `s_energy_wh` now persists to NVS (restored on `tapo_init`, written throttled
+    per 50 Wh), so post-reboot `consumed_kwh` no longer goes negative and the
+    energy safety watchdog stays armed. Flashed and running; the cross-reboot
+    restore itself hasn't been explicitly exercised yet (needs ≥ 50 Wh accrued to
+    hit the throttled write — test sessions drew only ~3–9 W).
+35. [Resolved 2026-07-06, flashed + verified] **Firmware billed the lifetime
+    energy integrator, not the session.** `telemetry_task` published the raw
+    monotonic `telemetry.energy_kwh` (a cross-reboot cumulative meter) as the
     telemetry `kwh`, while the backend bills that field as session energy. The
     first session on a fresh plug billed ~correctly; every subsequent one overbilled
     by the plug's entire history. Firmware now publishes session-relative energy
     (`telemetry.energy_kwh − active_session.start_energy_kwh`, clamped ≥ 0) in both
-    the live payload and the offline-log buffer (`firmware/main/main.c`). Requires
-    an on-device reflash.
+    the live payload and the offline-log buffer (`firmware/main/main.c`).
+    **Verified on-device 2026-07-06:** sessions #77–79 each started at
+    `kwh = 0.0000` despite prior accrual in the same boot (raw broker payloads
+    checked via `mosquitto_sub`); idle telemetry reports 0; each session billed
+    only its own energy.
 36. [Resolved 2026-07-06] **Inbound telemetry crossed a thread boundary unsafely.**
     `_handle_gateway_telemetry` runs on the paho network thread and called
     `TelemetryStore.update()` inline, which calls `asyncio.Event.set()` to wake
@@ -198,7 +212,7 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
     state). The store update is now marshaled onto the event loop via
     `loop.call_soon_threadsafe`, keeping the store single-threaded. Regression test:
     `backend/tests/test_mqtt_manager.py`.
-37. [Fixed in code 2026-07-06, pending on-device flash] **Firmware energy
+37. [Resolved 2026-07-06, flashed] **Firmware energy
     integrator updated outside the KLAP mutex.** `tapo_get_telemetry` mutated
     `s_energy_wh`/`s_energy_last_tick`/`s_energy_persisted_wh` after releasing
     `s_mutex`; the telemetry task and the ON-handler baseline read can overlap and
@@ -213,4 +227,7 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
     never sent, so the crash-recovery field was always empty. Offline-resynced
     readings still attribute by `plug_id` (the NVS ring-buffer entry has no room
     for the id). Backend parsing regression-tested in `test_mqtt_manager.py`;
-    firmware echo pending on-device flash.
+    **firmware echo verified on the wire 2026-07-06** (`mosquitto_sub` showed
+    `"session_id":"79"` echoed in live telemetry; DB rows attributed to the
+    correct sessions, with post-stop idle rows correctly NULL via the
+    ACTIVE-session guard).

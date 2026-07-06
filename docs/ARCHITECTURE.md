@@ -68,8 +68,9 @@ status messages update gateway online/offline state in the DB. The ESP32 runs a
 been run **end-to-end on physical hardware** — a real ESP32 + P110 drove a billed
 session with correct energy delivery. That run surfaced a session-overbilling bug
 (firmware published its lifetime energy meter instead of session-relative energy),
-now fixed in code but **pending an on-device reflash**. See
-[IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md).
+fixed and **verified on-device 2026-07-06** — the reflashed gateway ran consecutive
+billed sessions whose telemetry `kwh` each started at 0 and echoed the backend's
+`session_id`. See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md).
 
 ### Path B — Direct Mode over WireGuard (retired 2026-07-06 — kept for reference)
 1. A WireGuard tunnel links the GCP VM (`10.10.0.1`) to the developer's home PC
