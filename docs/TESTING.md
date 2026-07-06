@@ -13,6 +13,7 @@ prioritized roadmap to close the biggest coverage gaps.*
 | `test_payments.py` | `fetch_captured_payment()` — amount comes from Razorpay not the client; order-mismatch rejected; unconfigured/API-error paths | Unit (mocked SDK) |
 | `test_socketio.py` | Socket.io `connect` auth (token in auth vs query), unauthorized `subscribe_session`, success path, and a **regression test** for the `get_participants` bug (real task, real `sio`, stubbed emit) | Unit + light integration |
 | `test_telemetry_persistence.py` | MQTT handler forwards voltage/current/status into the buffer; buffer is bounded and counts drops; flush/enrich path is a **skipped** outline needing real Postgres | Unit |
+| `test_active_session_speedup.py` | **Regression** for the login/`/me` `MultipleResultsFound` crash: `check_and_speed_up_active_session` must handle a user with 0/1/many ACTIVE sessions (mock result mirrors SQLAlchemy's raise-on-many semantics) | Unit |
 
 Run:
 ```bash

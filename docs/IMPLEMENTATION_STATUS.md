@@ -231,3 +231,13 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
     `"session_id":"79"` echoed in live telemetry; DB rows attributed to the
     correct sessions, with post-stop idle rows correctly NULL via the
     ACTIVE-session guard).
+39. [Resolved 2026-07-06] **Login/`/me` crashed with `MultipleResultsFound` for
+    users holding >1 ACTIVE session.** `check_and_speed_up_active_session`
+    (called on every `/api/auth/login` and `/api/auth/me`) fetched "the" active
+    session with `scalar_one_or_none()`, but nothing limits a user to one active
+    session — a user with several (e.g. stale sessions on offline gateways) hit
+    a 500 on login and session restore, locking them out of the app (observed in
+    prod with 3 concurrent ACTIVE sessions). Now iterates `scalars().all()`.
+    Regression tests: `backend/tests/test_active_session_speedup.py`. Related
+    open gaps: sessions can start against offline gateways and there is no
+    backend session reaper — see [TODO.md](TODO.md).

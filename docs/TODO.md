@@ -32,6 +32,29 @@ Cross-references [TECH_DEBT.md](TECH_DEBT.md) items as `TD#n` and
 
 ## Next week — reliability & structure
 
+- [x] **Fix the login/`/me` `MultipleResultsFound` crash** (2026-07-06):
+      `check_and_speed_up_active_session` assumed at most one ACTIVE session per
+      user and 500'd login/session-restore for users with more (observed in prod
+      with 3). Now iterates all; regression tests in
+      `backend/tests/test_active_session_speedup.py`. (IMPL §3.39)
+- [ ] **Reject session start when the gateway is offline.** `send_plug_command`
+      only confirms the broker PUBACK, so sessions start "successfully" against
+      dead/mock gateways and sit ACTIVE forever with 0 energy (sessions 72–76).
+      The `Gateway` row is already loaded in the start handler — check its
+      `status`/`last_seen_at`.
+- [ ] **Add a backend session reaper**: periodic task that auto-stops ACTIVE
+      sessions with no telemetry for N minutes (bill persisted energy). Today the
+      only timeout lives in the firmware — useless if the gateway never got the
+      ON or died mid-session.
+- [ ] **Decide one-active-session-per-user** (enforce at start) or make
+      `/api/sessions/active` + the UI handle several; today older active
+      sessions are unreachable/un-stoppable by the user.
+- [ ] **Map duplicate-registration race to 400**: `/api/auth/register` (and
+      `cpo_setup` tenant name) does exists-check-then-insert; a concurrent
+      duplicate escapes as a raw `IntegrityError` 500. Catch it like
+      `_credit_topup` does.
+- [ ] **Set `TELEMETRY_RETENTION_DAYS` in prod** — default `0` keeps telemetry
+      forever; `telemetry_readings` grows ~1 row/s during live streaming.
 - [ ] **Add CI** (GitHub Actions): `pytest backend/tests` with a `postgres:15`
       service + `npm run lint`. Would have caught the `get_participants`
       "verified-but-broken" bug. (TD#13)

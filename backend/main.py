@@ -101,8 +101,13 @@ async def set_plug_telemetry_interval(db: AsyncSession, plug_id: int, interval_m
 
 async def check_and_speed_up_active_session(db: AsyncSession, user_id: int):
     """
-    Check if the user has an active charging session, and if so,
-    speed up the telemetry interval for the corresponding plug to 1000ms.
+    Check if the user has active charging sessions, and if so, speed up the
+    telemetry interval for each corresponding plug to 1000ms.
+
+    A user can hold more than one ACTIVE session (nothing limits starts to a
+    single plug), so this must not assume a single row — scalar_one_or_none()
+    here raised MultipleResultsFound, which broke /api/auth/login and
+    /api/auth/me for that user.
     """
     result = await db.execute(
         select(ChargingSession).where(
@@ -112,8 +117,7 @@ async def check_and_speed_up_active_session(db: AsyncSession, user_id: int):
             )
         )
     )
-    active_session = result.scalar_one_or_none()
-    if active_session:
+    for active_session in result.scalars().all():
         await set_plug_telemetry_interval(db, active_session.plug_id, 1000)
 
 
