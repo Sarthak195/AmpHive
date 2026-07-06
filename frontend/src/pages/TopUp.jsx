@@ -12,7 +12,8 @@
  * 5. User pays via UPI, card, wallet, or net banking
  * 6. On success, Razorpay returns payment_id, order_id, signature
  * 7. Frontend calls POST /api/payments/verify with all three values
- * 8. Backend verifies HMAC SHA256 signature and credits coins
+ * 8. Backend verifies the HMAC signature, fetches the authoritative amount
+ *    from Razorpay's API, and credits the corresponding coins
  * 9. Frontend refreshes the wallet balance
  */
 
@@ -99,11 +100,12 @@ const TopUp = () => {
         handler: async function (response) {
           try {
             // Verify the payment signature on the backend
+            // Note: no amount is sent — the backend fetches the authoritative
+            // amount from Razorpay and credits exactly what was paid.
             const verifyResult = await api.post('/api/payments/verify', {
               razorpay_order_id: response.razorpay_order_id,
               razorpay_payment_id: response.razorpay_payment_id,
               razorpay_signature: response.razorpay_signature,
-              amount_inr: selectedAmount,
             });
 
             // Step 4: Refresh wallet balance and show success
