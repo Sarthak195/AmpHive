@@ -1,0 +1,108 @@
+# =============================================================================
+# AmpHive Production Docker Compose — WITH TLS (Caddy front door)
+#
+# Use this INSTEAD of docker-compose.prod.yml when you have a real domain and
+# ports 80+443 open on the VM. Caddy becomes the only public web entrypoint and
+# terminates HTTPS (auto Let's Encrypt); the frontend container no longer
+# publishes a host port — it is reached only via the internal compose network.
+#
+#   1. cp deploy/config/Caddyfile.example ~/amphive/Caddyfile   (edit the domain)
+#   2. docker-compose -f docker-compose.tls.yml up -d --build
+#
+# Everything else (db, mqtt, backend) matches docker-compose.prod.yml.
+# =============================================================================
+version: '3.7'
+
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: amphive-db
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: amphive
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mqtt:
+    image: eclipse-mosquitto:2.0
+    container_name: amphive-mqtt
+    restart: always
+    ports:
+      # See docker-compose.prod.yml — set MQTT_BIND_IP to the overlay IP.
+      - "${MQTT_BIND_IP}:1883:1883"
+    volumes:
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf
+      - mosquitto_data:/mosquitto/data
+      - mosquitto_log:/mosquitto/log
+    healthcheck:
+      test: ["CMD-SHELL", "mosquitto_sub -t '$$SYS/#' -C 1 -W 5 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: amphive-backend
+    restart: always
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - MQTT_BROKER_HOST=mqtt
+      - MQTT_BROKER_PORT=1883
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - RAZORPAY_KEY_ID=${RAZORPAY_KEY_ID}
+      - RAZORPAY_KEY_SECRET=${RAZORPAY_KEY_SECRET}
+      - RAZORPAY_WEBHOOK_SECRET=${RAZORPAY_WEBHOOK_SECRET}
+      - COINS_PER_RUPEE=${COINS_PER_RUPEE}
+      - COINS_PER_KWH=${COINS_PER_KWH}
+      - DIRECT_MODE=${DIRECT_MODE}
+      - TAPO_USERNAME=${TAPO_USERNAME}
+      - TAPO_PASSWORD=${TAPO_PASSWORD}
+      - TAPO_PLUG_IP=${TAPO_PLUG_IP}
+      - TAPO_RELAY_URL=${TAPO_RELAY_URL}
+    depends_on:
+      - db
+      - mqtt
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: amphive-frontend
+    restart: always
+    # No host port: Caddy reaches it over the internal network as 'frontend:80'.
+    expose:
+      - "80"
+    depends_on:
+      - backend
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: amphive-caddy
+    restart: always
+    ports:
+      - "80:80"     # ACME HTTP-01 challenge + HTTP->HTTPS redirect
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data      # persists issued certificates across restarts
+      - caddy_config:/config
+    depends_on:
+      - frontend
+
+volumes:
+  mosquitto_data:
+  mosquitto_log:
+  postgres_data:
+  caddy_data:
+  caddy_config:

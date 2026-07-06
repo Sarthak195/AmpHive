@@ -1,0 +1,27 @@
+# AmpHive TLS reverse proxy (Caddy) — copy to Caddyfile and set your domain.
+#
+# Caddy automatically obtains and renews a Let's Encrypt certificate for the
+# domain below (HTTP-01 challenge), so you get HTTPS with no manual certbot.
+#
+# Requirements before this works:
+#   - A real domain/hostname pointing at the VM's public IP (e.g. the DuckDNS
+#     name amphive.duckdns.org — keep the DuckDNS updater running).
+#   - GCP firewall allows inbound tcp:80 AND tcp:443 to the VM.
+#   - Deploy with the TLS compose so Caddy is the public entrypoint:
+#       docker-compose -f docker-compose.tls.yml up -d --build
+#
+# Replace the hostname and the email (used by Let's Encrypt for expiry notices).
+
+amphive.duckdns.org {
+	encode gzip
+
+	# WebSocket + API + SPA all live behind the frontend nginx container, which
+	# already proxies /api and /socket.io to the backend. Caddy just terminates
+	# TLS and forwards everything to it.
+	reverse_proxy frontend:80
+}
+
+# Optional: uncomment to set the ACME account email.
+# {
+# 	email you@example.com
+# }
