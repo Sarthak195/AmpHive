@@ -101,8 +101,11 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
    used — plain Postgres + `date_trunc` aggregation was chosen deliberately;
    hypertables/native-retention/continuous-aggregates remain a possible future
    upgrade.
-3. **LWT offline alerts on the backend** (README description) is inaccurate (LWT is published by the *firmware*, and the backend has no LWT, though gateway status is now persisted on the backend when received).
-4. **Python version:** README says 3.12; Dockerfile uses **3.11**.
+3. [Resolved] ~~LWT offline alerts on the backend~~ — the README no longer
+   makes this claim (LWT is published by the *firmware*; the backend persists
+   gateway status when received).
+4. [Resolved] ~~Python version mismatch~~ — README now says 3.11, matching
+   the Dockerfile.
 5. [Resolved 2026-07-07] ~~`schema.sql`/`schema_v2.sql` are not executed~~ —
    schema management moved to **Alembic** (`backend/migrations/`, frozen-DDL
    baseline `0001_baseline`); the drifted SQL files are deleted and
@@ -116,8 +119,9 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 7. [Resolved 2026-07-02] The unauthenticated `gateways/register` /
    `plugs/register` endpoints were removed; provisioning now goes through the
    RBAC-gated, tenant-scoped `POST /api/cpo/gateways` / `POST /api/cpo/plugs`.
-8. **Direct Mode is documented as a temporary dev bypass** but is the
-   actually-enabled path in the committed config.
+8. [Resolved] ~~Direct Mode enabled in the committed config~~ — Path B is
+   retired: `DIRECT_MODE=false` in `.env.template`, and the `/api/direct/*`
+   endpoints return 503 (see §2).
 9. [Resolved] `charging_sessions.peak_power_w` is now populated.
 10. [Resolved 2026-07-02] Wallet updates are now row-locked (`SELECT ... FOR
     UPDATE`) in the stop, verify, and webhook paths.
@@ -147,14 +151,21 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
     overlay.
 20. **K8s vs VM divergence:** in-cluster Postgres vs Cloud SQL, Docker Hub images
     vs source builds, missing backend secrets in K8s.
-21. **Committed VM public IP differs across docs** (`35.200.131.98` vs
-    `34.100.200.152` vs others) — the IP is ephemeral; see [SECURITY.md](SECURITY.md).
-22. **Stale "EC2" wording** survives in `deployment_checklist.md` though the
-    platform is fully on GCP.
-23. **mosquitto 9001 (websockets)** port is published but not served (no listener).
-24. **Relay port mismatch:** `wireguard_tunnel_setup.md` says `:80`,
-    `relay_server.py` listens on `:8000`.
-25. **`frontend/README.md`** is the stock Vite template (not project docs).
+21. **Committed VM public IP differs across docs** — the IP is ephemeral (see
+    [SECURITY.md](SECURITY.md)); stale literals now remain only in
+    historical/retired runbooks (`wireguard_tunnel_setup.md`,
+    `gcp_migration_runbook.md`), which are banner-marked as such.
+22. [Resolved 2026-07-07] ~~Stale "EC2" wording in `deployment_checklist.md`~~
+    — reworded to GCP.
+23. [Resolved 2026-07-05] ~~mosquitto 9001 published but not served~~ — the
+    port is no longer published (see §3.28 hardening).
+24. [Resolved 2026-07-07] ~~Relay port mismatch~~ — `wireguard_tunnel_setup.md`
+    now carries a RETIRED banner (Path B is gone) noting the correction:
+    relay mode uses `relay_server.py` on `:8000` (`RELAY_PORT`); `:80` was
+    lib mode's plug portproxy.
+25. [Resolved 2026-07-07] ~~`frontend/README.md` is the stock Vite template~~
+    — replaced with real package docs (stack, commands, env vars, layout,
+    conventions; canonical docs stay in `docs/`).
 26. [Resolved 2026-07-05] **Socket.io telemetry was non-functional** despite
     being documented as verified: `stream_telemetry_task` awaited a
     non-existent `sio.get_participants(room=...)` API and died before the
@@ -182,7 +193,10 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
     for `coin_balance`, `coins_spent`, ledger `amount`/`balance_after`. Wallet math
     routes through `services/money.to_money` (half-up, 2 dp); columns migrated in
     place via a guarded `ALTER … TYPE` in `db.py:_INPLACE_UPGRADES`. Energy/power
-    stay `Float`. A DB-level non-negative-balance CHECK is still not present.
+    stay `Float`. The DB-level non-negative-balance CHECK landed 2026-07-07 as
+    Alembic revision `0002_wallet_non_negative` (the first post-baseline
+    revision): clamps legacy negative rows to 0, then adds
+    `ck_users_coin_balance_non_negative` (also declared on the `User` model).
 32. [Resolved 2026-07-06] **`CpoSetup` redirect-during-render** replaced with a
     declarative `<Navigate … replace />` (the render-body `navigate()` triggered a
     React "update during render" warning and could loop under StrictMode).

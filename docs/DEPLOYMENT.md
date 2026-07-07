@@ -164,7 +164,7 @@ Reference repos under the author's GitHub (read-only context, not build inputs):
 |------|--------|
 | `new_device_setup.md` | Setting up a new dev workstation |
 | `deploy_guide.md` | Cloud hosting, DuckDNS, VPN networking |
-| `deployment_checklist.md` | Step-by-step physical site deployment (contains stale "EC2" wording) |
+| `deployment_checklist.md` | Step-by-step physical site deployment |
 | `gcp_migration_runbook.md` | Full AWS EC2 → GCP, then region migration log |
-| `wireguard_tunnel_setup.md` | Direct-Mode WireGuard setup (pre-generated keys/configs) |
+| `wireguard_tunnel_setup.md` | Direct-Mode WireGuard setup — **retired** (Path B is gone; kept as historical reference) |
 | `phase2_walkthrough.md` | Phase-2 work log |

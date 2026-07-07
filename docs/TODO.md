@@ -100,8 +100,11 @@ Cross-references [TECH_DEBT.md](TECH_DEBT.md) items as `TD#n` and
       ledger `amount`/`balance_after`. Columns migrated in place via a guarded
       `ALTER … TYPE NUMERIC(12,2)` in `db.py:_INPLACE_UPGRADES`; all wallet math now
       goes through `services/money.to_money` (Decimal, half-up 2 dp), eliminating
-      float drift. Energy/power stay `Float` (measurements). **Still open:** a
-      DB-level non-negative-balance CHECK constraint. (TD#6, SEC §5)
+      float drift. Energy/power stay `Float` (measurements). The DB-level
+      non-negative-balance CHECK landed 2026-07-07 as Alembic revision
+      `0002_wallet_non_negative` — the first post-baseline revision (clamps
+      legacy negatives to 0, then adds `ck_users_coin_balance_non_negative`).
+      (TD#6, SEC §5)
 - [x] **Unique `razorpay_payment_id`** is in place and enforced — `db.py`
       creates `uq_ledger_razorpay_payment_id`, and `_credit_topup` relies on the
       `IntegrityError` from a concurrent insert (not just the pre-lock SELECT) to
@@ -119,7 +122,10 @@ Cross-references [TECH_DEBT.md](TECH_DEBT.md) items as `TD#n` and
       `cpo_list_plugs`, `cpo_analytics_sessions`, `get_my_groups` — each is a
       single JOINed statement now; driver endpoints verified byte-identical
       against prod before/after. (TD#9)
-- [ ] **Extract the access-code generator** (duplicated 3× across CPO routes). (TD#10)
+- [x] **Extract the access-code generator** (2026-07-07): the 3 duplicated
+      inline loops in the CPO group routes are now one
+      `generate_unique_access_code(db)` helper (`backend/routers/cpo.py`),
+      with tests in `backend/tests/test_access_codes.py`. (TD#10)
 - [x] **Unify live telemetry** (2026-07-07): the legacy SSE endpoint
       (`/api/sessions/live/{id}`) and the `sse-starlette` dep are retired —
       the frontend has been Socket.io-only since 2026-07-04 and had zero
@@ -174,7 +180,9 @@ Cross-references [TECH_DEBT.md](TECH_DEBT.md) items as `TD#n` and
 - [ ] **TimescaleDB** (hypertables/retention/continuous-aggregates) for
       `telemetry_readings` if telemetry volume grows. (IMPL 2)
 - [ ] **Token revocation / shorter-lived JWTs** (currently 7-day, no blacklist).
-- [ ] **Replace `frontend/README.md`** stock Vite template with real docs. (TD#16)
+- [x] **Replace `frontend/README.md`** (2026-07-07): real package docs (stack,
+      commands, env vars, layout, conventions) pointing at `docs/` as the
+      canonical source. (TD#16)
 
 ---
 

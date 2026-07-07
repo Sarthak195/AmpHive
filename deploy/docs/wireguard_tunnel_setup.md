@@ -1,5 +1,14 @@
 # WireGuard Tunnel Setup Guide — AmpHive Direct Mode
 
+> **RETIRED (2026-07):** Direct Mode / Path B is no longer used — the WireGuard
+> tunnel is torn down and `DIRECT_MODE=false` in the committed config (the
+> `/api/direct/*` endpoints return 503). This guide is kept for historical
+> reference only. IPs shown below are stale (the VM IP is ephemeral — see
+> [docs/SECURITY.md](../../docs/SECURITY.md)). One correction preserved for
+> the record: in **relay mode** the backend talks to `tools/relay_server.py`
+> on port **8000** (`RELAY_PORT`), not `:80` — the `:80` portproxy shown here
+> applies only to lib mode's direct plug access.
+
 This guide sets up a WireGuard tunnel between the GCP VM (`amphive-vm-in`) and the
 developer's Windows PC, allowing the cloud backend to reach a TP-Link Tapo P110
 smart plug on the home LAN without an ESP32 gateway.
