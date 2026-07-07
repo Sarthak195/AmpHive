@@ -123,7 +123,7 @@ main/CMakeLists.txt → SRCS main.c tapo_protocol.c session_nvs.c offline_log.c
 
 | File | Why it's critical |
 |------|-------------------|
-| `backend/main.py` | All 35 endpoints, business logic, and Pydantic schemas |
+| `backend/main.py` | App assembly only (lifespan, CORS, health, router includes, Socket.io wrap); routes live in `backend/routers/`, schemas in `backend/schemas.py` |
 | `backend/database/models.py` | All ORM models — changes alter the runtime DB schema |
 | `backend/services/auth.py` | JWT secret, password hashing, auth dependency for most routes |
 | `backend/services/rbac.py` | Role enforcement for the entire CPO surface |

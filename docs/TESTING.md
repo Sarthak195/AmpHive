@@ -37,6 +37,17 @@ No host-side unit tests. Validation is on-device via serial monitor
 
 ---
 
+### Seeded test fixture (prod DB, since 2026-07-07)
+
+The database was purged to a clean state and reseeded through the real APIs:
+three accounts (**admin / cpo / driver**, emails `*@amphive.test`) plus the
+CPO's tenant "AmpHive Test CPO" owning gateway `1cc3abb4fb54`, plug 1
+("Volt-FastPlug-01" @ 192.168.1.6) in the public group "AmpHive Public
+Station". **Credentials live in `TEST_ACCOUNTS.local.txt` at the repo root —
+gitignored, never commit it.** Balances: admin 1000, driver 500, cpo 100
+coins. The gateway row starts OFFLINE and flips online automatically on the
+ESP32's next status/telemetry message (session starts 409 until then).
+
 ## 2. Coverage assessment
 
 | Area | Coverage | Biggest untested risk |

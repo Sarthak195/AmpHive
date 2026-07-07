@@ -68,3 +68,5 @@ htmlcov/
 venv/
 env/
 .env/
+# Local test-account credentials (seeded fixture logins) - never commit
+TEST_ACCOUNTS.local.txt

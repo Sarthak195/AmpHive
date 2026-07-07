@@ -26,7 +26,9 @@ Everything cloud-side is identical between the two; only the last hop differs.
 
 | You want to change… | Go to |
 |---|---|
-| A REST endpoint or its schema | `backend/main.py` (all 37 routes + all Pydantic models are here) |
+| A REST endpoint | `backend/routers/{auth,groups,plugs,sessions,payments,direct,cpo}.py` (since the 2026-07-07 split; `main.py` is assembly only) |
+| A request/response schema | `backend/schemas.py` |
+| Runtime handles (mqtt_manager, telemetry_store, …) | `backend/state.py` (set by the lifespan — always access as `state.x`, never from-import) |
 | Auth / JWT / password hashing | `backend/services/auth.py` |
 | Role gating on `/api/cpo/*` | `backend/services/rbac.py` |
 | MQTT publish/ingest contract | `backend/services/mqtt_manager.py` + [MQTT_CONTRACT.md](MQTT_CONTRACT.md) |

@@ -260,6 +260,16 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
     back, and return the same 400 as the sequential duplicate path (same
     pattern `_credit_topup` already used). Tests:
     `backend/tests/test_registration_races.py`.
+44. [Resolved 2026-07-07] **Structural backlog cleared** in one round, all
+    deployed + verified in prod: `main.py` split (2,384 → 221 lines; routes
+    verbatim in `backend/routers/`, schemas in `schemas.py`, runtime handles
+    in `state.py`, session helpers in `services/session_lifecycle.py`;
+    OpenAPI parity 36 operations before/after) · N+1 queries eliminated in
+    `get_my_groups`/`get_available_plugs`/`cpo_list_plugs`/
+    `cpo_analytics_sessions` (driver endpoints verified byte-identical against
+    prod baselines) · legacy SSE endpoint + `sse-starlette` retired ·
+    `TELEMETRY_RETENTION_DAYS=90` set in prod. Remaining from that list:
+    broker TLS only (deferred — the overlay already encrypts transport).
 42. [Resolved 2026-07-06] **No backend session reaper** — a gateway dying
     mid-session left the session ACTIVE forever (the only timeout lived in the
     firmware, on the dead device). A lifespan-owned `SessionReaperService`
