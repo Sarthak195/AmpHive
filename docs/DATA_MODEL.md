@@ -36,6 +36,9 @@ Owns users, gateways, sessions, charger_groups (cascade delete-orphan).
 `id` PK · `tenant_id` → tenants (SET NULL, nullable) · `email` unique ·
 `hashed_password` · `full_name` · `role` (default `driver`) ·
 `coin_balance` **NUMERIC(12,2)** (Decimal, default 0.00) · `created_at`.
+CHECK `ck_users_coin_balance_non_negative` (`coin_balance >= 0`, revision
+`0002_wallet_non_negative`, 2026-07-07) — the DB-level backstop behind the
+row-locked, clamped wallet debits.
 
 ### `gateways`
 `id` **VARCHAR(50) PK** (caller-supplied MAC/UUID) · `tenant_id` → tenants

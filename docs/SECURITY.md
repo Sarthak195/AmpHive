@@ -98,11 +98,14 @@ BFG + force-push) to purge the dead values entirely.
 
 - Wallet credit/debit is now **row-locked** (`SELECT ... FOR UPDATE`) in the stop,
   verify, and webhook paths — the previous race is closed. Remaining hardening:
-  consider a single atomic `UPDATE ... SET balance = balance + :n` and DB-level
-  check constraints to prevent negative balances.
+  consider a single atomic `UPDATE ... SET balance = balance + :n`.
 - [2026-07-06] Money columns migrated from `Float` to `Numeric(12,2)` (Decimal),
   and all wallet math goes through `services/money.to_money` — float rounding
-  drift is closed. A DB-level non-negative-balance CHECK is still not in place.
+  drift is closed.
+- [2026-07-07] **DB-level non-negative-balance CHECK is in place**: Alembic
+  revision `0002_wallet_non_negative` adds `ck_users_coin_balance_non_negative`
+  on `users.coin_balance` (clamping legacy negative rows to 0 first), so no
+  write path — buggy or otherwise — can drive a wallet negative.
 - [2026-07-06] The `stop_charging_session` ledger now debits only what the wallet
   holds (`min(final_cost, balance)`) and records that same delta in `amount` /
   `balance_after` / `coins_spent`, so the ledger reconciles even when a bill

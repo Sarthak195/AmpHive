@@ -15,7 +15,7 @@ import enum
 from datetime import datetime
 from typing import List, Optional
 from decimal import Decimal
-from sqlalchemy import Column, Integer, BigInteger, String, Float, Numeric, Boolean, ForeignKey, DateTime, Enum as SQLEnum, Index, text
+from sqlalchemy import CheckConstraint, Column, Integer, BigInteger, String, Float, Numeric, Boolean, ForeignKey, DateTime, Enum as SQLEnum, Index, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 class Base(DeclarativeBase):
@@ -68,6 +68,14 @@ class Tenant(Base):
 
 class User(Base):
     __tablename__ = "users"
+
+    # DB-level backstop for the wallet: application code already row-locks and
+    # clamps debits to the available balance, but only this constraint makes a
+    # negative balance impossible through any write path. Added in migration
+    # 0002 (which also clamps pre-existing negative rows to 0).
+    __table_args__ = (
+        CheckConstraint("coin_balance >= 0", name="ck_users_coin_balance_non_negative"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     tenant_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("tenants.id", ondelete="SET NULL"), nullable=True)
