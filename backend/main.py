@@ -497,38 +497,33 @@ async def get_my_groups(
     - All public groups
     - All private groups the user has joined
     """
-    # Get all public groups
-    public_result = await db.execute(
-        select(ChargerGroup).where(ChargerGroup.is_public == True)
-    )
-    public_groups = list(public_result.scalars().all())
-
-    # Get all private groups the user has joined
-    joined_result = await db.execute(
-        select(ChargerGroup)
-        .join(GroupMembership, GroupMembership.group_id == ChargerGroup.id)
-        .where(GroupMembership.user_id == user.id)
-    )
-    joined_groups = list(joined_result.scalars().all())
-
-    # Merge and deduplicate
-    all_groups = {g.id: g for g in public_groups + joined_groups}
-
-    # Count plugs per group
-    response = []
-    for group in all_groups.values():
-        plug_count_result = await db.execute(
-            select(Plug).where(Plug.group_id == group.id)
+    # One round-trip: public groups ∪ joined groups, with plug counts
+    # aggregated in SQL (previously one COUNT query per group — N+1).
+    # DISTINCT on the plug count because a (theoretical) duplicate membership
+    # row would otherwise multiply it.
+    result = await db.execute(
+        select(ChargerGroup, func.count(func.distinct(Plug.id)))
+        .outerjoin(
+            GroupMembership,
+            and_(
+                GroupMembership.group_id == ChargerGroup.id,
+                GroupMembership.user_id == user.id,
+            ),
         )
-        plug_count = len(list(plug_count_result.scalars().all()))
-        response.append(GroupResponse(
+        .outerjoin(Plug, Plug.group_id == ChargerGroup.id)
+        .where(or_(ChargerGroup.is_public == True, GroupMembership.id.is_not(None)))
+        .group_by(ChargerGroup.id)
+    )
+
+    return [
+        GroupResponse(
             id=group.id,
             name=group.name,
             is_public=group.is_public,
             plug_count=plug_count,
-        ))
-
-    return response
+        )
+        for group, plug_count in result.all()
+    ]
 
 
 # ===========================================================================
@@ -546,63 +541,35 @@ async def get_available_plugs(
     - Plugs in private groups the user has joined
     - Ungrouped plugs (group_id = NULL, treated as public/legacy)
     """
-    # Get IDs of private groups the user has joined
-    membership_result = await db.execute(
-        select(GroupMembership.group_id).where(GroupMembership.user_id == user.id)
+    # One round-trip: accessibility filter via subqueries, group name and
+    # gateway coords (the fallback location) via joins. Previously this was
+    # 3 + N queries — one ChargerGroup.name lookup per plug.
+    joined_group_ids = (
+        select(GroupMembership.group_id)
+        .where(GroupMembership.user_id == user.id)
+        .scalar_subquery()
     )
-    joined_group_ids = [row[0] for row in membership_result.all()]
-
-    # Get IDs of all public groups
-    public_result = await db.execute(
-        select(ChargerGroup.id).where(ChargerGroup.is_public == True)
+    public_group_ids = (
+        select(ChargerGroup.id)
+        .where(ChargerGroup.is_public == True)
+        .scalar_subquery()
     )
-    public_group_ids = [row[0] for row in public_result.all()]
 
-    # Combine accessible group IDs
-    accessible_group_ids = list(set(joined_group_ids + public_group_ids))
-
-    # Query plugs: in accessible groups OR ungrouped (group_id is NULL)
-    if accessible_group_ids:
-        plugs_result = await db.execute(
-            select(Plug).where(
-                or_(
-                    Plug.group_id.in_(accessible_group_ids),
-                    Plug.group_id.is_(None),
-                )
+    rows = await db.execute(
+        select(Plug, ChargerGroup.name, Gateway.latitude, Gateway.longitude)
+        .join(Gateway, Gateway.id == Plug.gateway_id)
+        .outerjoin(ChargerGroup, ChargerGroup.id == Plug.group_id)
+        .where(
+            or_(
+                Plug.group_id.is_(None),  # ungrouped/legacy: public to all
+                Plug.group_id.in_(joined_group_ids),
+                Plug.group_id.in_(public_group_ids),
             )
         )
-    else:
-        # User has no groups — only show ungrouped plugs
-        plugs_result = await db.execute(
-            select(Plug).where(Plug.group_id.is_(None))
-        )
+    )
 
-    plugs = list(plugs_result.scalars().all())
-
-    # Batch-load gateway coordinates once: a plug with no coords of its own
-    # falls back to its gateway's location (avoids an N+1 lookup per plug).
-    gateway_ids = {p.gateway_id for p in plugs}
-    gateway_coords = {}
-    if gateway_ids:
-        gw_rows = await db.execute(
-            select(Gateway.id, Gateway.latitude, Gateway.longitude)
-            .where(Gateway.id.in_(gateway_ids))
-        )
-        gateway_coords = {gid: (lat, lng) for gid, lat, lng in gw_rows.all()}
-
-    response = []
-    for plug in plugs:
-        # Get group name if the plug belongs to a group
-        group_name = None
-        if plug.group_id:
-            group_result = await db.execute(
-                select(ChargerGroup.name).where(ChargerGroup.id == plug.group_id)
-            )
-            row = group_result.first()
-            group_name = row[0] if row else None
-
-        gw_lat, gw_lng = gateway_coords.get(plug.gateway_id, (None, None))
-        response.append(PlugResponse(
+    return [
+        PlugResponse(
             id=plug.id,
             name=plug.name,
             status=plug.status.value,
@@ -611,9 +578,9 @@ async def get_available_plugs(
             group_name=group_name,
             latitude=plug.latitude if plug.latitude is not None else gw_lat,
             longitude=plug.longitude if plug.longitude is not None else gw_lng,
-        ))
-
-    return response
+        )
+        for plug, group_name, gw_lat, gw_lng in rows.all()
+    ]
 
 
 @app.get("/api/plugs/{plug_id}", response_model=PlugResponse)
@@ -1747,25 +1714,16 @@ async def cpo_list_plugs(
     db: AsyncSession = Depends(get_db),
 ):
     """List all plugs across the CPO's gateways with status and group info."""
+    # Group name joined in — previously one ChargerGroup.name query per plug.
     result = await db.execute(
-        select(Plug)
+        select(Plug, ChargerGroup.name)
         .join(Gateway, Plug.gateway_id == Gateway.id)
+        .outerjoin(ChargerGroup, ChargerGroup.id == Plug.group_id)
         .where(Gateway.tenant_id == user.tenant_id)
     )
-    plugs = list(result.scalars().all())
 
-    response = []
-    for plug in plugs:
-        # Get group name if assigned
-        group_name = None
-        if plug.group_id:
-            gn_result = await db.execute(
-                select(ChargerGroup.name).where(ChargerGroup.id == plug.group_id)
-            )
-            row = gn_result.first()
-            group_name = row[0] if row else None
-
-        response.append({
+    return [
+        {
             "id": plug.id,
             "name": plug.name,
             "gateway_id": plug.gateway_id,
@@ -1779,9 +1737,9 @@ async def cpo_list_plugs(
             "longitude": plug.longitude,
             "last_seen_at": plug.last_seen_at.isoformat() if plug.last_seen_at else None,
             "created_at": plug.created_at.isoformat() if plug.created_at else None,
-        })
-
-    return response
+        }
+        for plug, group_name in result.all()
+    ]
 
 
 @app.post("/api/cpo/plugs")
@@ -2212,9 +2170,14 @@ async def cpo_analytics_sessions(
     Supports optional filters: plug_id, status, and date range (days).
     Returns sessions ordered by most recent first.
     """
-    # Base query: sessions belonging to this CPO's tenant
-    query = select(ChargingSession).where(
-        ChargingSession.tenant_id == user.tenant_id
+    # Base query: sessions belonging to this CPO's tenant, with plug name and
+    # driver email joined in (previously two extra queries per session row).
+    # Outer joins preserve the old fallback behavior for orphaned references.
+    query = (
+        select(ChargingSession, Plug.name, User.email)
+        .outerjoin(Plug, Plug.id == ChargingSession.plug_id)
+        .outerjoin(User, User.id == ChargingSession.user_id)
+        .where(ChargingSession.tenant_id == user.tenant_id)
     )
 
     # Apply optional filters
@@ -2238,20 +2201,11 @@ async def cpo_analytics_sessions(
     query = query.order_by(ChargingSession.started_at.desc()).limit(limit)
 
     result = await db.execute(query)
-    sessions = list(result.scalars().all())
 
-    # Enrich with plug name and user email
     response = []
-    for s in sessions:
-        # Get plug name
-        plug_result = await db.execute(select(Plug.name).where(Plug.id == s.plug_id))
-        plug_row = plug_result.first()
-        plug_name = plug_row[0] if plug_row else f"Plug #{s.plug_id}"
-
-        # Get user email
-        user_result = await db.execute(select(User.email).where(User.id == s.user_id))
-        user_row = user_result.first()
-        user_email = user_row[0] if user_row else "unknown"
+    for s, plug_name, user_email in result.all():
+        plug_name = plug_name if plug_name is not None else f"Plug #{s.plug_id}"
+        user_email = user_email if user_email is not None else "unknown"
 
         # Calculate duration
         duration_minutes = None

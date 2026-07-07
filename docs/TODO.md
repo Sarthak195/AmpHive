@@ -105,8 +105,10 @@ Cross-references [TECH_DEBT.md](TECH_DEBT.md) items as `TD#n` and
 
 ## Next month — scale & polish
 
-- [ ] **Kill N+1 queries** in `get_available_plugs`, `cpo_list_plugs`,
-      `cpo_analytics_sessions`, `get_my_groups` via JOIN/`selectinload`. (TD#9)
+- [x] **Kill N+1 queries** (2026-07-07) in `get_available_plugs`,
+      `cpo_list_plugs`, `cpo_analytics_sessions`, `get_my_groups` — each is a
+      single JOINed statement now; driver endpoints verified byte-identical
+      against prod before/after. (TD#9)
 - [ ] **Extract the access-code generator** (duplicated 3× across CPO routes). (TD#10)
 - [x] **Unify live telemetry** (2026-07-07): the legacy SSE endpoint
       (`/api/sessions/live/{id}`) and the `sse-starlette` dep are retired —
