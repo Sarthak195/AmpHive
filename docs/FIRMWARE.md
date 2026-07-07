@@ -203,9 +203,11 @@ Path A has now been run end-to-end on real hardware (a billed session with corre
 energy delivery); the firmware-side billing fix (session-relative `kwh`) and the
 `session_id` echo were **reflashed and verified on-device 2026-07-06** (raw MQTT
 payloads show `kwh` starting at 0 per session and the echoed `session_id`).
-**OTA is now implemented** (2026-07-07): dual-slot `esp_https_ota` with
-bootloader rollback, triggered by an `OTA` MQTT command
+**OTA is now implemented and verified end-to-end** (2026-07-08): dual-slot
+`esp_https_ota` with bootloader rollback, triggered by an `OTA` MQTT command
 (`ota_update.c`/`.h`); the new image only cancels rollback once it re-reaches
-the broker. Remaining gap: the control-plane host constants still default to
-Tailscale (Headscale retarget pending). See
+the broker. A live `1.1.0 → 1.1.1` push downloaded into `ota_1`, rebooted,
+and committed (`marking image valid`) on real hardware. Remaining gap: the
+control-plane host constants still default to Tailscale (Headscale retarget
+pending). See
 [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for the full matrix.

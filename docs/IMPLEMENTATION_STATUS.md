@@ -48,7 +48,7 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 | Over-current cutoff | ✅ | Enforced via the plug's `overcurrent_status` flag → local OFF + `OVERCURRENT_CUTOFF` alarm |
 | Tapo P110 driver (KLAP/AES) | ✅ | **Real KLAP v2** (mbedTLS SHA/AES + `esp_http_client`); fully verified on-device; builds on **ESP-IDF v5.3** (not v6) |
 | Session persistence in NVS / offline resync | ✅ | `session_nvs` module persists active session to NVS; `offline_log` ring buffer (64 entries) caches telemetry during MQTT outages; resync on reconnect |
-| OTA updates | ✅ | Dual OTA app slots (`partitions_ota.csv`) + `esp_https_ota` with bootloader rollback (`ota_update.c`). Triggered by the `OTA` MQTT command / `POST /api/cpo/gateways/{id}/ota`; refuses mid-session; cancels rollback once the new image re-reaches the broker. **Built + flashed 2026-07-07** (booted from `ota_0`, provisioning survived the migration). Live OTA-push verification pending. |
+| OTA updates | ✅ | Dual OTA app slots (`partitions_ota.csv`) + `esp_https_ota` with bootloader rollback (`ota_update.c`). Triggered by the `OTA` MQTT command / `POST /api/cpo/gateways/{id}/ota`; refuses mid-session; cancels rollback only once the new image re-reaches the broker. **Verified end-to-end on-device 2026-07-08**: a `1.1.0 → 1.1.1` push over MQTT downloaded into `ota_1`, rebooted, booted `fw 1.1.1` from `ota_1`, reconnected, and logged `marking image valid` (rollback cancelled). Provisioning survived the initial single-app→dual-OTA migration flash. |
 | Headscale (vs Tailscale defaults) | 🟡 | `/key` fetch supports it, but default host constants point at Tailscale |
 
 ### Infra / deploy
@@ -143,8 +143,12 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
     `otadata`, NVS at its pre-OTA offset so provisioning survives the
     migration flash), and `esp_https_ota` + bootloader rollback are wired in
     (`ota_update.c`), triggered by the `OTA` MQTT command /
-    `POST /api/cpo/gateways/{id}/ota`. Built + flashed on-device; live
-    OTA-push verification pending.
+    `POST /api/cpo/gateways/{id}/ota`. **Verified end-to-end on-device
+    2026-07-08** (1.1.0 → 1.1.1 over MQTT: download into `ota_1`, reboot,
+    reconnect, rollback cancelled). Note: the overlay took ~3 min to
+    re-establish after the OTA reboot (DERP/WireGuard re-handshake), during
+    which the image stayed `PENDING_VERIFY` — correct behavior (commit only
+    on broker reach), just a wide rollback-armed window.
 16. [Resolved 2026-07-02] **NVS session register / offline telemetry resync** now
     implemented via `session_nvs.c` (persists active session params) and
     `offline_log.c` (64-entry NVS ring buffer). Watchdogs enforce limits locally

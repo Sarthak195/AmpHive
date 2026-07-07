@@ -190,10 +190,11 @@ Cross-references [TECH_DEBT.md](TECH_DEBT.md) items as `TD#n` and
       (`firmware/main/ota_update.c`), triggered by an `OTA` MQTT command /
       `POST /api/cpo/gateways/{id}/ota` (`send_gateway_ota`). Refuses
       mid-session; the new image cancels rollback only once it re-reaches the
-      broker; `online` status now carries the `fw` version. Built + flashed
-      on-device (booted `ota_0`, provisioning survived the migration).
-      **Live OTA-push verification still pending** (needs an image server the
-      gateway can reach). (IMPL 15)
+      broker; `online` status now carries the `fw` version.
+      **Verified end-to-end on-device 2026-07-08**: `1.1.0 → 1.1.1` pushed
+      over MQTT (image served on the LAN) downloaded into `ota_1`, rebooted,
+      booted `fw 1.1.1`, reconnected, and cancelled rollback
+      (`marking image valid`). (IMPL 15)
 - [x] **Reconcile or retire K8s manifests** (2026-07-07): **retired** —
       `deploy/k8s/README.md` banner-marks them unmaintained reference
       material (divergence documented); `docs/DEPLOYMENT.md` no longer
