@@ -349,12 +349,58 @@ class MQTTManager:
                     logger.warning(f"Gateway {gateway_id} not found in DB, ignoring status update.")
         except Exception as e:
             logger.error(f"Failed to persist gateway status for {gateway_id}: {e}")
+            return
+
+        if status == "online":
+            await self._republish_off_for_orphaned_plugs(gateway_id)
+
+    async def _republish_off_for_orphaned_plugs(self, gateway_id: str):
+        """
+        On gateway reconnect, re-send OFF to each of its plugs that has no
+        ACTIVE session. OFF commands aren't retained, so a gateway that was
+        dead when its session got finalized (e.g. by the session reaper) never
+        received one — and its NVS crash recovery resumes the session on
+        reboot with the relay ON and nobody billing (observed 2026-07-07).
+        Idempotent: an OFF to an already-off plug is a no-op on the firmware.
+        """
+        from backend.database.models import ChargingSession, Plug, SessionStatus
+
+        try:
+            async with self.db_session_factory() as session:
+                from sqlalchemy import select
+
+                plug_result = await session.execute(
+                    select(Plug.id).where(Plug.gateway_id == gateway_id)
+                )
+                plug_ids = list(plug_result.scalars().all())
+                if not plug_ids:
+                    return
+
+                active_result = await session.execute(
+                    select(ChargingSession.plug_id).where(
+                        ChargingSession.plug_id.in_(plug_ids),
+                        ChargingSession.status == SessionStatus.ACTIVE,
+                    )
+                )
+                active_plug_ids = set(active_result.scalars().all())
+
+            for plug_id in plug_ids:
+                if plug_id not in active_plug_ids:
+                    # wait=False: we're on the event loop — don't block it on
+                    # the broker ack for a best-effort cleanup publish.
+                    self.send_plug_command(gateway_id, plug_id, "OFF", wait=False)
+                    logger.info(
+                        f"Republished OFF to gw={gateway_id} plug={plug_id} "
+                        f"on reconnect (no ACTIVE session)"
+                    )
+        except Exception as e:
+            logger.error(f"OFF republish on reconnect failed for gateway {gateway_id}: {e}")
 
     # -----------------------------------------------------------------------
     # Outbound command publisher
     # -----------------------------------------------------------------------
 
-    def send_plug_command(self, gateway_id: str, plug_id: int, action: str, max_duration: int = 14400, max_kwh: float = 30.0, session_id: Optional[int] = None) -> bool:
+    def send_plug_command(self, gateway_id: str, plug_id: int, action: str, max_duration: int = 14400, max_kwh: float = 30.0, session_id: Optional[int] = None, wait: bool = True) -> bool:
         """
         Sends an ON/OFF command to a specific plug registered under a gateway.
         Topic: amphive/gateways/{gateway_id}/plugs/{plug_id}/commands
@@ -364,6 +410,10 @@ class MQTTManager:
         The firmware persists it for crash recovery and echoes it back in
         telemetry so the backend can attribute a reading to the exact session
         rather than just "the active session on this plug".
+
+        `wait=False` skips the blocking wait for the broker ack — for
+        best-effort publishes issued from the event loop (blocking it up to
+        3 s per publish would stall every other coroutine).
         """
         topic = f"amphive/gateways/{gateway_id}/plugs/{plug_id}/commands"
         payload = {
@@ -373,10 +423,13 @@ class MQTTManager:
         }
         if session_id is not None:
             payload["session_id"] = str(session_id)
-        
+
         try:
             payload_str = json.dumps(payload)
             info = self.client.publish(topic, payload_str, qos=1)
+            if not wait:
+                logger.info(f"Published command (no-wait) to {topic}: {payload_str}")
+                return info.rc == mqtt.MQTT_ERR_SUCCESS
             info.wait_for_publish(timeout=3.0)
             logger.info(f"Published command to {topic}: {payload_str}")
             return info.is_published()

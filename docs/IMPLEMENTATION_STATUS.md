@@ -268,3 +268,11 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
     **double-stop double-debit race** (two concurrent stops both passed the
     unlocked ACTIVE check and each debited the wallet). Tests:
     `backend/tests/test_session_reaper.py`.
+43. [Resolved 2026-07-07] **Zombie relay after gateway power loss.** OFF
+    commands aren't retained, so a gateway that was dead when its session got
+    finalized never received one — its `session_nvs` crash recovery resumed the
+    session on reboot with the relay ON and nobody billing (observed on real
+    hardware after the reaper finalized session 82). On a gateway `online`
+    status, the backend now re-sends OFF (best-effort, no broker-ack wait) to
+    each of that gateway's plugs lacking an ACTIVE session. Tests:
+    `backend/tests/test_reconnect_off_republish.py`.

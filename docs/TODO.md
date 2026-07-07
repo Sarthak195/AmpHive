@@ -64,14 +64,14 @@ Cross-references [TECH_DEBT.md](TECH_DEBT.md) items as `TD#n` and
       `backend/tests/test_registration_races.py`. (IMPL §3.41)
 - [ ] **Set `TELEMETRY_RETENTION_DAYS` in prod** — default `0` keeps telemetry
       forever; `telemetry_readings` grows ~1 row/s during live streaming.
-- [ ] **Republish OFF when a gateway reconnects with no ACTIVE session on its
-      plug.** Observed 2026-07-07: the ESP32 lost power mid-session, the reaper
-      finalized the session, and on reboot the firmware recovered it from NVS
-      (`session_nvs` crash recovery) — relay back ON, telemetry `occupied`, and
-      nobody billing until the on-device duration watchdog (up to `max_dur`).
-      The reaper's OFF isn't retained, so the backend should re-send OFF on
-      gateway `online` status (or on telemetry echoing a non-ACTIVE
-      `session_id`). Cleared manually today via a quick start/stop.
+- [x] **Republish OFF when a gateway reconnects with no ACTIVE session on its
+      plug** (2026-07-07). Observed on-device: the ESP32 lost power mid-session,
+      the reaper finalized the session, and on reboot the firmware's NVS crash
+      recovery resumed it — relay back ON, telemetry `occupied`, nobody billing.
+      `_persist_gateway_status` now re-sends OFF (best-effort, no-wait) to each
+      of the gateway's plugs without an ACTIVE session whenever it reports
+      `online`. Tests: `backend/tests/test_reconnect_off_republish.py`.
+      (IMPL §3.43)
 - [ ] **Add CI** (GitHub Actions): `pytest backend/tests` with a `postgres:15`
       service + `npm run lint`. Would have caught the `get_participants`
       "verified-but-broken" bug. (TD#13)
