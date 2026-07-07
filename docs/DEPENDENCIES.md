@@ -15,12 +15,12 @@ thin service or the data layer. The import graph is acyclic
 ```
 main.py  (FastAPI app — 35 REST endpoints, all schemas, lifespan)
 │
-├── database/db.py         async engine + async_sessionmaker + get_db + init_db (create_all)
+├── database/db.py         async engine + async_sessionmaker + get_db + init_db (alembic upgrade head)
 │    └── database/models.py → Base
-├── database/models.py     9 ORM tables + 5 enums  (runtime source of truth)
+├── database/models.py     9 ORM tables + 5 enums  (source of truth, applied via Alembic)
 │    └── sqlalchemy / sqlalchemy.orm, enum
 ├── database/init_db.py    standalone DB-init helper (duplicates db.py:init_db — see §5)
-├── database/schema.sql / schema_v2.sql   reference SQL, NOT executed by the app
+├── migrations/            Alembic env.py + versions/ (0001_baseline = frozen full schema)
 │
 ├── services/auth.py       JWT (python-jose, HS256, 7-day) + bcrypt (passlib) + get_current_user
 ├── services/rbac.py       require_role(...) dependency factory → guards all /api/cpo/* routes
@@ -140,8 +140,8 @@ main/CMakeLists.txt → SRCS main.c tapo_protocol.c session_nvs.c offline_log.c
 
 | File | Status | Recommendation |
 |------|--------|----------------|
-| `backend/database/init_db.py` | Duplicates `db.py:init_db()` | Consolidate or remove |
-| `backend/database/schema.sql` / `schema_v2.sql` | Reference only — not executed by the app | Keep as reference; they carry constraints/indexes the ORM omits (see [DATA_MODEL.md](DATA_MODEL.md#4-schema-vs-orm-drift)) |
+| `backend/database/init_db.py` | Duplicates `db.py:init_db()` (and predates Alembic) | Consolidate or remove |
+| ~~`backend/database/schema.sql` / `schema_v2.sql`~~ | **Deleted 2026-07-07** — replaced by Alembic (`backend/migrations/`, see [DATA_MODEL.md §4](DATA_MODEL.md#4-migrations-alembic-since-2026-07-07)) | — |
 | `frontend/README.md` | Stock Vite template, not project docs | Replace with project-specific notes |
 
 > `frontend/src/api/mockSse.js` (a former Phase-1 leftover) has already been

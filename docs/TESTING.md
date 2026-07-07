@@ -18,6 +18,7 @@ prioritized roadmap to close the biggest coverage gaps.*
 | `test_registration_races.py` | **Regression** for duplicate-insert races: `/api/auth/register` + `/api/cpo/setup` must map a concurrent-duplicate `IntegrityError` to the same 400 as the sequential path (and roll back) | Unit |
 | `test_session_reaper.py` | Reaper sweep logic: every stale id finalized with the reap reason, user-stop races not double-counted, one failure doesn't abort the sweep, staleness query COALESCEs `last_telemetry_at`/`started_at` | Unit |
 | `test_reconnect_off_republish.py` | Gateway `online` status republishes OFF (no-wait) to its plugs without an ACTIVE session; plugs with a live session untouched; `offline` and no-plug cases are no-ops | Unit |
+| `test_migrations.py` | Alembic: `upgrade head` on an empty DB builds a schema matching the models (drift check via `compare_metadata`), and a pre-Alembic DB gets stamped, not re-migrated. **CI-only** (needs `TEST_DATABASE_URL` → postgres service); skipped locally | Integration (CI PG) |
 
 Run:
 ```bash

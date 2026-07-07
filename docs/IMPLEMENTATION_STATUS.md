@@ -103,8 +103,12 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
    upgrade.
 3. **LWT offline alerts on the backend** (README description) is inaccurate (LWT is published by the *firmware*, and the backend has no LWT, though gateway status is now persisted on the backend when received).
 4. **Python version:** README says 3.12; Dockerfile uses **3.11**.
-5. **`schema.sql`/`schema_v2.sql` are not executed** — the ORM `create_all` is the
-   real schema, and it omits unique constraints + indexes the SQL files define.
+5. [Resolved 2026-07-07] ~~`schema.sql`/`schema_v2.sql` are not executed~~ —
+   schema management moved to **Alembic** (`backend/migrations/`, frozen-DDL
+   baseline `0001_baseline`); the drifted SQL files are deleted and
+   `create_all` + `_INPLACE_UPGRADES` retired. Startup stamps pre-Alembic
+   databases at the baseline, then upgrades to head. CI verifies
+   baseline == models against real Postgres (`backend/tests/test_migrations.py`).
 6. [Resolved 2026-07-02] RBAC is enforced. Self-registration still creates a
    `driver`, but a driver self-promotes to `cpo` via `POST /api/cpo/setup`, and
    `require_role("cpo","admin")` (`backend/services/rbac.py`) gates all `/api/cpo/*`

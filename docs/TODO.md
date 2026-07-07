@@ -77,8 +77,15 @@ Cross-references [TECH_DEBT.md](TECH_DEBT.md) items as `TD#n` and
       planned Phase-1 integration tests) + `npm run lint`. Runs on push to
       main and on PRs; both jobs verified green locally before committing.
       (TD#13)
-- [ ] **Adopt Alembic** and retire the hand-written `_INPLACE_UPGRADES` +
-      unexecuted `schema.sql`/`schema_v2.sql`. (TD#5)
+- [x] **Adopt Alembic** (2026-07-07): `backend/migrations/` with a frozen-DDL
+      baseline (`0001_baseline`, compiled from the models — captures
+      everything the retired `_INPLACE_UPGRADES` produced); startup
+      (`db.py:init_db`) stamps pre-Alembic databases at the baseline then
+      runs `upgrade head`; `schema.sql`/`schema_v2.sql` deleted. CI proves
+      the baseline == models on the postgres service
+      (`backend/tests/test_migrations.py`). Future schema changes ship as
+      revisions: `alembic -c backend/alembic.ini revision --autogenerate`
+      (needs a reachable DB — CI or the VM). (TD#5)
 - [ ] **Split `backend/main.py`** (2,291 lines) into `routers/` + `schemas/`;
       keep the lifespan in `main.py`. (TD#7)
 - [x] **Money → `Numeric(12,2)`** (2026-07-06) for `coin_balance`, `coins_spent`,
