@@ -6,7 +6,6 @@
  * Responsive: hides desktop nav items on mobile.
  */
 
-import React from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { useWallet } from '../contexts/WalletContext';

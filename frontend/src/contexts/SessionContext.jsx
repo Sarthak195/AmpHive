@@ -19,7 +19,7 @@
  * monitor (telemetry subscription follows the focused session).
  */
 
-import React, { createContext, useState, useContext, useEffect, useCallback } from 'react';
+import { createContext, useState, useContext, useEffect, useCallback } from 'react';
 import { io } from 'socket.io-client';
 import api from '../api/client';
 import { useAuth } from './AuthContext';
@@ -40,13 +40,12 @@ export const SessionProvider = ({ children }) => {
   const [socket, setSocket] = useState(null);
   const [error, setError] = useState(null);
 
-  // Manage the Socket.io lifecycle (connect on login, disconnect on logout)
+  // Manage the Socket.io lifecycle (connect on login, disconnect on logout).
+  // The cleanup below disconnects the previous socket on every user change,
+  // so the logout branch only has to clear the state handle.
   useEffect(() => {
     if (!user) {
-      if (socket) {
-        socket.disconnect();
-        setSocket(null);
-      }
+      setSocket(null);
       return;
     }
 

@@ -5,7 +5,7 @@
  * Replaces the Phase 1 QR code flow with Plug ID entry + group-based access.
  */
 
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import WalletCard from '../components/WalletCard';
 import { useAuth } from '../contexts/AuthContext';
@@ -23,6 +23,18 @@ const Home = () => {
   const [loadingPlugs, setLoadingPlugs] = useState(false);
   const [startError, setStartError] = useState('');
   const [starting, setStarting] = useState(false);
+
+  const fetchPlugs = async () => {
+    setLoadingPlugs(true);
+    try {
+      const data = await api.get('/api/plugs/available');
+      setPlugs(data);
+    } catch (err) {
+      console.error('Failed to fetch plugs:', err);
+    } finally {
+      setLoadingPlugs(false);
+    }
+  };
 
   // Fetch available plugs when user is logged in
   useEffect(() => {
@@ -43,18 +55,6 @@ const Home = () => {
     socket.on('plug_status', handlePlugStatus);
     return () => socket.off('plug_status', handlePlugStatus);
   }, [socket]);
-
-  const fetchPlugs = async () => {
-    setLoadingPlugs(true);
-    try {
-      const data = await api.get('/api/plugs/available');
-      setPlugs(data);
-    } catch (err) {
-      console.error('Failed to fetch plugs:', err);
-    } finally {
-      setLoadingPlugs(false);
-    }
-  };
 
   const handleStartSession = async (e, targetPlugId = null) => {
     if (e) e.preventDefault();

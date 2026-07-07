@@ -17,14 +17,11 @@
  * 9. Frontend refreshes the wallet balance
  */
 
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useWallet } from '../contexts/WalletContext';
 import { useAuth } from '../contexts/AuthContext';
 import api from '../api/client';
-
-// Razorpay Key ID from Vite environment variable (public, safe for frontend)
-const RAZORPAY_KEY_ID = import.meta.env.VITE_RAZORPAY_KEY_ID || '';
 
 const TopUp = () => {
   const { balance, refreshBalance } = useWallet();

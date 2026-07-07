@@ -6,7 +6,6 @@
  * elapsed time, and session status with a stop button.
  */
 
-import React from 'react';
 import { useSession } from '../contexts/SessionContext';
 
 const StatBox = ({ label, value, unit, colorVar = '--color-text-primary' }) => (

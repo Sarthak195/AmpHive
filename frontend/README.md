@@ -16,6 +16,7 @@ live session monitoring over Socket.io) and a CPO operator portal
 npm install
 npm run dev      # Vite dev server (http://localhost:5173)
 npm run lint     # ESLint (same check CI runs)
+npm test         # Vitest + React Testing Library (also in CI)
 npm run build    # production build to dist/
 npm run preview  # serve the production build locally
 ```
@@ -30,7 +31,9 @@ source). `npm run dev` is only useful against a reachable backend.
 | Variable | Purpose |
 |----------|---------|
 | `VITE_API_URL` | Backend base URL. Empty (default) = same-origin, which is how production serves it. |
-| `VITE_RAZORPAY_KEY_ID` | Razorpay checkout key (falls back to the key returned by the backend's create-order response). |
+
+(The Razorpay checkout key is not an env var — it comes from the backend's
+create-order response.)
 
 ## Layout
 
@@ -48,13 +51,16 @@ src/
 
 Conventions worth knowing:
 
-- All app code is plain `.jsx`/`.js` (a TypeScript adopt-or-remove decision
-  is tracked in [docs/TODO.md](../docs/TODO.md), TD#14).
+- All app code is plain `.jsx`/`.js` **by decision** (2026-07-07, TD#14) —
+  the unused TypeScript toolchain was removed; don't reintroduce `@types/*`
+  or tsconfigs piecemeal.
 - Live telemetry is Socket.io only — connect with the JWT in the auth
   payload, then `subscribe_session` with a session id (see the Socket.io
   events reference in [API_REFERENCE.md](../docs/API_REFERENCE.md)).
 - A user can hold up to 2 concurrent sessions (backend-enforced);
   `SessionContext` tracks the full `activeSessions` list plus one *focused*
   session that drives the live monitor.
-- There are no frontend tests yet (planned: Vitest + React Testing Library —
-  see TESTING Phase 4 in [docs/TODO.md](../docs/TODO.md)).
+- Tests are Vitest + React Testing Library, colocated as `src/**/*.test.jsx`
+  (contexts, route guards, the TopUp payment handler). Import test APIs
+  explicitly from `vitest` — globals are off; RTL cleanup is registered in
+  `src/test-setup.js`.

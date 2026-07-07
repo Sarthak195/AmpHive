@@ -1,14 +1,10 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import api from '../api/client';
 
 export default function History() {
   const [sessions, setSessions] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-
-  useEffect(() => {
-    fetchHistory();
-  }, []);
 
   const fetchHistory = async () => {
     try {
@@ -21,6 +17,10 @@ export default function History() {
       setLoading(false);
     }
   };
+
+  useEffect(() => {
+    fetchHistory();
+  }, []);
 
   const formatDate = (isoString) => {
     if (!isoString) return '-';

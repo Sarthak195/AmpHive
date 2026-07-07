@@ -7,7 +7,7 @@
  * Data source: /api/cpo/analytics/sessions, /api/cpo/plugs
  */
 
-import React, { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import CpoLayout from '../../components/CpoLayout';
 import api from '../../api/client';
 

@@ -7,7 +7,7 @@
  * 3. See plug count per group.
  */
 
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import api from '../api/client';
@@ -23,12 +23,6 @@ const Groups = () => {
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
 
-  // Fetch user's groups on mount
-  useEffect(() => {
-    if (!user) return;
-    fetchGroups();
-  }, [user]);
-
   const fetchGroups = async () => {
     try {
       const data = await api.get('/api/groups/my');
@@ -39,6 +33,12 @@ const Groups = () => {
       setLoading(false);
     }
   };
+
+  // Fetch user's groups on mount
+  useEffect(() => {
+    if (!user) return;
+    fetchGroups();
+  }, [user]);
 
   const handleJoinGroup = async (e) => {
     e.preventDefault();

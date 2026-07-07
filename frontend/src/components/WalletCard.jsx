@@ -5,7 +5,6 @@
  * Includes top-up and history buttons.
  */
 
-import React from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useWallet } from '../contexts/WalletContext';
 import { useAuth } from '../contexts/AuthContext';

@@ -5,7 +5,7 @@
  * Redirects to home if no session is active.
  */
 
-import React, { useEffect } from 'react';
+import { useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import SessionMonitor from '../components/SessionMonitor';
 import { useSession } from '../contexts/SessionContext';

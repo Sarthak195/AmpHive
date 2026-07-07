@@ -12,7 +12,7 @@
  * - Logout: clears localStorage, resets state.
  */
 
-import React, { createContext, useState, useEffect, useContext, useCallback } from 'react';
+import { createContext, useState, useEffect, useContext, useCallback } from 'react';
 import api from '../api/client';
 
 const AuthContext = createContext();

@@ -8,7 +8,7 @@
  * Data source: /api/cpo/plugs, /api/cpo/gateways, /api/cpo/groups
  */
 
-import React, { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import CpoLayout from '../../components/CpoLayout';
 import api from '../../api/client';
 
