@@ -290,8 +290,8 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
     status, the backend now re-sends OFF (best-effort, no broker-ack wait) to
     each of that gateway's plugs lacking an ACTIVE session. Tests:
     `backend/tests/test_reconnect_off_republish.py`.
-45. [Resolved 2026-07-07] **Concurrent-session policy decided: max 2 per
-    user.** Nothing used to limit how many ACTIVE sessions a user could hold,
+45. [Resolved 2026-07-07, deployed + verified in prod] **Concurrent-session
+    policy decided: max 2 per user.** Nothing used to limit how many ACTIVE sessions a user could hold,
     while `/api/sessions/active` and the UI surfaced only the newest — older
     active sessions were unreachable/un-stoppable by the user (and >1 ACTIVE
     session previously crashed login, §3.39). `/api/sessions/start` now
@@ -303,4 +303,9 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
     fields mirror the newest entry), and the frontend tracks the full list:
     one Home banner per session, a Session-page switcher to refocus the live
     monitor, and stop acts on the focused session. Tests:
-    `backend/tests/test_max_active_sessions.py`.
+    `backend/tests/test_max_active_sessions.py`. **Verified in prod
+    2026-07-07** (CI green; OpenAPI still 36 operations; seeded driver gets
+    the new `{"active":false,"sessions":[]}` shape; the start path passes
+    the cap check under the user lock; served frontend bundle carries the
+    multi-session context). The 409-at-cap itself is unit-tested only — a
+    live check would need two real sessions on the physical plug.
