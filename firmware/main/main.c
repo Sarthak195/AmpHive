@@ -30,6 +30,10 @@ char gateway_id[32] = "";
 char target_plug_ip[16] = "";
 char tapo_email[64] = "";
 char tapo_password[64] = "";
+// MQTT broker credentials (optional). Empty = connect anonymously, which the
+// broker allows until the stage-2 allow_anonymous=false flip (SECURITY.md §3).
+char mqtt_username[64] = "";
+char mqtt_password[64] = "";
 
 bool config_loaded = false;
 static uint32_t telemetry_interval_ms = 10000; // Default 10s (10000ms)
@@ -112,6 +116,10 @@ static void load_config_from_nvs(void) {
     nvs_get_str(my_handle, "tapo_email", tapo_email, &size);
     size = sizeof(tapo_password);
     nvs_get_str(my_handle, "tapo_pwd", tapo_password, &size);
+    size = sizeof(mqtt_username);
+    nvs_get_str(my_handle, "mqtt_user", mqtt_username, &size);
+    size = sizeof(mqtt_password);
+    nvs_get_str(my_handle, "mqtt_pwd", mqtt_password, &size);
 
     nvs_close(my_handle);
     
@@ -122,7 +130,7 @@ static void load_config_from_nvs(void) {
     }
 }
 
-static void save_config_to_nvs(const char* ssid, const char* pwd, const char* auth, const char* dev_name, const char* gw_id, const char* plug_ip, const char* t_email, const char* t_pwd) {
+static void save_config_to_nvs(const char* ssid, const char* pwd, const char* auth, const char* dev_name, const char* gw_id, const char* plug_ip, const char* t_email, const char* t_pwd, const char* m_user, const char* m_pwd) {
     nvs_handle_t my_handle;
     esp_err_t err = nvs_open("storage", NVS_READWRITE, &my_handle);
     if (err != ESP_OK) return;
@@ -135,6 +143,8 @@ static void save_config_to_nvs(const char* ssid, const char* pwd, const char* au
     nvs_set_str(my_handle, "target_plug", plug_ip);
     nvs_set_str(my_handle, "tapo_email", t_email);
     nvs_set_str(my_handle, "tapo_pwd", t_pwd);
+    nvs_set_str(my_handle, "mqtt_user", m_user);
+    nvs_set_str(my_handle, "mqtt_pwd", m_pwd);
 
     nvs_commit(my_handle);
     nvs_close(my_handle);
@@ -156,6 +166,8 @@ static const char* portal_html = \
     "<label>Target Plug IP:</label><input name='plug_ip' required>"
     "<label>Tapo Account Email:</label><input name='tapo_email' type='email' required>"
     "<label>Tapo Account Password:</label><input name='tapo_pwd' type='password' required>"
+    "<label>MQTT Username (optional):</label><input name='mqtt_user'>"
+    "<label>MQTT Password (optional):</label><input name='mqtt_pwd' type='password'>"
     "<button type='submit'>Save & Reboot</button>"
     "</form></body></html>";
 
@@ -207,7 +219,7 @@ static esp_err_t portal_post_handler(httpd_req_t *req) {
     buf[ret] = '\0';
 
     char ssid[32] = {0}, pwd[64] = {0}, auth[128] = {0}, dev[32] = {0}, gw[32] = {0}, plug[16] = {0};
-    char t_email[64] = {0}, t_pwd[64] = {0};
+    char t_email[64] = {0}, t_pwd[64] = {0}, m_user[64] = {0}, m_pwd[64] = {0};
     httpd_query_key_value(buf, "ssid", ssid, sizeof(ssid));
     httpd_query_key_value(buf, "pwd", pwd, sizeof(pwd));
     httpd_query_key_value(buf, "auth", auth, sizeof(auth));
@@ -216,11 +228,14 @@ static esp_err_t portal_post_handler(httpd_req_t *req) {
     httpd_query_key_value(buf, "plug_ip", plug, sizeof(plug));
     httpd_query_key_value(buf, "tapo_email", t_email, sizeof(t_email));
     httpd_query_key_value(buf, "tapo_pwd", t_pwd, sizeof(t_pwd));
+    httpd_query_key_value(buf, "mqtt_user", m_user, sizeof(m_user));
+    httpd_query_key_value(buf, "mqtt_pwd", m_pwd, sizeof(m_pwd));
 
     url_decode(ssid); url_decode(pwd); url_decode(auth); url_decode(dev);
     url_decode(gw); url_decode(plug); url_decode(t_email); url_decode(t_pwd);
+    url_decode(m_user); url_decode(m_pwd);
 
-    save_config_to_nvs(ssid, pwd, auth, dev, gw, plug, t_email, t_pwd);
+    save_config_to_nvs(ssid, pwd, auth, dev, gw, plug, t_email, t_pwd, m_user, m_pwd);
 
     const char* resp = "<html><body><h2>Saved! Rebooting gateway...</h2></body></html>";
     httpd_resp_send(req, resp, HTTPD_RESP_USE_STRLEN);
@@ -497,6 +512,16 @@ static void start_mqtt_client(void) {
            handshake (crypto + HTTP), so give it extra stack headroom. */
         .task.stack_size = 8192,
     };
+
+    // Present broker credentials when provisioned (NVS mqtt_user/mqtt_pwd).
+    // Empty = anonymous, which the broker accepts until the stage-2 flip.
+    if (mqtt_username[0] != '\0') {
+        mqtt_cfg.credentials.username = mqtt_username;
+        mqtt_cfg.credentials.authentication.password = mqtt_password;
+        ESP_LOGI(TAG, "MQTT: authenticating as '%s'", mqtt_username);
+    } else {
+        ESP_LOGW(TAG, "MQTT: no broker credentials in NVS - connecting anonymously");
+    }
 
     mqtt_client = esp_mqtt_client_init(&mqtt_cfg);
     esp_mqtt_client_register_event(mqtt_client, ESP_EVENT_ANY_ID, mqtt_event_handler, NULL);

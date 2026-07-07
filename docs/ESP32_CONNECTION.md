@@ -183,7 +183,7 @@ On a board with no stored config (factory-fresh or after `erase-flash`):
 1. The board starts an open SoftAP: **`AmpHive_Setup_XXXX`** (XXXX = last MAC bytes).
 2. Join that Wi-Fi network from a laptop/phone.
 3. Browse to **`http://192.168.4.1`**.
-4. Fill in the form — **8 fields**:
+4. Fill in the form — **10 fields**:
    | Field | Example | Notes |
    |-------|---------|-------|
    | WiFi SSID | `HomeNet` | 2.4 GHz network the plug is on |
@@ -192,8 +192,10 @@ On a board with no stored config (factory-fresh or after `erase-flash`):
    | Device Name | `gateway-01` | shown on the control plane |
    | Gateway MAC/ID | `gw-abc123` | must match the backend's gateway record |
    | Target Plug IP | `192.168.1.5` | the Tapo plug's LAN IP (see tip below) |
-   | **Tapo Account Email** | `you@example.com` | **new** — Tapo cloud login; used for KLAP auth |
-   | **Tapo Account Password** | | **new** — stored in NVS (plaintext, prototype) |
+   | **Tapo Account Email** | `you@example.com` | Tapo cloud login; used for KLAP auth |
+   | **Tapo Account Password** | | stored in NVS (plaintext, prototype) |
+   | MQTT Username *(optional)* | `amphive-gateway` | broker credentials (`MQTT_GW_USERNAME` in `.env`); empty = anonymous until the broker's stage-2 flip |
+   | MQTT Password *(optional)* | | stored in NVS (`mqtt_user`/`mqtt_pwd`) |
 5. Submit → config is written to NVS and the board reboots into normal operation.
 
 > **Find the plug's IP:** it's DHCP-assigned and can change. In the Tapo app:
