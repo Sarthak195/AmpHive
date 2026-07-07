@@ -4,6 +4,8 @@ Cpo routes — moved verbatim from main.py (2026-07-07, TD#7 split).
 import json
 import logging
 import os
+import secrets
+import string
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
@@ -43,6 +45,23 @@ from backend.services.telemetry import COINS_PER_KWH
 
 logger = logging.getLogger("amphive.api")
 router = APIRouter()
+
+
+async def generate_unique_access_code(db: AsyncSession) -> str:
+    """
+    Unique 8-character access code for a private charger group — uppercase
+    letters and digits only, for easy manual entry. Retries until the code
+    is unused (the column is UNIQUE; collisions on 36^8 are near-impossible,
+    the loop just makes them a retry instead of an IntegrityError).
+    """
+    while True:
+        code = ''.join(secrets.choice(string.ascii_uppercase + string.digits) for _ in range(8))
+        existing = await db.execute(
+            select(ChargerGroup).where(ChargerGroup.access_code == code)
+        )
+        if not existing.scalar_one_or_none():
+            return code
+
 
 # ===========================================================================
 # CPO (Charge Point Operator) Admin Endpoints
@@ -459,21 +478,9 @@ async def cpo_create_group(
     Create a new charger group under the CPO's tenant.
     Private groups automatically get a generated access code.
     """
-    import secrets
-    import string
-
     access_code = None
     if not req.is_public:
-        # Generate a unique 8-character alphanumeric access code
-        # Using uppercase letters and digits for easy manual entry
-        while True:
-            code = ''.join(secrets.choice(string.ascii_uppercase + string.digits) for _ in range(8))
-            existing = await db.execute(
-                select(ChargerGroup).where(ChargerGroup.access_code == code)
-            )
-            if not existing.scalar_one_or_none():
-                access_code = code
-                break
+        access_code = await generate_unique_access_code(db)
 
     group = ChargerGroup(
         tenant_id=user.tenant_id,
@@ -504,9 +511,6 @@ async def cpo_update_group(
     db: AsyncSession = Depends(get_db),
 ):
     """Update a charger group's details. Can regenerate access codes for private groups."""
-    import secrets
-    import string
-
     result = await db.execute(
         select(ChargerGroup).where(
             and_(ChargerGroup.id == group_id, ChargerGroup.tenant_id == user.tenant_id)
@@ -526,24 +530,10 @@ async def cpo_update_group(
             group.access_code = None
         # If switching to private, generate a new access code
         elif not group.access_code:
-            while True:
-                code = ''.join(secrets.choice(string.ascii_uppercase + string.digits) for _ in range(8))
-                existing = await db.execute(
-                    select(ChargerGroup).where(ChargerGroup.access_code == code)
-                )
-                if not existing.scalar_one_or_none():
-                    group.access_code = code
-                    break
+            group.access_code = await generate_unique_access_code(db)
 
     if req.regenerate_access_code and not group.is_public:
-        while True:
-            code = ''.join(secrets.choice(string.ascii_uppercase + string.digits) for _ in range(8))
-            existing = await db.execute(
-                select(ChargerGroup).where(ChargerGroup.access_code == code)
-            )
-            if not existing.scalar_one_or_none():
-                group.access_code = code
-                break
+        group.access_code = await generate_unique_access_code(db)
 
     await db.commit()
     await db.refresh(group)
