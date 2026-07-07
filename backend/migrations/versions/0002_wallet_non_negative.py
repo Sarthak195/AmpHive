@@ -30,8 +30,28 @@ def upgrade() -> None:
     # (which could record a debit larger than the wallet held). Forgive them —
     # the same policy finalize_charging_session applies at stop time.
     op.execute("UPDATE users SET coin_balance = 0 WHERE coin_balance < 0")
-    op.create_check_constraint(CONSTRAINT, "users", "coin_balance >= 0")
+    # Idempotent add: a database bootstrapped via create_all (init_db stamps
+    # such a pre-Alembic DB at the baseline, then upgrades to head) already
+    # carries this constraint from the model's __table_args__, so a plain
+    # ADD CONSTRAINT would raise DuplicateObject. Guard on pg_constraint so
+    # the migration is a no-op when it's already present and adds it otherwise
+    # (the genuine pre-constraint prod case).
+    op.execute(
+        f"""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname = '{CONSTRAINT}'
+                  AND conrelid = 'users'::regclass
+            ) THEN
+                ALTER TABLE users
+                    ADD CONSTRAINT {CONSTRAINT} CHECK (coin_balance >= 0);
+            END IF;
+        END $$;
+        """
+    )
 
 
 def downgrade() -> None:
-    op.drop_constraint(CONSTRAINT, "users", type_="check")
+    op.execute(f"ALTER TABLE users DROP CONSTRAINT IF EXISTS {CONSTRAINT}")
