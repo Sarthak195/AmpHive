@@ -1,0 +1,61 @@
+# AmpHive CI — pytest (backend) + eslint (frontend) on every push/PR.
+# This is the pipeline that would have caught the get_participants
+# "verified-but-broken" regression before it shipped (TD#13).
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  backend-tests:
+    runs-on: ubuntu-latest
+    # Postgres is provisioned for the Phase-1 integration tests planned in
+    # docs/TESTING.md (session billing / payment concurrency); today's suite
+    # is DB-free and ignores it.
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: amphive_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          # Matches the backend Dockerfile (python:3.11), not the docs' 3.12.
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements*.txt
+      - name: Install dependencies
+        run: pip install -r backend/requirements.txt -r backend/requirements-dev.txt
+      - name: Run tests
+        run: pytest backend/tests -q
+        env:
+          TEST_DATABASE_URL: postgresql+asyncpg://postgres:ci@localhost:5432/amphive_test
+
+  frontend-lint:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Lint
+        run: npm run lint

@@ -88,9 +88,10 @@ must not break — have no automated coverage.
    test limit-tripping and ring wrap/overwrite on the host (no hardware).
 
 ### Cross-cutting — CI (P1, do alongside Phase 1)
-10. GitHub Actions: `pytest backend/tests` (with a `postgres:15` service) +
-    `npm run lint`. This is what would have caught the `get_participants`
-    "verified-but-broken" regression before it shipped.
+10. ~~GitHub Actions: `pytest backend/tests` (with a `postgres:15` service) +
+    `npm run lint`.~~ **Done 2026-07-07** — `.github/workflows/ci.yml` runs
+    both on push/PR; the postgres service is provisioned and waiting for the
+    Phase-1 integration tests (exported as `TEST_DATABASE_URL`).
 
 ---
 

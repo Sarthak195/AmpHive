@@ -72,9 +72,11 @@ Cross-references [TECH_DEBT.md](TECH_DEBT.md) items as `TD#n` and
       of the gateway's plugs without an ACTIVE session whenever it reports
       `online`. Tests: `backend/tests/test_reconnect_off_republish.py`.
       (IMPL §3.43)
-- [ ] **Add CI** (GitHub Actions): `pytest backend/tests` with a `postgres:15`
-      service + `npm run lint`. Would have caught the `get_participants`
-      "verified-but-broken" bug. (TD#13)
+- [x] **Add CI** (2026-07-07): `.github/workflows/ci.yml` — `pytest
+      backend/tests` (python 3.11, postgres:15 service provisioned for the
+      planned Phase-1 integration tests) + `npm run lint`. Runs on push to
+      main and on PRs; both jobs verified green locally before committing.
+      (TD#13)
 - [ ] **Adopt Alembic** and retire the hand-written `_INPLACE_UPGRADES` +
       unexecuted `schema.sql`/`schema_v2.sql`. (TD#5)
 - [ ] **Split `backend/main.py`** (2,291 lines) into `routers/` + `schemas/`;
