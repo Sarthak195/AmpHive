@@ -66,19 +66,17 @@ BFG + force-push) to purge the dead values entirely.
     connects over the overlay and the backend uses the internal compose network,
     so nothing needs the public port. The unused websocket port 9001 is no longer
     published.
-  - [Staged 2026-07-07] Broker **auth** is now implemented end-to-end but not
-    yet enforced. **Stage 1 (in code/config):** `mosquitto.conf` loads a
+  - [Done 2026-07-07] Broker **auth is enforced**: `allow_anonymous false` +
     `password_file` (generated on the VM by `deploy.ps1` from `MQTT_USERNAME` /
     `MQTT_PASSWORD` — backend client — and `MQTT_GW_USERNAME` /
     `MQTT_GW_PASSWORD` — shared gateway account — in `.env`, all validated
-    alphanumeric); the compose healthcheck authenticates; the backend already
-    sends its credentials via env; the firmware presents NVS `mqtt_user` /
-    `mqtt_pwd` when provisioned (portal has optional fields; falls back to
-    anonymous when unset). **Stage 2 (the flip):** once every gateway is
-    provisioned and verified authenticating, set `allow_anonymous false` in
-    `mosquitto.conf` and redeploy — then overlay peers can no longer publish
-    anonymously. TLS remains a separate future item (confidentiality currently
-    comes from the overlay).
+    alphanumeric). The compose healthcheck authenticates; the backend sends
+    its credentials via env; the firmware presents NVS `mqtt_user`/`mqtt_pwd`
+    (provisioned via the portal's optional MQTT fields — a credential-less
+    gateway can no longer connect). **Verified in prod:** anonymous
+    `mosquitto_sub` → `Connection Refused: not authorised`; backend + the
+    real ESP32 reconnected authenticated and telemetry flows. TLS remains a
+    separate future item (confidentiality currently comes from the overlay).
 - [Fixed + deployed 2026-07-06] **CORS** is restricted to an explicit allowlist
   (localhost, `amphive.duckdns.org`, VM IP; http+https) with the wildcard removed,
   in `backend/main.py:187`. Verified in prod: an allowed origin is echoed, a
