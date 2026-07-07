@@ -69,9 +69,11 @@ and `amphive/gateways/+/status` (QoS 1). It does **not** currently subscribe to
 - `MQTTManager.send_gateway_ota(gateway_id, plug_id, firmware_url)`
   publishes an `OTA` command at QoS 1. Triggered by
   `POST /api/cpo/gateways/{id}/ota` (RBAC + tenant-scoped; requires the
-  gateway live and to have ≥1 plug — the firmware only subscribes to the
-  per-plug command topic, so the OTA command rides one of the gateway's plug
-  topics and the firmware ignores the plug_id for OTA). The gateway
+  gateway `ONLINE` — the status flag, not telemetry freshness, so a gateway
+  whose plug is unreachable can still be updated — and to have ≥1 plug, since
+  the firmware only subscribes to the per-plug command topic, so the OTA
+  command rides one of the gateway's plug topics and the firmware ignores the
+  plug_id for OTA). The gateway
   downloads the image into its passive OTA slot and reboots
   (rollback-protected); it refuses the update while a session is active.
 

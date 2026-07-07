@@ -6,7 +6,7 @@ route the command through (the firmware only subscribes to per-plug command
 topics), and publishes the OTA command. Failures map to specific statuses:
 404 (not yours / missing), 409 (offline, or no plugs), 502 (publish failed).
 """
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -19,10 +19,12 @@ from backend.schemas import CpoGatewayOtaRequest
 URL = "http://100.87.241.70:8070/amphive-gateway-1.1.1.bin"
 
 
-def _live_gateway():
+def _online_gateway(last_seen_at=None):
     gw = MagicMock()
     gw.status = GatewayStatus.ONLINE
-    gw.last_seen_at = datetime.now(timezone.utc)
+    # Default deliberately stale: OTA gates on the ONLINE flag, not telemetry
+    # freshness (see the endpoint), so this must still be accepted.
+    gw.last_seen_at = last_seen_at or (datetime.now(timezone.utc) - timedelta(hours=1))
     return gw
 
 
@@ -46,8 +48,8 @@ def _db(*results):
 
 
 @pytest.mark.asyncio
-async def test_ota_published_for_live_gateway():
-    db = _db(_result(_live_gateway()), _result(1))  # gateway, then plug_id=1
+async def test_ota_published_for_online_gateway():
+    db = _db(_result(_online_gateway()), _result(1))  # gateway, then plug_id=1
     with patch("backend.routers.cpo.state") as state:
         state.mqtt_manager.send_gateway_ota.return_value = True
         res = await cpo_gateway_ota("gw-1", CpoGatewayOtaRequest(firmware_url=URL), _user(), db)
@@ -66,7 +68,7 @@ async def test_ota_404_when_not_owned():
 
 @pytest.mark.asyncio
 async def test_ota_409_when_gateway_offline():
-    gw = _live_gateway()
+    gw = _online_gateway()
     gw.status = GatewayStatus.OFFLINE
     db = _db(_result(gw))
     with pytest.raises(HTTPException) as exc:
@@ -77,7 +79,7 @@ async def test_ota_409_when_gateway_offline():
 
 @pytest.mark.asyncio
 async def test_ota_409_when_gateway_has_no_plugs():
-    db = _db(_result(_live_gateway()), _result(None))  # live, but no plug rows
+    db = _db(_result(_online_gateway()), _result(None))  # live, but no plug rows
     with pytest.raises(HTTPException) as exc:
         await cpo_gateway_ota("gw-1", CpoGatewayOtaRequest(firmware_url=URL), _user(), db)
     assert exc.value.status_code == 409
@@ -86,7 +88,7 @@ async def test_ota_409_when_gateway_has_no_plugs():
 
 @pytest.mark.asyncio
 async def test_ota_502_when_publish_fails():
-    db = _db(_result(_live_gateway()), _result(1))
+    db = _db(_result(_online_gateway()), _result(1))
     with patch("backend.routers.cpo.state") as state:
         state.mqtt_manager.send_gateway_ota.return_value = False
         with pytest.raises(HTTPException) as exc:

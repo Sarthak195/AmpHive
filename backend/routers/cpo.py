@@ -293,7 +293,14 @@ async def cpo_gateway_ota(
     if not gateway:
         raise HTTPException(status_code=404, detail="Gateway not found or access denied.")
 
-    if not gateway_is_live(gateway):
+    # OTA deliberately uses the ONLINE flag, NOT gateway_is_live(): the latter
+    # requires fresh *telemetry*, which stops whenever the plug is unreachable
+    # even though the gateway's MQTT link (and thus its ability to receive an
+    # OTA) is fine. Coupling firmware updates to plug health would be wrong,
+    # and a false positive here is benign — the OTA command is a QoS-1 publish
+    # that a truly-gone gateway simply never receives (no session pinned, no
+    # billing), unlike session-start where gateway_is_live guards real money.
+    if gateway.status != GatewayStatus.ONLINE:
         raise HTTPException(
             status_code=409,
             detail="Gateway is offline; it must be connected to receive an OTA command.",
