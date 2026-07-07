@@ -1,0 +1,163 @@
+"""
+AmpHive Pydantic request/response schemas.
+
+Extracted verbatim from main.py (2026-07-07, TD#7 split). One module for all
+routers — schemas are cross-cutting (e.g. PlugResponse is returned by both the
+driver and CPO plug routes).
+"""
+from typing import Optional
+
+from pydantic import BaseModel, Field
+
+
+# --- Auth Schemas ---
+
+class RegisterRequest(BaseModel):
+    email: str
+    password: str
+    full_name: str
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+class AuthResponse(BaseModel):
+    token: str
+    user: dict
+
+class UserResponse(BaseModel):
+    id: int
+    email: str
+    full_name: str
+    role: str
+    coin_balance: float
+
+
+# --- Session Schemas ---
+
+class SessionStartRequest(BaseModel):
+    plug_id: int
+    # Bounded so a client can't disable the firmware safety watchdog by sending
+    # an absurd limit. 1 s .. 24 h, and 0.1 .. 100 kWh.
+    max_duration_seconds: int = Field(default=14400, gt=0, le=86400)  # 4 h default, 24 h cap
+    max_kwh: float = Field(default=30.0, gt=0, le=100.0)              # 30 kWh default, 100 kWh cap
+
+class SessionStopRequest(BaseModel):
+    session_id: int
+
+
+# --- Gateway & Plug Schemas ---
+
+class GatewayRegisterRequest(BaseModel):
+    gateway_id: str  # MAC/UUID
+    name: str
+    vpn_ip: str
+    tenant_id: int
+
+class PlugRegisterRequest(BaseModel):
+    gateway_id: str
+    name: str
+    local_ip: str
+    plug_model: str = "tapo_p110"
+    group_id: Optional[int] = None  # [P2] Optional charger group assignment
+
+
+# --- Group Schemas ---
+
+class JoinGroupRequest(BaseModel):
+    access_code: str
+
+class GroupResponse(BaseModel):
+    id: int
+    name: str
+    is_public: bool
+    plug_count: int
+
+class PlugResponse(BaseModel):
+    id: int
+    name: str
+    status: str
+    current_power_w: float
+    plug_model: str
+    group_name: Optional[str] = None
+    # Effective map coordinates: the plug's own, else its gateway's, else None.
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+
+
+# --- Payment Schemas ---
+
+class CreateOrderRequest(BaseModel):
+    amount_inr: float  # Amount in Rupees (e.g. 100 for ₹100)
+
+class CreateOrderResponse(BaseModel):
+    order_id: str
+    amount: int       # Amount in paise
+    currency: str
+    key_id: str       # Razorpay Key ID (needed by frontend checkout)
+
+class VerifyPaymentRequest(BaseModel):
+    razorpay_order_id: str
+    razorpay_payment_id: str
+    razorpay_signature: str
+    # Deprecated and IGNORED: the credited amount is always fetched from
+    # Razorpay's API server-side. Kept optional so older clients that still
+    # send it don't get a 422.
+    amount_inr: Optional[float] = None
+
+
+# --- Direct Mode Schemas ---
+
+class DirectPlugRequest(BaseModel):
+    """Optional request body for direct plug control. If plug_ip is not provided,
+    falls back to the TAPO_PLUG_IP environment variable."""
+    plug_ip: Optional[str] = None
+
+
+# --- CPO Schemas ---
+
+class CpoSetupRequest(BaseModel):
+    """Request body for CPO onboarding — creates a new tenant."""
+    tenant_name: str
+
+
+class CpoGatewayCreateRequest(BaseModel):
+    """Register a new gateway under the CPO's tenant."""
+    gateway_id: str   # MAC address or hardware UUID
+    name: str
+    vpn_ip: str
+
+
+class CpoPlugCreateRequest(BaseModel):
+    """Register a new plug on one of the CPO's gateways."""
+    gateway_id: str
+    name: str
+    local_ip: str
+    plug_model: str = "tapo_p110"
+    group_id: Optional[int] = None
+    # Optional geolocation; when omitted the plug inherits its gateway's coords.
+    latitude: Optional[float] = Field(default=None, ge=-90, le=90)
+    longitude: Optional[float] = Field(default=None, ge=-180, le=180)
+
+
+class CpoPlugUpdateRequest(BaseModel):
+    """Update an existing plug's details."""
+    name: Optional[str] = None
+    group_id: Optional[int] = None
+    # Status string matching PlugStatus enum values: available, occupied, offline, maintenance
+    status: Optional[str] = None
+    latitude: Optional[float] = Field(default=None, ge=-90, le=90)
+    longitude: Optional[float] = Field(default=None, ge=-180, le=180)
+
+
+class CpoGroupCreateRequest(BaseModel):
+    """Create a new charger group."""
+    name: str
+    is_public: bool = False
+
+
+class CpoGroupUpdateRequest(BaseModel):
+    """Update an existing charger group."""
+    name: Optional[str] = None
+    is_public: Optional[bool] = None
+    regenerate_access_code: bool = False

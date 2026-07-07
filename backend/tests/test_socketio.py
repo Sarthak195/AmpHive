@@ -104,11 +104,11 @@ async def test_stream_task_emits_telemetry_and_stops_when_room_empties(monkeypat
     """
     from backend.services import socketio_manager as sm
 
-    # Stub backend.main so the task's late import doesn't pull the full app
-    # (and set_plug_telemetry_interval doesn't need a DB).
-    fake_main = types.ModuleType("backend.main")
-    fake_main.set_plug_telemetry_interval = AsyncMock()
-    monkeypatch.setitem(sys.modules, "backend.main", fake_main)
+    # Stub the session-lifecycle module so the task's late import gets a
+    # DB-free set_plug_telemetry_interval.
+    fake_lifecycle = types.ModuleType("backend.services.session_lifecycle")
+    fake_lifecycle.set_plug_telemetry_interval = AsyncMock()
+    monkeypatch.setitem(sys.modules, "backend.services.session_lifecycle", fake_lifecycle)
 
     session_id, plug_id = 4242, 7777
     room_name = f"session_{session_id}"

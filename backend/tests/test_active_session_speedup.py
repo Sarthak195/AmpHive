@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from sqlalchemy.exc import MultipleResultsFound
 
-from backend.main import check_and_speed_up_active_session
+from backend.services.session_lifecycle import check_and_speed_up_active_session
 
 
 def _session(plug_id):
@@ -44,7 +44,7 @@ def _db_returning_sessions(sessions):
 @pytest.mark.asyncio
 async def test_multiple_active_sessions_do_not_crash_and_each_plug_speeds_up():
     db = _db_returning_sessions([_session(1), _session(3), _session(4)])
-    with patch("backend.main.set_plug_telemetry_interval", new=AsyncMock()) as speed_up:
+    with patch("backend.services.session_lifecycle.set_plug_telemetry_interval", new=AsyncMock()) as speed_up:
         await check_and_speed_up_active_session(db, user_id=4)
 
     assert sorted(call.args[1] for call in speed_up.await_args_list) == [1, 3, 4]
@@ -54,7 +54,7 @@ async def test_multiple_active_sessions_do_not_crash_and_each_plug_speeds_up():
 @pytest.mark.asyncio
 async def test_single_active_session_speeds_up_its_plug():
     db = _db_returning_sessions([_session(7)])
-    with patch("backend.main.set_plug_telemetry_interval", new=AsyncMock()) as speed_up:
+    with patch("backend.services.session_lifecycle.set_plug_telemetry_interval", new=AsyncMock()) as speed_up:
         await check_and_speed_up_active_session(db, user_id=8)
 
     speed_up.assert_awaited_once()
@@ -65,7 +65,7 @@ async def test_single_active_session_speeds_up_its_plug():
 @pytest.mark.asyncio
 async def test_no_active_sessions_is_a_no_op():
     db = _db_returning_sessions([])
-    with patch("backend.main.set_plug_telemetry_interval", new=AsyncMock()) as speed_up:
+    with patch("backend.services.session_lifecycle.set_plug_telemetry_interval", new=AsyncMock()) as speed_up:
         await check_and_speed_up_active_session(db, user_id=9)
 
     speed_up.assert_not_awaited()

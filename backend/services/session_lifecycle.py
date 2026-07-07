@@ -1,0 +1,224 @@
+"""
+Session lifecycle helpers shared across routers and background services.
+
+Moved verbatim out of main.py (2026-07-07, TD#7 split):
+- set_plug_telemetry_interval — telemetry cadence control (routes + Socket.io)
+- gateway_is_live — the session-start liveness gate
+- check_and_speed_up_active_session — login/`me` hook
+- finalize_charging_session — the one true stop/billing path (stop route +
+  session reaper)
+"""
+import logging
+import os
+from datetime import datetime, timezone
+from typing import Optional
+
+from sqlalchemy import and_, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from backend import state
+from backend.database.models import (
+    ChargingSession, Gateway, GatewayStatus, LedgerTransaction, Plug,
+    PlugStatus, SessionStatus, TransactionType, User,
+)
+from backend.services.money import to_money, ZERO_MONEY
+from backend.services.telemetry import COINS_PER_KWH
+
+logger = logging.getLogger("amphive.api")
+
+# A gateway counts as live only if it reported (status or telemetry) within
+# this window. The DB status flag alone is not enough: seeded/mock rows can
+# say ONLINE with no MQTT client behind them, and a missed LWT leaves a dead
+# gateway ONLINE forever. Telemetry arrives every ~10 s from a healthy
+# gateway (bumped into last_seen_at at most once a minute), so 120 s gives
+# comfortable slack without letting sessions start against dead hardware.
+GATEWAY_LIVENESS_WINDOW_SEC = int(os.getenv("GATEWAY_LIVENESS_WINDOW_SEC", "120"))
+
+
+async def set_plug_telemetry_interval(db: AsyncSession, plug_id: int, interval_ms: int):
+    """
+    Update the polling interval for a specific plug in telemetry_store
+    and publish the SET_INTERVAL MQTT command to the gateway.
+    """
+    if state.telemetry_store.get_interval(plug_id) == interval_ms:
+        return
+
+    result = await db.execute(select(Plug).where(Plug.id == plug_id))
+    plug = result.scalar_one_or_none()
+    if not plug:
+        logger.warning(f"Plug {plug_id} not found when trying to set telemetry interval.")
+        return
+
+    state.telemetry_store.set_interval(plug_id, interval_ms)
+
+    from backend.services.mqtt_manager import MQTTManager
+    manager = MQTTManager()
+    if hasattr(manager, "client") and manager.client:
+        manager.send_plug_interval(plug.gateway_id, plug_id, interval_ms)
+
+
+def gateway_is_live(gateway: Gateway, now: Optional[datetime] = None) -> bool:
+    """
+    Whether a gateway is actually reachable, not just flagged ONLINE in the DB.
+    Requires both the ONLINE status and a last_seen_at within
+    GATEWAY_LIVENESS_WINDOW_SEC (status messages and telemetry both refresh it).
+    """
+    if gateway.status != GatewayStatus.ONLINE:
+        return False
+    if gateway.last_seen_at is None:
+        return False
+    last_seen = gateway.last_seen_at
+    if last_seen.tzinfo is None:
+        # Legacy rows written by the old naive-datetime onupdate hook.
+        last_seen = last_seen.replace(tzinfo=timezone.utc)
+    now = now or datetime.now(timezone.utc)
+    return (now - last_seen).total_seconds() <= GATEWAY_LIVENESS_WINDOW_SEC
+
+
+async def check_and_speed_up_active_session(db: AsyncSession, user_id: int):
+    """
+    Check if the user has active charging sessions, and if so, speed up the
+    telemetry interval for each corresponding plug to 1000ms.
+
+    A user can hold more than one ACTIVE session (nothing limits starts to a
+    single plug), so this must not assume a single row — scalar_one_or_none()
+    here raised MultipleResultsFound, which broke /api/auth/login and
+    /api/auth/me for that user.
+    """
+    result = await db.execute(
+        select(ChargingSession).where(
+            and_(
+                ChargingSession.user_id == user_id,
+                ChargingSession.status == SessionStatus.ACTIVE,
+            )
+        )
+    )
+    for active_session in result.scalars().all():
+        await set_plug_telemetry_interval(db, active_session.plug_id, 1000)
+
+
+async def finalize_charging_session(
+    db: AsyncSession,
+    session_id: int,
+    *,
+    expected_user_id: Optional[int] = None,
+    reason: Optional[str] = None,
+) -> Optional[dict]:
+    """
+    Shared stop path for /api/sessions/stop and the session reaper: bill the
+    session, debit the wallet, write the ledger row, free the plug, and tear
+    down the telemetry stream.
+
+    The session row is locked (SELECT ... FOR UPDATE) and its ACTIVE status
+    re-checked under the lock, so concurrent finalizers (double stop click,
+    user racing the reaper) settle exactly once — the loser gets None.
+    Returns None when the session doesn't exist (for the caller's filter) or
+    is no longer ACTIVE; otherwise returns the stop-response payload.
+    """
+    filters = [ChargingSession.id == session_id]
+    if expected_user_id is not None:
+        filters.append(ChargingSession.user_id == expected_user_id)
+    result = await db.execute(
+        select(ChargingSession).where(and_(*filters)).with_for_update()
+    )
+    session = result.scalar_one_or_none()
+    if not session or session.status != SessionStatus.ACTIVE:
+        return None
+
+    # Load the plug
+    plug_result = await db.execute(select(Plug).where(Plug.id == session.plug_id))
+    plug = plug_result.scalar_one()
+
+    # 1. Send MQTT OFF command (best-effort — the gateway may be gone; its
+    #    on-device watchdogs bound the hardware side)
+    success = state.mqtt_manager.send_plug_command(
+        gateway_id=plug.gateway_id,
+        plug_id=plug.id,
+        action="OFF",
+    )
+
+    if not success:
+        logger.warning(f"Failed to send OFF command for session {session.id}, but proceeding with DB cleanup.")
+
+    # 2. Determine final energy, then derive cost from it.
+    #    Prefer the live in-memory snapshot, but fall back to the energy
+    #    persisted on the session row (updated from inbound MQTT telemetry by
+    #    MQTTManager._persist_telemetry). This matters after a backend restart:
+    #    TelemetryStore is empty, and session.coins_spent is NEVER written
+    #    mid-session — so the old `latest.cost_coins if latest else
+    #    session.coins_spent` billed 0 for any session that outlived a restart.
+    #    Take the max so a stale/empty store can't bill LESS than what was
+    #    already recorded, and always compute cost from energy * COINS_PER_KWH
+    #    (the same formula TelemetryStore uses) for a single source of truth.
+    latest = state.telemetry_store.get_latest(plug.id)
+    persisted_energy = session.energy_kwh or 0.0
+    live_energy = latest.energy_kwh if latest else 0.0
+    final_energy = max(live_energy, persisted_energy)
+    final_cost = to_money(final_energy * COINS_PER_KWH)  # Decimal, 2 dp
+
+    # 3. Finalize session
+    session.status = SessionStatus.COMPLETED
+    session.ended_at = datetime.now(timezone.utc)
+    session.energy_kwh = final_energy
+
+    # 4. Deduct coins from user wallet and create ledger entry (Atomic)
+    user_result = await db.execute(
+        select(User).where(User.id == session.user_id).with_for_update()
+    )
+    locked_user = user_result.scalar_one()
+
+    # Debit only what the wallet actually holds. Writing a ledger row whose
+    # `amount` disagrees with the real balance delta (as `max(0, ...)` used to,
+    # while still recording -final_cost) breaks reconciliation: the running
+    # balance can no longer be derived by summing `amount`. If the bill exceeds
+    # the balance, the shortfall is forgiven but recorded for observability.
+    prev_balance = locked_user.coin_balance if locked_user.coin_balance > 0 else ZERO_MONEY
+    actual_debit = min(final_cost, prev_balance)  # both Decimal
+    shortfall = final_cost - actual_debit
+    locked_user.coin_balance = prev_balance - actual_debit
+    session.coins_spent = actual_debit  # what was actually collected from the wallet
+
+    description = f"Charging session on {plug.name}: {final_energy:.3f} kWh"
+    if reason:
+        description += f" [{reason}]"
+    if shortfall > 0:
+        description += f" (shortfall {shortfall:.2f} coins uncollected)"
+        logger.warning(
+            f"Session {session.id}: billed {final_cost:.2f} coins but wallet held "
+            f"only {prev_balance:.2f}; {shortfall:.2f} coins uncollected"
+        )
+
+    ledger_entry = LedgerTransaction(
+        user_id=locked_user.id,
+        session_id=session.id,
+        amount=-actual_debit,  # Negative = debit; matches the real balance delta
+        transaction_type=TransactionType.SESSION_DEBIT,
+        description=description,
+        balance_after=locked_user.coin_balance,
+    )
+    db.add(ledger_entry)
+
+    # 5. Update plug status back to available
+    plug.status = PlugStatus.AVAILABLE
+    await db.commit()
+
+    # Broadcast so other clients' plug lists flip back to AVAILABLE live.
+    from backend.services.socketio_manager import emit_plug_status
+    await emit_plug_status(plug.id, PlugStatus.AVAILABLE.value)
+
+    # 6. End telemetry stream
+    state.telemetry_store.end_session(plug.id)
+    await set_plug_telemetry_interval(db, plug.id, 10000)
+
+    logger.info(
+        f"Session {session.id} stopped{f' ({reason})' if reason else ''}: "
+        f"{final_energy:.3f} kWh, {actual_debit:.2f} coins"
+    )
+
+    return {
+        "status": "completed",
+        "session_id": session.id,
+        "energy_kwh": round(final_energy, 3),
+        "coins_spent": round(actual_debit, 2),
+        "balance_remaining": round(locked_user.coin_balance, 2),
+    }

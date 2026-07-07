@@ -61,14 +61,6 @@ MQTT_BROKER_PORT = int(os.getenv("MQTT_BROKER_PORT", 1883))
 MQTT_USERNAME = os.getenv("MQTT_USERNAME", None)
 MQTT_PASSWORD = os.getenv("MQTT_PASSWORD", None)
 
-# A gateway counts as live only if it reported (status or telemetry) within
-# this window. The DB status flag alone is not enough: seeded/mock rows can
-# say ONLINE with no MQTT client behind them, and a missed LWT leaves a dead
-# gateway ONLINE forever. Telemetry arrives every ~10 s from a healthy
-# gateway (bumped into last_seen_at at most once a minute), so 120 s gives
-# comfortable slack without letting sessions start against dead hardware.
-GATEWAY_LIVENESS_WINDOW_SEC = int(os.getenv("GATEWAY_LIVENESS_WINDOW_SEC", "120"))
-
 # --- [Direct Mode] Tapo P110 Configuration ---
 # When DIRECT_MODE=true, the backend can control the plug directly via the
 # `tapo` Python library, bypassing the ESP32 gateway and MQTT broker.
@@ -78,82 +70,21 @@ TAPO_USERNAME = os.getenv("TAPO_USERNAME", "")
 TAPO_PASSWORD = os.getenv("TAPO_PASSWORD", "")
 TAPO_PLUG_IP = os.getenv("TAPO_PLUG_IP", "")
 
-# --- App Lifespan ---
-mqtt_manager = None
-# [Direct Mode] Global reference to the Tapo direct driver (initialized in lifespan)
-tapo_driver: Optional[TapoDirectDriver] = None
-telemetry_store = TelemetryStore()
-# Buffered batch-flush service for time-series telemetry persistence (lifespan-owned)
-telemetry_persistence: Optional[TelemetryPersistenceService] = None
-# Auto-finalizer for sessions whose telemetry went silent (lifespan-owned)
-session_reaper: Optional[SessionReaperService] = None
-
-async def set_plug_telemetry_interval(db: AsyncSession, plug_id: int, interval_ms: int):
-    """
-    Update the polling interval for a specific plug in telemetry_store
-    and publish the SET_INTERVAL MQTT command to the gateway.
-    """
-    if telemetry_store.get_interval(plug_id) == interval_ms:
-        return
-
-    result = await db.execute(select(Plug).where(Plug.id == plug_id))
-    plug = result.scalar_one_or_none()
-    if not plug:
-        logger.warning(f"Plug {plug_id} not found when trying to set telemetry interval.")
-        return
-
-    telemetry_store.set_interval(plug_id, interval_ms)
-
-    from backend.services.mqtt_manager import MQTTManager
-    manager = MQTTManager()
-    if hasattr(manager, "client") and manager.client:
-        manager.send_plug_interval(plug.gateway_id, plug_id, interval_ms)
-
-def gateway_is_live(gateway: Gateway, now: Optional[datetime] = None) -> bool:
-    """
-    Whether a gateway is actually reachable, not just flagged ONLINE in the DB.
-    Requires both the ONLINE status and a last_seen_at within
-    GATEWAY_LIVENESS_WINDOW_SEC (status messages and telemetry both refresh it).
-    """
-    if gateway.status != GatewayStatus.ONLINE:
-        return False
-    if gateway.last_seen_at is None:
-        return False
-    last_seen = gateway.last_seen_at
-    if last_seen.tzinfo is None:
-        # Legacy rows written by the old naive-datetime onupdate hook.
-        last_seen = last_seen.replace(tzinfo=timezone.utc)
-    now = now or datetime.now(timezone.utc)
-    return (now - last_seen).total_seconds() <= GATEWAY_LIVENESS_WINDOW_SEC
-
-
-async def check_and_speed_up_active_session(db: AsyncSession, user_id: int):
-    """
-    Check if the user has active charging sessions, and if so, speed up the
-    telemetry interval for each corresponding plug to 1000ms.
-
-    A user can hold more than one ACTIVE session (nothing limits starts to a
-    single plug), so this must not assume a single row — scalar_one_or_none()
-    here raised MultipleResultsFound, which broke /api/auth/login and
-    /api/auth/me for that user.
-    """
-    result = await db.execute(
-        select(ChargingSession).where(
-            and_(
-                ChargingSession.user_id == user_id,
-                ChargingSession.status == SessionStatus.ACTIVE,
-            )
-        )
-    )
-    for active_session in result.scalars().all():
-        await set_plug_telemetry_interval(db, active_session.plug_id, 1000)
+# --- Shared runtime state + session-lifecycle helpers (TD#7 split) ---
+# Mutable runtime handles live in backend/state.py (set below in lifespan);
+# the session helpers moved verbatim to services/session_lifecycle.py.
+from backend import state
+from backend.services.session_lifecycle import (  # noqa: E402
+    check_and_speed_up_active_session,
+    finalize_charging_session,
+    gateway_is_live,
+    set_plug_telemetry_interval,
+)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage MQTT and Tapo Direct connection lifecycles with the FastAPI application."""
-    global mqtt_manager, tapo_driver, telemetry_persistence, session_reaper
-
     # Initialize the database tables
     await init_db()
 
@@ -162,33 +93,33 @@ async def lifespan(app: FastAPI):
 
     # Start the telemetry persistence flush loop before MQTT so the buffer is
     # ready to receive enqueued readings as soon as messages arrive.
-    telemetry_persistence = TelemetryPersistenceService(
+    state.telemetry_persistence = TelemetryPersistenceService(
         db_session_factory=async_session_factory,
     )
-    telemetry_persistence.start(loop)
+    state.telemetry_persistence.start(loop)
 
     # Initialize and start the MQTT connection.
-    # Pass telemetry_store so inbound MQTT data feeds the SSE stream,
+    # Pass telemetry_store so inbound MQTT data feeds the live stream,
     # db_session_factory so session totals are persisted, and
     # telemetry_persistence so raw samples are buffered into telemetry_readings.
-    mqtt_manager = MQTTManager(
+    state.mqtt_manager = MQTTManager(
         broker_host=MQTT_BROKER_HOST,
         broker_port=MQTT_BROKER_PORT,
         username=MQTT_USERNAME,
         password=MQTT_PASSWORD,
-        telemetry_store=telemetry_store,
+        telemetry_store=state.telemetry_store,
         db_session_factory=async_session_factory,
         event_loop=loop,
-        telemetry_persistence=telemetry_persistence,
+        telemetry_persistence=state.telemetry_persistence,
     )
-    mqtt_manager.start()
+    state.mqtt_manager.start()
 
     # [Direct Mode] Initialize the Tapo direct driver if enabled.
     # This allows controlling the plug without an ESP32 gateway, useful for
     # development/testing. The plug is reached via a WireGuard tunnel to
     # the developer's home network.
     if DIRECT_MODE and TAPO_USERNAME and TAPO_PASSWORD:
-        tapo_driver = TapoDirectDriver(
+        state.tapo_driver = TapoDirectDriver(
             tapo_email=TAPO_USERNAME,
             tapo_password=TAPO_PASSWORD,
         )
@@ -199,21 +130,21 @@ async def lifespan(app: FastAPI):
     # Auto-finalize ACTIVE sessions whose telemetry has gone silent (dead
     # gateway mid-session). Shares finalize_charging_session with the stop
     # route, so reaping bills/frees exactly like a user-initiated stop.
-    session_reaper = SessionReaperService(
+    state.session_reaper = SessionReaperService(
         db_session_factory=async_session_factory,
         finalize=finalize_charging_session,
     )
-    session_reaper.start(loop)
+    state.session_reaper.start(loop)
 
     yield
     # Stop MQTT first (no new enqueues), then drain + stop the flush loop so the
     # buffered tail is persisted.
-    if session_reaper:
-        await session_reaper.stop()
-    if mqtt_manager:
-        mqtt_manager.stop()
-    if telemetry_persistence:
-        await telemetry_persistence.stop()
+    if state.session_reaper:
+        await state.session_reaper.stop()
+    if state.mqtt_manager:
+        state.mqtt_manager.stop()
+    if state.telemetry_persistence:
+        await state.telemetry_persistence.stop()
 
 
 app = FastAPI(
@@ -244,103 +175,18 @@ app.add_middleware(
 
 
 # ===========================================================================
-# Pydantic Request/Response Schemas
+# Pydantic Request/Response Schemas — moved to backend/schemas.py (TD#7)
 # ===========================================================================
 
-# --- Auth Schemas ---
-
-class RegisterRequest(BaseModel):
-    email: str
-    password: str
-    full_name: str
-
-class LoginRequest(BaseModel):
-    email: str
-    password: str
-
-class AuthResponse(BaseModel):
-    token: str
-    user: dict
-
-class UserResponse(BaseModel):
-    id: int
-    email: str
-    full_name: str
-    role: str
-    coin_balance: float
-
-
-# --- Session Schemas ---
-
-class SessionStartRequest(BaseModel):
-    plug_id: int
-    # Bounded so a client can't disable the firmware safety watchdog by sending
-    # an absurd limit. 1 s .. 24 h, and 0.1 .. 100 kWh.
-    max_duration_seconds: int = Field(default=14400, gt=0, le=86400)  # 4 h default, 24 h cap
-    max_kwh: float = Field(default=30.0, gt=0, le=100.0)              # 30 kWh default, 100 kWh cap
-
-class SessionStopRequest(BaseModel):
-    session_id: int
-
-
-# --- Gateway & Plug Schemas ---
-
-class GatewayRegisterRequest(BaseModel):
-    gateway_id: str  # MAC/UUID
-    name: str
-    vpn_ip: str
-    tenant_id: int
-
-class PlugRegisterRequest(BaseModel):
-    gateway_id: str
-    name: str
-    local_ip: str
-    plug_model: str = "tapo_p110"
-    group_id: Optional[int] = None  # [P2] Optional charger group assignment
-
-
-# --- Group Schemas ---
-
-class JoinGroupRequest(BaseModel):
-    access_code: str
-
-class GroupResponse(BaseModel):
-    id: int
-    name: str
-    is_public: bool
-    plug_count: int
-
-class PlugResponse(BaseModel):
-    id: int
-    name: str
-    status: str
-    current_power_w: float
-    plug_model: str
-    group_name: Optional[str] = None
-    # Effective map coordinates: the plug's own, else its gateway's, else None.
-    latitude: Optional[float] = None
-    longitude: Optional[float] = None
-
-
-# --- Payment Schemas ---
-
-class CreateOrderRequest(BaseModel):
-    amount_inr: float  # Amount in Rupees (e.g. 100 for ₹100)
-
-class CreateOrderResponse(BaseModel):
-    order_id: str
-    amount: int       # Amount in paise
-    currency: str
-    key_id: str       # Razorpay Key ID (needed by frontend checkout)
-
-class VerifyPaymentRequest(BaseModel):
-    razorpay_order_id: str
-    razorpay_payment_id: str
-    razorpay_signature: str
-    # Deprecated and IGNORED: the credited amount is always fetched from
-    # Razorpay's API server-side. Kept optional so older clients that still
-    # send it don't get a 422.
-    amount_inr: Optional[float] = None
+from backend.schemas import (  # noqa: E402
+    AuthResponse, CpoGatewayCreateRequest, CpoGroupCreateRequest,
+    CpoGroupUpdateRequest, CpoPlugCreateRequest, CpoPlugUpdateRequest,
+    CpoSetupRequest, CreateOrderRequest, CreateOrderResponse,
+    DirectPlugRequest, GatewayRegisterRequest, GroupResponse,
+    JoinGroupRequest, LoginRequest, PlugRegisterRequest, PlugResponse,
+    RegisterRequest, SessionStartRequest, SessionStopRequest, UserResponse,
+    VerifyPaymentRequest,
+)
 
 
 # ===========================================================================
@@ -745,7 +591,7 @@ async def start_charging_session(
 
     # 4. Now command the gateway. If this fails, undo the claim so the plug
     #    doesn't stay OCCUPIED with a live ACTIVE session nobody can drive.
-    success = mqtt_manager.send_plug_command(
+    success = state.mqtt_manager.send_plug_command(
         gateway_id=plug.gateway_id,
         plug_id=plug.id,
         action="ON",
@@ -765,7 +611,7 @@ async def start_charging_session(
         )
 
     # 5. Initialize the telemetry stream for this plug
-    telemetry_store.start_session(plug.id)
+    state.telemetry_store.start_session(plug.id)
     await set_plug_telemetry_interval(db, plug.id, 1000)
 
     logger.info(f"Session {session.id} started: user={user.email}, plug={plug.id}")
@@ -776,133 +622,6 @@ async def start_charging_session(
         "plug_id": plug.id,
         "plug_name": plug.name,
         "message": f"Charging started on {plug.name}.",
-    }
-
-
-async def finalize_charging_session(
-    db: AsyncSession,
-    session_id: int,
-    *,
-    expected_user_id: Optional[int] = None,
-    reason: Optional[str] = None,
-) -> Optional[dict]:
-    """
-    Shared stop path for /api/sessions/stop and the session reaper: bill the
-    session, debit the wallet, write the ledger row, free the plug, and tear
-    down the telemetry stream.
-
-    The session row is locked (SELECT ... FOR UPDATE) and its ACTIVE status
-    re-checked under the lock, so concurrent finalizers (double stop click,
-    user racing the reaper) settle exactly once — the loser gets None.
-    Returns None when the session doesn't exist (for the caller's filter) or
-    is no longer ACTIVE; otherwise returns the stop-response payload.
-    """
-    filters = [ChargingSession.id == session_id]
-    if expected_user_id is not None:
-        filters.append(ChargingSession.user_id == expected_user_id)
-    result = await db.execute(
-        select(ChargingSession).where(and_(*filters)).with_for_update()
-    )
-    session = result.scalar_one_or_none()
-    if not session or session.status != SessionStatus.ACTIVE:
-        return None
-
-    # Load the plug
-    plug_result = await db.execute(select(Plug).where(Plug.id == session.plug_id))
-    plug = plug_result.scalar_one()
-
-    # 1. Send MQTT OFF command (best-effort — the gateway may be gone; its
-    #    on-device watchdogs bound the hardware side)
-    success = mqtt_manager.send_plug_command(
-        gateway_id=plug.gateway_id,
-        plug_id=plug.id,
-        action="OFF",
-    )
-
-    if not success:
-        logger.warning(f"Failed to send OFF command for session {session.id}, but proceeding with DB cleanup.")
-
-    # 2. Determine final energy, then derive cost from it.
-    #    Prefer the live in-memory snapshot, but fall back to the energy
-    #    persisted on the session row (updated from inbound MQTT telemetry by
-    #    MQTTManager._persist_telemetry). This matters after a backend restart:
-    #    TelemetryStore is empty, and session.coins_spent is NEVER written
-    #    mid-session — so the old `latest.cost_coins if latest else
-    #    session.coins_spent` billed 0 for any session that outlived a restart.
-    #    Take the max so a stale/empty store can't bill LESS than what was
-    #    already recorded, and always compute cost from energy * COINS_PER_KWH
-    #    (the same formula TelemetryStore uses) for a single source of truth.
-    latest = telemetry_store.get_latest(plug.id)
-    persisted_energy = session.energy_kwh or 0.0
-    live_energy = latest.energy_kwh if latest else 0.0
-    final_energy = max(live_energy, persisted_energy)
-    final_cost = to_money(final_energy * COINS_PER_KWH)  # Decimal, 2 dp
-
-    # 3. Finalize session
-    session.status = SessionStatus.COMPLETED
-    session.ended_at = datetime.now(timezone.utc)
-    session.energy_kwh = final_energy
-
-    # 4. Deduct coins from user wallet and create ledger entry (Atomic)
-    user_result = await db.execute(
-        select(User).where(User.id == session.user_id).with_for_update()
-    )
-    locked_user = user_result.scalar_one()
-
-    # Debit only what the wallet actually holds. Writing a ledger row whose
-    # `amount` disagrees with the real balance delta (as `max(0, ...)` used to,
-    # while still recording -final_cost) breaks reconciliation: the running
-    # balance can no longer be derived by summing `amount`. If the bill exceeds
-    # the balance, the shortfall is forgiven but recorded for observability.
-    prev_balance = locked_user.coin_balance if locked_user.coin_balance > 0 else ZERO_MONEY
-    actual_debit = min(final_cost, prev_balance)  # both Decimal
-    shortfall = final_cost - actual_debit
-    locked_user.coin_balance = prev_balance - actual_debit
-    session.coins_spent = actual_debit  # what was actually collected from the wallet
-
-    description = f"Charging session on {plug.name}: {final_energy:.3f} kWh"
-    if reason:
-        description += f" [{reason}]"
-    if shortfall > 0:
-        description += f" (shortfall {shortfall:.2f} coins uncollected)"
-        logger.warning(
-            f"Session {session.id}: billed {final_cost:.2f} coins but wallet held "
-            f"only {prev_balance:.2f}; {shortfall:.2f} coins uncollected"
-        )
-
-    ledger_entry = LedgerTransaction(
-        user_id=locked_user.id,
-        session_id=session.id,
-        amount=-actual_debit,  # Negative = debit; matches the real balance delta
-        transaction_type=TransactionType.SESSION_DEBIT,
-        description=description,
-        balance_after=locked_user.coin_balance,
-    )
-    db.add(ledger_entry)
-
-    # 5. Update plug status back to available
-    plug.status = PlugStatus.AVAILABLE
-    await db.commit()
-
-    # Broadcast so other clients' plug lists flip back to AVAILABLE live.
-    from backend.services.socketio_manager import emit_plug_status
-    await emit_plug_status(plug.id, PlugStatus.AVAILABLE.value)
-
-    # 6. End telemetry stream
-    telemetry_store.end_session(plug.id)
-    await set_plug_telemetry_interval(db, plug.id, 10000)
-
-    logger.info(
-        f"Session {session.id} stopped{f' ({reason})' if reason else ''}: "
-        f"{final_energy:.3f} kWh, {actual_debit:.2f} coins"
-    )
-
-    return {
-        "status": "completed",
-        "session_id": session.id,
-        "energy_kwh": round(final_energy, 3),
-        "coins_spent": round(actual_debit, 2),
-        "balance_remaining": round(locked_user.coin_balance, 2),
     }
 
 
@@ -1277,12 +996,6 @@ async def razorpay_webhook(request: Request, db: AsyncSession = Depends(get_db))
 # ===========================================================================
 
 
-class DirectPlugRequest(BaseModel):
-    """Optional request body for direct plug control. If plug_ip is not provided,
-    falls back to the TAPO_PLUG_IP environment variable."""
-    plug_ip: Optional[str] = None
-
-
 def _get_plug_ip(req_ip: Optional[str] = None) -> str:
     """
     Resolve the target plug IP address.
@@ -1308,14 +1021,14 @@ async def direct_plug_on(
     Bypasses ESP32/MQTT and sends the command directly to the plug via
     the WireGuard tunnel. Requires DIRECT_MODE=true in environment.
     """
-    if not DIRECT_MODE or not tapo_driver:
+    if not DIRECT_MODE or not state.tapo_driver:
         raise HTTPException(
             status_code=503,
             detail="Direct mode is not enabled. Set DIRECT_MODE=true and provide Tapo credentials.",
         )
 
     plug_ip = _get_plug_ip(req.plug_ip)
-    success = await tapo_driver.turn_on(plug_ip)
+    success = await state.tapo_driver.turn_on(plug_ip)
 
     if not success:
         raise HTTPException(
@@ -1341,14 +1054,14 @@ async def direct_plug_off(
     Bypasses ESP32/MQTT and sends the command directly to the plug via
     the WireGuard tunnel. Requires DIRECT_MODE=true in environment.
     """
-    if not DIRECT_MODE or not tapo_driver:
+    if not DIRECT_MODE or not state.tapo_driver:
         raise HTTPException(
             status_code=503,
             detail="Direct mode is not enabled. Set DIRECT_MODE=true and provide Tapo credentials.",
         )
 
     plug_ip = _get_plug_ip(req.plug_ip)
-    success = await tapo_driver.turn_off(plug_ip)
+    success = await state.tapo_driver.turn_off(plug_ip)
 
     if not success:
         raise HTTPException(
@@ -1373,14 +1086,14 @@ async def direct_plug_info(
     [Direct Mode] Get device information from the Tapo P110 plug.
     Returns power state, model, nickname, firmware version, etc.
     """
-    if not DIRECT_MODE or not tapo_driver:
+    if not DIRECT_MODE or not state.tapo_driver:
         raise HTTPException(
             status_code=503,
             detail="Direct mode is not enabled. Set DIRECT_MODE=true and provide Tapo credentials.",
         )
 
     target_ip = _get_plug_ip(plug_ip)
-    info = await tapo_driver.get_device_info(target_ip)
+    info = await state.tapo_driver.get_device_info(target_ip)
 
     if info is None:
         raise HTTPException(
@@ -1404,14 +1117,14 @@ async def direct_plug_energy(
     [Direct Mode] Get energy usage data from the Tapo P110 plug.
     Returns current power draw, today's energy consumption, monthly stats.
     """
-    if not DIRECT_MODE or not tapo_driver:
+    if not DIRECT_MODE or not state.tapo_driver:
         raise HTTPException(
             status_code=503,
             detail="Direct mode is not enabled. Set DIRECT_MODE=true and provide Tapo credentials.",
         )
 
     target_ip = _get_plug_ip(plug_ip)
-    usage = await tapo_driver.get_energy_usage(target_ip)
+    usage = await state.tapo_driver.get_energy_usage(target_ip)
 
     if usage is None:
         raise HTTPException(
@@ -1435,14 +1148,14 @@ async def direct_plug_health(
     [Direct Mode] Health check — verify the plug is reachable through
     the WireGuard tunnel and responding to commands.
     """
-    if not DIRECT_MODE or not tapo_driver:
+    if not DIRECT_MODE or not state.tapo_driver:
         raise HTTPException(
             status_code=503,
             detail="Direct mode is not enabled. Set DIRECT_MODE=true and provide Tapo credentials.",
         )
 
     target_ip = _get_plug_ip(plug_ip)
-    health = await tapo_driver.health_check(target_ip)
+    health = await state.tapo_driver.health_check(target_ip)
 
     return {
         "plug_ip": target_ip,
@@ -1463,55 +1176,6 @@ async def direct_plug_health(
 # - Create and manage charger groups (public/private with access codes)
 # - View analytics: session history, revenue, energy consumption
 # ===========================================================================
-
-
-# --- CPO Pydantic Schemas ---
-
-class CpoSetupRequest(BaseModel):
-    """Request body for CPO onboarding — creates a new tenant."""
-    tenant_name: str
-
-
-class CpoGatewayCreateRequest(BaseModel):
-    """Register a new gateway under the CPO's tenant."""
-    gateway_id: str   # MAC address or hardware UUID
-    name: str
-    vpn_ip: str
-
-
-class CpoPlugCreateRequest(BaseModel):
-    """Register a new plug on one of the CPO's gateways."""
-    gateway_id: str
-    name: str
-    local_ip: str
-    plug_model: str = "tapo_p110"
-    group_id: Optional[int] = None
-    # Optional geolocation; when omitted the plug inherits its gateway's coords.
-    latitude: Optional[float] = Field(default=None, ge=-90, le=90)
-    longitude: Optional[float] = Field(default=None, ge=-180, le=180)
-
-
-class CpoPlugUpdateRequest(BaseModel):
-    """Update an existing plug's details."""
-    name: Optional[str] = None
-    group_id: Optional[int] = None
-    # Status string matching PlugStatus enum values: available, occupied, offline, maintenance
-    status: Optional[str] = None
-    latitude: Optional[float] = Field(default=None, ge=-90, le=90)
-    longitude: Optional[float] = Field(default=None, ge=-180, le=180)
-
-
-class CpoGroupCreateRequest(BaseModel):
-    """Create a new charger group."""
-    name: str
-    is_public: bool = False
-
-
-class CpoGroupUpdateRequest(BaseModel):
-    """Update an existing charger group."""
-    name: Optional[str] = None
-    is_public: Optional[bool] = None
-    regenerate_access_code: bool = False
 
 
 # --- CPO Setup & Profile ---

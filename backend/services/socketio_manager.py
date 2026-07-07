@@ -160,8 +160,8 @@ async def stream_telemetry_task(session_id: int, plug_id: int):
     Background task to stream telemetry for a session.
     It runs as long as the room has participants and the session is not completed.
     """
-    # Import inside the function to avoid circular imports
-    from backend.main import set_plug_telemetry_interval
+    # Late import so unit tests can stub the module with a DB-free fake
+    from backend.services.session_lifecycle import set_plug_telemetry_interval
     room_name = f"session_{session_id}"
     logger.info(f"Starting telemetry stream task for session {session_id} (plug {plug_id})")
     

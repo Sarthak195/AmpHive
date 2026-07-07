@@ -17,9 +17,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-import backend.main as main_module
 from backend.database.models import GatewayStatus
-from backend.main import GATEWAY_LIVENESS_WINDOW_SEC, gateway_is_live
+from backend.services.session_lifecycle import GATEWAY_LIVENESS_WINDOW_SEC, gateway_is_live
 from backend.services import mqtt_manager as mqtt_module
 from backend.services.mqtt_manager import MQTTManager
 
