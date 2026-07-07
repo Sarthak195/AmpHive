@@ -13,7 +13,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 from sqlalchemy.exc import IntegrityError
 
-from backend.main import CpoSetupRequest, RegisterRequest, cpo_setup, register
+from backend.routers.auth import register
+from backend.routers.cpo import cpo_setup
+from backend.schemas import CpoSetupRequest, RegisterRequest
 
 
 def _integrity_error():

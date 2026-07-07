@@ -84,8 +84,12 @@ Cross-references [TECH_DEBT.md](TECH_DEBT.md) items as `TD#n` and
       (`backend/tests/test_migrations.py`). Future schema changes ship as
       revisions: `alembic -c backend/alembic.ini revision --autogenerate`
       (needs a reachable DB — CI or the VM). (TD#5)
-- [ ] **Split `backend/main.py`** (2,291 lines) into `routers/` + `schemas/`;
-      keep the lifespan in `main.py`. (TD#7)
+- [x] **Split `backend/main.py`** (2026-07-07): 2,384 → 221 lines. Routes
+      moved verbatim to `backend/routers/{auth,groups,plugs,sessions,payments,
+      direct,cpo}.py`; schemas to `backend/schemas.py`; runtime handles to
+      `backend/state.py` (attribute access — survives the lifespan rebind);
+      session helpers to `services/session_lifecycle.py`. OpenAPI parity
+      verified: 36 operations before and after. (TD#7)
 - [x] **Money → `Numeric(12,2)`** (2026-07-06) for `coin_balance`, `coins_spent`,
       ledger `amount`/`balance_after`. Columns migrated in place via a guarded
       `ALTER … TYPE NUMERIC(12,2)` in `db.py:_INPLACE_UPGRADES`; all wallet math now

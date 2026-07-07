@@ -1,0 +1,267 @@
+"""
+Sessions routes — moved verbatim from main.py (2026-07-07, TD#7 split).
+"""
+import json
+import logging
+import os
+from datetime import datetime, timedelta, timezone
+from typing import List, Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Request
+from sqlalchemy import Date, and_, cast, func, or_, select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from backend import state
+from backend.database.db import async_session_factory, get_db
+from backend.database.models import (
+    ChargerGroup, ChargingSession, Gateway, GatewayStatus, GroupMembership,
+    LedgerTransaction, Plug, PlugStatus, SessionStatus, TelemetryReading,
+    Tenant, TransactionType, User, UserRole,
+)
+from backend.schemas import (
+    AuthResponse, CpoGatewayCreateRequest, CpoGroupCreateRequest,
+    CpoGroupUpdateRequest, CpoPlugCreateRequest, CpoPlugUpdateRequest,
+    CpoSetupRequest, CreateOrderRequest, CreateOrderResponse,
+    DirectPlugRequest, GatewayRegisterRequest, GroupResponse,
+    JoinGroupRequest, LoginRequest, PlugRegisterRequest, PlugResponse,
+    RegisterRequest, SessionStartRequest, SessionStopRequest, UserResponse,
+    VerifyPaymentRequest,
+)
+from backend.services import payments as payment_service
+from backend.services.auth import (
+    create_access_token, decode_access_token, get_current_user,
+    hash_password, verify_password,
+)
+from backend.services.money import ZERO_MONEY, to_money
+from backend.services.rbac import require_role
+from backend.services.session_lifecycle import (
+    check_and_speed_up_active_session, finalize_charging_session,
+    gateway_is_live, set_plug_telemetry_interval,
+)
+from backend.services.telemetry import COINS_PER_KWH
+
+logger = logging.getLogger("amphive.api")
+router = APIRouter()
+
+# ===========================================================================
+# Charging Session Endpoints
+# ===========================================================================
+
+@router.post("/api/sessions/start")
+async def start_charging_session(
+    req: SessionStartRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Start a charging session on a specific plug.
+    1. Verify user has access to the plug (group check).
+    2. Check user has sufficient wallet balance (minimum ₹50).
+    3. Lock the plug row and claim it (avoids two concurrent starts on one plug).
+    4. Commit the session + OCCUPIED status FIRST, then publish MQTT ON.
+       (Publishing first could leave the plug live with no session billing it
+       if the DB write then fails. If the publish fails we roll the claim back.)
+    5. Start the telemetry stream.
+    """
+    # 1. Verify plug exists and lock the row for the duration of this txn, so a
+    #    concurrent start blocks here and then sees OCCUPIED (closes the TOCTOU
+    #    between the availability check and the claim below).
+    result = await db.execute(
+        select(Plug).where(Plug.id == req.plug_id).with_for_update()
+    )
+    plug = result.scalar_one_or_none()
+    if not plug:
+        raise HTTPException(status_code=404, detail=f"Plug {req.plug_id} not found.")
+
+    # Access check for private groups
+    if plug.group_id:
+        group_result = await db.execute(
+            select(ChargerGroup).where(ChargerGroup.id == plug.group_id)
+        )
+        group = group_result.scalar_one_or_none()
+        if group and not group.is_public:
+            membership_result = await db.execute(
+                select(GroupMembership).where(
+                    and_(
+                        GroupMembership.user_id == user.id,
+                        GroupMembership.group_id == group.id,
+                    )
+                )
+            )
+            if not membership_result.scalar_one_or_none():
+                raise HTTPException(
+                    status_code=403,
+                    detail="You don't have access to this plug. Join the group first.",
+                )
+
+    # 2. Check wallet balance (minimum 50 coins to start)
+    if user.coin_balance < 50:
+        raise HTTPException(
+            status_code=402,
+            detail=f"Insufficient balance. You have {user.coin_balance} coins. Minimum 50 required.",
+        )
+
+    # 3. Claim the plug (still holding the row lock). Only OCCUPIED blocks a
+    #    start; offline/maintenance plugs are handled by the gateway/telemetry.
+    if plug.status == PlugStatus.OCCUPIED:
+        raise HTTPException(status_code=409, detail="This plug is currently in use.")
+
+    gw_result = await db.execute(select(Gateway).where(Gateway.id == plug.gateway_id))
+    gateway = gw_result.scalar_one()
+
+    # Refuse to start against a gateway that isn't demonstrably alive: the MQTT
+    # publish below only confirms the *broker* accepted the command, so without
+    # this check a session on a dead gateway starts "successfully" and then
+    # sits ACTIVE forever with the plug pinned OCCUPIED and no telemetry.
+    if not gateway_is_live(gateway):
+        raise HTTPException(
+            status_code=409,
+            detail="This charger's gateway is offline. Try again once it reconnects.",
+        )
+
+    session = ChargingSession(
+        tenant_id=gateway.tenant_id,
+        user_id=user.id,
+        plug_id=plug.id,
+        status=SessionStatus.ACTIVE,
+    )
+    db.add(session)
+    plug.status = PlugStatus.OCCUPIED
+    # Commit the claim + session BEFORE touching hardware, releasing the lock.
+    await db.commit()
+    await db.refresh(session)
+
+    # Broadcast the claim so other clients' plug lists flip to OCCUPIED live.
+    from backend.services.socketio_manager import emit_plug_status
+    await emit_plug_status(plug.id, PlugStatus.OCCUPIED.value)
+
+    # 4. Now command the gateway. If this fails, undo the claim so the plug
+    #    doesn't stay OCCUPIED with a live ACTIVE session nobody can drive.
+    success = state.mqtt_manager.send_plug_command(
+        gateway_id=plug.gateway_id,
+        plug_id=plug.id,
+        action="ON",
+        max_duration=req.max_duration_seconds,
+        max_kwh=req.max_kwh,
+        session_id=session.id,
+    )
+    if not success:
+        session.status = SessionStatus.CANCELLED
+        session.ended_at = datetime.now(timezone.utc)
+        plug.status = PlugStatus.AVAILABLE
+        await db.commit()
+        await emit_plug_status(plug.id, PlugStatus.AVAILABLE.value)
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to publish start command to the gateway. The gateway may be offline.",
+        )
+
+    # 5. Initialize the telemetry stream for this plug
+    state.telemetry_store.start_session(plug.id)
+    await set_plug_telemetry_interval(db, plug.id, 1000)
+
+    logger.info(f"Session {session.id} started: user={user.email}, plug={plug.id}")
+
+    return {
+        "status": "started",
+        "session_id": session.id,
+        "plug_id": plug.id,
+        "plug_name": plug.name,
+        "message": f"Charging started on {plug.name}.",
+    }
+
+
+@router.post("/api/sessions/stop")
+async def stop_charging_session(
+    req: SessionStopRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Stop an active charging session (billing + cleanup happen in
+    finalize_charging_session, shared with the session reaper).
+    """
+    result = await finalize_charging_session(
+        db, req.session_id, expected_user_id=user.id
+    )
+    if result is not None:
+        return result
+
+    # Nothing was finalized — distinguish "not yours/doesn't exist" from
+    # "already finished" for the API contract. Race-safe: finalization
+    # definitively did not happen in this request.
+    check = await db.execute(
+        select(ChargingSession).where(
+            and_(
+                ChargingSession.id == req.session_id,
+                ChargingSession.user_id == user.id,
+            )
+        )
+    )
+    if check.scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail="Session not found.")
+    raise HTTPException(status_code=400, detail="This session is not active.")
+
+
+@router.get("/api/sessions/active")
+async def get_active_session(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get the current active charging session for the logged-in user, if any."""
+    result = await db.execute(
+        select(ChargingSession)
+        .where(
+            and_(
+                ChargingSession.user_id == user.id,
+                ChargingSession.status == SessionStatus.ACTIVE,
+            )
+        )
+        .order_by(ChargingSession.started_at.desc())
+    )
+    sessions = list(result.scalars().all())
+    if not sessions:
+        return {"active": False}
+    session = sessions[0]
+
+    plug_result = await db.execute(select(Plug).where(Plug.id == session.plug_id))
+    plug = plug_result.scalar_one()
+
+    return {
+        "active": True,
+        "session_id": session.id,
+        "plug_id": session.plug_id,
+        "plug_name": plug.name,
+        "started_at": session.started_at.isoformat() if session.started_at else None,
+    }
+
+
+@router.get("/api/sessions/history")
+async def get_session_history(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return past charging sessions for the current user, most recent first."""
+    result = await db.execute(
+        select(ChargingSession)
+        .where(ChargingSession.user_id == user.id)
+        .order_by(ChargingSession.started_at.desc())
+        .limit(50)
+    )
+    sessions = list(result.scalars().all())
+
+    return [
+        {
+            "id": s.id,
+            "plug_id": s.plug_id,
+            "started_at": s.started_at.isoformat() if s.started_at else None,
+            "ended_at": s.ended_at.isoformat() if s.ended_at else None,
+            "energy_kwh": round(s.energy_kwh, 3),
+            "coins_spent": round(s.coins_spent, 2),
+            "status": s.status.value,
+        }
+        for s in sessions
+    ]
+
+

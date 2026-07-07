@@ -13,8 +13,11 @@ thin service or the data layer. The import graph is acyclic
 (`main.py` → `services/*` → `database/*`).
 
 ```
-main.py  (FastAPI app — 35 REST endpoints, all schemas, lifespan)
+main.py  (app assembly only since 2026-07-07: lifespan, CORS, health, router includes, Socket.io wrap)
 │
+├── routers/               7 route modules (auth, groups, plugs, sessions, payments, direct, cpo)
+├── schemas.py             all Pydantic request/response models
+├── state.py               mutable runtime handles (mqtt_manager, telemetry_store, …) set by lifespan
 ├── database/db.py         async engine + async_sessionmaker + get_db + init_db (alembic upgrade head)
 │    └── database/models.py → Base
 ├── database/models.py     9 ORM tables + 5 enums  (source of truth, applied via Alembic)
