@@ -44,6 +44,11 @@ from backend.services.telemetry import COINS_PER_KWH
 logger = logging.getLogger("amphive.api")
 router = APIRouter()
 
+# How many charging sessions a user may run concurrently (e.g. two vehicles
+# on two plugs). The API and UI list every active session, so raising this
+# needs no code change.
+MAX_ACTIVE_SESSIONS_PER_USER = int(os.getenv("MAX_ACTIVE_SESSIONS_PER_USER", "2"))
+
 # ===========================================================================
 # Charging Session Endpoints
 # ===========================================================================
@@ -56,6 +61,7 @@ async def start_charging_session(
 ):
     """
     Start a charging session on a specific plug.
+    0. Lock the user row and enforce the concurrent-session cap.
     1. Verify user has access to the plug (group check).
     2. Check user has sufficient wallet balance (minimum ₹50).
     3. Lock the plug row and claim it (avoids two concurrent starts on one plug).
@@ -64,6 +70,39 @@ async def start_charging_session(
        if the DB write then fails. If the publish fails we roll the claim back.)
     5. Start the telemetry stream.
     """
+    # 0. Lock the user row, then count ACTIVE sessions under that lock: two
+    #    simultaneous starts by the same user serialize here, so the loser
+    #    counts the winner's committed session (a plain count would let both
+    #    pass and exceed the cap). Lock order is user -> plug everywhere the
+    #    two are taken together (finalize goes session -> user -> plug), so
+    #    no lock cycle is possible.
+    locked_user = await db.execute(
+        select(User).where(User.id == user.id).with_for_update()
+    )
+    user = locked_user.scalar_one()
+
+    count_result = await db.execute(
+        select(func.count())
+        .select_from(ChargingSession)
+        .where(
+            and_(
+                ChargingSession.user_id == user.id,
+                ChargingSession.status == SessionStatus.ACTIVE,
+            )
+        )
+    )
+    active_count = count_result.scalar_one()
+    if active_count >= MAX_ACTIVE_SESSIONS_PER_USER:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"You already have {active_count} active charging "
+                f"session{'s' if active_count != 1 else ''} "
+                f"(limit {MAX_ACTIVE_SESSIONS_PER_USER}). "
+                "Stop one before starting another."
+            ),
+        )
+
     # 1. Verify plug exists and lock the row for the duration of this txn, so a
     #    concurrent start blocks here and then sees OCCUPIED (closes the TOCTOU
     #    between the availability check and the claim below).
@@ -209,9 +248,14 @@ async def get_active_session(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get the current active charging session for the logged-in user, if any."""
+    """
+    All ACTIVE charging sessions for the logged-in user, newest first (a user
+    may run up to MAX_ACTIVE_SESSIONS_PER_USER concurrently). The top-level
+    single-session fields mirror the newest entry for older clients.
+    """
     result = await db.execute(
-        select(ChargingSession)
+        select(ChargingSession, Plug.name)
+        .join(Plug, Plug.id == ChargingSession.plug_id)
         .where(
             and_(
                 ChargingSession.user_id == user.id,
@@ -220,21 +264,19 @@ async def get_active_session(
         )
         .order_by(ChargingSession.started_at.desc())
     )
-    sessions = list(result.scalars().all())
+    sessions = [
+        {
+            "session_id": session.id,
+            "plug_id": session.plug_id,
+            "plug_name": plug_name,
+            "started_at": session.started_at.isoformat() if session.started_at else None,
+        }
+        for session, plug_name in result.all()
+    ]
     if not sessions:
-        return {"active": False}
-    session = sessions[0]
+        return {"active": False, "sessions": []}
 
-    plug_result = await db.execute(select(Plug).where(Plug.id == session.plug_id))
-    plug = plug_result.scalar_one()
-
-    return {
-        "active": True,
-        "session_id": session.id,
-        "plug_id": session.plug_id,
-        "plug_name": plug.name,
-        "started_at": session.started_at.isoformat() if session.started_at else None,
-    }
+    return {"active": True, "sessions": sessions, **sessions[0]}
 
 
 @router.get("/api/sessions/history")

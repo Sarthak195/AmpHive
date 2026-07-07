@@ -53,9 +53,15 @@ Cross-references [TECH_DEBT.md](TECH_DEBT.md) items as `TD#n` and
       path as a user stop — which now **locks the session row** and re-checks
       ACTIVE, also closing the pre-existing double-stop double-debit race.
       Tests: `backend/tests/test_session_reaper.py`. (IMPL §3.42)
-- [ ] **Decide one-active-session-per-user** (enforce at start) or make
-      `/api/sessions/active` + the UI handle several; today older active
-      sessions are unreachable/un-stoppable by the user.
+- [x] **Decide one-active-session-per-user** (2026-07-07): **decided — allow
+      up to 2 concurrent sessions per user** (`MAX_ACTIVE_SESSIONS_PER_USER`,
+      env, default 2), enforced in `/api/sessions/start` under a user-row
+      lock (concurrent starts serialize, so the cap can't be exceeded by a
+      race). `/api/sessions/active` now returns **all** active sessions
+      (top-level fields still mirror the newest for older clients), and the
+      frontend lists every session (Home banners, Session-page switcher), so
+      none is unreachable/un-stoppable anymore. Tests:
+      `backend/tests/test_max_active_sessions.py`. (IMPL §3.45)
 - [x] **Map duplicate-registration race to 400** (2026-07-06):
       `/api/auth/register` and `/api/cpo/setup` caught only the sequential
       duplicate via exists-check; the concurrent one escaped as a raw

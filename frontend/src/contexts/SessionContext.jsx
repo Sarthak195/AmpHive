@@ -11,8 +11,12 @@
  * 1. user logs in → opens Socket.io connection using JWT auth
  * 2. startSession(plugId) → POST /api/sessions/start → receives session_id
  *    - Automatically emits 'subscribe_session' and listens for 'telemetry' events
- * 3. stopSession() → POST /api/sessions/stop
+ * 3. stopSession() → POST /api/sessions/stop (stops the *focused* session)
  *    - Automatically emits 'unsubscribe_session' and stops telemetry listener
+ *
+ * A user can hold several active sessions at once (backend cap, default 2):
+ * `activeSessions` lists them all, and switchSession(s) refocuses the live
+ * monitor (telemetry subscription follows the focused session).
  */
 
 import React, { createContext, useState, useContext, useEffect, useCallback } from 'react';
@@ -26,6 +30,10 @@ const API_BASE = import.meta.env.VITE_API_URL || '';
 
 export const SessionProvider = ({ children }) => {
   const { user } = useAuth();
+  // A user can hold several active sessions (backend caps them, default 2).
+  // `activeSessions` lists them all; `sessionId`/`sessionData`/`isActive`
+  // track the *focused* one — the session the live monitor is subscribed to.
+  const [activeSessions, setActiveSessions] = useState([]);
   const [sessionData, setSessionData] = useState(null);
   const [sessionId, setSessionId] = useState(null);
   const [isActive, setIsActive] = useState(false);
@@ -86,14 +94,46 @@ export const SessionProvider = ({ children }) => {
     };
   }, [socket, sessionId, isActive]);
 
+  const refreshActiveSessions = useCallback(async () => {
+    const res = await api.get('/api/sessions/active');
+    setActiveSessions(res.sessions || []);
+    return res;
+  }, []);
+
+  // Point the live monitor at one of the active sessions (resubscribes
+  // telemetry via the effect above).
+  const switchSession = useCallback((session) => {
+    setSessionId(session.session_id);
+    setIsActive(true);
+    setSessionData({
+      plug_id: session.plug_id,
+      plug_name: session.plug_name,
+      status: 'charging',
+      duration_sec: 0,
+      power_w: 0.0,
+      energy_kwh: 0.0,
+      current_a: 0.0,
+      cost_coins: 0.0
+    });
+  }, []);
+
   const startSession = useCallback(async (plugId) => {
     setError(null);
     try {
       // Call backend to start session
       const result = await api.post('/api/sessions/start', { plug_id: parseInt(plugId) });
-      const newSessionId = result.session_id;
-      setSessionId(newSessionId);
+      setActiveSessions(prev => [
+        {
+          session_id: result.session_id,
+          plug_id: result.plug_id,
+          plug_name: result.plug_name,
+          started_at: new Date().toISOString(),
+        },
+        ...prev,
+      ]);
+      setSessionId(result.session_id);
       setIsActive(true);
+      setSessionData(null);
       return result;
     } catch (err) {
       setError(err.message);
@@ -106,6 +146,7 @@ export const SessionProvider = ({ children }) => {
     try {
       if (sessionId) {
         const result = await api.post('/api/sessions/stop', { session_id: sessionId });
+        setActiveSessions(prev => prev.filter(s => s.session_id !== sessionId));
         // Keep last sessionData for receipt view, but mark as completed
         setSessionData(prev => prev ? { ...prev, status: 'completed' } : null);
         setIsActive(false);
@@ -114,9 +155,12 @@ export const SessionProvider = ({ children }) => {
     } catch (err) {
       setError(err.message);
       setIsActive(false);
+      // The stop may have failed because the session was already finalized
+      // server-side (reaper/other tab) — re-sync the list from the backend.
+      refreshActiveSessions().catch(() => {});
       throw err;
     }
-  }, [sessionId]);
+  }, [sessionId, refreshActiveSessions]);
 
   const clearSession = useCallback(() => {
     setSessionData(null);
@@ -125,10 +169,11 @@ export const SessionProvider = ({ children }) => {
     setError(null);
   }, []);
 
-  // Check for active session on mount or auth change
+  // Check for active sessions on mount or auth change; focus the newest.
   useEffect(() => {
     const checkActiveSession = async () => {
       if (!user) {
+        setActiveSessions([]);
         setSessionData(null);
         setSessionId(null);
         setIsActive(false);
@@ -136,20 +181,9 @@ export const SessionProvider = ({ children }) => {
       }
 
       try {
-        const res = await api.get('/api/sessions/active');
+        const res = await refreshActiveSessions();
         if (res.active) {
-          setSessionId(res.session_id);
-          setIsActive(true);
-          setSessionData({
-            plug_id: res.plug_id,
-            plug_name: res.plug_name,
-            status: 'charging',
-            duration_sec: 0,
-            power_w: 0.0,
-            energy_kwh: 0.0,
-            current_a: 0.0,
-            cost_coins: 0.0
-          });
+          switchSession(res.sessions[0]);
         }
       } catch (err) {
         console.error('Failed to restore active session:', err);
@@ -157,13 +191,13 @@ export const SessionProvider = ({ children }) => {
     };
 
     checkActiveSession();
-  }, [user]);
+  }, [user, refreshActiveSessions, switchSession]);
 
   return (
     <SessionContext.Provider value={{
       socket,
-      sessionData, sessionId, isActive, error,
-      startSession, stopSession, clearSession,
+      activeSessions, sessionData, sessionId, isActive, error,
+      startSession, stopSession, clearSession, switchSession,
     }}>
       {children}
     </SessionContext.Provider>

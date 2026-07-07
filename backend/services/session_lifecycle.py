@@ -80,10 +80,10 @@ async def check_and_speed_up_active_session(db: AsyncSession, user_id: int):
     Check if the user has active charging sessions, and if so, speed up the
     telemetry interval for each corresponding plug to 1000ms.
 
-    A user can hold more than one ACTIVE session (nothing limits starts to a
-    single plug), so this must not assume a single row — scalar_one_or_none()
-    here raised MultipleResultsFound, which broke /api/auth/login and
-    /api/auth/me for that user.
+    A user can hold more than one ACTIVE session (starts are capped at
+    MAX_ACTIVE_SESSIONS_PER_USER, default 2), so this must not assume a single
+    row — scalar_one_or_none() here raised MultipleResultsFound, which broke
+    /api/auth/login and /api/auth/me for that user.
     """
     result = await db.execute(
         select(ChargingSession).where(

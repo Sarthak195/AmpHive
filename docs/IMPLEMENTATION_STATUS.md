@@ -290,3 +290,17 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
     status, the backend now re-sends OFF (best-effort, no broker-ack wait) to
     each of that gateway's plugs lacking an ACTIVE session. Tests:
     `backend/tests/test_reconnect_off_republish.py`.
+45. [Resolved 2026-07-07] **Concurrent-session policy decided: max 2 per
+    user.** Nothing used to limit how many ACTIVE sessions a user could hold,
+    while `/api/sessions/active` and the UI surfaced only the newest — older
+    active sessions were unreachable/un-stoppable by the user (and >1 ACTIVE
+    session previously crashed login, §3.39). `/api/sessions/start` now
+    enforces `MAX_ACTIVE_SESSIONS_PER_USER` (env, default 2) with a 409,
+    counting under a `SELECT … FOR UPDATE` user-row lock so two simultaneous
+    starts serialize (lock order user → plug is consistent with the finalize
+    path's session → user → plug; no cycle). `/api/sessions/active` returns
+    all active sessions newest-first (the legacy top-level single-session
+    fields mirror the newest entry), and the frontend tracks the full list:
+    one Home banner per session, a Session-page switcher to refocus the live
+    monitor, and stop acts on the focused session. Tests:
+    `backend/tests/test_max_active_sessions.py`.

@@ -62,9 +62,9 @@ Token: HS256 JWT, claims `sub`/`role`/`email`/`iat`/`exp`, **7-day** expiry.
 
 | Method | Path | Auth | Body/Params | Behaviour |
 |--------|------|------|-------------|-----------|
-| POST | `/api/sessions/start` | JWT | `{plug_id, max_duration_seconds=14400, max_kwh=30.0}` | Access check → require balance ≥ 50 (402) → reject if OCCUPIED (409) → MQTT `ON` (500 on publish fail) → create session, mark plug OCCUPIED → `{status:"started", session_id, plug_id, plug_name, message}` |
+| POST | `/api/sessions/start` | JWT | `{plug_id, max_duration_seconds=14400, max_kwh=30.0}` | Reject if the user already has `MAX_ACTIVE_SESSIONS_PER_USER` (env, default 2) ACTIVE sessions (409; counted under a user-row lock so concurrent starts can't exceed the cap) → access check → require balance ≥ 50 (402) → reject if OCCUPIED (409) → MQTT `ON` (500 on publish fail) → create session, mark plug OCCUPIED → `{status:"started", session_id, plug_id, plug_name, message}` |
 | POST | `/api/sessions/stop` | JWT | `{session_id}` | Owner+active check → MQTT `OFF` (best-effort) → finalize from telemetry → debit wallet → ledger `session_debit` → plug AVAILABLE → `{status:"completed", session_id, energy_kwh, coins_spent, balance_remaining}` |
-| GET | `/api/sessions/active` | JWT | — | Retrieve the currently active session for the logged-in user, if any (returns the most recent active session) → `{active:true, session_id, plug_id, plug_name, started_at}` or `{active:false}` |
+| GET | `/api/sessions/active` | JWT | — | Retrieve **all** active sessions for the logged-in user, newest first → `{active:true, sessions:[{session_id, plug_id, plug_name, started_at}, …], session_id, plug_id, plug_name, started_at}` (the top-level single-session fields mirror the newest entry for older clients) or `{active:false, sessions:[]}` |
 | — | `Socket.io` connection | JWT | connection query or auth dict | Real-time bi-directional channel for telemetry updates and session status (sole live-telemetry transport since 2026-07-07). |
 | GET | `/api/sessions/history` | JWT | — | Last 50 sessions, newest first → `[{id, plug_id, started_at, ended_at, energy_kwh, coins_spent, status}]` |
 
