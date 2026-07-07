@@ -92,8 +92,14 @@ must not break — have no automated coverage.
    bucket shapes and tenant isolation.
 
 ### Phase 4 — Frontend (P2)
-8. Add Vitest + React Testing Library. Cover: `AuthContext` restore/login/logout,
-   `TopUp` handler (verify called without amount), `ProtectedRoute`/`CpoProtectedRoute`.
+8. ~~Add Vitest + React Testing Library. Cover: `AuthContext` restore/login/logout,
+   `TopUp` handler (verify called without amount), `ProtectedRoute`/`CpoProtectedRoute`.~~
+   **Done 2026-07-07** — 20 tests in 4 suites (`src/**/*.test.jsx`): all of
+   the above plus the multi-session `SessionContext`
+   (restore-all/switch/start/stop). The guards were extracted from `App.jsx`
+   into `components/ProtectedRoutes.jsx` to be testable. Setup:
+   `vite.config.js` `test` block (jsdom; `src/test-setup.js` registers
+   jest-dom + RTL cleanup); `npm test` runs in CI alongside lint.
 
 ### Phase 5 — Firmware (P2/P3)
 9. Extract watchdog + offline-ring-buffer logic behind host-compilable units and

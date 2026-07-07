@@ -2,11 +2,10 @@
 
 *Verified against `deploy/`, `scripts/`, and `tools/` on 2026-07-02.*
 
-There are **two parallel deployment models** in the repo:
-1. **Docker Compose on a GCP Compute Engine VM** — this is the **live/canonical**
-   deployment.
-2. **Kubernetes (K3s) manifests** under `deploy/k8s/` — present and internally
-   consistent, but **not** what production runs. Treat as an alternative/future.
+The deployment model is **Docker Compose on a GCP Compute Engine VM**.
+(The K3s manifests under `deploy/k8s/` were **retired 2026-07-07** — see
+[§5](#5-kubernetes-manifests-deployk8s-retired) and `deploy/k8s/README.md`;
+they are unmaintained reference material, not an alternative.)
 
 ---
 
@@ -139,9 +138,11 @@ tunnel. (This file **commits a WireGuard private key** — see [SECURITY.md](SEC
 
 ⚠️ All four hard-code Tapo account credentials — see [SECURITY.md](SECURITY.md).
 
-## 5. Kubernetes manifests (`deploy/k8s/`, not live)
+## 5. Kubernetes manifests (`deploy/k8s/`, RETIRED)
 
-Namespace `amphive`, all Deployments `replicas: 1`. Differs from prod reality:
+**Retired 2026-07-07 (TD#15)** — kept as unmaintained reference only;
+`deploy/k8s/README.md` carries the banner. Known divergence from prod at
+retirement time (namespace `amphive`, all Deployments `replicas: 1`):
 - In-cluster **Postgres** (PVC) instead of Cloud SQL.
 - Backend/frontend pull Docker Hub images `sarthak195/amphive-*:latest` instead
   of building from source — these may be stale/unpublished.

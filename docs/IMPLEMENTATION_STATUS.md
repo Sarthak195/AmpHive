@@ -35,7 +35,8 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 | CPO operator portal (setup, dashboard, plugs, groups, sessions) | ✅ | `pages/cpo/*` behind `CpoProtectedRoute`; charts via `recharts` |
 | Map of available plugs | ✅ | Leaflet/OpenStreetMap `MapComponent` on Home. Plug geolocation is now persisted (`Plug.latitude`/`longitude`, falling back to the gateway's coords); markers use real coordinates and plugs without a known location are omitted — the old `Math.random()` fallback (which also jittered markers on every re-render) is gone. |
 | "View History" button (WalletCard) | ✅ | `WalletCard` button → `/history` route (`App.jsx`) → `History.jsx`, which fetches `GET /api/sessions/history`. Shows charging-session debits; does not yet show a unified ledger with top-up credits. |
-| TypeScript usage | ❌ | TS toolchain + `@types/*` present, but all app code is `.jsx`/`.js` |
+| TypeScript usage | — | **Decided against 2026-07-07** (TD#14): toolchain removed; all app code is plain `.jsx`/`.js` by policy. ESLint now actually lints `js/jsx` (the old config matched only `ts,tsx` — zero files). |
+| Frontend tests (Vitest + RTL) | ✅ | 20 tests: AuthContext, ProtectedRoute/CpoProtectedRoute, TopUp payment handler (no client amount on `/verify`), multi-session SessionContext. `npm test` runs in CI. |
 
 ### Firmware
 | Capability | Status | Notes |
@@ -55,7 +56,7 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 |------------|:------:|-------|
 | Docker Compose on GCP VM | ✅ | Live/canonical |
 | `deploy.ps1` + `scripts/*.bat` helpers | ✅ | VM start/stop + remote compose/logs (in `scripts/`) |
-| K8s/K3s manifests | 🟡 | Complete but not the live deployment; stale images, missing env |
+| K8s/K3s manifests | — | **Retired 2026-07-07** (TD#15): banner-marked unmaintained reference (`deploy/k8s/README.md`); Compose-on-VM is the only deployment model |
 | Mosquitto broker | 🟡 | Works, but anonymous + no TLS + publicly reachable |
 
 ---
@@ -149,8 +150,9 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
     doesn't match the implemented per-gateway topic — but firmware & backend agree.
 19. **MQTT "Noise-encrypted TCP"** (spec) → plain `mqtt://`, secured only by the
     overlay.
-20. **K8s vs VM divergence:** in-cluster Postgres vs Cloud SQL, Docker Hub images
-    vs source builds, missing backend secrets in K8s.
+20. [Resolved 2026-07-07] ~~K8s vs VM divergence~~ — moot: the manifests are
+    **retired** (TD#15) and banner-marked as unmaintained reference in
+    `deploy/k8s/README.md`, which records the divergence.
 21. **Committed VM public IP differs across docs** — the IP is ephemeral (see
     [SECURITY.md](SECURITY.md)); stale literals now remain only in
     historical/retired runbooks (`wireguard_tunnel_setup.md`,

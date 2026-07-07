@@ -144,12 +144,24 @@ Cross-references [TECH_DEBT.md](TECH_DEBT.md) items as `TD#n` and
       create/update. `MapComponent` plots only plugs with real coords and no
       longer uses `Math.random()` (which also moved markers on every re-render).
       (TD#17)
-- [ ] **Decide TypeScript**: adopt it (all app code is `.jsx` despite the TS
-      toolchain + `@types/*`) or remove the toolchain. (TD#14)
+- [x] **Decide TypeScript** (2026-07-07): **decided — removed the toolchain**
+      (`typescript`, `typescript-eslint`, `@types/*`, `tsconfig*.json`;
+      `vite.config.ts` → `.js`). All app code stays plain JSX. Found in the
+      process: the ESLint config only matched `**/*.{ts,tsx}`, so **lint had
+      been passing while checking zero files** — it now lints `js/jsx`, and
+      the 32 findings it surfaced were fixed (unused React imports under the
+      automatic JSX runtime, use-before-define fetch functions, a dead
+      `RAZORPAY_KEY_ID` const; `react-hooks/set-state-in-effect` disabled as
+      policy with a comment). (TD#14)
 - [x] **Fix `CpoSetup` redirect-during-render** (2026-07-06): the render-body
       `navigate()` is replaced with a declarative `<Navigate to=… replace />`. (TD#18)
-- [ ] **Add frontend tests** (Vitest + RTL) for auth, payment handler, protected
-      routes. (TESTING Phase 4)
+- [x] **Add frontend tests** (2026-07-07): Vitest + RTL, 20 tests across 4
+      suites — `AuthContext` (restore/login/logout/failed-restore cleanup),
+      `ProtectedRoute`/`CpoProtectedRoute` (extracted from `App.jsx` into
+      `components/ProtectedRoutes.jsx` for testability), the `TopUp` payment
+      handler (asserts `/verify` sends **only** the Razorpay ids/signature —
+      no client amount), and the multi-session `SessionContext`
+      (restore/switch/start/stop). `npm test` wired into CI. (TESTING Phase 4)
 
 ## Long term — productionization
 
@@ -175,8 +187,10 @@ Cross-references [TECH_DEBT.md](TECH_DEBT.md) items as `TD#n` and
       provisioned copy → KLAP `handshake1 auth mismatch`). (IMPL §2, §3.35)
 - [ ] **OTA firmware updates**: current single-app partition table precludes the
       spec'd dual-partition rollback. (IMPL 15)
-- [ ] **Reconcile or retire K8s manifests** — they diverge from the live VM
-      (stale images, missing secrets, in-cluster PG). (TD#15)
+- [x] **Reconcile or retire K8s manifests** (2026-07-07): **retired** —
+      `deploy/k8s/README.md` banner-marks them unmaintained reference
+      material (divergence documented); `docs/DEPLOYMENT.md` no longer
+      presents them as a parallel deployment model. (TD#15)
 - [ ] **TimescaleDB** (hypertables/retention/continuous-aggregates) for
       `telemetry_readings` if telemetry volume grows. (IMPL 2)
 - [ ] **Token revocation / shorter-lived JWTs** (currently 7-day, no blacklist).
