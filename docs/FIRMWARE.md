@@ -13,7 +13,7 @@ client written in C**.
 ```
 firmware/
 ├── CMakeLists.txt            # ESP-IDF project "amphive-gateway"
-├── sdkconfig.defaults        # PSRAM octal, 16MB flash, single-app-large partition
+├── sdkconfig.defaults        # PSRAM octal, 16MB flash, dual-OTA custom partition
 ├── main/
 │   ├── main.c                # boot, WiFi, captive portal, MQTT loop, watchdogs
 │   ├── tapo_protocol.c/.h    # Tapo P110 driver — real KLAP v2 (mbedTLS + esp_http_client)
@@ -175,9 +175,12 @@ an auth key but not a control-plane host.
 
 - PSRAM: `CONFIG_SPIRAM=y`, octal 80 MHz; stacks allowed in external RAM; 32 KB
   internal reserved. 16 MB flash.
-- **Partition table:** `CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE` — **single app,
-  no OTA partitions**, so the spec'd OTA dual-partition rollback is not possible
-  without changing this.
+- **Partition table:** `CONFIG_PARTITION_TABLE_CUSTOM` → `partitions_ota.csv`
+  (2026-07-07) — **dual OTA app slots** (`ota_0`/`ota_1`, 1920 KB each) +
+  `otadata`, with `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`. NVS keeps its
+  pre-OTA offset (`0x9000`) so provisioning survives the one-time migration
+  reflash. The ~1.1 MB image uses ~55% of a slot. (Was
+  `SINGLE_APP_LARGE` — no OTA — before this.)
 - mbedTLS TLS 1.2 + full cert bundle (for DERP/coordination TLS). lwIP IPv4-only.
 - Main task stack 32768. `CONFIG_MICROLINK_DISCO_PORT=51821` (cosmetic, actual port is hardcoded to `41641` to match standard magicsock).
 
@@ -200,6 +203,9 @@ Path A has now been run end-to-end on real hardware (a billed session with corre
 energy delivery); the firmware-side billing fix (session-relative `kwh`) and the
 `session_id` echo were **reflashed and verified on-device 2026-07-06** (raw MQTT
 payloads show `kwh` starting at 0 per session and the echoed `session_id`).
-Remaining gaps: there is no OTA, and the control-plane host constants still default
-to Tailscale (Headscale retarget pending). See
+**OTA is now implemented** (2026-07-07): dual-slot `esp_https_ota` with
+bootloader rollback, triggered by an `OTA` MQTT command
+(`ota_update.c`/`.h`); the new image only cancels rollback once it re-reaches
+the broker. Remaining gap: the control-plane host constants still default to
+Tailscale (Headscale retarget pending). See
 [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for the full matrix.

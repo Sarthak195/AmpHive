@@ -437,6 +437,30 @@ class MQTTManager:
             logger.error(f"Failed to publish command to {topic}: {e}")
             return False
 
+    def send_gateway_ota(self, gateway_id: str, plug_id: int, firmware_url: str) -> bool:
+        """
+        Trigger an OTA firmware update on a gateway.
+
+        The firmware subscribes only to the per-plug command topic
+        (amphive/gateways/{gw}/plugs/+/commands), so the OTA command rides one
+        of the gateway's plug topics; the firmware ignores the plug_id for
+        OTA (it's a gateway-scoped action) and does not touch active_plug_id.
+        Payload: {"action": "OTA", "url": "<http(s) url>"}. The gateway
+        refuses the update while a session is active and reboots into the
+        passive slot on success (rollback-protected).
+        """
+        topic = f"amphive/gateways/{gateway_id}/plugs/{plug_id}/commands"
+        payload = {"action": "OTA", "url": firmware_url}
+        try:
+            payload_str = json.dumps(payload)
+            info = self.client.publish(topic, payload_str, qos=1)
+            info.wait_for_publish(timeout=3.0)
+            logger.info(f"Published OTA command to {topic}: {payload_str}")
+            return info.is_published()
+        except Exception as e:
+            logger.error(f"Failed to publish OTA command to {topic}: {e}")
+            return False
+
     def send_plug_interval(self, gateway_id: str, plug_id: int, interval_ms: int) -> bool:
         """
         Sends a SET_INTERVAL command to a specific plug registered under a gateway.

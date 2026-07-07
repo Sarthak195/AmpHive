@@ -12,7 +12,7 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 ### Backend
 | Capability | Status | Notes |
 |------------|:------:|-------|
-| REST API (auth, groups, plugs, sessions, payments, direct, CPO portal) | ✅ | 36 endpoints (SSE live endpoint retired 2026-07-07) — see [API_REFERENCE.md](API_REFERENCE.md) |
+| REST API (auth, groups, plugs, sessions, payments, direct, CPO portal) | ✅ | 37 endpoints (SSE live endpoint retired + CPO gateway OTA-trigger added 2026-07-07) — see [API_REFERENCE.md](API_REFERENCE.md) |
 | JWT auth + bcrypt | ✅ | 7-day token, loaded fresh per request |
 | Role-based access control | ✅ | Enforced via `services/rbac.py` `require_role(...)` on all `/api/cpo/*` routes (checks the DB role, not just the token) |
 | MQTT command publish (ON/OFF) | ✅ | QoS 1, 3 s wait |
@@ -48,7 +48,7 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 | Over-current cutoff | ✅ | Enforced via the plug's `overcurrent_status` flag → local OFF + `OVERCURRENT_CUTOFF` alarm |
 | Tapo P110 driver (KLAP/AES) | ✅ | **Real KLAP v2** (mbedTLS SHA/AES + `esp_http_client`); fully verified on-device; builds on **ESP-IDF v5.3** (not v6) |
 | Session persistence in NVS / offline resync | ✅ | `session_nvs` module persists active session to NVS; `offline_log` ring buffer (64 entries) caches telemetry during MQTT outages; resync on reconnect |
-| OTA updates | ❌ | Single-app partition table; no `esp_https_ota` |
+| OTA updates | ✅ | Dual OTA app slots (`partitions_ota.csv`) + `esp_https_ota` with bootloader rollback (`ota_update.c`). Triggered by the `OTA` MQTT command / `POST /api/cpo/gateways/{id}/ota`; refuses mid-session; cancels rollback once the new image re-reaches the broker. **Built + flashed 2026-07-07** (booted from `ota_0`, provisioning survived the migration). Live OTA-push verification pending. |
 | Headscale (vs Tailscale defaults) | 🟡 | `/key` fetch supports it, but default host constants point at Tailscale |
 
 ### Infra / deploy
@@ -138,8 +138,13 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
     implementation (mbedTLS SHA/AES + `esp_http_client`), fully verified on-device.
     The project builds on **ESP-IDF v5.3.3** (v6.0.1 has breaking changes that cause a
     LoadProhibited panic on custom netif registration in `netif_callback_fn`).
-15. **No OTA** and the **single-app partition table** precludes the spec'd
-    dual-partition rollback without a partition change.
+15. [Resolved 2026-07-07] ~~No OTA / single-app partition table~~ — the
+    partition table is now dual-OTA (`partitions_ota.csv`: `ota_0`/`ota_1` +
+    `otadata`, NVS at its pre-OTA offset so provisioning survives the
+    migration flash), and `esp_https_ota` + bootloader rollback are wired in
+    (`ota_update.c`), triggered by the `OTA` MQTT command /
+    `POST /api/cpo/gateways/{id}/ota`. Built + flashed on-device; live
+    OTA-push verification pending.
 16. [Resolved 2026-07-02] **NVS session register / offline telemetry resync** now
     implemented via `session_nvs.c` (persists active session params) and
     `offline_log.c` (64-entry NVS ring buffer). Watchdogs enforce limits locally

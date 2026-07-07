@@ -21,10 +21,10 @@
 
 | Direction | Topic | QoS | Retained | Payload |
 |-----------|-------|-----|----------|---------|
-| backend → gateway | `amphive/gateways/{gateway_id}/plugs/{plug_id}/commands` | 1 | no | `{"action":"ON"\|"OFF","max_duration_seconds":<int>,"max_kwh":<float>,"session_id":"<str>"}` OR `{"action":"SET_INTERVAL","interval_ms":<int>}` |
+| backend → gateway | `amphive/gateways/{gateway_id}/plugs/{plug_id}/commands` | 1 | no | `{"action":"ON"\|"OFF","max_duration_seconds":<int>,"max_kwh":<float>,"session_id":"<str>"}` OR `{"action":"SET_INTERVAL","interval_ms":<int>}` OR `{"action":"OTA","url":"<http(s)>"}` |
 | gateway → backend | `amphive/gateways/{gateway_id}/telemetry` | 0 | no | `{"plug_id":<int>,"watts":<f>,"kwh":<f>,"voltage":<f>,"current":<f>,"status":"occupied"\|"available","session_id":"<str>"}` |
-| gateway → backend | `amphive/gateways/{gateway_id}/status` | 1 | yes | `{"status":"online"}` (on connect) / `{"status":"offline"}` (LWT) |
-| gateway → backend | `amphive/gateways/{gateway_id}/alarms` | 1 | no | `{"error":"THERMAL_CUTOFF"}` |
+| gateway → backend | `amphive/gateways/{gateway_id}/status` | 1 | yes | `{"status":"online","fw":"<ver>"}` (on connect) / `{"status":"offline"}` (LWT) |
+| gateway → backend | `amphive/gateways/{gateway_id}/alarms` | 1 | no | `{"error":"THERMAL_CUTOFF"}` or `{"event":"OTA_STARTED"\|"OTA_OK_REBOOTING"\|"OTA_FAILED"\|"OTA_REFUSED_SESSION_ACTIVE"\|...}` |
 
 The backend subscribes with wildcards: `amphive/gateways/+/telemetry` (QoS 0)
 and `amphive/gateways/+/status` (QoS 1). It does **not** currently subscribe to
@@ -66,6 +66,14 @@ and `amphive/gateways/+/status` (QoS 1). It does **not** currently subscribe to
   `session_id` and ignores the result (best-effort OFF).
 - `MQTTManager.send_plug_interval(gateway_id, plug_id, interval_ms)`
   publishes the `SET_INTERVAL` command at QoS 1 to configure the gateway's telemetry reporting interval.
+- `MQTTManager.send_gateway_ota(gateway_id, plug_id, firmware_url)`
+  publishes an `OTA` command at QoS 1. Triggered by
+  `POST /api/cpo/gateways/{id}/ota` (RBAC + tenant-scoped; requires the
+  gateway live and to have ≥1 plug — the firmware only subscribes to the
+  per-plug command topic, so the OTA command rides one of the gateway's plug
+  topics and the firmware ignores the plug_id for OTA). The gateway
+  downloads the image into its passive OTA slot and reboots
+  (rollback-protected); it refuses the update while a session is active.
 
 ## Inbound handling (backend) — live
 
@@ -91,12 +99,15 @@ LWT/`offline` message is published by the *gateway* firmware.
 
 ## Firmware side (summary)
 
-The ESP32 publishes `online` status (retained) + subscribes to its commands on
-connect; runs a dynamically adjustable telemetry/watchdog loop (default 10 seconds,
-updated via `SET_INTERVAL` between 500ms and 60000ms); parses commands with
-**cJSON** (topic/data buffers 256/512 B, oversized/fragmented payloads dropped);
-and enforces local safety cutoffs (duration, energy, thermal/over-current via the
-plug's status flags → publishes the alarm). See [FIRMWARE.md](FIRMWARE.md).
+The ESP32 publishes `online` status (retained, with its `fw` version) +
+subscribes to its commands on connect; runs a dynamically adjustable
+telemetry/watchdog loop (default 10 seconds, updated via `SET_INTERVAL`
+between 500ms and 60000ms); parses commands with **cJSON** (topic/data
+buffers 256/512 B, oversized/fragmented payloads dropped); enforces local
+safety cutoffs (duration, energy, thermal/over-current via the plug's status
+flags → publishes the alarm); and applies `OTA` updates via `esp_https_ota`
+into a dual app-slot layout with bootloader rollback (refuses mid-session;
+cancels rollback once it re-reaches the broker). See [FIRMWARE.md](FIRMWARE.md).
 
 ## Path A status
 

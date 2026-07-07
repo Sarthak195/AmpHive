@@ -14,10 +14,11 @@ Interactive docs: `http://<host>:8000/docs`.
   `cpo` or `admin`, enforced by `require_role(...)` (`backend/services/rbac.py`).
 - **CORS:** explicit allowlist (localhost, `amphive.duckdns.org`, VM IP) —
   locked down 2026-07-06.
-- **36 endpoints total**, grouped below: health (1), auth (3), groups (2),
-  plugs (2), sessions (4), payments (3), Direct Mode (5), CPO portal (16).
+- **37 endpoints total**, grouped below: health (1), auth (3), groups (2),
+  plugs (2), sessions (4), payments (3), Direct Mode (5), CPO portal (17).
   (The legacy SSE endpoint `/api/sessions/live/{id}` was retired 2026-07-07 —
-  live telemetry is Socket.io only.)
+  live telemetry is Socket.io only. The CPO gateway OTA-trigger endpoint was
+  added 2026-07-07.)
 
 ---
 
@@ -120,6 +121,7 @@ scoped to the caller's `tenant_id`, so operators only ever see their own assets.
 | GET | `/api/cpo/profile` | cpo/admin | — | Tenant info + counts `{gateway_count, plug_count, group_count}`. |
 | GET | `/api/cpo/gateways` | cpo/admin | — | Tenant's gateways (each with `plug_count`). |
 | POST | `/api/cpo/gateways` | cpo/admin | `{gateway_id, name, vpn_ip}` | Register a gateway under the tenant. |
+| POST | `/api/cpo/gateways/{id}/ota` | cpo/admin | `{firmware_url}` (http(s), ≤512 chars) | Trigger an OTA firmware update. Requires the gateway live (409 if offline) and ≥1 plug (409 — the OTA command rides a per-plug command topic). Publishes the `OTA` command (502 on publish fail); the gateway downloads into its passive slot and reboots (rollback-protected), refusing mid-session. → `{status:"ota_triggered", gateway_id, firmware_url, message}` |
 | GET | `/api/cpo/plugs` | cpo/admin | — | All plugs across the tenant's gateways (status, power, group). |
 | POST | `/api/cpo/plugs` | cpo/admin | `{gateway_id, name, local_ip, plug_model?, group_id?}` | Register a plug (validates gateway + group ownership). |
 | PUT | `/api/cpo/plugs/{id}` | cpo/admin | `{name?, group_id?, status?}` | Update a plug (`group_id:0` = unassign). |

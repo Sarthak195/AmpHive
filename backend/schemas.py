@@ -128,6 +128,16 @@ class CpoGatewayCreateRequest(BaseModel):
     vpn_ip: str
 
 
+class CpoGatewayOtaRequest(BaseModel):
+    """Trigger an OTA firmware update on a gateway.
+
+    `firmware_url` must be an http(s) URL the *gateway* can reach (the overlay
+    IP of the image server, or a LAN address) — not a URL relative to the
+    backend. The firmware downloads it into its passive OTA slot and reboots.
+    """
+    firmware_url: str = Field(pattern=r"^https?://", max_length=512)
+
+
 class CpoPlugCreateRequest(BaseModel):
     """Register a new plug on one of the CPO's gateways."""
     gateway_id: str

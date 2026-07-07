@@ -1,0 +1,18 @@
+# AmpHive gateway — dual-OTA layout (4 MB flash), adopted 2026-07-07.
+#
+# NVS keeps the pre-OTA offset/size (0x9000/0x6000) so provisioning survives
+# the one-time migration reflash: wifi/tapo/mqtt credentials, the session
+# crash-recovery record, and the persisted energy integrator all live there,
+# and `idf.py flash` never writes this region.
+#
+# Two 1920K app slots comfortably hold the ~1.1 MB image (~55% used).
+# phy_init moved to 0x11000 to make room for otadata; its content is unused
+# (CONFIG_ESP_PHY_INIT_DATA_IN_PARTITION is off — PHY data is embedded in
+# the app).
+#
+# Name,   Type, SubType, Offset,   Size
+nvs,      data, nvs,     0x9000,   0x6000
+otadata,  data, ota,     0xf000,   0x2000
+phy_init, data, phy,     0x11000,  0x1000
+ota_0,    app,  ota_0,   0x20000,  0x1E0000
+ota_1,    app,  ota_1,   0x200000, 0x1E0000

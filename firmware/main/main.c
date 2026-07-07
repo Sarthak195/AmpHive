@@ -20,6 +20,9 @@
 #include "session_nvs.h"
 #include "offline_log.h"
 #include "cJSON.h"
+#include "esp_app_desc.h"
+#include "esp_ota_ops.h"
+#include "ota_update.h"
 
 // ─── Configuration Variables ──────────────────────────────────────────────────
 char wifi_ssid[32] = "";
@@ -357,6 +360,18 @@ static bool wifi_init(void) {
     }
 }
 
+// ─── OTA event → alarms topic ───────────────────────────────────────────────
+// Coarse OTA lifecycle events go to the alarms topic (the backend does not
+// subscribe to it, so this can't be mistaken for gateway status).
+static void publish_ota_event(const char *event) {
+    if (!mqtt_connected || mqtt_client == NULL) return;
+    char topic[128];
+    char payload[96];
+    snprintf(topic, sizeof(topic), "amphive/gateways/%s/alarms", gateway_id);
+    snprintf(payload, sizeof(payload), "{\"event\":\"%s\"}", event);
+    esp_mqtt_client_publish(mqtt_client, topic, payload, 0, 1, 0);
+}
+
 // ─── MQTT Subscriber/Event Handler ──────────────────────────────────────────
 static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
                                int32_t event_id, void *event_data) {
@@ -367,16 +382,26 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
             ESP_LOGI(TAG, "MQTT connected to server broker.");
             mqtt_connected = true;
             
-            // Publish status: ONLINE
+            // Publish status: ONLINE (fw version included so an OTA can be
+            // verified from the broker/backend side; extra keys are ignored
+            // by the backend's status handler).
             char status_topic[128];
+            char status_payload[96];
             snprintf(status_topic, sizeof(status_topic), "amphive/gateways/%s/status", gateway_id);
-            esp_mqtt_client_publish(mqtt_client, status_topic, "{\"status\":\"online\"}", 0, 1, 1);
-            
+            snprintf(status_payload, sizeof(status_payload),
+                     "{\"status\":\"online\",\"fw\":\"%s\"}",
+                     esp_app_get_description()->version);
+            esp_mqtt_client_publish(mqtt_client, status_topic, status_payload, 0, 1, 1);
+
             // Subscribe to incoming commands for this gateway's plugs
             char command_topic[128];
             snprintf(command_topic, sizeof(command_topic), "amphive/gateways/%s/plugs/+/commands", gateway_id);
             esp_mqtt_client_subscribe(mqtt_client, command_topic, 1);
             ESP_LOGI(TAG, "Subscribed to commands: %s", command_topic);
+
+            // Reaching the broker authenticated is the self-test bar for a
+            // freshly-OTA'd image: cancel the bootloader rollback.
+            ota_mark_valid_if_pending();
 
             // Drain any offline-buffered telemetry
             resync_offline_logs();
@@ -409,13 +434,6 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
 
             ESP_LOGI(TAG, "MQTT Message Received - Topic: %s, Data: %s", topic, data);
 
-            // Adopt the plug id this command is addressed to, so telemetry we
-            // publish is attributed to the same DB plug the backend is billing.
-            int cmd_plug_id = parse_plug_id_from_topic(topic);
-            if (cmd_plug_id >= 0) {
-                active_plug_id = cmd_plug_id;
-            }
-
             // Parse with a real JSON parser: robust to whitespace and field
             // ordering, and immune to the truncation/corruption the old
             // strstr/sscanf scan suffered on longer payloads.
@@ -426,6 +444,15 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
             }
             const cJSON *action_item = cJSON_GetObjectItemCaseSensitive(root, "action");
             const char *action = cJSON_IsString(action_item) ? action_item->valuestring : NULL;
+
+            // Adopt the plug id this command is addressed to, so telemetry we
+            // publish is attributed to the same DB plug the backend is billing.
+            // Gateway-scoped actions (OTA) are excluded: they ride the same
+            // per-plug topic but say nothing about which plug we drive.
+            int cmd_plug_id = parse_plug_id_from_topic(topic);
+            if (cmd_plug_id >= 0 && (!action || strcmp(action, "OTA") != 0)) {
+                active_plug_id = cmd_plug_id;
+            }
 
             if (action && strcmp(action, "ON") == 0) {
                 ESP_LOGI(TAG, "Command: Turning Smart Plug ON.");
@@ -485,6 +512,23 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
                 if (interval > 60000) interval = 60000;
                 telemetry_interval_ms = interval;
                 ESP_LOGI(TAG, "Telemetry interval updated to %lu ms", interval);
+            } else if (action && strcmp(action, "OTA") == 0) {
+                const cJSON *u = cJSON_GetObjectItemCaseSensitive(root, "url");
+                const char *url = cJSON_IsString(u) ? u->valuestring : NULL;
+                if (!url) {
+                    ESP_LOGW(TAG, "OTA command missing 'url'; ignoring.");
+                } else if (active_session.active) {
+                    // Never reboot away from a charging vehicle: the OTA
+                    // restart would drop the relay/watchdog mid-session.
+                    ESP_LOGW(TAG, "OTA refused: charging session active.");
+                    publish_ota_event("OTA_REFUSED_SESSION_ACTIVE");
+                } else {
+                    esp_err_t ota_err = ota_update_start(url);
+                    if (ota_err != ESP_OK) {
+                        ESP_LOGW(TAG, "OTA start failed: %s", esp_err_to_name(ota_err));
+                        publish_ota_event("OTA_START_FAILED");
+                    }
+                }
             }
 
             cJSON_Delete(root);
@@ -720,6 +764,11 @@ static void microlink_task(void *pvParameters) {
 
 // ─── Entry Point ─────────────────────────────────────────────────────────────
 void app_main(void) {
+    ESP_LOGI(TAG, "AmpHive gateway fw %s (partition: %s)",
+             esp_app_get_description()->version,
+             esp_ota_get_running_partition()->label);
+    ota_update_init(publish_ota_event);
+
     // 1. Initialize WiFi and attempt STA connection
     bool wifi_connected = wifi_init();
 

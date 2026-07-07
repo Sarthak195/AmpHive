@@ -2,8 +2,13 @@
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
 
-# Partition table
-CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+# Partition table - dual-OTA slots + rollback (2026-07-07). NVS keeps the
+# pre-OTA offset so provisioning survives the migration flash.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_ota.csv"
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+# OTA images are fetched over the overlay/LAN; plain HTTP allowed for now.
+CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP=y
 
 # TLS/HTTPS
 CONFIG_ESP_TLS_USING_MBEDTLS=y

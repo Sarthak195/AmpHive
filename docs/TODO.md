@@ -185,8 +185,15 @@ Cross-references [TECH_DEBT.md](TECH_DEBT.md) items as `TD#n` and
       `kwh` + `session_id` echo. Note: the reflash also required refreshing the
       NVS `tapo_pwd` (the Tapo password rotation had stranded the gateway's
       provisioned copy → KLAP `handshake1 auth mismatch`). (IMPL §2, §3.35)
-- [ ] **OTA firmware updates**: current single-app partition table precludes the
-      spec'd dual-partition rollback. (IMPL 15)
+- [x] **OTA firmware updates** (2026-07-07): dual-OTA partition table
+      (`partitions_ota.csv`) + `esp_https_ota` with bootloader rollback
+      (`firmware/main/ota_update.c`), triggered by an `OTA` MQTT command /
+      `POST /api/cpo/gateways/{id}/ota` (`send_gateway_ota`). Refuses
+      mid-session; the new image cancels rollback only once it re-reaches the
+      broker; `online` status now carries the `fw` version. Built + flashed
+      on-device (booted `ota_0`, provisioning survived the migration).
+      **Live OTA-push verification still pending** (needs an image server the
+      gateway can reach). (IMPL 15)
 - [x] **Reconcile or retire K8s manifests** (2026-07-07): **retired** —
       `deploy/k8s/README.md` banner-marks them unmaintained reference
       material (divergence documented); `docs/DEPLOYMENT.md` no longer
