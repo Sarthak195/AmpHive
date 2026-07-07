@@ -145,7 +145,8 @@ joined via `access_code`.
   verify, and webhook paths), so concurrent top-ups/debits no longer race.
 - Time-series telemetry **is** now persisted to `telemetry_readings` via a
   buffered background batch-flush (`backend/services/telemetry_persistence.py`),
-  decoupled from the live in-memory `TelemetryStore` (which still drives SSE).
+  decoupled from the live in-memory `TelemetryStore` (which drives the live
+  Socket.io stream).
   This uses **plain Postgres** + `date_trunc` aggregation; the spec's TimescaleDB
   (hypertables, native retention, continuous aggregates) is *not* used and is a
   possible future upgrade. Retention is an opt-in periodic prune gated by

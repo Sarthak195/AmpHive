@@ -130,7 +130,7 @@ POST /api/sessions/stop              (JWT required)
   session stop (energy × `COINS_PER_KWH`). Conversion is `COINS_PER_RUPEE`
   (default 1.0). Credits and debits are **row-locked** (`SELECT ... FOR UPDATE`)
   so concurrent updates don't race.
-- **Telemetry/live data:** live telemetry is served in real time via **Socket.io** (with legacy SSE endpoint kept as fallback) from an **in-memory**
+- **Telemetry/live data:** live telemetry is served in real time via **Socket.io** (sole transport since 2026-07-07; the legacy SSE endpoint is retired) from an **in-memory**
   `TelemetryStore` singleton (`backend/services/telemetry.py`). Raw samples are
   **also** persisted to the `telemetry_readings` time-series table via a buffered
   background batch-flush (`backend/services/telemetry_persistence.py`), decoupled

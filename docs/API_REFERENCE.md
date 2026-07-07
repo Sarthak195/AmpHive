@@ -12,9 +12,12 @@ Interactive docs: `http://<host>:8000/docs`.
   DB on every request, so balance/role are always current.
 - Routes marked **cpo/admin** additionally require the caller's DB role to be
   `cpo` or `admin`, enforced by `require_role(...)` (`backend/services/rbac.py`).
-- **CORS:** wide open (`allow_origins=["*"]`) — flagged for production lockdown.
-- **37 endpoints total**, grouped below: health (1), auth (3), groups (2),
-  plugs (2), sessions (5), payments (3), Direct Mode (5), CPO portal (16).
+- **CORS:** explicit allowlist (localhost, `amphive.duckdns.org`, VM IP) —
+  locked down 2026-07-06.
+- **36 endpoints total**, grouped below: health (1), auth (3), groups (2),
+  plugs (2), sessions (4), payments (3), Direct Mode (5), CPO portal (16).
+  (The legacy SSE endpoint `/api/sessions/live/{id}` was retired 2026-07-07 —
+  live telemetry is Socket.io only.)
 
 ---
 
@@ -62,8 +65,7 @@ Token: HS256 JWT, claims `sub`/`role`/`email`/`iat`/`exp`, **7-day** expiry.
 | POST | `/api/sessions/start` | JWT | `{plug_id, max_duration_seconds=14400, max_kwh=30.0}` | Access check → require balance ≥ 50 (402) → reject if OCCUPIED (409) → MQTT `ON` (500 on publish fail) → create session, mark plug OCCUPIED → `{status:"started", session_id, plug_id, plug_name, message}` |
 | POST | `/api/sessions/stop` | JWT | `{session_id}` | Owner+active check → MQTT `OFF` (best-effort) → finalize from telemetry → debit wallet → ledger `session_debit` → plug AVAILABLE → `{status:"completed", session_id, energy_kwh, coins_spent, balance_remaining}` |
 | GET | `/api/sessions/active` | JWT | — | Retrieve the currently active session for the logged-in user, if any (returns the most recent active session) → `{active:true, session_id, plug_id, plug_name, started_at}` or `{active:false}` |
-| GET | `/api/sessions/live/{session_id}` | JWT | path `session_id:int` | **SSE** (`text/event-stream`); legacy fallback endpoint. Emits named `telemetry` events `{event:"telemetry", data:<json>}` |
-| — | `Socket.io` connection | JWT | connection query or auth dict | Real-time bi-directional channel for telemetry updates and session status. |
+| — | `Socket.io` connection | JWT | connection query or auth dict | Real-time bi-directional channel for telemetry updates and session status (sole live-telemetry transport since 2026-07-07). |
 | GET | `/api/sessions/history` | JWT | — | Last 50 sessions, newest first → `[{id, plug_id, started_at, ended_at, energy_kwh, coins_spent, status}]` |
 
 ### Socket.io Events Reference

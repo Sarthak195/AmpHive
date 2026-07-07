@@ -62,8 +62,6 @@ Cross-references [TECH_DEBT.md](TECH_DEBT.md) items as `TD#n` and
       `IntegrityError` 500. Both now catch it at commit/flush and return the
       same 400 as the sequential path. Tests:
       `backend/tests/test_registration_races.py`. (IMPL §3.41)
-- [ ] **Set `TELEMETRY_RETENTION_DAYS` in prod** — default `0` keeps telemetry
-      forever; `telemetry_readings` grows ~1 row/s during live streaming.
 - [x] **Republish OFF when a gateway reconnects with no ACTIVE session on its
       plug** (2026-07-07). Observed on-device: the ESP32 lost power mid-session,
       the reaper finalized the session, and on reboot the firmware's NVS crash
@@ -110,8 +108,13 @@ Cross-references [TECH_DEBT.md](TECH_DEBT.md) items as `TD#n` and
 - [ ] **Kill N+1 queries** in `get_available_plugs`, `cpo_list_plugs`,
       `cpo_analytics_sessions`, `get_my_groups` via JOIN/`selectinload`. (TD#9)
 - [ ] **Extract the access-code generator** (duplicated 3× across CPO routes). (TD#10)
-- [ ] **Unify live telemetry**: retire the SSE endpoint + `sse-starlette` dep,
-      or document it as an explicit fallback. (TD#12)
+- [x] **Unify live telemetry** (2026-07-07): the legacy SSE endpoint
+      (`/api/sessions/live/{id}`) and the `sse-starlette` dep are retired —
+      the frontend has been Socket.io-only since 2026-07-04 and had zero
+      references to it. (TD#12)
+- [x] **Set `TELEMETRY_RETENTION_DAYS` in prod** (2026-07-07): 90 days, wired
+      through `.env` → compose → `telemetry_persistence` (prune runs ~hourly
+      in the flush loop).
 - [x] **cJSON on the firmware command path** (2026-07-06) instead of
       `strstr`/`sscanf`; MQTT buffers raised (topic 256, data 512) with an
       oversized/fragmented guard so a `session_id` can't truncate. **Flashed +

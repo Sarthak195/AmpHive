@@ -29,7 +29,6 @@ from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import select, or_, and_, func, cast, Date
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
-from sse_starlette.sse import EventSourceResponse
 
 from backend.database.db import get_db, init_db, async_session_factory
 from backend.database.models import (
@@ -1003,54 +1002,6 @@ async def get_active_session(
         "plug_name": plug.name,
         "started_at": session.started_at.isoformat() if session.started_at else None,
     }
-
-
-@app.get("/api/sessions/live/{session_id}")
-async def live_session_telemetry(
-    session_id: int,
-    token: Optional[str] = None,
-    db: AsyncSession = Depends(get_db),
-):
-    """
-    Server-Sent Events (SSE) endpoint streaming real-time charging telemetry
-    to the frontend. Yields a JSON event every ~1 second containing power,
-    current, energy, duration, and cost data.
-    """
-    if not token:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    payload = decode_access_token(token)
-    if not payload or not payload.get("sub"):
-        raise HTTPException(status_code=401, detail="Invalid token")
-    user_id = int(payload.get("sub"))
-
-    # Verify session exists and belongs to the user
-    result = await db.execute(
-        select(ChargingSession).where(
-            and_(
-                ChargingSession.id == session_id,
-                ChargingSession.user_id == user_id,
-            )
-        )
-    )
-    session = result.scalar_one_or_none()
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found.")
-
-    # Increment active listeners in telemetry store
-    telemetry_store.increment_listeners(session.plug_id)
-    await set_plug_telemetry_interval(db, session.plug_id, 1000)
-
-    async def event_generator():
-        try:
-            async for snapshot in telemetry_store.stream(session.plug_id):
-                yield {"event": "telemetry", "data": json.dumps(snapshot)}
-        finally:
-            listeners = telemetry_store.decrement_listeners(session.plug_id)
-            if listeners == 0:
-                async with async_session_factory() as local_db:
-                    await set_plug_telemetry_interval(local_db, session.plug_id, 10000)
-
-    return EventSourceResponse(event_generator())
 
 
 @app.get("/api/sessions/history")

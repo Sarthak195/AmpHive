@@ -104,8 +104,8 @@ commands you run against the VM there.**
 - **Firmware builds on ESP-IDF v5.3.3**, not v6 (v6 causes a LoadProhibited panic
   on custom netif registration). `eim_config.toml` mentions v6.0.1 — ignore it
   for building; use v5.3.x.
-- **Two live-telemetry transports exist** (SSE + Socket.io). The frontend uses
-  Socket.io; the SSE endpoint is legacy/fallback.
+- **Live telemetry is Socket.io only** (the legacy SSE endpoint was retired
+  2026-07-07).
 
 ## 8. First things to fix if you inherit this today
 See [TODO.md](TODO.md) and [TECH_DEBT.md](TECH_DEBT.md). The top three:

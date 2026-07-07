@@ -30,7 +30,7 @@ Legend — **Impact**: how much it costs if left. **Effort**: rough work to fix.
 | 9 | **N+1 query patterns** | `get_available_plugs`, `cpo_list_plugs`, `cpo_analytics_sessions`, `get_my_groups` | Per-row follow-up queries for group/plug/user names. | Latency grows linearly with row count; fine at demo scale, bad at fleet scale. | 2–3 h (JOIN/`selectinload`) | **P2** |
 | 10 | **Access-code generation loops with per-try SELECT** | `cpo_create_group`, `cpo_update_group` (3 copies) | Duplicated `while True` unique-code logic inline in the route. | Copy-paste drift; extra round-trips. | 45 min (extract helper) | **P2** |
 | 11 | ✅ ~~**Firmware command JSON parsed with `strstr`/`sscanf`**~~ **Done 2026-07-06 (flashed + verified)** | `firmware/main/main.c` | Command path now parses with cJSON (vendored `json` component); buffers widened (topic 256, data 512) with an oversized/fragmented-payload guard, so a `session_id` no longer truncates. | Verified on-device: ON commands carrying `session_id` parsed correctly through E2E sessions #77–79. | — | ~~P2~~ Done |
-| 12 | **Two live telemetry transports** | SSE (`/api/sessions/live`) + Socket.io (`socketio_manager.py`) | Socket.io replaced SSE, but the SSE endpoint and `sse-starlette` dep remain. | Dead-ish surface, double maintenance, reader confusion. | 1 h (retire SSE or document as fallback) | **P2** |
+| 12 | ✅ ~~**Two live telemetry transports**~~ **Done 2026-07-07** | Socket.io only (`socketio_manager.py`) | The legacy SSE endpoint (`/api/sessions/live/{id}`) and the `sse-starlette` dep are removed; the frontend had zero references (Socket.io since 2026-07-04). | — | — | ~~P2~~ Done |
 
 ## Tier 3 — Cleanup / hygiene debt (P2/P3)
 

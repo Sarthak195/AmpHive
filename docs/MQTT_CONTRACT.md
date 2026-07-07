@@ -73,7 +73,7 @@ and `amphive/gateways/+/status` (QoS 1). It does **not** currently subscribe to
 (`lifespan` in `main.py` gives `MQTTManager` a `telemetry_store`,
 `db_session_factory`, `event_loop`, and `telemetry_persistence`). On each
 telemetry message the handler:
-1. Feeds the in-memory `TelemetryStore` (drives the live Socket.io/SSE stream and
+1. Feeds the in-memory `TelemetryStore` (drives the live Socket.io stream and
    the running cost). The update is **marshaled onto the event loop** via
    `loop.call_soon_threadsafe` — the handler runs on the paho network thread and
    `asyncio.Event.set()` (used to wake stream consumers) is not thread-safe

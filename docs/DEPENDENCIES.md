@@ -26,7 +26,7 @@ main.py  (FastAPI app — 35 REST endpoints, all schemas, lifespan)
 ├── services/rbac.py       require_role(...) dependency factory → guards all /api/cpo/* routes
 ├── services/mqtt_manager.py  paho-mqtt bridge: publishes ON/OFF; ingests telemetry
 │                             (updates TelemetryStore + persists energy/peak_power) & status
-├── services/telemetry.py  in-memory TelemetryStore singleton + SSE generator (COINS pricing)
+├── services/telemetry.py  in-memory TelemetryStore singleton + async stream() (COINS pricing)
 ├── services/socketio_manager.py Socket.io server, auth, session rooms, and telemetry broadcasting
 ├── services/payments.py   razorpay create-order / verify / webhook (HMAC, idempotent credit)
 ├── services/tapo_direct.py  Direct-Mode Tapo driver (tapo lib or HTTP relay via TAPO_RELAY_URL)
@@ -47,7 +47,6 @@ main.py  (FastAPI app — 35 REST endpoints, all schemas, lifespan)
 | `python-dotenv` | `.env` loading |
 | `razorpay` | Payment gateway SDK |
 | `python-socketio`, `python-engineio` | Socket.io server and engine for real-time WebSockets |
-| `sse-starlette` | Server-Sent Events (legacy fallback) |
 | `tapo` | Rust-backed TP-Link Tapo control (Direct Mode) |
 
 ---
