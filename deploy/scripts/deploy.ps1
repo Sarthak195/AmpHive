@@ -138,6 +138,23 @@ Write-Host "`n[3/4] Copying deployment configs..." -ForegroundColor Cyan
 gcloud compute scp --quiet "$PROJECT_ROOT\deploy\config\mosquitto.conf" "${VM_NAME}:/tmp/mosquitto.conf" --zone=$VM_ZONE
 gcloud compute ssh --quiet $VM_NAME --zone=$VM_ZONE --command="sudo mv /tmp/mosquitto.conf $REMOTE_DIR/mosquitto.conf"
 
+# MQTT TLS certs (broker 8883 listener). The mosquitto.conf mounts these, so
+# a deploy without them ships a broker that fails to start the TLS listener.
+$certDir = "$PROJECT_ROOT\deploy\config\mqtt-certs"
+foreach ($f in @("ca.crt", "server.crt", "server.key")) {
+    if (-not (Test-Path "$certDir\$f")) {
+        Write-Host "ERROR: $certDir\$f not found." -ForegroundColor Red
+        Write-Host "Generate the broker TLS material first:" -ForegroundColor Yellow
+        Write-Host "  MQTT_TLS_SAN_IP=$MQTT_BIND_IP bash deploy/config/gen_mqtt_certs.sh" -ForegroundColor Yellow
+        exit 1
+    }
+}
+Write-Host "  -> Transferring MQTT TLS certs..." -ForegroundColor Cyan
+gcloud compute scp --quiet "$certDir\ca.crt" "$certDir\server.crt" "$certDir\server.key" "${VM_NAME}:/tmp/" --zone=$VM_ZONE
+# server.key must be readable by the mosquitto user (uid 1883) and no one else.
+$certs_cmd = "sudo mkdir -p $REMOTE_DIR/mqtt-certs && sudo mv /tmp/ca.crt /tmp/server.crt /tmp/server.key $REMOTE_DIR/mqtt-certs/ && sudo chown -R 1883:1883 $REMOTE_DIR/mqtt-certs && sudo chmod 644 $REMOTE_DIR/mqtt-certs/ca.crt $REMOTE_DIR/mqtt-certs/server.crt && sudo chmod 600 $REMOTE_DIR/mqtt-certs/server.key"
+gcloud compute ssh --quiet $VM_NAME --zone=$VM_ZONE --command=$certs_cmd
+
 gcloud compute scp --quiet "$PROJECT_ROOT\deploy\docker\docker-compose.prod.yml" "${VM_NAME}:${REMOTE_DIR}/docker-compose.yml" --zone=$VM_ZONE
 gcloud compute scp --quiet "$PROJECT_ROOT\.env" "${VM_NAME}:${REMOTE_DIR}/.env" --zone=$VM_ZONE
 

@@ -11,6 +11,13 @@
 # WireGuard tunnel config carries a private key — only the .example is tracked
 deploy/config/amphive_tunnel.conf
 
+# MQTT TLS private keys — NEVER commit. The public certs (ca.crt, server.crt)
+# are tracked so the firmware build embeds the CA and mosquitto can mount the
+# server cert; the CA + server keys stay local (+ on the VM). See
+# deploy/config/mqtt-certs/README.md.
+deploy/config/mqtt-certs/*.key
+*.key
+
 # Dependency directories
 node_modules/
 jspm_packages/

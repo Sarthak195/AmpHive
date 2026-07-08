@@ -42,9 +42,18 @@ bool config_loaded = false;
 static uint32_t telemetry_interval_ms = 10000; // Default 10s (10000ms)
 
 // The central AmpHive server's Tailscale VPN IP
-#define SERVER_VPN_IP       "100.87.241.70" 
-#define MQTT_BROKER_URL     "mqtt://100.87.241.70:1883"
+#define SERVER_VPN_IP       "100.87.241.70"
+// TLS broker (port 8883). The self-signed CA below is validated by mbedTLS
+// (chain + IP SAN); cert dates are not checked (CONFIG_MBEDTLS_HAVE_TIME_DATE
+// is off), so no clock/SNTP is needed. The broker keeps a plaintext 1883
+// listener during the transition, so an older image (or an OTA rollback)
+// still connects.
+#define MQTT_BROKER_URL     "mqtts://100.87.241.70:8883"
 #define TARGET_PLUG_ID      1
+
+// Broker CA, embedded via EMBED_TXTFILES (see main/CMakeLists.txt). The
+// linker appends a NUL, so it is a valid PEM C-string for esp-mqtt.
+extern const uint8_t mqtt_ca_crt_start[] asm("_binary_mqtt_ca_crt_start");
 // ─────────────────────────────────────────────────────────────────────────────
 
 static const char *TAG = "amphive_gateway";
@@ -546,6 +555,10 @@ static void start_mqtt_client(void) {
 
     esp_mqtt_client_config_t mqtt_cfg = {
         .broker.address.uri = MQTT_BROKER_URL,
+        /* TLS: verify the broker against our embedded self-signed CA. The URI
+           scheme (mqtts://) selects TLS; the CA PEM authenticates the server
+           (chain + IP SAN). Dates aren't validated (no clock). */
+        .broker.verification.certificate = (const char *)mqtt_ca_crt_start,
         .session.last_will = {
             .topic = lwt_topic,
             .msg = "{\"status\":\"offline\"}",

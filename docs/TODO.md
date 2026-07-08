@@ -171,8 +171,15 @@ Cross-references [TECH_DEBT.md](TECH_DEBT.md) items as `TD#n` and
       healthcheck, backend env plumbed, firmware credentials in NVS
       (`mqtt_user`/`mqtt_pwd`, optional portal fields) seeded + flashed on the
       dev gateway. Verified in prod: anonymous → `not authorised`; backend +
-      ESP32 authenticate and telemetry flows. **TLS remains open** (overlay
-      provides confidentiality today). (SEC §3)
+      ESP32 authenticate and telemetry flows. (SEC §3)
+- [~] **MQTT broker TLS** (2026-07-08, code complete, staged rollout): a TLS
+      listener on **8883** with a self-signed CA + server cert
+      (`deploy/config/gen_mqtt_certs.sh`, SAN `IP:100.87.241.70`); firmware
+      `1.2.0` embeds the CA and dials `mqtts://…:8883` (validates chain + IP
+      SAN; no clock needed since `MBEDTLS_HAVE_TIME_DATE` is off). The
+      plaintext `1883` listener stays up during transition (backend internal +
+      OTA-rollback target), bound internal-only once all gateways are on 8883.
+      Deploy ships certs via `deploy.ps1`; firmware ships via OTA. (SEC §3)
 - [x] **Finish Path A end-to-end**: real billed session on physical hardware over
       ESP32+MQTT, feeding the session/telemetry pipeline. **Achieved 2026-07-06** —
       a real ESP32 + P110 ran a billed session; the plug delivered correct energy

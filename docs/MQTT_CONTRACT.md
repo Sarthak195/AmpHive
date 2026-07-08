@@ -101,8 +101,10 @@ LWT/`offline` message is published by the *gateway* firmware.
 
 ## Firmware side (summary)
 
-The ESP32 publishes `online` status (retained, with its `fw` version) +
-subscribes to its commands on connect; runs a dynamically adjustable
+The ESP32 connects over **TLS** (`mqtts://…:8883`, firmware ≥ 1.2.0),
+validating the broker cert against an embedded self-signed CA (chain + IP
+SAN; dates unchecked, no clock needed); it publishes `online` status
+(retained, with its `fw` version) + subscribes to its commands on connect; runs a dynamically adjustable
 telemetry/watchdog loop (default 10 seconds, updated via `SET_INTERVAL`
 between 500ms and 60000ms); parses commands with **cJSON** (topic/data
 buffers 256/512 B, oversized/fragmented payloads dropped); enforces local

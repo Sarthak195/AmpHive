@@ -84,8 +84,17 @@ BFG + force-push) to purge the dead values entirely.
     (provisioned via the portal's optional MQTT fields — a credential-less
     gateway can no longer connect). **Verified in prod:** anonymous
     `mosquitto_sub` → `Connection Refused: not authorised`; backend + the
-    real ESP32 reconnected authenticated and telemetry flows. TLS remains a
-    separate future item (confidentiality currently comes from the overlay).
+    real ESP32 reconnected authenticated and telemetry flows.
+  - [Added 2026-07-08, rollout in progress] Broker **TLS** listener on **8883**
+    (`mosquitto.conf`): a self-signed CA + server cert (SAN `IP:100.87.241.70`,
+    `deploy/config/gen_mqtt_certs.sh`); the gateway firmware embeds the CA and
+    validates the broker cert (chain + IP SAN — dates aren't checked, no clock
+    needed). Server-auth only; clients still present username/password.
+    Rollout is staged for safety: the plaintext **1883** listener stays up
+    during the transition (backend on the internal Docker network; OTA-
+    rollback target for gateways), and is bound internal-only once every
+    gateway is confirmed on 8883. TLS here is defense-in-depth — the WireGuard
+    overlay already encrypts the transport.
 - [Fixed + deployed 2026-07-06] **CORS** is restricted to an explicit allowlist
   (localhost, `amphive.duckdns.org`, VM IP; http+https) with the wildcard removed,
   in `backend/main.py:187`. Verified in prod: an allowed origin is echoed, a

@@ -57,7 +57,7 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 | Docker Compose on GCP VM | ✅ | Live/canonical |
 | `deploy.ps1` + `scripts/*.bat` helpers | ✅ | VM start/stop + remote compose/logs (in `scripts/`) |
 | K8s/K3s manifests | — | **Retired 2026-07-07** (TD#15): banner-marked unmaintained reference (`deploy/k8s/README.md`); Compose-on-VM is the only deployment model |
-| Mosquitto broker | 🟡 | Works, but anonymous + no TLS + publicly reachable |
+| Mosquitto broker | ✅ | Auth enforced (`allow_anonymous false` + passwd file); overlay-bound (not public). **TLS listener on 8883** added 2026-07-08 (self-signed CA, firmware validates chain+IP SAN) — staged rollout keeps plaintext 1883 up as the transition/OTA-rollback path. |
 
 ---
 
@@ -157,8 +157,11 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
     the plug's `overcurrent_status` flag (local OFF + `OVERCURRENT_CUTOFF` alarm).
 18. **Telemetry topic shape** in `requirements.md` (`.../plugs/{id}/telemetry`)
     doesn't match the implemented per-gateway topic — but firmware & backend agree.
-19. **MQTT "Noise-encrypted TCP"** (spec) → plain `mqtt://`, secured only by the
-    overlay.
+19. [Largely resolved 2026-07-08] ~~MQTT plain `mqtt://`, secured only by the
+    overlay~~ — the broker now has a **TLS listener on 8883** and firmware
+    ≥ 1.2.0 dials `mqtts://` (self-signed CA, chain + IP SAN validated). Not
+    the spec's Noise, but transport is now TLS-encrypted + broker-authenticated
+    (on top of the overlay). Plaintext 1883 stays up during the staged rollout.
 20. [Resolved 2026-07-07] ~~K8s vs VM divergence~~ — moot: the manifests are
     **retired** (TD#15) and banner-marked as unmaintained reference in
     `deploy/k8s/README.md`, which records the divergence.

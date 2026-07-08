@@ -43,10 +43,12 @@ firmware/
 | `microlink_vpn` | 32768 | 6 | floating |
 | `ml_coord_poll` (inside microlink) | 8 KB | max-1 | pinned Core 1 |
 
-Hard-coded constants: `SERVER_VPN_IP "100.64.0.1"`, `MQTT_BROKER_URL
-"mqtt://100.64.0.1:1883"`, `TARGET_PLUG_ID 1`. SSID, WiFi password, auth key,
-device name, gateway id, and target plug IP all come from NVS (namespace
-`storage`) populated by the captive portal.
+Hard-coded constants: `SERVER_VPN_IP "100.87.241.70"`, `MQTT_BROKER_URL
+"mqtts://100.87.241.70:8883"` (TLS since fw 1.2.0 — the broker CA is embedded
+via `EMBED_TXTFILES "certs/mqtt_ca.crt"` and validated by mbedTLS: chain + IP
+SAN, no date check), `TARGET_PLUG_ID 1`. SSID, WiFi password, auth key,
+device name, gateway id, target plug IP, and MQTT credentials all come from
+NVS (namespace `storage`) populated by the captive portal.
 
 ## 2. Captive portal (✅ implemented)
 
