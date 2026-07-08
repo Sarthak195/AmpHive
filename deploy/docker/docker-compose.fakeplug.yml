@@ -1,0 +1,56 @@
+# =============================================================================
+# AmpHive — Fake Plug (test-only, OPTIONAL)
+# =============================================================================
+# Runs the software ESP32 + P110 stand-in (tools/fake_plug.py) as an always-on
+# container, so the app can be tested end-to-end WITHOUT hardware. It is NOT part
+# of the production stack and is NOT shipped by deploy.ps1 — deploy it manually.
+#
+# It reuses the already-built `amphive_backend` image (which has python +
+# paho-mqtt), mounts the sim script, joins the running stack's Docker network,
+# and reaches the broker as `mqtt:1883`. Broker credentials come from
+# ~/amphive/.env (MQTT_GW_*), read by the script from the environment.
+#
+# The plug row must already exist (created once via the CPO API):
+#   python tools/fake_plug.py --register-only --cpo-email cpo@amphive.test --cpo-password '<pw>'
+#   -> gateway=fakeplug-gw-01  plug_id=2  (public group)
+#
+# Deploy (from repo root; a separate compose PROJECT so redeploys never touch it):
+#   gcloud compute scp tools/fake_plug.py deploy/docker/docker-compose.fakeplug.yml \
+#       amphive-vm-in:/home/Sarthak/amphive/ --zone=asia-south1-a
+#   gcloud compute ssh amphive-vm-in --zone=asia-south1-a --command \
+#       "cd ~/amphive && sudo docker-compose -p fakeplug -f docker-compose.fakeplug.yml up -d"
+#
+# Tail logs:  sudo docker logs -f amphive-fake-plug
+# Stop:       cd ~/amphive && sudo docker-compose -p fakeplug -f docker-compose.fakeplug.yml down
+# =============================================================================
+version: '3.7'
+
+services:
+  fake-plug:
+    image: amphive_backend            # reuse the backend image (has paho-mqtt)
+    container_name: amphive-fake-plug
+    restart: always                   # survives crashes AND VM reboots
+    # Mounted, not baked, so updating the sim is just scp + `restart`.
+    volumes:
+      - ./fake_plug.py:/fake_plug.py:ro
+    environment:
+      # Broker (gateway) account — the script reads these for --broker-user/pass.
+      - MQTT_GW_USERNAME=${MQTT_GW_USERNAME}
+      - MQTT_GW_PASSWORD=${MQTT_GW_PASSWORD}
+    command:
+      - python
+      - /fake_plug.py
+      - --run-only
+      - --plug-id=2
+      - --gateway-id=fakeplug-gw-01
+      - --broker-host=mqtt
+      - --broker-port=1883
+      - --watts=10000                 # constant 10 kW load
+      - --interval=5                  # telemetry every 5 s
+
+# Attach to the already-running stack's network (created by the prod compose as
+# `<project>_default`, i.e. amphive_default) so `mqtt` resolves.
+networks:
+  default:
+    external:
+      name: amphive_default

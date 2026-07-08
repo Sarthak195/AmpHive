@@ -48,6 +48,59 @@ gitignored, never commit it.** Balances: admin 1000, driver 500, cpo 100
 coins. The gateway row starts OFFLINE and flips online automatically on the
 ESP32's next status/telemetry message (session starts 409 until then).
 
+### Fake plug simulator (`tools/fake_plug.py`, added 2026-07-08)
+
+A software stand-in for an ESP32 gateway + Tapo P110 so the **whole stack**
+(session start/stop, wallet billing, live Socket.io telemetry, the driver/CPO
+UI) can be exercised **without physical hardware**. It speaks the exact MQTT
+contract in [MQTT_CONTRACT.md](MQTT_CONTRACT.md): retained `online` status +
+`offline` LWT, subscribes to the per-plug command topic (honours
+`ON`/`OFF`/`SET_INTERVAL`; `OTA` is a no-op), and publishes telemetry every
+`--interval` seconds. While a session is `ON` it draws a **constant load**
+(default **10 kW**, `--watts`) and integrates session-relative energy just like
+the firmware — so the live cost and wallet debit tick up predictably
+(~0.167 kWh/min ≈ 0.83 coins/min at `COINS_PER_KWH=5`). Registration goes
+through the public CPO API, never the DB.
+
+**Where it runs.** The broker is overlay-bound (`MQTT_BIND_IP`, not public), so
+the MQTT loop must run where it can reach the broker — the **GCP VM host**
+(`--broker-host 100.87.241.70`, the VM's own overlay IP) or **inside the compose
+network** (`--broker-host mqtt`). The API registration step works from anywhere.
+
+```bash
+# 1. One-time: create the fake gateway + plug (idempotent). Runs from anywhere.
+python tools/fake_plug.py --register-only \
+    --cpo-email cpo@amphive.test --cpo-password '<cpo-pw>'
+#   -> prints:  gateway=fakeplug-gw-01  plug_id=<N>  (group 1 = public)
+
+# 2. Keep the fake plug live (run ON THE VM; needs paho-mqtt). Ctrl-C stops it.
+pip install paho-mqtt
+python tools/fake_plug.py --run-only --plug-id <N> \
+    --gateway-id fakeplug-gw-01 --broker-host 100.87.241.70 \
+    --broker-user amphive-gateway --broker-pass '<MQTT_GW_PASSWORD>'
+```
+
+The gateway goes stale after `GATEWAY_LIVENESS_WINDOW_SEC` (120 s) once the
+simulator stops, so keep it running while you test (a session won't *start*
+against a stale gateway). `--self-test` prints the wire payloads with no network
+for a quick contract check. Broker creds default to `MQTT_GW_*`/`MQTT_*` env
+vars; the fake plug uses the gateway MQTT account, not the backend's.
+
+**Always-on deployment (running in prod since 2026-07-08).** For a fake plug
+that stays live without a terminal open, `deploy/docker/docker-compose.fakeplug.yml`
+runs the simulator as an always-on container (`restart: always`, survives crashes
+and VM reboots). It reuses the `amphive_backend` image (which already has
+paho-mqtt), joins the stack's `amphive_default` network, and reaches the broker
+as `mqtt:1883` with the `MQTT_GW_*` creds from `~/amphive/.env`. It is **test-only
+and not shipped by `deploy.ps1`** — deploy it manually (commands in the compose
+file header). Currently deployed on `amphive-vm-in` as container
+`amphive-fake-plug` driving gateway `fakeplug-gw-01` / plug 2. Manage it with:
+
+```bash
+sudo docker logs -f amphive-fake-plug                                    # tail
+cd ~/amphive && sudo docker-compose -p fakeplug -f docker-compose.fakeplug.yml down   # stop
+```
+
 ## 2. Coverage assessment
 
 | Area | Coverage | Biggest untested risk |
