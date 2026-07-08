@@ -52,7 +52,11 @@ if not JWT_SECRET_KEY or JWT_SECRET_KEY in _KNOWN_INSECURE_SECRETS:
         "Set a strong JWT_SECRET_KEY in the environment/.env to fix this."
     )
 JWT_ALGORITHM = "HS256"
-JWT_EXPIRY_DAYS = 7
+# Env-configurable so an environment can shorten token lifetime. Kept at 7d
+# by default (mobile-first UX, no refresh flow); per-user revocation via the
+# token_version epoch — see create_access_token / get_current_user — is the
+# substantive control that makes a long-lived token killable on demand.
+JWT_EXPIRY_DAYS = int(os.getenv("JWT_EXPIRY_DAYS", "7"))
 
 # --- Password Hashing ---
 
@@ -73,7 +77,7 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 
 # --- JWT Token Management ---
 
-def create_access_token(user_id: int, role: str, email: str) -> str:
+def create_access_token(user_id: int, role: str, email: str, token_version: int = 0) -> str:
     """
     Create a signed JWT access token containing user claims.
 
@@ -81,6 +85,8 @@ def create_access_token(user_id: int, role: str, email: str) -> str:
     - sub: user ID (string)
     - role: user role (admin/cpo/driver)
     - email: user email (for display purposes in frontend)
+    - tv: token version (the user's token_version epoch at issue time; a
+      request is rejected once the stored epoch moves past it)
     - exp: expiration timestamp
     - iat: issued-at timestamp
     """
@@ -89,6 +95,7 @@ def create_access_token(user_id: int, role: str, email: str) -> str:
         "sub": str(user_id),
         "role": role,
         "email": email,
+        "tv": token_version,
         "iat": now,
         "exp": now + timedelta(days=JWT_EXPIRY_DAYS),
     }
@@ -157,6 +164,19 @@ async def get_current_user(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="User account not found.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    # Reject tokens issued before the user's current token epoch (logout /
+    # password change / admin revoke bumps token_version). Tokens minted
+    # before this claim existed carry no `tv`; treat them as epoch 0 so a
+    # deploy doesn't force-log-out everyone — the first revoke still kills them
+    # (epoch moves to 1). This is a per-user "log out everywhere", not a
+    # per-token blacklist.
+    if payload.get("tv", 0) != user.token_version:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Session has been revoked. Please sign in again.",
             headers={"WWW-Authenticate": "Bearer"},
         )
 

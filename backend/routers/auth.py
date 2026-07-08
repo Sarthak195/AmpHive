@@ -80,7 +80,7 @@ async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
     await db.refresh(user)
 
     # Generate JWT token
-    token = create_access_token(user.id, user.role.value, user.email)
+    token = create_access_token(user.id, user.role.value, user.email, user.token_version)
     logger.info(f"New user registered: {user.email} (id={user.id})")
 
     return AuthResponse(
@@ -102,7 +102,7 @@ async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
     if not user or not verify_password(req.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Invalid email or password.")
 
-    token = create_access_token(user.id, user.role.value, user.email)
+    token = create_access_token(user.id, user.role.value, user.email, user.token_version)
     logger.info(f"User logged in: {user.email}")
 
     await check_and_speed_up_active_session(db, user.id)
@@ -132,5 +132,26 @@ async def get_me(
         role=user.role.value,
         coin_balance=user.coin_balance,
     )
+
+
+@router.post("/api/auth/logout")
+async def logout(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Revoke every outstanding token for this user by bumping token_version
+    (server-side "log out everywhere"). The current token — and any issued on
+    other devices — is rejected on its next request. Row-locked so concurrent
+    logouts increment exactly once.
+    """
+    locked = await db.execute(
+        select(User).where(User.id == user.id).with_for_update()
+    )
+    locked_user = locked.scalar_one()
+    locked_user.token_version += 1
+    await db.commit()
+    logger.info(f"User logged out (tokens revoked): {user.email} (tv={locked_user.token_version})")
+    return {"status": "logged_out"}
 
 

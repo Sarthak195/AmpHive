@@ -52,6 +52,15 @@ BFG + force-push) to purge the dead values entirely.
   live DB and is set via `.env` `POSTGRES_PASSWORD`; `deploy.ps1` now **rejects**
   the old `amphive_db_admin` literal as insecure. (The dead old value remains in
   git history.)
+- [Added 2026-07-08] **JWT revocation.** Tokens were previously irrevocable
+  until their 7-day expiry — a leaked token stayed valid. Every token now
+  carries the user's `token_version` epoch (`tv` claim), re-checked per
+  request; `POST /api/auth/logout` bumps the epoch, killing all of that
+  user's tokens server-side ("log out everywhere"). Expiry is now
+  env-configurable (`JWT_EXPIRY_DAYS`, default 7). No blacklist table (the
+  epoch is per-user, not per-token); single-device logout isn't distinguished
+  from all-device. Legacy pre-`tv` tokens are treated as epoch 0 (valid until
+  the first revoke), so the change didn't force-log-out existing sessions.
 
 ## 3. Open / unauthenticated surfaces
 

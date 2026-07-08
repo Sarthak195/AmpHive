@@ -86,6 +86,11 @@ class User(Base):
     # Money: NUMERIC(12,2) → Decimal in Python. All wallet math goes through
     # services.money.to_money to avoid float rounding drift. See models money note.
     coin_balance: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal("0.00"), nullable=False)
+    # Monotonic token epoch: embedded in every JWT as the `tv` claim and
+    # re-checked on each request. Bumping it (logout, password change, admin
+    # revoke) invalidates all previously issued tokens for this user without a
+    # blacklist table. Added in migration 0003.
+    token_version: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
 
     # Relationships

@@ -69,7 +69,15 @@ export const AuthProvider = ({ children }) => {
     return data;
   }, []);
 
-  const logout = useCallback(() => {
+  const logout = useCallback(async () => {
+    // Revoke the token server-side (bumps token_version → all this user's
+    // tokens die). Best-effort: clear local state regardless of the result,
+    // so the user is always logged out locally even if the request fails.
+    try {
+      await api.post('/api/auth/logout');
+    } catch (err) {
+      console.warn('Logout revoke failed (clearing local session anyway):', err.message);
+    }
     setUser(null);
     localStorage.removeItem('amphive_token');
     localStorage.removeItem('amphive_user');

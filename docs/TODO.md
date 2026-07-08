@@ -201,7 +201,14 @@ Cross-references [TECH_DEBT.md](TECH_DEBT.md) items as `TD#n` and
       presents them as a parallel deployment model. (TD#15)
 - [ ] **TimescaleDB** (hypertables/retention/continuous-aggregates) for
       `telemetry_readings` if telemetry volume grows. (IMPL 2)
-- [ ] **Token revocation / shorter-lived JWTs** (currently 7-day, no blacklist).
+- [x] **Token revocation / shorter-lived JWTs** (2026-07-08): every JWT
+      carries the user's `token_version` epoch (`tv` claim), re-checked per
+      request; `POST /api/auth/logout` bumps it to revoke all of a user's
+      tokens ("log out everywhere", no blacklist table). `JWT_EXPIRY_DAYS` is
+      now env-configurable (default 7). Migration `0003_token_version`;
+      frontend `logout()` calls the endpoint; tests in
+      `backend/tests/test_token_revocation.py` +
+      `frontend/src/contexts/AuthContext.test.jsx`.
 - [x] **Replace `frontend/README.md`** (2026-07-07): real package docs (stack,
       commands, env vars, layout, conventions) pointing at `docs/` as the
       canonical source. (TD#16)

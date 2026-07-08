@@ -13,7 +13,7 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 | Capability | Status | Notes |
 |------------|:------:|-------|
 | REST API (auth, groups, plugs, sessions, payments, direct, CPO portal) | ✅ | 37 endpoints (SSE live endpoint retired + CPO gateway OTA-trigger added 2026-07-07) — see [API_REFERENCE.md](API_REFERENCE.md) |
-| JWT auth + bcrypt | ✅ | 7-day token, loaded fresh per request |
+| JWT auth + bcrypt | ✅ | Env-configurable expiry (`JWT_EXPIRY_DAYS`, default 7); user loaded fresh per request. **Revocable** via the `token_version` epoch (`tv` claim, re-checked per request; `POST /api/auth/logout` bumps it — "log out everywhere"). |
 | Role-based access control | ✅ | Enforced via `services/rbac.py` `require_role(...)` on all `/api/cpo/*` routes (checks the DB role, not just the token) |
 | MQTT command publish (ON/OFF) | ✅ | QoS 1, 3 s wait |
 | MQTT inbound telemetry/status handling | ✅ | Telemetry updates TelemetryStore and session DB. Status updates gateway state in DB. |

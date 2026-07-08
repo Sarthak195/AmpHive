@@ -14,11 +14,11 @@ Interactive docs: `http://<host>:8000/docs`.
   `cpo` or `admin`, enforced by `require_role(...)` (`backend/services/rbac.py`).
 - **CORS:** explicit allowlist (localhost, `amphive.duckdns.org`, VM IP) —
   locked down 2026-07-06.
-- **37 endpoints total**, grouped below: health (1), auth (3), groups (2),
+- **38 endpoints total**, grouped below: health (1), auth (4), groups (2),
   plugs (2), sessions (4), payments (3), Direct Mode (5), CPO portal (17).
   (The legacy SSE endpoint `/api/sessions/live/{id}` was retired 2026-07-07 —
   live telemetry is Socket.io only. The CPO gateway OTA-trigger endpoint was
-  added 2026-07-07.)
+  added 2026-07-07; the `/api/auth/logout` revocation endpoint 2026-07-08.)
 
 ---
 
@@ -35,6 +35,7 @@ Interactive docs: `http://<host>:8000/docs`.
 | POST | `/api/auth/register` | none | `{email, password, full_name}` | `{token, user}` — creates a `driver`, `coin_balance=0`. 400 on duplicate email. |
 | POST | `/api/auth/login` | none | `{email, password}` | `{token, user}` — 401 on bad credentials. |
 | GET | `/api/auth/me` | JWT | — | `{id, email, full_name, role, coin_balance}` |
+| POST | `/api/auth/logout` | JWT | — | Revokes every token for the caller (bumps `users.token_version`; "log out everywhere") → `{status:"logged_out"}`. |
 
 `user` object shape: `{id, email, full_name, role, coin_balance}` (where `coin_balance` is a float).
 Token: HS256 JWT, claims `sub`/`role`/`email`/`iat`/`exp`, **7-day** expiry.

@@ -89,19 +89,37 @@ describe('login / logout', () => {
     expect(JSON.parse(localStorage.getItem('amphive_user')).email).toBe('driver@amphive.test');
   });
 
-  it('logout clears state and localStorage', async () => {
-    api.post.mockResolvedValue({
-      token: 'fresh-jwt',
-      user: { email: 'driver@amphive.test', role: 'driver' },
-    });
+  it('logout revokes server-side then clears state and localStorage', async () => {
+    api.post.mockImplementation((url) =>
+      url === '/api/auth/login'
+        ? Promise.resolve({ token: 'fresh-jwt', user: { email: 'driver@amphive.test', role: 'driver' } })
+        : Promise.resolve({ status: 'logged_out' })
+    );
     renderProbe();
     await screen.findByTestId('user');
     await userEvent.click(screen.getByText('login'));
 
     await userEvent.click(screen.getByText('logout'));
 
-    expect(screen.getByTestId('user')).toHaveTextContent('anonymous');
+    expect(api.post).toHaveBeenCalledWith('/api/auth/logout');
+    await waitFor(() => expect(screen.getByTestId('user')).toHaveTextContent('anonymous'));
     expect(localStorage.getItem('amphive_token')).toBeNull();
     expect(localStorage.getItem('amphive_user')).toBeNull();
+  });
+
+  it('logout still clears local state when the revoke request fails', async () => {
+    api.post.mockImplementation((url) =>
+      url === '/api/auth/login'
+        ? Promise.resolve({ token: 'fresh-jwt', user: { email: 'driver@amphive.test', role: 'driver' } })
+        : Promise.reject(new Error('network down'))
+    );
+    renderProbe();
+    await screen.findByTestId('user');
+    await userEvent.click(screen.getByText('login'));
+
+    await userEvent.click(screen.getByText('logout'));
+
+    await waitFor(() => expect(screen.getByTestId('user')).toHaveTextContent('anonymous'));
+    expect(localStorage.getItem('amphive_token')).toBeNull();
   });
 });
