@@ -43,12 +43,18 @@ static uint32_t telemetry_interval_ms = 10000; // Default 10s (10000ms)
 
 // The central AmpHive server's Tailscale VPN IP
 #define SERVER_VPN_IP       "100.87.241.70"
-// TLS broker (port 8883). The self-signed CA below is validated by mbedTLS
-// (chain + IP SAN); cert dates are not checked (CONFIG_MBEDTLS_HAVE_TIME_DATE
-// is off), so no clock/SNTP is needed. The broker keeps a plaintext 1883
-// listener during the transition, so an older image (or an OTA rollback)
-// still connects.
-#define MQTT_BROKER_URL     "mqtts://100.87.241.70:8883"
+// INTERIM (2026-07-08): plaintext 1883. mqtts://8883 is verified
+// working on the broker, but the ESP's custom ml_* overlay cannot carry the TLS
+// handshake (transport stall — esp_tls timeout, no mbedTLS/cert error). The
+// overlay is already WireGuard-encrypted, so 1883 is not a confidentiality
+// regression. Restore to "mqtts://100.87.241.70:8883" once the overlay TLS
+// path is fixed (see auto-memory: broker-tls-ondevice-verify-pending).
+#define MQTT_BROKER_URL     "mqtt://100.87.241.70:1883"
+// Must match the URI scheme above: 1 for mqtts:// (TLS), 0 for mqtt:// (plain).
+// esp-mqtt refuses to init a client that has TLS verification configs set on a
+// non-SSL scheme ("Client was not initialized"), so the CA cert below is only
+// attached when this is 1. Set back to 1 when restoring the mqtts://8883 URL.
+#define MQTT_USE_TLS        0
 #define TARGET_PLUG_ID      1
 
 // Broker CA, embedded via EMBED_TXTFILES (see main/CMakeLists.txt). The
@@ -98,6 +104,7 @@ static struct {
 
 // --- Forward Declarations ---
 static void start_mqtt_client(void);
+static void on_overlay_disconnected(void);
 static void telemetry_task(void *pvParameters);
 static void microlink_task(void *pvParameters);
 static void start_captive_portal(void);
@@ -555,10 +562,13 @@ static void start_mqtt_client(void) {
 
     esp_mqtt_client_config_t mqtt_cfg = {
         .broker.address.uri = MQTT_BROKER_URL,
+#if MQTT_USE_TLS
         /* TLS: verify the broker against our embedded self-signed CA. The URI
            scheme (mqtts://) selects TLS; the CA PEM authenticates the server
-           (chain + IP SAN). Dates aren't validated (no clock). */
+           (chain + IP SAN). Dates aren't validated (no clock). Only attach the
+           CA on a TLS scheme — esp-mqtt rejects SSL configs on plain mqtt://. */
         .broker.verification.certificate = (const char *)mqtt_ca_crt_start,
+#endif
         .session.last_will = {
             .topic = lwt_topic,
             .msg = "{\"status\":\"offline\"}",
@@ -583,6 +593,22 @@ static void start_mqtt_client(void) {
     mqtt_client = esp_mqtt_client_init(&mqtt_cfg);
     esp_mqtt_client_register_event(mqtt_client, ESP_EVENT_ANY_ID, mqtt_event_handler, NULL);
     esp_mqtt_client_start(mqtt_client);
+}
+
+// Overlay teardown hook — microlink calls this from microlink_disconnect() BEFORE
+// it frees the WireGuard netif (on an ERROR-triggered reconnect). Stop + destroy
+// the MQTT client here so its TCP socket/PCB is closed while the netif still
+// exists; freeing the netif under a live socket is a use-after-free crash
+// (LoadProhibited). Clearing mqtt_client makes microlink_task restart MQTT once
+// the overlay reconnects (state -> CONNECTED/MONITORING).
+static void on_overlay_disconnected(void) {
+    if (mqtt_client) {
+        ESP_LOGW(TAG, "Overlay down: stopping MQTT client before netif teardown");
+        esp_mqtt_client_stop(mqtt_client);
+        esp_mqtt_client_destroy(mqtt_client);
+        mqtt_client = NULL;
+        mqtt_connected = false;
+    }
 }
 
 // ─── Offline Telemetry Resync ─────────────────────────────────────────────────
@@ -736,6 +762,8 @@ static void microlink_task(void *pvParameters) {
     config.enable_derp  = true;
     config.enable_disco = true;
     config.enable_stun  = true;
+    // Stop the MQTT client before the overlay tears down its netif (UAF guard).
+    config.on_disconnected = on_overlay_disconnected;
 
     microlink_t *ml = microlink_init(&config);
     if (!ml) {
