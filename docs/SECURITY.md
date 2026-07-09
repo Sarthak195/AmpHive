@@ -108,7 +108,15 @@ BFG + force-push) to purge the dead values entirely.
 
 ## 4. AuthZ gaps
 
-- [Resolved 2026-07-02] **SSE auth gap.** The frontend now passes the JWT token as a `?token=` query parameter, and the backend verifies the token and session ownership. A potential future hardening is to use a short-lived, single-use ticket instead of the full JWT token in the query parameter.
+- [Resolved 2026-07-02; hardened 2026-07-09] **Live-telemetry auth.** The old
+  SSE transport (retired 2026-07-07) authenticated via a `?token=` query
+  parameter, and the note here proposed a short-lived single-use ticket to
+  keep the JWT out of URLs. Moot now: Socket.io (the sole transport) carries
+  the JWT in the **auth payload of the CONNECT packet body**, and the
+  backend's leftover query-string token fallback — which no client used —
+  was **removed 2026-07-09** (`socketio_manager.py:connect`), so a full JWT
+  can no longer appear in proxy/access logs via the URL. Session ownership
+  is still verified per subscription.
 
 > RBAC across the `/api/cpo/*` surface is now enforced (`require_role`) — see
 > [§7](#7-recently-fixed).

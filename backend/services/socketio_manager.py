@@ -48,21 +48,17 @@ async def emit_plug_status(plug_id: int, status: str) -> None:
 async def connect(sid, environ, auth=None):
     """
     Handle connection. Authenticate the JWT token.
-    Token can be passed in auth payload: { "token": "..." }
-    or query parameters: ?token=...
+
+    The token must arrive in the Socket.io auth payload ({ "token": "..." }),
+    which travels in the CONNECT packet body — never in the URL. The old
+    `?token=` query-string fallback (an SSE-era leftover no client used) was
+    removed 2026-07-09: query strings land in proxy/access logs, so accepting
+    a full JWT there turns every log line into a bearer credential.
     """
     token = None
     if auth and isinstance(auth, dict):
         token = auth.get("token")
-    
-    if not token:
-        # Check query string
-        query_string = environ.get("QUERY_STRING", "")
-        if query_string:
-            from urllib.parse import parse_qs
-            parsed = parse_qs(query_string)
-            token = parsed.get("token", [None])[0]
-            
+
     if not token:
         logger.warning(f"Socket connection rejected: No token provided (sid: {sid})")
         return False  # Refuses connection
