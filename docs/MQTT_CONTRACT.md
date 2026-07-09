@@ -4,15 +4,27 @@
 (`backend/services/mqtt_manager.py`) and the ESP32 gateway firmware
 (`firmware/main/main.c`). Verified 2026-06-20 — firmware and backend agree.*
 
-- **Broker:** Eclipse Mosquitto 2.0, plain MQTT (no TLS). Confidentiality comes
-  from the overlay tunnel, not from MQTT. **Auth is enforced** (2026-07-07):
-  `allow_anonymous false` + passwd file (backend + gateway accounts, generated
-  by `deploy.ps1`); the firmware authenticates with NVS `mqtt_user`/`mqtt_pwd`
-  — see [SECURITY.md §3](SECURITY.md).
+- **Broker:** Eclipse Mosquitto 2.0. Two listeners:
+  - **`mqtts://8.231.81.12:8883` — PUBLIC, the primary transport** (2026-07-10,
+    "direct MQTT"): devices/agents dial **outbound** TLS to the VM's static IP,
+    validating the broker cert (SANs carry both IPs) against the embedded
+    AmpHive CA. Outbound-only traversal — works behind symmetric NAT/CGNAT with
+    no overlay, STUN, or port-forwards.
+  - **`mqtt://100.87.241.70:1883` — overlay-only, legacy/transition**: reachable
+    only over the WireGuard overlay; also the backend's path (internal Docker
+    network). Retire per-device once migrated to 8883.
+- **Auth is enforced** on both listeners: `allow_anonymous false` + passwd file,
+  plus **topic ACLs** (2026-07-10): per-gateway accounts (username ==
+  gateway_id, added via `deploy/scripts/add_gateway_user.ps1`) are confined to
+  `amphive/gateways/<gateway_id>/#`; the backend account has `amphive/#`. The
+  firmware authenticates with NVS `mqtt_user`/`mqtt_pwd` — see
+  [SECURITY.md §3](SECURITY.md).
 - **Backend client id:** `amphive_backend_server` (paho-mqtt v2, `VERSION2`).
-- **Gateway broker URL (firmware):** hard-coded `mqtt://100.64.0.1:1883`
-  (the server's overlay IP). The MQTT client is started lazily once the overlay
-  reaches `CONNECTED`/`MONITORING`.
+- **Gateway broker URL (firmware):** `AMPHIVE_DIRECT_MQTT=1` (default, fw ≥
+  1.3.0) hard-codes `mqtts://8.231.81.12:8883`, started right after Wi-Fi.
+  The legacy overlay build (`AMPHIVE_DIRECT_MQTT=0`) uses
+  `mqtt://100.87.241.70:1883`, started lazily once the overlay reaches
+  `CONNECTED`/`MONITORING`.
 - **Namespace prefix:** `amphive/`.
 
 ---
@@ -118,10 +130,14 @@ LWT/`offline` message is published by the *gateway* firmware.
 
 ## Firmware side (summary)
 
-The ESP32 connects over **TLS** (`mqtts://…:8883`, firmware ≥ 1.2.0),
-validating the broker cert against an embedded self-signed CA (chain + IP
-SAN; dates unchecked, no clock needed); it publishes `online` status
-(retained, with its `fw` version) + subscribes to its commands on connect; runs a dynamically adjustable
+The ESP32 connects **directly over TLS to the public broker**
+(`mqtts://8.231.81.12:8883`, firmware ≥ 1.3.0, `AMPHIVE_DIRECT_MQTT=1`) as
+soon as Wi-Fi is up — no overlay; esp-mqtt owns reconnection — validating the
+broker cert against the embedded self-signed CA (chain + IP SAN; dates
+unchecked, no clock needed). (The legacy `AMPHIVE_DIRECT_MQTT=0` build keeps
+the microlink overlay + plaintext 1883 for comparison/rollback.) It publishes
+`online` status (retained, with its `fw` version) + subscribes to its commands
+on connect; runs a dynamically adjustable
 telemetry/watchdog loop (default 10 seconds, updated via `SET_INTERVAL`
 between 500ms and 60000ms); parses commands with **cJSON** (topic/data
 buffers 256/512 B, oversized/fragmented payloads dropped); enforces local

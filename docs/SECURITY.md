@@ -86,15 +86,40 @@ BFG + force-push) to purge the dead values entirely.
     `mosquitto_sub` → `Connection Refused: not authorised`; backend + the
     real ESP32 reconnected authenticated and telemetry flows.
   - [Added 2026-07-08, rollout in progress] Broker **TLS** listener on **8883**
-    (`mosquitto.conf`): a self-signed CA + server cert (SAN `IP:100.87.241.70`,
-    `deploy/config/gen_mqtt_certs.sh`); the gateway firmware embeds the CA and
+    (`mosquitto.conf`): a self-signed CA + server cert
+    (`deploy/config/gen_mqtt_certs.sh`); the gateway firmware embeds the CA and
     validates the broker cert (chain + IP SAN — dates aren't checked, no clock
     needed). Server-auth only; clients still present username/password.
     Rollout is staged for safety: the plaintext **1883** listener stays up
     during the transition (backend on the internal Docker network; OTA-
     rollback target for gateways), and is bound internal-only once every
-    gateway is confirmed on 8883. TLS here is defense-in-depth — the WireGuard
-    overlay already encrypts the transport.
+    gateway is confirmed on 8883.
+  - [Done 2026-07-10] **8883 is deliberately PUBLIC — the direct-MQTT path.**
+    The overlay proved fragile for devices behind symmetric NAT (DISCO
+    hole-punching fails; see §7), so the transport is now a plain **outbound**
+    MQTT/TLS connection: devices/agents dial `mqtts://8.231.81.12:8883` (the
+    VM's reserved static IP; GCP rule `allow-amphive-mqtts`), which traverses
+    any NAT/CGNAT without STUN/DERP/port-forwards. The trust the tailnet used
+    to provide implicitly is now explicit:
+    * **TLS**: server cert (SANs `100.87.241.70` + `8.231.81.12`) chained to
+      the AmpHive CA; CA regenerated 2026-07-10 with proper
+      `basicConstraints`/`keyUsage` extensions (Python 3.13 strict validators —
+      i.e. the AmpHive Agent — reject a CA without them). Firmware embeds the
+      new CA from 1.3.0.
+    * **AuthN**: `allow_anonymous false` + passwd file. Per-gateway accounts
+      (username == gateway_id) via `deploy/scripts/add_gateway_user.ps1`;
+      the passwd file survives redeploys (no more `-c` truncation).
+    * **AuthZ**: mosquitto **topic ACLs** (`mosquitto_acl`, generated on the VM
+      by `deploy.ps1`): backend → `amphive/#` + `$SYS` read; per-gateway
+      accounts → `pattern readwrite amphive/gateways/%u/#` (a gateway can only
+      touch its own subtree — no cross-site forgery); the legacy shared gateway
+      account keeps `amphive/gateways/#` **transitionally** and should be
+      retired once every device has its own account.
+    **Verified in prod 2026-07-10:** TLS 1.3 handshake from the public internet
+    validates against the CA (strict mode); anonymous and bogus credentials
+    both get `not authorised`; backend, fake plug, and the real ESP32 all
+    stayed connected under the ACLs. The overlay 1883 listener is unchanged
+    (legacy/transition + backend-internal).
 - [Fixed + deployed 2026-07-06] **CORS** is restricted to an explicit allowlist
   (localhost, `amphive.duckdns.org`, VM IP; http+https) with the wildcard removed,
   in `backend/main.py:187`. Verified in prod: an allowed origin is echoed, a

@@ -5,10 +5,14 @@
 *Verified against `firmware/` on 2026-07-06.*
 
 The gateway is an ESP-IDF application targeting **ESP32-S3-N16R8** (16 MB flash /
-8 MB PSRAM). It joins a Tailscale-style overlay, receives MQTT commands, drives a
-local Tapo plug, and enforces edge safety watchdogs. The standout piece is
-`microlink` — a substantial, near-complete **from-scratch Tailscale-protocol
-client written in C**.
+8 MB PSRAM). Since fw **1.3.0** it connects **directly to the public broker over
+outbound MQTT/TLS** (`AMPHIVE_DIRECT_MQTT=1`, the default — NAT/CGNAT-immune, no
+overlay; see [MQTT_CONTRACT.md](MQTT_CONTRACT.md) and [SECURITY.md §3](SECURITY.md)),
+receives MQTT commands, drives a local Tapo plug, and enforces edge safety
+watchdogs. The legacy transport (`AMPHIVE_DIRECT_MQTT=0`) joins a Tailscale-style
+overlay via `microlink` — a substantial, near-complete **from-scratch
+Tailscale-protocol client written in C** — kept compilable for rollback, but
+defeated by symmetric NAT (root-caused 2026-07-09) and no longer the default.
 
 ```
 firmware/
@@ -35,18 +39,22 @@ firmware/
    submits the setup form (which triggers `esp_restart()`).
 3. `tapo_init()` (also restores the persisted energy integrator from NVS).
 4. Create `telemetry_safety` task (stack 8192, prio 5).
-5. Create `microlink_vpn` task (stack 32768, prio 6).
+5. Direct build (default): `start_mqtt_client()` immediately (esp-mqtt owns
+   reconnects). Legacy overlay build: create `microlink_vpn` task (stack 32768,
+   prio 6) which starts MQTT lazily once the overlay is up.
 
 | Task | Stack | Prio | Core |
 |------|-------|------|------|
 | `telemetry_safety` | 8192 | 5 | floating |
-| `microlink_vpn` | 32768 | 6 | floating |
-| `ml_coord_poll` (inside microlink) | 8 KB | max-1 | pinned Core 1 |
+| `microlink_vpn` (legacy build only) | 32768 | 6 | floating |
+| `ml_coord_poll` (inside microlink, legacy build only) | 8 KB | max-1 | pinned Core 1 |
 
-Hard-coded constants: `SERVER_VPN_IP "100.87.241.70"`, `MQTT_BROKER_URL
-"mqtts://100.87.241.70:8883"` (TLS since fw 1.2.0 — the broker CA is embedded
-via `EMBED_TXTFILES "certs/mqtt_ca.crt"` and validated by mbedTLS: chain + IP
-SAN, no date check), `TARGET_PLUG_ID 1`. SSID, WiFi password, auth key,
+Hard-coded constants: `AMPHIVE_DIRECT_MQTT 1` → `MQTT_BROKER_URL
+"mqtts://8.231.81.12:8883"` (the VM's static public IP; the broker CA is
+embedded via `EMBED_TXTFILES "certs/mqtt_ca.crt"` and validated by mbedTLS:
+chain + IP SAN, no date check). The legacy build (`AMPHIVE_DIRECT_MQTT 0`) keeps
+`SERVER_VPN_IP "100.87.241.70"` + plaintext `mqtt://100.87.241.70:1883` inside
+the WireGuard tunnel. `TARGET_PLUG_ID 1`. SSID, WiFi password, auth key,
 device name, gateway id, target plug IP, and MQTT credentials all come from
 NVS (namespace `storage`) populated by the captive portal.
 
@@ -62,7 +70,9 @@ product features.
 
 ## 3. MQTT control loop & watchdogs
 
-- Lazy MQTT start once the overlay is up; topics per [MQTT_CONTRACT.md](MQTT_CONTRACT.md).
+- Direct build: MQTT starts right after Wi-Fi (TLS to the public broker). Legacy
+  build: lazy MQTT start once the overlay is up. Topics per
+  [MQTT_CONTRACT.md](MQTT_CONTRACT.md).
 - Commands parsed with **cJSON** (`"action":"ON"`/`"OFF"`/`"SET_INTERVAL"`, optional
   `max_duration_seconds` / `max_kwh` / `session_id`, `interval_ms`); topic/data
   buffers 256/512 B with an oversized/fragmented-payload guard. Defaults: 14400 s,

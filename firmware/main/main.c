@@ -41,6 +41,22 @@ char mqtt_password[64] = "";
 bool config_loaded = false;
 static uint32_t telemetry_interval_ms = 10000; // Default 10s (10000ms)
 
+// ── Transport selection ──────────────────────────────────────────────────────
+// 1: DIRECT MQTT (default since 1.3.0) — plain outbound TLS to the broker's
+//    PUBLIC IP. No overlay: survives symmetric NAT/CGNAT (the device only
+//    dials out), which the microlink overlay could not (see docs/SECURITY.md
+//    §3 and docs/MQTT_CONTRACT.md). Confidentiality/authenticity = TLS against
+//    the embedded CA; authorization = per-gateway broker creds + topic ACLs.
+// 0: legacy overlay transport (microlink/WireGuard to the server's tailnet IP,
+//    plaintext 1883 inside the encrypted tunnel).
+#define AMPHIVE_DIRECT_MQTT 1
+
+#if AMPHIVE_DIRECT_MQTT
+// The VM's reserved static public IP (gcloud: amphive-static-ip). The broker
+// cert carries this IP in its SANs; mbedTLS verifies it against the embedded CA.
+#define MQTT_BROKER_URL     "mqtts://8.231.81.12:8883"
+#define MQTT_USE_TLS        1
+#else
 // The central AmpHive server's Tailscale VPN IP
 #define SERVER_VPN_IP       "100.87.241.70"
 // INTERIM (2026-07-08): plaintext 1883. mqtts://8883 is verified
@@ -55,6 +71,7 @@ static uint32_t telemetry_interval_ms = 10000; // Default 10s (10000ms)
 // non-SSL scheme ("Client was not initialized"), so the CA cert below is only
 // attached when this is 1. Set back to 1 when restoring the mqtts://8883 URL.
 #define MQTT_USE_TLS        0
+#endif
 #define TARGET_PLUG_ID      1
 
 // Broker CA, embedded via EMBED_TXTFILES (see main/CMakeLists.txt). The
@@ -104,11 +121,13 @@ static struct {
 
 // --- Forward Declarations ---
 static void start_mqtt_client(void);
-static void on_overlay_disconnected(void);
 static void telemetry_task(void *pvParameters);
-static void microlink_task(void *pvParameters);
 static void start_captive_portal(void);
 static void resync_offline_logs(void);
+#if !AMPHIVE_DIRECT_MQTT
+static void on_overlay_disconnected(void);
+static void microlink_task(void *pvParameters);
+#endif
 
 // ─── NVS Configuration Helpers ───────────────────────────────────────────────
 static void load_config_from_nvs(void) {
@@ -595,6 +614,7 @@ static void start_mqtt_client(void) {
     esp_mqtt_client_start(mqtt_client);
 }
 
+#if !AMPHIVE_DIRECT_MQTT
 // Overlay teardown hook — microlink calls this from microlink_disconnect() BEFORE
 // it frees the WireGuard netif (on an ERROR-triggered reconnect). Stop + destroy
 // the MQTT client here so its TCP socket/PCB is closed while the netif still
@@ -610,6 +630,7 @@ static void on_overlay_disconnected(void) {
         mqtt_connected = false;
     }
 }
+#endif // !AMPHIVE_DIRECT_MQTT
 
 // ─── Offline Telemetry Resync ─────────────────────────────────────────────────
 static void resync_offline_logs(void) {
@@ -752,6 +773,7 @@ static void telemetry_task(void *pvParameters) {
 }
 
 // ─── MicroLink VPN Tunnel Task ───────────────────────────────────────────────
+#if !AMPHIVE_DIRECT_MQTT
 static void microlink_task(void *pvParameters) {
     ESP_LOGI(TAG, "=== Starting AmpHive MicroLink Network Client ===");
 
@@ -802,6 +824,7 @@ static void microlink_task(void *pvParameters) {
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
+#endif // !AMPHIVE_DIRECT_MQTT
 
 // ─── Entry Point ─────────────────────────────────────────────────────────────
 void app_main(void) {
@@ -857,6 +880,15 @@ void app_main(void) {
     //    Stack raised to 8 KB: the task now performs real KLAP crypto + HTTP each poll.
     xTaskCreate(telemetry_task, "telemetry_safety", 8192, NULL, 5, NULL);
 
+#if AMPHIVE_DIRECT_MQTT
+    // 6. Direct transport: Wi-Fi is up, so dial the public broker over TLS
+    //    right away. esp-mqtt owns reconnection (backoff on the default
+    //    reconnect_timeout_ms), and the Wi-Fi netif is never torn down by us,
+    //    so no overlay-style teardown hook is needed.
+    ESP_LOGI(TAG, "Direct MQTT transport: connecting to " MQTT_BROKER_URL);
+    start_mqtt_client();
+#else
     // 6. Start Tailscale connection client
     xTaskCreate(microlink_task, "microlink_vpn", 32768, NULL, 6, NULL);
+#endif
 }

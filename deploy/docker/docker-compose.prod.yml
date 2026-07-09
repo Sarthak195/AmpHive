@@ -41,13 +41,18 @@ services:
       # backend is unaffected — it reaches 'mqtt' over the compose network,
       # not via this published port.
       - "${MQTT_BIND_IP}:1883:1883"
-      # TLS listener (8883): gateways connect over the overlay with mqtts://.
-      - "${MQTT_BIND_IP}:8883:8883"
+      # TLS listener (8883): PUBLIC by default (direct-MQTT path — gateways and
+      # agents dial out to mqtts://<public-ip>:8883; auth = TLS + per-gateway
+      # creds + ACLs, see docs/SECURITY.md §3). Override MQTT_TLS_BIND_IP in
+      # .env to re-restrict it (e.g. to the overlay IP).
+      - "${MQTT_TLS_BIND_IP:-0.0.0.0}:8883:8883"
       # (9001 removed: it was published but mosquitto has no websocket listener.)
     volumes:
       - ./mosquitto.conf:/mosquitto/config/mosquitto.conf
       # Generated on the VM by deploy.ps1 (mosquitto_passwd) from MQTT_* in .env.
       - ./mosquitto_passwd:/mosquitto/config/passwd
+      # Topic ACLs, generated on the VM by deploy.ps1 (see mosquitto.conf).
+      - ./mosquitto_acl:/mosquitto/config/acl
       # TLS certs (ca.crt, server.crt, server.key) transferred by deploy.ps1.
       - ./mqtt-certs:/mosquitto/config/certs:ro
       - mosquitto_data:/mosquitto/data

@@ -41,7 +41,8 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 ### Firmware
 | Capability | Status | Notes |
 |------------|:------:|-------|
-| `microlink` Tailscale client (Noise/ts2021, DERP, DISCO, STUN, WG) | ✅ | Fully operational; NAT traversal and direct connections work using the unified magicsock port (41641). |
+| **Direct MQTT transport (fw ≥ 1.3.0, default)** | ✅ | `AMPHIVE_DIRECT_MQTT=1`: outbound `mqtts://8.231.81.12:8883` right after Wi-Fi — no overlay, NAT/CGNAT-immune, esp-mqtt owns reconnects. **Verified on-device 2026-07-10** (~3.3 s power-on→connected through a symmetric-NAT router; telemetry at 10 s cadence). Binary shrank ~50% (microlink linked out). |
+| `microlink` Tailscale client (Noise/ts2021, DERP, DISCO, STUN, WG) | 🟡 | **Demoted to legacy transport** (`AMPHIVE_DIRECT_MQTT=0`): works for full-cone NATs, but symmetric NAT defeats DISCO hole-punching (root-caused 2026-07-09) — the reason for the direct-MQTT pivot. Kept compilable for rollback/comparison. |
 | MQTT control loop + topic contract | ✅ | Matches backend topics |
 | Captive portal provisioning | ✅ | `AmpHive_Setup_XXXX` → NVS → reboot |
 | Edge watchdogs (duration/energy/thermal/over-current) | ✅ | Thermal + over-current now use the plug's `overheat_status`/`overcurrent_status` flags (the P110 has no °C sensor) |
@@ -57,7 +58,7 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 | Docker Compose on GCP VM | ✅ | Live/canonical |
 | `deploy.ps1` + `scripts/*.bat` helpers | ✅ | VM start/stop + remote compose/logs (in `scripts/`) |
 | K8s/K3s manifests | — | **Retired 2026-07-07** (TD#15): banner-marked unmaintained reference (`deploy/k8s/README.md`); Compose-on-VM is the only deployment model |
-| Mosquitto broker | ✅ | Auth enforced (`allow_anonymous false` + passwd file); overlay-bound (not public). **TLS listener on 8883** added 2026-07-08 (self-signed CA, firmware validates chain+IP SAN) — staged rollout keeps plaintext 1883 up as the transition/OTA-rollback path. |
+| Mosquitto broker | ✅ | Auth enforced (`allow_anonymous false` + passwd file) **+ topic ACLs** (2026-07-10). **8883 TLS is PUBLIC — the primary "direct MQTT" transport** (devices dial outbound `mqtts://8.231.81.12:8883`, NAT-immune; per-gateway accounts scoped to `amphive/gateways/<id>/#` via `add_gateway_user.ps1`). Overlay-bound plaintext 1883 stays as the legacy/transition path. Verified in prod: ESP32 fw 1.3.0-direct connected from the public internet through a symmetric-NAT router in ~3.3 s power-on→connected; ACL isolation cross-checked. See SECURITY.md §3, MQTT_CONTRACT.md. |
 
 ---
 

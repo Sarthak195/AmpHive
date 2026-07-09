@@ -16,6 +16,8 @@ deploy/config/amphive_tunnel.conf
 # server cert; the CA + server keys stay local (+ on the VM). See
 # deploy/config/mqtt-certs/README.md.
 deploy/config/mqtt-certs/*.key
+# Rotated-out cert material kept locally for reference — never commit.
+deploy/config/mqtt-certs/retired-*/
 *.key
 
 # Dependency directories
