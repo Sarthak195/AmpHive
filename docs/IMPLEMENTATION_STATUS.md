@@ -337,3 +337,20 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
     the cap check under the user lock; served frontend bundle carries the
     multi-session context). The 409-at-cap itself is unit-tested only — a
     live check would need two real sessions on the physical plug.
+46. [Resolved 2026-07-09] **Wallet lost-update via the stale identity map.**
+    The row-locked read-modify-write in `_credit_topup` and
+    `finalize_charging_session` looked race-safe, but the request session
+    already held the auth-loaded `User` (get_current_user shares the
+    request's `db`), and SQLAlchemy returns that **cached instance without
+    refreshing attributes** from a later `select(User).with_for_update()` —
+    the lock was taken, the arithmetic ran on the balance as of auth time.
+    A credit/debit committed between auth and the lock (webhook top-up
+    during a stop request, reaper debit during /verify) was silently
+    overwritten. Wallet writes are now DB-side atomics centralized in
+    `services/wallet.py` (`credit_wallet`, `debit_wallet_clamped`); the
+    logout `token_version` bump had the same shape and is also an atomic
+    `UPDATE … RETURNING` now. Postgres-backed regression tests
+    (stale-instance scenarios, duplicate-topup rollback, clamp, lock
+    serialization): `backend/tests/test_wallet.py` — these are the first
+    tests to use CI's postgres service for billing correctness (the purpose
+    it was provisioned for).

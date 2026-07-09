@@ -115,9 +115,19 @@ BFG + force-push) to purge the dead values entirely.
 
 ## 5. Data-integrity gaps
 
-- Wallet credit/debit is now **row-locked** (`SELECT ... FOR UPDATE`) in the stop,
-  verify, and webhook paths — the previous race is closed. Remaining hardening:
-  consider a single atomic `UPDATE ... SET balance = balance + :n`.
+- [2026-07-09] Wallet writes are now **atomic DB-side updates** centralized in
+  `backend/services/wallet.py` (credits: `UPDATE … SET coin_balance =
+  coin_balance + :n RETURNING`; debits: fresh column read under `FOR UPDATE`
+  + clamped write). Implementing the long-noted "consider a single atomic
+  UPDATE" hardening surfaced that it was a **real lost-update bug**, not just
+  hygiene: the request session already holds the auth-loaded `User` in its
+  identity map, and SQLAlchemy returns that cached instance — stale balance
+  and all — from a later `select(User).with_for_update()`, so the old
+  read-modify-write silently overwrote any credit/debit committed between
+  auth and the lock (e.g. a webhook top-up landing while a stop request was
+  in flight). The logout `token_version` bump had the same shape and is also
+  DB-side now. Postgres-backed regression tests: `backend/tests/test_wallet.py`
+  (run in CI; local dev boxes run no DB by policy).
 - [2026-07-06] Money columns migrated from `Float` to `Numeric(12,2)` (Decimal),
   and all wallet math goes through `services/money.to_money` — float rounding
   drift is closed.
