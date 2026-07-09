@@ -64,11 +64,12 @@ BFG + force-push) to purge the dead values entirely.
 
 ## 3. Open / unauthenticated surfaces
 
-- **MQTT broker is anonymous + no TLS** (`mosquitto.conf`: `allow_anonymous true`).
-  It *used* to be reachable on **1883 from `0.0.0.0/0`** — anyone could
-  publish/subscribe, send plug `ON`/`OFF`, and **forge telemetry that feeds
-  billing**. The public exposure was closed 2026-07-06 (see below); broker
-  **auth** is still missing, so any overlay peer can still publish.
+- **MQTT broker** — *largely closed as of 2026-07-08; TLS rollout in progress.*
+  It *used* to be anonymous and reachable on **1883 from `0.0.0.0/0`** — anyone
+  could publish/subscribe, send plug `ON`/`OFF`, and **forge telemetry that
+  feeds billing**. Since then: public exposure closed 2026-07-06, auth enforced
+  2026-07-07, TLS listener added 2026-07-08 (details below). Remaining: move
+  every gateway to 8883, then bind plaintext 1883 internal-only.
   - [Done 2026-07-06] MQTT now binds to the VM overlay IP `100.87.241.70`
     (`MQTT_BIND_IP` in `.env`), and the GCP firewall rule was restricted to
     tcp:80 + tcp:8000 — **1883 is no longer publicly reachable**. The ESP32
@@ -195,13 +196,19 @@ Status — open items and recently closed:
 - [x] **Rotate** WireGuard keys, DuckDNS token, Tapo & DB passwords at the source
       (2026-07-06). Dead old values remain in git history — *optional* scrub.
 - [x] **Commit + deploy** the CORS allowlist (2026-07-06) — live in prod.
-- [ ] Add MQTT broker **auth** (firmware credentials field needed).
-- [ ] Set a strong `JWT_SECRET_KEY` in every environment (enforced by
-      deploy.ps1 as of 2026-07-05; backend falls back to an ephemeral key).
+- [x] Add MQTT broker **auth** (2026-07-07) — `allow_anonymous false` + passwd
+      file; backend, healthcheck, and gateway firmware (NVS creds) all
+      authenticate; verified in prod (see §3).
+- [x] Set a strong `JWT_SECRET_KEY` in every environment — deploy.ps1 aborts on
+      a missing/short/default secret (2026-07-05) and prod deploys since prove a
+      strong key is set; the backend falls back to an ephemeral key elsewhere.
 - [x] MQTT bound to the overlay IP + public 1883 firewall rule dropped (2026-07-06).
 - [x] CORS restricted to an allowlist in `backend/main.py` (2026-07-06, deployed).
-- [ ] Consider a DB-level non-negative-balance constraint (money is now
-      `Numeric(12,2)`, but no CHECK enforces `coin_balance >= 0` yet).
+- [ ] MQTT broker **TLS** rollout completion: OTA every gateway to ≥ 1.2.0
+      (mqtts://8883), then bind plaintext 1883 internal-only (see §3).
+- [x] DB-level non-negative-balance CHECK (2026-07-07) — Alembic
+      `0002_wallet_non_negative` adds `ck_users_coin_balance_non_negative`
+      (see §5).
 - [x] Unique `razorpay_payment_id` ledger column (2026-07-06) —
       `uq_ledger_razorpay_payment_id` + `IntegrityError` handling in
       `_credit_topup` closes the concurrent /verify + webhook double-credit race.
