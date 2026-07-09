@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "amphive-agent"
+version = "0.1.0"
+description = "AmpHive local hub — discovers smart plugs of many brands and pushes telemetry to the AmpHive cloud over MQTT (Home-Assistant-style)."
+requires-python = ">=3.10"
+dependencies = [
+    "paho-mqtt>=2.0",
+]
+
+[project.optional-dependencies]
+kasa = ["python-kasa>=0.7"]      # Kasa + Tapo (incl. P110 energy), local
+shelly = ["aiohttp>=3.9"]        # Shelly Gen2+ local RPC
+all = ["python-kasa>=0.7", "aiohttp>=3.9"]
+
+[project.scripts]
+amphive-agent = "amphive_agent.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["amphive_agent*"]

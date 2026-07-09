@@ -131,6 +131,11 @@ class Plug(Base):
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     local_ip: Mapped[str] = mapped_column(String(45), nullable=False) # VLAN 20 IP
     plug_model: Mapped[str] = mapped_column(String(50), default="tapo_p110", nullable=False)
+    # Stable device identity reported by the AmpHive Agent's discovery
+    # (brand-scoped, e.g. "kasa:AA:BB:CC:DD:EE:FF"). NULL for ESP-gateway or
+    # manually-provisioned plugs. Used to auto-populate + reconcile agent-
+    # discovered plugs idempotently (the agent then adopts the assigned id).
+    unique_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True, index=True)
     status: Mapped[PlugStatus] = mapped_column(SQLEnum(PlugStatus, name="plug_status", values_callable=lambda x: [e.value for e in x]), default=PlugStatus.OFFLINE, nullable=False)
     current_power_w: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     # Geolocation for the map. NULL = unknown → callers fall back to the plug's

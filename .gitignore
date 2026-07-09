@@ -77,3 +77,6 @@ env/
 .env/
 # Local test-account credentials (seeded fixture logins) - never commit
 TEST_ACCOUNTS.local.txt
+
+# Local reference clones of third-party plug-API repos (see docs/PLUG_CONNECTIVITY_OPTIONS.md)
+research/

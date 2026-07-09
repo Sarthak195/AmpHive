@@ -67,6 +67,8 @@ class MQTTManager:
         self.telemetry_pattern = re.compile(r"^amphive/gateways/([^/]+)/telemetry$")
         # gateways/{gateway_id}/status
         self.status_pattern = re.compile(r"^amphive/gateways/([^/]+)/status$")
+        # gateways/{gateway_id}/discovery  (AmpHive Agent plug discovery)
+        self.discovery_pattern = re.compile(r"^amphive/gateways/([^/]+)/discovery$")
 
     def start(self):
         logger.info(f"Connecting to MQTT broker at {self.broker_host}:{self.broker_port}...")
@@ -84,6 +86,8 @@ class MQTTManager:
             # Subscribe to all gateway telemetry and status topics
             self.client.subscribe("amphive/gateways/+/telemetry", qos=0)
             self.client.subscribe("amphive/gateways/+/status", qos=1)
+            # AmpHive Agent plug discovery (auto-populate) — retained announcements.
+            self.client.subscribe("amphive/gateways/+/discovery", qos=1)
         else:
             logger.error(f"Failed to connect to MQTT broker, return code {rc}")
 
@@ -112,6 +116,13 @@ class MQTTManager:
         if telemetry_match:
             gateway_id = telemetry_match.group(1)
             self._handle_gateway_telemetry(gateway_id, payload)
+            return
+
+        # Match discovery topic (AmpHive Agent auto-populate)
+        discovery_match = self.discovery_pattern.match(msg.topic)
+        if discovery_match:
+            gateway_id = discovery_match.group(1)
+            self._handle_gateway_plug_discovery(gateway_id, payload)
             return
 
     # -----------------------------------------------------------------------
@@ -395,6 +406,98 @@ class MQTTManager:
                     )
         except Exception as e:
             logger.error(f"OFF republish on reconnect failed for gateway {gateway_id}: {e}")
+
+    # -----------------------------------------------------------------------
+    # Inbound plug-discovery handler — auto-populate agent-discovered plugs
+    # -----------------------------------------------------------------------
+
+    def _handle_gateway_plug_discovery(self, gateway_id: str, payload: Dict[str, Any]):
+        """
+        Process a plug-discovery announcement from an AmpHive Agent.
+
+        Expected payload (docs/AMPHIVE_AGENT.md):
+            {"unique_id": "kasa:AA:BB:..", "provider": "kasa",
+             "model": "KP115", "alias": "Bay 3", "capabilities": ["switch","power","energy"]}
+
+        The backend is authoritative for plug_id: it upserts a Plug keyed by the
+        stable `unique_id` (the DB assigns `plugs.id`), then publishes the current
+        {unique_id: plug_id} map back so the agent adopts the assigned ids. This
+        is required because the MQTT plug_id IS the global `plugs.id` used by the
+        telemetry handler — an agent must not invent its own.
+        """
+        unique_id = payload.get("unique_id")
+        if not unique_id:
+            logger.warning(f"Discovery from gateway {gateway_id} missing unique_id, ignoring.")
+            return
+        if self.db_session_factory and self.event_loop:
+            asyncio.run_coroutine_threadsafe(
+                self._persist_plug_discovery(gateway_id, payload),
+                self.event_loop,
+            )
+
+    async def _persist_plug_discovery(self, gateway_id: str, payload: Dict[str, Any]):
+        """Upsert the discovered plug by unique_id, then publish the assignment map."""
+        from backend.database.models import Gateway, Plug
+        from sqlalchemy import select
+
+        unique_id = payload.get("unique_id")
+        alias = str(payload.get("alias") or unique_id)[:100]
+        model = str(payload.get("model") or "agent")[:50]
+        local_ip = str(payload.get("ip") or "agent")[:45]
+
+        try:
+            async with self.db_session_factory() as session:
+                # Only auto-populate for a gateway that already exists (is claimed).
+                gateway = (
+                    await session.execute(select(Gateway).where(Gateway.id == gateway_id))
+                ).scalar_one_or_none()
+                if gateway is None:
+                    logger.warning(
+                        f"Discovery for unknown gateway {gateway_id}, ignoring "
+                        f"(claim the gateway first)."
+                    )
+                    return
+
+                existing = (
+                    await session.execute(
+                        select(Plug).where(
+                            Plug.gateway_id == gateway_id, Plug.unique_id == unique_id
+                        )
+                    )
+                ).scalar_one_or_none()
+
+                if existing is None:
+                    session.add(Plug(
+                        gateway_id=gateway_id, name=alias, local_ip=local_ip,
+                        plug_model=model, unique_id=unique_id,
+                    ))
+                    logger.info(f"Auto-populated new plug '{alias}' ({unique_id}) on {gateway_id}")
+                else:
+                    existing.name = alias
+                    existing.plug_model = model
+
+                await session.commit()
+
+                # Rebuild the full {unique_id: plug_id} map for this gateway.
+                rows = (
+                    await session.execute(
+                        select(Plug.unique_id, Plug.id).where(
+                            Plug.gateway_id == gateway_id, Plug.unique_id.is_not(None)
+                        )
+                    )
+                ).all()
+                assignments = {uid: pid for uid, pid in rows}
+        except Exception as e:
+            logger.error(f"Failed to persist plug discovery for {gateway_id}: {e}")
+            return
+
+        # Hand the authoritative ids back to the agent (retained, so it survives
+        # an agent restart / late subscribe).
+        self.client.publish(
+            f"amphive/gateways/{gateway_id}/assign",
+            json.dumps(assignments), qos=1, retain=True,
+        )
+        logger.info(f"Published plug assignments for {gateway_id}: {assignments}")
 
     # -----------------------------------------------------------------------
     # Outbound command publisher

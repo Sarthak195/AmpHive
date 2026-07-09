@@ -13,6 +13,7 @@ thread.
 """
 
 import asyncio
+import json
 import threading
 from unittest.mock import MagicMock
 
@@ -130,4 +131,142 @@ async def test_telemetry_update_direct_when_no_loop():
         plug_id=2, power_w=20.0, current_a=0.087, energy_kwh=0.2, status="idle"
     )
 
+    MQTTManager._instance = None
+
+
+# ---------------------------------------------------------------------------
+# Plug discovery -> backend-authoritative plug_id assignment (docs/AMPHIVE_AGENT.md)
+# ---------------------------------------------------------------------------
+
+
+class _FakeResult:
+    """Stands in for a SQLAlchemy Result: scalar_one_or_none() or all()."""
+
+    def __init__(self, scalar="__unset__", rows=None):
+        self._scalar = scalar
+        self._rows = rows or []
+
+    def scalar_one_or_none(self):
+        return None if self._scalar == "__unset__" else self._scalar
+
+    def all(self):
+        return self._rows
+
+
+class _FakeSession:
+    """Async-context session that returns queued results and records adds."""
+
+    def __init__(self, results):
+        self._results = iter(results)
+        self.added = []
+        self.committed = False
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def execute(self, *_a, **_k):
+        return next(self._results)
+
+    def add(self, obj):
+        self.added.append(obj)
+
+    async def commit(self):
+        self.committed = True
+
+
+@pytest.mark.asyncio
+async def test_discovery_missing_unique_id_is_ignored():
+    """A discovery announcement without unique_id must not touch the DB/loop."""
+    MQTTManager._instance = None
+    loop = asyncio.get_running_loop()
+    mgr = MQTTManager(db_session_factory=lambda: None, event_loop=loop)
+
+    scheduled = []
+    mgr._persist_plug_discovery = lambda *a, **k: scheduled.append(a)  # would be awaited
+
+    mgr._handle_gateway_plug_discovery("gw-1", {"provider": "kasa"})  # no unique_id
+    await asyncio.sleep(0.05)
+
+    assert scheduled == [], "discovery without unique_id should be ignored"
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_discovery_marshaled_onto_loop():
+    """A valid discovery on the paho thread schedules _persist_plug_discovery."""
+    MQTTManager._instance = None
+    loop = asyncio.get_running_loop()
+    mgr = MQTTManager(db_session_factory=lambda: None, event_loop=loop)
+
+    captured = {}
+
+    async def fake_persist(gateway_id, payload):
+        captured.update(gateway_id=gateway_id, payload=payload)
+
+    mgr._persist_plug_discovery = fake_persist
+
+    payload = {"unique_id": "kasa:AA:BB", "provider": "kasa", "model": "KP115"}
+    mgr._handle_gateway_plug_discovery("gw-9", payload)
+    await asyncio.sleep(0.05)  # let the scheduled coroutine run
+
+    assert captured.get("gateway_id") == "gw-9"
+    assert captured.get("payload") == payload
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_persist_discovery_upserts_new_plug_and_publishes_assign_map():
+    """
+    For a known gateway, a new unique_id is inserted as a Plug and the backend
+    publishes the retained {unique_id: plug_id} map so the agent adopts the
+    DB-assigned id.
+    """
+    MQTTManager._instance = None
+    loop = asyncio.get_running_loop()
+
+    session = _FakeSession([
+        _FakeResult(scalar=MagicMock()),                 # gateway exists
+        _FakeResult(scalar=None),                        # plug is new
+        _FakeResult(rows=[("kasa:AA:BB:CC", 5)]),        # rebuilt map after commit
+    ])
+    mgr = MQTTManager(db_session_factory=lambda: session, event_loop=loop)
+    mgr.client = MagicMock()
+
+    await mgr._persist_plug_discovery("gw-1", {
+        "unique_id": "kasa:AA:BB:CC", "provider": "kasa",
+        "model": "KP115", "alias": "Bay 3",
+    })
+
+    # A new Plug was inserted with the reported unique_id.
+    assert len(session.added) == 1
+    assert session.added[0].unique_id == "kasa:AA:BB:CC"
+    assert session.added[0].name == "Bay 3"
+    assert session.committed
+
+    # The retained assign map was published with the DB-assigned id.
+    mgr.client.publish.assert_called_once()
+    args, kwargs = mgr.client.publish.call_args
+    assert args[0] == "amphive/gateways/gw-1/assign"
+    assert json.loads(args[1]) == {"kasa:AA:BB:CC": 5}
+    assert kwargs.get("retain") is True
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_persist_discovery_unknown_gateway_publishes_nothing():
+    """Discovery for an unclaimed gateway is dropped (no plug, no assign map)."""
+    MQTTManager._instance = None
+    loop = asyncio.get_running_loop()
+
+    session = _FakeSession([_FakeResult(scalar=None)])  # gateway does not exist
+    mgr = MQTTManager(db_session_factory=lambda: session, event_loop=loop)
+    mgr.client = MagicMock()
+
+    await mgr._persist_plug_discovery("ghost-gw", {"unique_id": "kasa:ZZ"})
+
+    assert session.added == []
+    mgr.client.publish.assert_not_called()
     MQTTManager._instance = None

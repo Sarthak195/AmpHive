@@ -25,10 +25,27 @@
 | gateway → backend | `amphive/gateways/{gateway_id}/telemetry` | 0 | no | `{"plug_id":<int>,"watts":<f>,"kwh":<f>,"voltage":<f>,"current":<f>,"status":"occupied"\|"available","session_id":"<str>"}` |
 | gateway → backend | `amphive/gateways/{gateway_id}/status` | 1 | yes | `{"status":"online","fw":"<ver>"}` (on connect) / `{"status":"offline"}` (LWT) |
 | gateway → backend | `amphive/gateways/{gateway_id}/alarms` | 1 | no | `{"error":"THERMAL_CUTOFF"}` or `{"event":"OTA_STARTED"\|"OTA_OK_REBOOTING"\|"OTA_FAILED"\|"OTA_REFUSED_SESSION_ACTIVE"\|...}` |
+| agent → backend | `amphive/gateways/{gateway_id}/discovery` | 1 | no | `{"unique_id":"<str>","provider":"<str>","model":"<str>","alias":"<str>","capabilities":["switch","power","energy"]}` |
+| backend → agent | `amphive/gateways/{gateway_id}/assign` | 1 | yes | `{"<unique_id>":<plug_id:int>, ...}` (full map for the gateway) |
 
-The backend subscribes with wildcards: `amphive/gateways/+/telemetry` (QoS 0)
-and `amphive/gateways/+/status` (QoS 1). It does **not** currently subscribe to
-`/alarms`.
+The backend subscribes with wildcards: `amphive/gateways/+/telemetry` (QoS 0),
+`amphive/gateways/+/status` (QoS 1), and `amphive/gateways/+/discovery` (QoS 1).
+It does **not** currently subscribe to `/alarms`.
+
+> **`/discovery` + `/assign` (software gateways only).** These two topics belong
+> to the **AmpHive Agent** ([AMPHIVE_AGENT.md](AMPHIVE_AGENT.md)) — a software
+> gateway that adopts non-AmpHive plugs (Kasa/Tapo, Shelly, …). The **ESP32
+> firmware does not use them.** plug_id is **backend-authoritative**: the MQTT
+> `plug_id` in every command/telemetry payload *is* the global DB `plugs.id`
+> (`_persist_telemetry` looks up `Plug.id == plug_id`), so an agent must never
+> invent local ids. Instead it announces each discovered device by a stable
+> `unique_id` (brand-scoped, MAC-derived — stable across reboots/IP changes) on
+> `/discovery`; the backend upserts a `Plug` keyed by `(gateway_id, unique_id)`,
+> letting the DB assign `plugs.id`, then publishes the **retained** full
+> `{unique_id: plug_id}` map on `/assign`. The agent adopts those ids and only
+> then starts publishing telemetry under them. Retained so a restarted/late agent
+> re-learns its ids immediately. Discovery for an **unclaimed** gateway (no
+> `gateways` row) is dropped — claim the gateway first.
 
 > **`kwh` is session-relative.** The telemetry `kwh` field is energy consumed
 > **this session** (`meter − session_baseline` on the firmware), **not** the
