@@ -109,6 +109,10 @@ class Gateway(Base):
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     vpn_ip: Mapped[str] = mapped_column(String(45), unique=True, nullable=False)
     status: Mapped[GatewayStatus] = mapped_column(SQLEnum(GatewayStatus, name="gateway_status", values_callable=lambda x: [e.value for e in x]), default=GatewayStatus.OFFLINE, nullable=False)
+    # Firmware version last reported in the gateway's `online` status payload
+    # (e.g. "1.5.0-direct"). NULL until the gateway first connects and reports
+    # it. Lets a CPO see which gateways need an OTA.
+    firmware_version: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     latitude: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     longitude: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     # Liveness marker: written ONLY by the MQTT handlers (status connect/LWT +
@@ -294,4 +298,42 @@ class TelemetryReading(Base):
         Index("idx_telemetry_plug_recorded", "plug_id", "recorded_at"),
         Index("idx_telemetry_session_recorded", "session_id", "recorded_at"),
         Index("idx_telemetry_tenant_recorded", "tenant_id", "recorded_at"),
+    )
+
+
+# --- Gateway / Plug Events (alarms, faults, operational notices) ---
+
+class GatewayEvent(Base):
+    """
+    Operational events raised by a gateway/plug: firmware safety alarms
+    (THERMAL_CUTOFF, OVERCURRENT_CUTOFF, UNAUTHORIZED_ON), OTA lifecycle
+    notices, and backend-detected conditions. Surfaced to the CPO portal as an
+    alert feed so an operator can see, e.g., a plug that was switched on
+    out-of-band (physical button / Tapo app) with no authorized session.
+
+    Design notes mirror TelemetryReading:
+    - event_type / severity are plain Strings, not PG enums: they are raw
+      firmware/operational signals that evolve without a schema migration.
+    - tenant_id is denormalized (gateway -> tenant) so the CPO feed filters
+      without a join. plug_id is nullable (some events are gateway-wide).
+    - acknowledged lets an operator clear an alert from the active feed
+      without deleting the audit row.
+    """
+    __tablename__ = "gateway_events"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    gateway_id: Mapped[str] = mapped_column(String(50), ForeignKey("gateways.id", ondelete="CASCADE"), nullable=False)
+    plug_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("plugs.id", ondelete="SET NULL"), nullable=True)
+    # e.g. "UNAUTHORIZED_ON", "THERMAL_CUTOFF", "OVERCURRENT_CUTOFF", "OTA_FAILED"
+    event_type: Mapped[str] = mapped_column(String(48), nullable=False)
+    # "critical" | "warning" | "info" — drives feed styling / prioritization.
+    severity: Mapped[str] = mapped_column(String(16), default="warning", nullable=False)
+    detail: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    acknowledged: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+
+    __table_args__ = (
+        Index("idx_gateway_events_tenant_created", "tenant_id", "created_at"),
+        Index("idx_gateway_events_gateway_created", "gateway_id", "created_at"),
     )

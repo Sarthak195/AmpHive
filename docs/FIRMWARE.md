@@ -94,6 +94,13 @@ product features.
     - **Over-current:** plug reports `overcurrent_status != "normal"` → local OFF +
       NVS clear + publish `OVERCURRENT_CUTOFF` alarm. (The plug does the sensing;
       this replaces the previously-unimplemented 13 A/5-min rule.)
+  - **Unauthorized physical-on guard (fw 1.5.0):** when there is **no** active
+    session, the loop checks the plug's real `device_on`; if the relay is ON
+    (physical button, Tapo app, or NVS crash-recovery resuming a stale session)
+    it commands OFF every cycle and publishes
+    `{"error":"UNAUTHORIZED_ON","plug_id":N}` once per episode (rising edge).
+  - Since fw 1.5.0 the telemetry payload also includes `"relay":<bool>` — the
+    actual `device_on` state, distinct from `"status"` (session state).
 - On MQTT reconnect, buffered offline telemetry entries are drained and published
   with `"offline":true` and `"offline_ts"` so the backend can distinguish replayed data.
 
@@ -133,7 +140,7 @@ current, or temperature. So the `tapo_telemetry_t` fields map as:
 | Field | Source |
 |-------|--------|
 | `power_w` | **real** — `current_power` (mW) ÷ 1000 |
-| `energy_kwh` | **real** — driver-side monotonic **lifetime** Wh integrator (robust vs the plug's daily `today_energy` reset); persisted to NVS across reboots and updated under the driver mutex |
+| `energy_kwh` | **real** — driver-side monotonic **lifetime** Wh integrator (robust vs the plug's daily `today_energy` reset); persisted to NVS across reboots and updated under the driver mutex. Since fw 1.5.0 it integrates with the **trapezoidal rule** (average of consecutive power samples × dt) instead of left-rectangle, reducing error on ramping loads at the 10 s poll cadence; a new module static `s_energy_last_power_w` holds the previous sample |
 | `device_on` / `overheated` / `overcurrent` | **real** — from `get_device_info` status strings |
 | `voltage_v` | **nominal** (configured, default 230 V) |
 | `current_a` | **derived** — `power_w / voltage_v` |
@@ -264,17 +271,32 @@ internet, `ota_update.c` attaches the **Mozilla CA bundle**
 (`esp_crt_bundle_attach`, fw ≥ 1.3.1); the 1.3.0→1.3.1 jump itself used plain
 http only because the *old* running image predated the cert bundle.
 
-**OTA hardening — signed + https-only (2026-07-10, fw ≥ 1.4.0, code
-complete).** Both follow-ups from the direct-MQTT pivot are implemented:
+**OTA hardening — signed + https-only (2026-07-10, fw ≥ 1.4.0, rolled
+out).** Both follow-ups from the direct-MQTT pivot are implemented:
 images are hosted on the public HTTPS bucket `gs://amphive-fw` (see §7), and
 every update must carry a valid **ECDSA app signature** (§6) — a
 valid-but-malicious image from a MITM'd or compromised host is now rejected
 by the device itself. Plain `http://` is refused in the firmware
 (`ALLOW_HTTP` removed + explicit scheme check) *and* by the backend
-(`CpoGatewayOtaRequest` requires `https://`). **Not yet verified on-device:**
-the signed `1.4.0-direct` image is built and published, but the push to the
-real gateway (and the backend deploy of the https-only validation) is
-pending — the running fw accepts it (pre-1.4.0 images don't check
-signatures; the signature is a trailer they ignore), after which only signed
-images install. See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for
-the full matrix.
+(`CpoGatewayOtaRequest` requires `https://`). **Verified on-device
+2026-07-10:** the real gateway `1cc3abb4fb54` was OTA'd `1.3.2 → 1.5.0` with
+a signed image over https, and the backend `^https://` validation is
+deployed. The pre-1.4.0 running image accepted the jump (it doesn't check
+signatures; the signature is a trailer it ignores); from 1.4.0 on, only
+signed images install. See
+[IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for the full matrix.
+
+**fw `1.5.0-direct` (current) — OTA'd + verified on the real gateway
+`1cc3abb4fb54` 2026-07-10** (`1.3.2 → 1.5.0`; the new `relay` field seen on
+the wire). Three changes:
+- **Unauthorized physical-on guard** — with no active session, a relay found
+  ON (physical button, Tapo app, or NVS crash-recovery resuming a stale
+  session) is commanded OFF every telemetry cycle and
+  `{"error":"UNAUTHORIZED_ON","plug_id":N}` is published once per episode
+  (rising edge). See §3.
+- **Trapezoidal energy integration** — `tapo_protocol.c` integrates energy
+  with the trapezoidal rule (average of consecutive power samples × dt)
+  instead of left-rectangle, reducing error on ramping loads at the 10 s poll
+  cadence (`s_energy_last_power_w` holds the previous sample). See §4.
+- **Telemetry `relay` field** — telemetry now includes `"relay":<bool>` (the
+  actual `device_on`), distinct from `"status"` (session state). See §3.

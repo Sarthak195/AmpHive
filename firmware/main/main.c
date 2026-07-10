@@ -428,6 +428,20 @@ static void publish_ota_event(const char *event) {
     esp_mqtt_client_publish(mqtt_client, topic, payload, 0, 1, 0);
 }
 
+// ─── Safety alarm → alarms topic ────────────────────────────────────────────
+// Fault alarms (THERMAL_CUTOFF, OVERCURRENT_CUTOFF, UNAUTHORIZED_ON, …) carry
+// the plug id so the backend can attribute them; QoS 1 (best-effort delivery of
+// a one-shot event). Silent when offline — the condition is still enforced
+// locally regardless of the broker link.
+static void publish_alarm(const char *error) {
+    if (!mqtt_connected || mqtt_client == NULL) return;
+    char topic[128];
+    char payload[96];
+    snprintf(topic, sizeof(topic), "amphive/gateways/%s/alarms", gateway_id);
+    snprintf(payload, sizeof(payload), "{\"error\":\"%s\",\"plug_id\":%d}", error, active_plug_id);
+    esp_mqtt_client_publish(mqtt_client, topic, payload, 0, 1, 0);
+}
+
 // ─── MQTT Subscriber/Event Handler ──────────────────────────────────────────
 static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
                                int32_t event_id, void *event_data) {
@@ -714,15 +728,19 @@ static void telemetry_task(void *pvParameters) {
             }
 
             /* Echo the backend session_id (empty when idle) so the backend can
-               attribute this reading to the exact session, not just the plug. */
-            char payload[256];
+               attribute this reading to the exact session, not just the plug.
+               "relay" is the plug's ACTUAL reported relay state (device_on),
+               distinct from "status" (which reflects our session state): the
+               backend/UI can flag a relay physically ON with no session. */
+            char payload[320];
             snprintf(payload, sizeof(payload),
-                     "{\"plug_id\":%d,\"watts\":%.1f,\"kwh\":%.4f,\"voltage\":%.1f,\"current\":%.2f,\"status\":\"%s\",\"session_id\":\"%s\"}",
+                     "{\"plug_id\":%d,\"watts\":%.1f,\"kwh\":%.4f,\"voltage\":%.1f,\"current\":%.2f,\"relay\":%s,\"status\":\"%s\",\"session_id\":\"%s\"}",
                      active_plug_id,
                      telemetry.power_w,
                      session_kwh,
                      telemetry.voltage_v,
                      telemetry.current_a,
+                     telemetry.device_on ? "true" : "false",
                      active_session.active ? "occupied" : "available",
                      active_session.active ? active_session.session_id : "");
 
@@ -768,24 +786,37 @@ static void telemetry_task(void *pvParameters) {
                     tapo_set_power_state(target_plug_ip, false);
                     active_session.active = false;
                     session_nvs_clear();
-
-                    if (mqtt_connected) {
-                        char alarm_topic[128];
-                        snprintf(alarm_topic, sizeof(alarm_topic), "amphive/gateways/%s/alarms", gateway_id);
-                        esp_mqtt_client_publish(mqtt_client, alarm_topic, "{\"error\":\"THERMAL_CUTOFF\"}", 0, 1, 0);
-                    }
+                    publish_alarm("THERMAL_CUTOFF");
                 }
                 else if (telemetry.overcurrent) {
                     ESP_LOGE(TAG, "OVERCURRENT ALARM: Plug reports overcurrent_status != normal. Shutting down plug locally!");
                     tapo_set_power_state(target_plug_ip, false);
                     active_session.active = false;
                     session_nvs_clear();
+                    publish_alarm("OVERCURRENT_CUTOFF");
+                }
+            }
 
-                    if (mqtt_connected) {
-                        char alarm_topic[128];
-                        snprintf(alarm_topic, sizeof(alarm_topic), "amphive/gateways/%s/alarms", gateway_id);
-                        esp_mqtt_client_publish(mqtt_client, alarm_topic, "{\"error\":\"OVERCURRENT_CUTOFF\"}", 0, 1, 0);
+            /* Unauthorized-use guard: relay physically ON with no active session.
+               A commercial charger must not deliver energy without authorization,
+               but a P110 can be switched on out-of-band — its physical button, the
+               Tapo app, a schedule, or NVS crash-recovery resuming a stale session.
+               Whenever we see device_on without a session we command OFF (every
+               cycle until it stays off) and raise UNAUTHORIZED_ON once per episode
+               (rising edge) so the backend can alert the operator without the alarm
+               repeating every poll. The edge resets when the relay is confirmed
+               off, so a genuinely new press re-alarms. */
+            if (!active_session.active) {
+                static bool unauthorized_flagged = false;
+                if (telemetry.device_on) {
+                    ESP_LOGW(TAG, "UNAUTHORIZED ON: relay is ON with no active session — forcing OFF.");
+                    tapo_set_power_state(target_plug_ip, false);
+                    if (!unauthorized_flagged) {
+                        publish_alarm("UNAUTHORIZED_ON");
+                        unauthorized_flagged = true;
                     }
+                } else {
+                    unauthorized_flagged = false;
                 }
             }
         }

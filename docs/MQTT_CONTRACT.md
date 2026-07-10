@@ -35,15 +35,24 @@
 | Direction | Topic | QoS | Retained | Payload |
 |-----------|-------|-----|----------|---------|
 | backend → gateway | `amphive/gateways/{gateway_id}/plugs/{plug_id}/commands` | 1 | no | `{"action":"ON"\|"OFF","max_duration_seconds":<int>,"max_kwh":<float>,"session_id":"<str>"}` OR `{"action":"SET_INTERVAL","interval_ms":<int>}` OR `{"action":"OTA","url":"<http(s)>"}` |
-| gateway → backend | `amphive/gateways/{gateway_id}/telemetry` | 0 | no | `{"plug_id":<int>,"watts":<f>,"kwh":<f>,"voltage":<f>,"current":<f>,"status":"occupied"\|"available","session_id":"<str>"}` |
+| gateway → backend | `amphive/gateways/{gateway_id}/telemetry` | 0 | no | `{"plug_id":<int>,"watts":<f>,"kwh":<f>,"voltage":<f>,"current":<f>,"relay":<bool>,"status":"occupied"\|"available","session_id":"<str>"}` |
 | gateway → backend | `amphive/gateways/{gateway_id}/status` | 1 | yes | `{"status":"online","fw":"<ver>"}` (on connect) / `{"status":"offline"}` (LWT) |
-| gateway → backend | `amphive/gateways/{gateway_id}/alarms` | 1 | no | `{"error":"THERMAL_CUTOFF"}` or `{"event":"OTA_STARTED"\|"OTA_OK_REBOOTING"\|"OTA_FAILED"\|"OTA_REFUSED_SESSION_ACTIVE"\|...}` |
+| gateway → backend | `amphive/gateways/{gateway_id}/alarms` | 1 | no | `{"error":"THERMAL_CUTOFF"\|"OVERCURRENT_CUTOFF"\|"UNAUTHORIZED_ON","plug_id":<int>}` or `{"event":"OTA_STARTED"\|"OTA_OK_REBOOTING"\|"OTA_FAILED"\|"OTA_REFUSED_SESSION_ACTIVE"\|...}` |
 | agent → backend | `amphive/gateways/{gateway_id}/discovery` | 1 | no | `{"unique_id":"<str>","provider":"<str>","model":"<str>","alias":"<str>","capabilities":["switch","power","energy"]}` |
 | backend → agent | `amphive/gateways/{gateway_id}/assign` | 1 | yes | `{"<unique_id>":<plug_id:int>, ...}` (full map for the gateway) |
 
 The backend subscribes with wildcards: `amphive/gateways/+/telemetry` (QoS 0),
-`amphive/gateways/+/status` (QoS 1), and `amphive/gateways/+/discovery` (QoS 1).
-It does **not** currently subscribe to `/alarms`.
+`amphive/gateways/+/status` (QoS 1), `amphive/gateways/+/discovery` (QoS 1),
+and `amphive/gateways/+/alarms` (QoS 1). Alarm/event messages are persisted as
+`gateway_events` rows (tenant resolved from the gateway) and broadcast to
+clients via the `gateway_alarm` Socket.io event; a CPO reads them through
+`GET /api/cpo/events` and clears them with `POST /api/cpo/events/{id}/ack`.
+
+The `relay` field (firmware ≥ 1.5.0) is the plug's **actual** reported relay
+state (`device_on`), distinct from `status` (the gateway's own session state).
+It lets the backend/UI show the physical relay and underpins the firmware's
+`UNAUTHORIZED_ON` guard: a relay ON with no active session (physical button /
+Tapo app / stale NVS resume) is forced OFF locally and alarmed.
 
 > **`/discovery` + `/assign` (software gateways only).** These two topics belong
 > to the **AmpHive Agent** ([AMPHIVE_AGENT.md](AMPHIVE_AGENT.md)) — a software
@@ -129,8 +138,10 @@ telemetry message the handler:
 3. Persists authoritative session totals (`energy_kwh`, `peak_power_w`) to the
    active `charging_sessions` row and `current_power_w` to the plug.
 
-Status messages update the gateway's `status`/`last_seen_at` in the DB. The
-backend does **not** subscribe to `/alarms`.
+Status messages update the gateway's `status`/`last_seen_at` in the DB. Alarm
+messages (`/alarms`) are ingested by `_handle_gateway_alarm` → persisted as
+`gateway_events` and broadcast as the `gateway_alarm` Socket.io event
+(2026-07-10).
 
 There is **no Last Will & Testament configured on the backend client**; the
 LWT/`offline` message is published by the *gateway* firmware.

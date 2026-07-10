@@ -206,13 +206,24 @@ const Home = () => {
             </div>
           ) : (
             <div className="flex flex-col gap-3">
-              {plugs.map((plug, index) => (
+              {plugs.map((plug, index) => {
+                // A plug is startable only if it is available AND its gateway is
+                // reachable right now. gateway_online defaults true for older
+                // API data; an unreachable charger is shown but not clickable so
+                // the driver isn't sent into a 409 at start.
+                const unreachable = plug.gateway_online === false;
+                const startable = plug.status === 'available' && !unreachable;
+                return (
                 <div
                   key={plug.id}
                   className="glass glass-card flex justify-between items-center animate-slide-up"
-                  style={{ animationDelay: `${index * 0.06}s` }}
+                  style={{
+                    animationDelay: `${index * 0.06}s`,
+                    cursor: startable ? 'pointer' : 'default',
+                    opacity: unreachable ? 0.6 : 1,
+                  }}
                   onClick={() => {
-                    if (plug.status === 'available') {
+                    if (startable) {
                       handleStartSession(null, plug.id);
                     }
                   }}
@@ -220,8 +231,8 @@ const Home = () => {
                   <div>
                     <div className="flex items-center gap-2" style={{ marginBottom: '0.25rem' }}>
                       <span style={{ fontWeight: 600 }}>{plug.name}</span>
-                      <span className={`badge ${statusColor(plug.status)}`}>
-                        {plug.status}
+                      <span className={`badge ${unreachable ? 'badge-danger' : statusColor(plug.status)}`}>
+                        {unreachable ? 'charger offline' : plug.status}
                       </span>
                     </div>
                     <div className="flex items-center gap-3" style={{ fontSize: '0.85rem', color: 'var(--color-text-secondary)' }}>
@@ -236,13 +247,18 @@ const Home = () => {
                       )}
                     </div>
                   </div>
-                  {plug.status === 'available' && (
+                  {startable ? (
                     <span style={{ color: 'var(--color-primary)', fontWeight: 600, fontSize: '0.9rem' }}>
                       Charge →
                     </span>
-                  )}
+                  ) : unreachable ? (
+                    <span style={{ color: 'var(--color-text-muted)', fontSize: '0.8rem' }}>
+                      Unreachable
+                    </span>
+                  ) : null}
                 </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>

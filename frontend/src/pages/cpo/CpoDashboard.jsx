@@ -14,6 +14,7 @@ import {
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
 } from 'recharts';
 import CpoLayout from '../../components/CpoLayout';
+import CpoAlerts from '../../components/CpoAlerts';
 import api from '../../api/client';
 
 /**
@@ -147,6 +148,9 @@ const CpoDashboard = () => {
         <h1>Dashboard</h1>
         <p>Overview of your charging network performance</p>
       </div>
+
+      {/* Active alerts (safety cutoffs, unauthorized-on, OTA) */}
+      <CpoAlerts />
 
       {/* Stat Cards Row */}
       <div className="stat-cards">

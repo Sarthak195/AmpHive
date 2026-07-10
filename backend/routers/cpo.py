@@ -17,18 +17,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend import state
 from backend.database.db import async_session_factory, get_db
 from backend.database.models import (
-    ChargerGroup, ChargingSession, Gateway, GatewayStatus, GroupMembership,
-    LedgerTransaction, Plug, PlugStatus, SessionStatus, TelemetryReading,
-    Tenant, TransactionType, User, UserRole,
+    ChargerGroup, ChargingSession, Gateway, GatewayEvent, GatewayStatus,
+    GroupMembership, LedgerTransaction, Plug, PlugStatus, SessionStatus,
+    TelemetryReading, Tenant, TransactionType, User, UserRole,
 )
 from backend.schemas import (
     AuthResponse, CpoGatewayCreateRequest, CpoGatewayOtaRequest,
     CpoGroupCreateRequest, CpoGroupUpdateRequest, CpoPlugCreateRequest,
     CpoPlugUpdateRequest, CpoSetupRequest, CreateOrderRequest,
-    CreateOrderResponse, DirectPlugRequest, GatewayRegisterRequest,
-    GroupResponse, JoinGroupRequest, LoginRequest, PlugRegisterRequest,
-    PlugResponse, RegisterRequest, SessionStartRequest, SessionStopRequest,
-    UserResponse, VerifyPaymentRequest,
+    CreateOrderResponse, DirectPlugRequest, GatewayEventResponse,
+    GatewayRegisterRequest, GroupResponse, JoinGroupRequest, LoginRequest,
+    PlugRegisterRequest, PlugResponse, RegisterRequest, SessionStartRequest,
+    SessionStopRequest, UserResponse, VerifyPaymentRequest,
 )
 from backend.services import payments as payment_service
 from backend.services.auth import (
@@ -225,6 +225,7 @@ async def cpo_list_gateways(
             "name": gw.name,
             "vpn_ip": gw.vpn_ip,
             "status": gw.status.value,
+            "firmware_version": gw.firmware_version,
             "last_seen_at": gw.last_seen_at.isoformat() if gw.last_seen_at else None,
             "created_at": gw.created_at.isoformat() if gw.created_at else None,
             "plug_count": plug_count,
@@ -977,6 +978,73 @@ async def cpo_analytics_telemetry(
         }
         for row in rows
     ]
+
+
+# --- CPO Gateway Events / Alerts ---
+
+@router.get("/api/cpo/events", response_model=List[GatewayEventResponse])
+async def cpo_list_events(
+    user: User = Depends(require_role("cpo", "admin")),
+    db: AsyncSession = Depends(get_db),
+    limit: int = 50,
+    unacknowledged_only: bool = False,
+    severity: Optional[str] = None,
+):
+    """
+    Gateway/plug operational events for the CPO's tenant — safety cutoffs,
+    unauthorized-on alarms, OTA lifecycle notices — newest first. Powers the
+    operator alert feed. `unacknowledged_only` narrows to the active alert set;
+    `severity` filters (e.g. "critical").
+    """
+    limit = max(1, min(limit, 200))
+    conditions = [GatewayEvent.tenant_id == user.tenant_id]
+    if unacknowledged_only:
+        conditions.append(GatewayEvent.acknowledged == False)  # noqa: E712
+    if severity:
+        conditions.append(GatewayEvent.severity == severity)
+
+    result = await db.execute(
+        select(GatewayEvent)
+        .where(and_(*conditions))
+        .order_by(GatewayEvent.created_at.desc(), GatewayEvent.id.desc())
+        .limit(limit)
+    )
+    events = list(result.scalars().all())
+
+    return [
+        GatewayEventResponse(
+            id=ev.id,
+            gateway_id=ev.gateway_id,
+            plug_id=ev.plug_id,
+            event_type=ev.event_type,
+            severity=ev.severity,
+            detail=ev.detail,
+            acknowledged=ev.acknowledged,
+            created_at=ev.created_at.isoformat() if ev.created_at else None,
+        )
+        for ev in events
+    ]
+
+
+@router.post("/api/cpo/events/{event_id}/ack")
+async def cpo_acknowledge_event(
+    event_id: int,
+    user: User = Depends(require_role("cpo", "admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Acknowledge (clear from the active feed) a single event. Tenant-scoped."""
+    result = await db.execute(
+        select(GatewayEvent).where(
+            and_(GatewayEvent.id == event_id, GatewayEvent.tenant_id == user.tenant_id)
+        )
+    )
+    event = result.scalar_one_or_none()
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found or access denied.")
+
+    event.acknowledged = True
+    await db.commit()
+    return {"status": "acknowledged", "event_id": event_id}
 
 
 # Wrap FastAPI app with Socket.io ASGI wrapper so they run on the same port

@@ -1,10 +1,12 @@
 # AmpHive — Backend API Reference
 
-*Verified against `backend/main.py` on 2026-07-02.*
+*Verified against `backend/` on 2026-07-02; endpoint list refreshed 2026-07-10.*
 
-All routes are defined directly on the FastAPI `app` in `backend/main.py` (there
-is no `APIRouter`/prefix grouping). Every path is hard-coded under `/api`.
-The app title is **"AmpHive Shared EV Charging API"**, version **2.0.0**.
+Routes live in `backend/routers/*.py` (`{auth,groups,plugs,sessions,payments,
+direct,cpo}.py`), each an `APIRouter` mounted on the FastAPI `app` in
+`backend/main.py` (the 2026-07-07 `main.py` split — TD#7). Every path is
+hard-coded under `/api` (no router `prefix=`). The app title is
+**"AmpHive Shared EV Charging API"**, version **2.0.0**.
 Interactive docs: `http://<host>:8000/docs`.
 
 - **Auth:** routes marked **JWT** require `Authorization: Bearer <token>`
@@ -14,11 +16,12 @@ Interactive docs: `http://<host>:8000/docs`.
   `cpo` or `admin`, enforced by `require_role(...)` (`backend/services/rbac.py`).
 - **CORS:** explicit allowlist (localhost, `amphive.duckdns.org`, VM IP) —
   locked down 2026-07-06.
-- **38 endpoints total**, grouped below: health (1), auth (4), groups (2),
-  plugs (2), sessions (4), payments (3), Direct Mode (5), CPO portal (17).
+- **40 endpoints total**, grouped below: health (1), auth (4), groups (2),
+  plugs (2), sessions (4), payments (3), Direct Mode (5), CPO portal (19).
   (The legacy SSE endpoint `/api/sessions/live/{id}` was retired 2026-07-07 —
   live telemetry is Socket.io only. The CPO gateway OTA-trigger endpoint was
-  added 2026-07-07; the `/api/auth/logout` revocation endpoint 2026-07-08.)
+  added 2026-07-07; the `/api/auth/logout` revocation endpoint 2026-07-08; the
+  CPO events feed + ack endpoints 2026-07-10.)
 
 ---
 
@@ -51,8 +54,8 @@ Token: HS256 JWT, claims `sub`/`role`/`email`/`iat`/`exp`, **7-day** expiry.
 
 | Method | Path | Auth | Body/Params | Behaviour |
 |--------|------|------|-------------|-----------|
-| GET | `/api/plugs/available` | JWT | — | Plugs in accessible groups **or** ungrouped (`group_id IS NULL`, visible to all) → `[{id, name, status, current_power_w, plug_model, group_name?}]` |
-| GET | `/api/plugs/{plug_id}` | JWT | path `plug_id:int` | Single plug; 404 if missing, 403 if in a private group the user hasn't joined |
+| GET | `/api/plugs/available` | JWT | — | Plugs in accessible groups **or** ungrouped (`group_id IS NULL`, visible to all) → `[{id, name, status, current_power_w, plug_model, group_name?, gateway_online}]` — `gateway_online: bool` (added 2026-07-10) is whether the plug's gateway is live: `ONLINE` + `last_seen` within the liveness window |
+| GET | `/api/plugs/{plug_id}` | JWT | path `plug_id:int` | Single plug; 404 if missing, 403 if in a private group the user hasn't joined. Response also carries `gateway_online: bool` (as above) |
 
 > **Provisioning moved.** The old unauthenticated `POST /api/plugs/register` and
 > `POST /api/gateways/register` have been **removed**. Gateways and plugs are now
@@ -80,7 +83,7 @@ Token: HS256 JWT, claims `sub`/`role`/`email`/`iat`/`exp`, **7-day** expiry.
     - On failure: Emits `subscription_error` event: `{ "detail": "<error_message>" }`
 - **Telemetry Stream**:
   - Event: `telemetry` (pushed from server to rooms)
-  - Payload: `{ "plug_id": <int>, "power_w": <float>, "current_a": <float>, "voltage_v": <float>, "energy_kwh": <float>, "duration_sec": <int>, "cost_coins": <float>, "status": "charging"|"completed"|"starting" }`
+  - Payload: `{ "plug_id": <int>, "power_w": <float>, "current_a": <float>, "voltage_v": <float>, "energy_kwh": <float>, "duration_sec": <int>, "cost_coins": <float>, "status": "charging"|"completed"|"starting", "relay_on": <bool>, "is_stale": <bool>, "age_sec": <float> }` — `relay_on` (the plug's actual relay state), `voltage_v`, `is_stale`, and `age_sec` added 2026-07-10
 - **Unsubscribe Session**:
   - Event: `unsubscribe_session`
   - Payload: `{ "session_id": <int> }`
@@ -135,6 +138,8 @@ scoped to the caller's `tenant_id`, so operators only ever see their own assets.
 | GET | `/api/cpo/analytics/revenue` | cpo/admin | query `days=30` | Daily `{date, revenue_coins, session_count}` series. |
 | GET | `/api/cpo/analytics/energy` | cpo/admin | query `days=30` | Daily `{date, energy_kwh, session_count}` series. |
 | GET | `/api/cpo/analytics/telemetry` | cpo/admin | query `plug_id?, days=1, bucket=hour` | `date_trunc`-bucketed time-series from `telemetry_readings` (bucket ∈ {minute, hour, day}; 400 otherwise) → `[{timestamp, avg_power_w, max_power_w, energy_kwh, sample_count}]`. Powers the dashboard load graph. |
+| GET | `/api/cpo/events` | cpo/admin | query `limit=50` (max 200), `unacknowledged_only?` (bool), `severity?` (e.g. `critical`) | Gateway/plug operational events (safety cutoffs, `UNAUTHORIZED_ON` alarms, OTA notices) for the CPO's tenant, newest first → `[{id, gateway_id, plug_id, event_type, severity, detail, acknowledged, created_at}]`. (Added 2026-07-10.) |
+| POST | `/api/cpo/events/{event_id}/ack` | cpo/admin | path `event_id:int` | Acknowledge (clear from the active feed) one event; tenant-scoped. → `{status:"acknowledged", event_id}` |
 
 ---
 

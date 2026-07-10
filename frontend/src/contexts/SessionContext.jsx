@@ -39,6 +39,15 @@ export const SessionProvider = ({ children }) => {
   const [isActive, setIsActive] = useState(false);
   const [socket, setSocket] = useState(null);
   const [error, setError] = useState(null);
+  // Epoch ms of the last telemetry frame for the focused session — lets the UI
+  // detect a dropped gateway/socket (no frames) even though the server-side
+  // is_stale flag can only ride on a frame that actually arrives.
+  const [lastFrameAt, setLastFrameAt] = useState(null);
+  // ISO start time of the focused session, so the elapsed timer ticks smoothly
+  // client-side instead of freezing between (or after losing) telemetry frames.
+  const [focusedStartedAt, setFocusedStartedAt] = useState(null);
+  // Recent gateway alarms (safety cutoff / unauthorized-on / OTA), newest first.
+  const [alarms, setAlarms] = useState([]);
 
   // Manage the Socket.io lifecycle (connect on login, disconnect on logout).
   // The cleanup below disconnects the previous socket on every user change,
@@ -67,9 +76,18 @@ export const SessionProvider = ({ children }) => {
       console.log('Socket.io disconnected:', reason);
     });
 
+    // Gateway alarms (safety cutoff, unauthorized-on, OTA notices) are
+    // broadcast to all clients; keep the most recent handful so the UI can
+    // warn the driver (e.g. someone physically switched their plug on/off).
+    const handleAlarm = (event) => {
+      setAlarms((prev) => [{ ...event, received_at: Date.now() }, ...prev].slice(0, 20));
+    };
+    newSocket.on('gateway_alarm', handleAlarm);
+
     setSocket(newSocket);
 
     return () => {
+      newSocket.off('gateway_alarm', handleAlarm);
       newSocket.disconnect();
     };
   }, [user]);
@@ -80,6 +98,7 @@ export const SessionProvider = ({ children }) => {
 
     const handleTelemetry = (data) => {
       setSessionData(data);
+      setLastFrameAt(Date.now());
     };
 
     socket.on('telemetry', handleTelemetry);
@@ -104,6 +123,8 @@ export const SessionProvider = ({ children }) => {
   const switchSession = useCallback((session) => {
     setSessionId(session.session_id);
     setIsActive(true);
+    setFocusedStartedAt(session.started_at || new Date().toISOString());
+    setLastFrameAt(null);
     setSessionData({
       plug_id: session.plug_id,
       plug_name: session.plug_name,
@@ -121,17 +142,20 @@ export const SessionProvider = ({ children }) => {
     try {
       // Call backend to start session
       const result = await api.post('/api/sessions/start', { plug_id: parseInt(plugId) });
+      const startedAt = new Date().toISOString();
       setActiveSessions(prev => [
         {
           session_id: result.session_id,
           plug_id: result.plug_id,
           plug_name: result.plug_name,
-          started_at: new Date().toISOString(),
+          started_at: startedAt,
         },
         ...prev,
       ]);
       setSessionId(result.session_id);
       setIsActive(true);
+      setFocusedStartedAt(startedAt);
+      setLastFrameAt(null);
       setSessionData(null);
       return result;
     } catch (err) {
@@ -165,6 +189,8 @@ export const SessionProvider = ({ children }) => {
     setSessionData(null);
     setSessionId(null);
     setIsActive(false);
+    setFocusedStartedAt(null);
+    setLastFrameAt(null);
     setError(null);
   }, []);
 
@@ -196,6 +222,7 @@ export const SessionProvider = ({ children }) => {
     <SessionContext.Provider value={{
       socket,
       activeSessions, sessionData, sessionId, isActive, error,
+      lastFrameAt, focusedStartedAt, alarms,
       startSession, stopSession, clearSession, switchSession,
     }}>
       {children}

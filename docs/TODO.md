@@ -208,16 +208,40 @@ Cross-references [TECH_DEBT.md](TECH_DEBT.md) items as `TD#n` and
       presents them as a parallel deployment model. (TD#15)
 - [ ] **TimescaleDB** (hypertables/retention/continuous-aggregates) for
       `telemetry_readings` if telemetry volume grows. (IMPL 2)
-- [~] **Signed OTA + public HTTPS image host** (2026-07-10, code complete —
-      rollout pending): fw ≥ 1.4.0 verifies an ECDSA app signature on every
-      update (`SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT`; key
+- [x] **Signed OTA + public HTTPS image host** (2026-07-10, **rolled out**):
+      fw ≥ 1.4.0 verifies an ECDSA app signature on every update
+      (`SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT`; key
       `firmware/secure_boot_signing_key.pem`, gitignored — **back it up**)
       and refuses plain-http downloads (`ALLOW_HTTP` removed; backend
-      `CpoGatewayOtaRequest` now `^https://` too). Images live on the
-      public-read bucket `gs://amphive-fw`; signed `1.4.0-direct` is built +
-      published. **Pending:** OTA push to the real gateway + `deploy.ps1`
-      run for the backend validation — runbook
-      `deploy/docs/ota_image_publishing.md`. (SEC §3)
+      `CpoGatewayOtaRequest` now `^https://`, **deployed**). Images live on the
+      public-read bucket `gs://amphive-fw`. The real gateway `1cc3abb4fb54`
+      was OTA'd end-to-end over direct-MQTT from `1.3.2-direct` → signed
+      **`1.5.0-direct`** (`OTA_OK_REBOOTING` → offline → back online on 1.5.0,
+      rollback cancelled). From 1.4.0 onward only signed images install.
+      Runbook: `deploy/docs/ota_image_publishing.md`. (SEC §3)
+
+## Shipped 2026-07-10 — safety, alarms & live UX
+
+- [x] **Firmware unauthorized physical-on guard (fw 1.5.0).** The relay ON with
+      no active session (physical button / Tapo app / stale NVS resume) is forced
+      OFF locally every poll and alarmed once per episode (`UNAUTHORIZED_ON`,
+      rising-edge) using the plug's real `device_on`. Live on the real gateway;
+      backend ingestion verified in prod. Remote physical-press trigger is
+      unit-tested + by-construction (no LAN path to press it remotely).
+- [x] **Trapezoidal energy integration (fw 1.5.0).** Driver-side kWh integrator
+      switched from left-rectangle to the trapezoidal rule (average of
+      consecutive power samples) for lower error on ramping loads at 10 s cadence.
+- [x] **Backend alarm ingestion + CPO events feed.** Subscribes
+      `amphive/gateways/+/alarms`; persists `gateway_events`
+      (Alembic `0005_gateway_events`); broadcasts `gateway_alarm` Socket.io;
+      `GET /api/cpo/events` + `POST /api/cpo/events/{id}/ack`. Tests in
+      `test_mqtt_manager.py`; verified live in prod.
+- [x] **Driver gateway-offline UX.** `/api/plugs/available` + `/api/plugs/{id}`
+      now return `gateway_online`; Home dims/disables unreachable chargers.
+- [x] **Live-monitor robustness.** Socket.io `telemetry` now carries
+      `relay_on`/`voltage_v`/`is_stale`/`age_sec`; the session monitor shows a
+      client-side ticking clock, a "reconnecting" staleness banner, a voltage +
+      relay line, and per-plug alarm banners. Tests in `SessionMonitor.test.jsx`.
 - [x] **Token revocation / shorter-lived JWTs** (2026-07-08): every JWT
       carries the user's `token_version` epoch (`tv` claim), re-checked per
       request; `POST /api/auth/logout` bumps it to revoke all of a user's

@@ -126,7 +126,7 @@ BFG + force-push) to purge the dead values entirely.
     both get `not authorised`; backend, fake plug, and the real ESP32 all
     stayed connected under the ACLs. The overlay 1883 listener is unchanged
     (legacy/transition + backend-internal).
-  - [Hardened 2026-07-10 — code complete, rollout pending] **OTA image
+  - [Hardened + rolled out 2026-07-10] **OTA image
     transport + signing.** Both halves of the earlier TODO are implemented
     (fw ≥ 1.4.0):
     * **HTTPS-only images**: hosted on the public-read GCS bucket
@@ -145,11 +145,19 @@ BFG + force-push) to purge the dead values entirely.
       valid-but-malicious image from a MITM or a compromised bucket no longer
       installs. No eFuses burned; boot-time verification stays off (full
       secure boot remains a possible future step).
-    **Rollout state:** the signed `1.4.0-direct` image is built + published;
-    the OTA push to the real gateway and the `deploy.ps1` run shipping the
-    backend https-only validation are pending (see
-    `deploy/docs/ota_image_publishing.md`). Pre-1.4.0 firmware ignores the
-    signature trailer, so the migration jump installs cleanly.
+    **Rolled out 2026-07-10:** the real gateway was OTA'd to the signed
+    `1.5.0-direct` image over https, and the backend `^https://` validation
+    is deployed (see `deploy/docs/ota_image_publishing.md`). Pre-1.4.0
+    firmware ignores the signature trailer, so the migration jump installed
+    cleanly; from 1.4.0 on, only signed images install.
+- [Added 2026-07-10, fw 1.5.0] **Unauthorized-use safety control.** The plug's
+  physical button and the Tapo app are control paths that bypass AmpHive
+  entirely — a relay could be energized with no authorized session (free,
+  unmetered power). The firmware now enforces this locally: with no active
+  session, a relay found ON is forced OFF every telemetry cycle and raised
+  (once per episode) as a **critical `UNAUTHORIZED_ON` event** surfaced to the
+  operator (`gateway_events` table → `GET /api/cpo/events`) — a defense
+  against out-of-band plug activation.
 - [Fixed + deployed 2026-07-06] **CORS** is restricted to an explicit allowlist
   (localhost, `amphive.duckdns.org`, VM IP; http+https) with the wildcard removed,
   in `backend/main.py:187`. Verified in prod: an allowed origin is echoed, a

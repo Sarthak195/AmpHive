@@ -64,8 +64,12 @@ async def test_telemetry_update_marshaled_onto_loop_not_paho_thread():
 
     assert len(calls) == 1, "scheduled telemetry update did not run on the loop"
     assert worker_name not in calls, "update() must run on the loop thread, not the paho thread"
-    # Args are forwarded positionally: (plug_id, power_w, current_a, energy_kwh, status)
-    store.update.assert_called_once_with(1, 10.0, 0.04, 0.1, "charging")
+    # Positional args: (plug_id, power_w, current_a, energy_kwh, status); voltage
+    # and relay state (firmware ≥ 1.5.0) ride along as keywords. status
+    # "occupied" → relay defaults on, voltage echoes the payload.
+    store.update.assert_called_once_with(
+        1, 10.0, 0.04, 0.1, "charging", voltage_v=230.0, relay_on=True
+    )
 
     MQTTManager._instance = None
 
@@ -128,9 +132,98 @@ async def test_telemetry_update_direct_when_no_loop():
     })
 
     store.update.assert_called_once_with(
-        plug_id=2, power_w=20.0, current_a=0.087, energy_kwh=0.2, status="idle"
+        plug_id=2, power_w=20.0, current_a=0.087, energy_kwh=0.2, status="idle",
+        voltage_v=230.0, relay_on=False,
     )
 
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload,exp_type,exp_sev,exp_plug", [
+    ({"error": "UNAUTHORIZED_ON", "plug_id": 5}, "UNAUTHORIZED_ON", "critical", 5),
+    ({"error": "THERMAL_CUTOFF", "plug_id": 1}, "THERMAL_CUTOFF", "critical", 1),
+    ({"error": "OVERCURRENT_CUTOFF"}, "OVERCURRENT_CUTOFF", "critical", None),
+    ({"event": "OTA_STARTED"}, "OTA_STARTED", "info", None),
+    ({"event": "OTA_FAILED"}, "OTA_FAILED", "warning", None),
+    ({"error": "SOMETHING_NEW"}, "SOMETHING_NEW", "warning", None),  # unknown → warning
+])
+async def test_alarm_parsed_and_persisted(payload, exp_type, exp_sev, exp_plug):
+    """
+    _handle_gateway_alarm must parse both the {"error":..} and {"event":..}
+    shapes, map the type to a severity, extract plug_id when present, and forward
+    to _persist_gateway_event. Unknown types default to "warning" (never dropped).
+    """
+    MQTTManager._instance = None
+    loop = asyncio.get_running_loop()
+    mgr = MQTTManager(db_session_factory=lambda: None, event_loop=loop)
+
+    captured = {}
+
+    async def fake_persist(gateway_id, plug_id, event_type, severity, detail):
+        captured.update(gateway_id=gateway_id, plug_id=plug_id,
+                        event_type=event_type, severity=severity, detail=detail)
+
+    mgr._persist_gateway_event = fake_persist
+
+    mgr._handle_gateway_alarm("gw-9", payload)
+    await asyncio.sleep(0.05)
+
+    assert captured.get("gateway_id") == "gw-9"
+    assert captured.get("event_type") == exp_type
+    assert captured.get("severity") == exp_sev
+    assert captured.get("plug_id") == exp_plug
+
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_alarm_missing_type_ignored():
+    """A malformed alarm (no error/event key) is logged and dropped, not crashed."""
+    MQTTManager._instance = None
+    loop = asyncio.get_running_loop()
+    mgr = MQTTManager(db_session_factory=lambda: None, event_loop=loop)
+
+    called = {"n": 0}
+
+    async def fake_persist(*a, **k):
+        called["n"] += 1
+
+    mgr._persist_gateway_event = fake_persist
+    mgr._handle_gateway_alarm("gw-9", {"plug_id": 1})  # no error/event
+    await asyncio.sleep(0.05)
+
+    assert called["n"] == 0
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload,exp_status,exp_fw", [
+    ({"status": "online", "fw": "1.5.0-direct"}, "online", "1.5.0-direct"),
+    ({"status": "online"}, "online", None),          # fw absent
+    ({"status": "offline"}, "offline", None),        # LWT carries no fw
+])
+async def test_status_parses_fw(payload, exp_status, exp_fw):
+    """
+    _handle_gateway_status must forward the reported firmware version (from the
+    `online` status payload) to _persist_gateway_status. The LWT/offline message
+    has no fw, so None is forwarded and the stored value is left untouched.
+    """
+    MQTTManager._instance = None
+    loop = asyncio.get_running_loop()
+    mgr = MQTTManager(db_session_factory=lambda: None, event_loop=loop)
+
+    captured = {}
+
+    async def fake_persist(gateway_id, status, firmware_version=None):
+        captured.update(gateway_id=gateway_id, status=status, firmware_version=firmware_version)
+
+    mgr._persist_gateway_status = fake_persist
+    mgr._handle_gateway_status("gw-1", payload)
+    await asyncio.sleep(0.05)
+
+    assert captured.get("status") == exp_status
+    assert captured.get("firmware_version") == exp_fw
     MQTTManager._instance = None
 
 

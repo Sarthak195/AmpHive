@@ -83,6 +83,22 @@ class PlugResponse(BaseModel):
     # Effective map coordinates: the plug's own, else its gateway's, else None.
     latitude: Optional[float] = None
     longitude: Optional[float] = None
+    # Whether the plug's gateway is live right now (ONLINE + recently seen). The
+    # driver UI uses this to warn that a plug is unreachable before a start is
+    # attempted, instead of only discovering it via a 409 at session start.
+    gateway_online: bool = True
+
+
+class GatewayEventResponse(BaseModel):
+    """A gateway/plug operational event (alarm, safety cutoff, OTA notice)."""
+    id: int
+    gateway_id: str
+    plug_id: Optional[int] = None
+    event_type: str
+    severity: str
+    detail: Optional[str] = None
+    acknowledged: bool
+    created_at: Optional[str] = None
 
 
 # --- Payment Schemas ---
