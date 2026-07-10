@@ -160,11 +160,30 @@ static void load_config_from_nvs(void) {
     nvs_get_str(my_handle, "mqtt_pwd", mqtt_password, &size);
 
     nvs_close(my_handle);
-    
+
+    // gateway_id is ALWAYS the device's STA MAC (lower-case, no separators) —
+    // it is intrinsic to the hardware, so we derive it rather than ask the
+    // installer to type it. This overrides any stored value and keeps the id
+    // stable across re-provisioning. device_name (legacy/overlay-only) follows.
+    uint8_t mac[6];
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    snprintf(gateway_id, sizeof(gateway_id), "%02x%02x%02x%02x%02x%02x",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    if (device_name[0] == '\0') {
+        // gateway_id is a 12-char MAC hex; bound the field so the compiler's
+        // format-truncation check is satisfied (8 + 20 < sizeof device_name).
+        snprintf(device_name, sizeof(device_name), "amphive-%.20s", gateway_id);
+    }
+    // The broker account username == gateway_id, so default mqtt_user to it
+    // (the installer only needs to supply the per-gateway password).
+    if (mqtt_username[0] == '\0') {
+        strncpy(mqtt_username, gateway_id, sizeof(mqtt_username) - 1);
+    }
+
     if(config_loaded) {
-        ESP_LOGI(TAG, "Config loaded from NVS. SSID: %s", wifi_ssid);
+        ESP_LOGI(TAG, "Config loaded from NVS. SSID: %s | gateway_id: %s", wifi_ssid, gateway_id);
     } else {
-        ESP_LOGI(TAG, "No config found in NVS. Booting into setup mode.");
+        ESP_LOGI(TAG, "No config found in NVS. Booting into setup mode. gateway_id: %s", gateway_id);
     }
 }
 
@@ -193,24 +212,25 @@ static void save_config_to_nvs(const char* ssid, const char* pwd, const char* au
 
 static const char* portal_html = \
     "<html><head><title>AmpHive Gateway Setup</title>"
-    "<style>body{font-family:sans-serif;margin:40px;background:#1e1e1e;color:#fff;} input{padding:10px;margin:5px 0 20px 0;width:100%%;border-radius:5px;border:none;} button{padding:10px 20px;background:#00d2ff;border:none;border-radius:5px;cursor:pointer;font-weight:bold;}</style>"
+    "<style>body{font-family:sans-serif;margin:40px;background:#1e1e1e;color:#fff;} input{padding:10px;margin:5px 0 20px 0;width:100%%;border-radius:5px;border:none;} button{padding:10px 20px;background:#00d2ff;border:none;border-radius:5px;cursor:pointer;font-weight:bold;} code{background:#333;padding:3px 8px;border-radius:4px;color:#00d2ff;}</style>"
     "</head><body><h2>AmpHive Gateway Config</h2>"
+    "<p>Gateway ID (auto-detected): <code>%s</code><br>"
+    "<small>Give this ID to your AmpHive operator to get the MQTT password.</small></p>"
     "<form method='POST' action='/save'>"
     "<label>WiFi SSID:</label><input name='ssid' required>"
     "<label>WiFi Password:</label><input name='pwd' type='password'>"
-    "<label>Headscale Auth Key (mkey:...):</label><input name='auth' required>"
-    "<label>Device Name:</label><input name='dev_name' required>"
-    "<label>Gateway MAC/ID:</label><input name='gw_id' required>"
     "<label>Target Plug IP:</label><input name='plug_ip' required>"
     "<label>Tapo Account Email:</label><input name='tapo_email' type='email' required>"
     "<label>Tapo Account Password:</label><input name='tapo_pwd' type='password' required>"
-    "<label>MQTT Username (optional):</label><input name='mqtt_user'>"
-    "<label>MQTT Password (optional):</label><input name='mqtt_pwd' type='password'>"
-    "<button type='submit'>Save & Reboot</button>"
+    "<label>MQTT Password:</label><input name='mqtt_pwd' type='password' required>"
+    "<button type='submit'>Save &amp; Reboot</button>"
     "</form></body></html>";
 
 static esp_err_t portal_get_handler(httpd_req_t *req) {
-    httpd_resp_send(req, portal_html, HTTPD_RESP_USE_STRLEN);
+    // Render with the auto-detected gateway_id embedded (load_config derives it).
+    char page[1400];
+    snprintf(page, sizeof(page), portal_html, gateway_id);
+    httpd_resp_send(req, page, HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
 }
 
@@ -256,24 +276,25 @@ static esp_err_t portal_post_handler(httpd_req_t *req) {
     }
     buf[ret] = '\0';
 
-    char ssid[32] = {0}, pwd[64] = {0}, auth[128] = {0}, dev[32] = {0}, gw[32] = {0}, plug[16] = {0};
-    char t_email[64] = {0}, t_pwd[64] = {0}, m_user[64] = {0}, m_pwd[64] = {0};
+    // gateway_id, device_name and mqtt_user are derived from the MAC (see
+    // load_config_from_nvs), so the portal no longer collects them — the
+    // installer supplies only Wi-Fi, the plug IP, the Tapo account, and the
+    // per-gateway MQTT password.
+    char ssid[32] = {0}, pwd[64] = {0}, plug[16] = {0};
+    char t_email[64] = {0}, t_pwd[64] = {0}, m_pwd[64] = {0};
     httpd_query_key_value(buf, "ssid", ssid, sizeof(ssid));
     httpd_query_key_value(buf, "pwd", pwd, sizeof(pwd));
-    httpd_query_key_value(buf, "auth", auth, sizeof(auth));
-    httpd_query_key_value(buf, "dev_name", dev, sizeof(dev));
-    httpd_query_key_value(buf, "gw_id", gw, sizeof(gw));
     httpd_query_key_value(buf, "plug_ip", plug, sizeof(plug));
     httpd_query_key_value(buf, "tapo_email", t_email, sizeof(t_email));
     httpd_query_key_value(buf, "tapo_pwd", t_pwd, sizeof(t_pwd));
-    httpd_query_key_value(buf, "mqtt_user", m_user, sizeof(m_user));
     httpd_query_key_value(buf, "mqtt_pwd", m_pwd, sizeof(m_pwd));
 
-    url_decode(ssid); url_decode(pwd); url_decode(auth); url_decode(dev);
-    url_decode(gw); url_decode(plug); url_decode(t_email); url_decode(t_pwd);
-    url_decode(m_user); url_decode(m_pwd);
+    url_decode(ssid); url_decode(pwd); url_decode(plug);
+    url_decode(t_email); url_decode(t_pwd); url_decode(m_pwd);
 
-    save_config_to_nvs(ssid, pwd, auth, dev, gw, plug, t_email, t_pwd, m_user, m_pwd);
+    // mqtt_user == gateway_id (== MAC); ts_auth_key is unused in direct mode.
+    save_config_to_nvs(ssid, pwd, "", device_name, gateway_id, plug,
+                       t_email, t_pwd, gateway_id, m_pwd);
 
     const char* resp = "<html><body><h2>Saved! Rebooting gateway...</h2></body></html>";
     httpd_resp_send(req, resp, HTTPD_RESP_USE_STRLEN);

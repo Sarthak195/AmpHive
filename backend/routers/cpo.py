@@ -249,11 +249,14 @@ async def cpo_create_gateway(
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=400, detail=f"Gateway '{req.gateway_id}' already exists.")
 
+    # vpn_ip is a legacy overlay field (NOT NULL + UNIQUE) that direct-MQTT
+    # gateways don't use. Fall back to the gateway_id so the unique constraint
+    # is satisfied without forcing the operator to invent an overlay IP.
     gateway = Gateway(
         id=req.gateway_id,
         tenant_id=user.tenant_id,
         name=req.name,
-        vpn_ip=req.vpn_ip,
+        vpn_ip=req.vpn_ip or req.gateway_id,
     )
     db.add(gateway)
     await db.commit()

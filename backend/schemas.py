@@ -122,10 +122,16 @@ class CpoSetupRequest(BaseModel):
 
 
 class CpoGatewayCreateRequest(BaseModel):
-    """Register a new gateway under the CPO's tenant."""
-    gateway_id: str   # MAC address or hardware UUID
+    """Register a new gateway under the CPO's tenant.
+
+    ``gateway_id`` is the device's MAC (lower-case, no separators) — the
+    firmware derives it from the hardware and shows it in the setup portal,
+    so the operator just copies it here. ``vpn_ip`` is legacy/overlay-only
+    (direct-MQTT devices don't use it); optional and defaults to empty.
+    """
+    gateway_id: str   # device MAC (matches the firmware-derived gateway_id)
     name: str
-    vpn_ip: str
+    vpn_ip: str = ""
 
 
 class CpoGatewayOtaRequest(BaseModel):
