@@ -106,15 +106,21 @@ BFG + force-push) to purge the dead values entirely.
       `basicConstraints`/`keyUsage` extensions (Python 3.13 strict validators —
       i.e. the AmpHive Agent — reject a CA without them). Firmware embeds the
       new CA from 1.3.0.
-    * **AuthN**: `allow_anonymous false` + passwd file. Per-gateway accounts
+    * **AuthN**: `allow_anonymous false` + passwd file. **Per-gateway accounts**
       (username == gateway_id) via `deploy/scripts/add_gateway_user.ps1`;
-      the passwd file survives redeploys (no more `-c` truncation).
+      the passwd file survives redeploys (no more `-c` truncation). The shared
+      `amphive-gateway` account was **retired 2026-07-10** — every device has
+      its own account (real ESP `1cc3abb4fb54`, fake plug `fakeplug-gw-01`),
+      and `deploy.ps1` no longer provisions a shared one.
     * **AuthZ**: mosquitto **topic ACLs** (`mosquitto_acl`, generated on the VM
       by `deploy.ps1`): backend → `amphive/#` + `$SYS` read; per-gateway
       accounts → `pattern readwrite amphive/gateways/%u/#` (a gateway can only
-      touch its own subtree — no cross-site forgery); the legacy shared gateway
-      account keeps `amphive/gateways/#` **transitionally** and should be
-      retired once every device has its own account.
+      touch its own subtree — no cross-site forgery). The old shared broad
+      grant (`amphive/gateways/#`) is **gone**. Verified 2026-07-10: an account
+      subscribed to another gateway's telemetry receives nothing.
+      *Ops note:* the ACL/passwd files are **bind-mounted**, so edit them
+      **in place** (mosquitto_passwd / `tee`) — replacing via `mv` swaps the
+      inode and the running broker keeps the old file until restarted.
     **Verified in prod 2026-07-10:** TLS 1.3 handshake from the public internet
     validates against the CA (strict mode); anonymous and bogus credentials
     both get `not authorised`; backend, fake plug, and the real ESP32 all

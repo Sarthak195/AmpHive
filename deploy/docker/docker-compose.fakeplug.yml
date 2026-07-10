@@ -34,9 +34,12 @@ services:
     volumes:
       - ./fake_plug.py:/fake_plug.py:ro
     environment:
-      # Broker (gateway) account — the script reads these for --broker-user/pass.
-      - MQTT_GW_USERNAME=${MQTT_GW_USERNAME}
-      - MQTT_GW_PASSWORD=${MQTT_GW_PASSWORD}
+      # Per-gateway broker account (username == gateway_id, ACL-scoped to
+      # amphive/gateways/fakeplug-gw-01/#). Password from ~/amphive/.env
+      # (MQTT_FAKEPLUG_PASSWORD), created via deploy/scripts/add_gateway_user.ps1.
+      # fake_plug.py reads MQTT_GW_USERNAME/PASSWORD for --broker-user/pass.
+      - MQTT_GW_USERNAME=fakeplug-gw-01
+      - MQTT_GW_PASSWORD=${MQTT_FAKEPLUG_PASSWORD}
     command:
       - python
       - /fake_plug.py

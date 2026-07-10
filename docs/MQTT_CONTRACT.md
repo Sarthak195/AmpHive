@@ -14,11 +14,12 @@
     only over the WireGuard overlay; also the backend's path (internal Docker
     network). Retire per-device once migrated to 8883.
 - **Auth is enforced** on both listeners: `allow_anonymous false` + passwd file,
-  plus **topic ACLs** (2026-07-10): per-gateway accounts (username ==
-  gateway_id, added via `deploy/scripts/add_gateway_user.ps1`) are confined to
-  `amphive/gateways/<gateway_id>/#`; the backend account has `amphive/#`. The
-  firmware authenticates with NVS `mqtt_user`/`mqtt_pwd` — see
-  [SECURITY.md §3](SECURITY.md).
+  plus **topic ACLs** (2026-07-10): every device has its **own** account
+  (username == gateway_id, added via `deploy/scripts/add_gateway_user.ps1`),
+  confined by `pattern readwrite amphive/gateways/%u/#` to its own subtree; the
+  backend account has `amphive/#`. The shared `amphive-gateway` account and its
+  broad grant were **retired 2026-07-10**. The firmware authenticates with NVS
+  `mqtt_user`/`mqtt_pwd` — see [SECURITY.md §3](SECURITY.md).
 - **Backend client id:** `amphive_backend_server` (paho-mqtt v2, `VERSION2`).
 - **Gateway broker URL (firmware):** `AMPHIVE_DIRECT_MQTT=1` (default, fw ≥
   1.3.0) hard-codes `mqtts://8.231.81.12:8883`, started right after Wi-Fi.

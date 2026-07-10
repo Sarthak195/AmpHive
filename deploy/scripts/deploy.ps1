@@ -82,8 +82,11 @@ if (-not $has_mqtt_bind) {
 # The broker now mounts the passwd file, so a deploy without these would ship
 # a broker that can't start. Alphanumeric/-/_ only: the values pass through a
 # remote shell and compose interpolation unquoted.
+# MQTT_GW_* (the shared gateway account) was retired 2026-07-10: every device now
+# has its own per-gateway account (add_gateway_user.ps1), so only the backend
+# account is provisioned here.
 $mqtt_vars = @{}
-foreach ($name in @("MQTT_USERNAME", "MQTT_PASSWORD", "MQTT_GW_USERNAME", "MQTT_GW_PASSWORD")) {
+foreach ($name in @("MQTT_USERNAME", "MQTT_PASSWORD")) {
     $line = $content | Where-Object { $_ -like "$name=*" } | Select-Object -First 1
     $value = if ($line) { $line.Substring("$name=".Length).Trim() } else { "" }
     if ($value -eq "" -or $value -like "set-a-strong-*") {
@@ -165,20 +168,21 @@ gcloud compute scp --quiet "$PROJECT_ROOT\.env" "${VM_NAME}:${REMOTE_DIR}/.env" 
 # survive redeploys; -b updates the managed entries in place either way.
 Write-Host "  -> Generating mosquitto passwd file on the VM..." -ForegroundColor Cyan
 $mq_u  = $mqtt_vars["MQTT_USERNAME"];    $mq_p  = $mqtt_vars["MQTT_PASSWORD"]
-$mqg_u = $mqtt_vars["MQTT_GW_USERNAME"]; $mqg_p = $mqtt_vars["MQTT_GW_PASSWORD"]
-# chown 1883 (the image's mosquitto user) + 600: the broker reads the file
-# after dropping privileges on reload, so root-owned would break SIGHUP.
-$passwd_cmd = "sudo docker run --rm -v ${REMOTE_DIR}:/work eclipse-mosquitto:2.0 sh -c '[ -f /work/mosquitto_passwd ] || mosquitto_passwd -c -b /work/mosquitto_passwd $mq_u $mq_p; mosquitto_passwd -b /work/mosquitto_passwd $mq_u $mq_p && mosquitto_passwd -b /work/mosquitto_passwd $mqg_u $mqg_p && chown 1883:1883 /work/mosquitto_passwd && chmod 600 /work/mosquitto_passwd'"
+# Only the backend account is managed here; per-gateway accounts are created
+# out-of-band by add_gateway_user.ps1 and preserved (no -c truncation once the
+# file exists). chown 1883 (the image's mosquitto user) + 600: the broker reads
+# the file after dropping privileges on reload, so root-owned would break SIGHUP.
+$passwd_cmd = "sudo docker run --rm -v ${REMOTE_DIR}:/work eclipse-mosquitto:2.0 sh -c '[ -f /work/mosquitto_passwd ] || mosquitto_passwd -c -b /work/mosquitto_passwd $mq_u $mq_p; mosquitto_passwd -b /work/mosquitto_passwd $mq_u $mq_p && chown 1883:1883 /work/mosquitto_passwd && chmod 600 /work/mosquitto_passwd'"
 gcloud compute ssh --quiet $VM_NAME --zone=$VM_ZONE --command=$passwd_cmd
 
-# Mosquitto ACL file: topic authorization, required now that 8883 is public.
+# Mosquitto ACL file: topic authorization (required now that 8883 is public).
 # Backend gets the full namespace (+ $SYS read for the compose healthcheck);
-# the legacy shared gateway account keeps the whole gateways subtree during the
-# transition; per-gateway accounts (username == gateway_id, created by
-# deploy/scripts/add_gateway_user.ps1) are scoped to their own subtree by the
-# %u pattern. Anything not granted is denied.
+# every gateway/agent account (username == gateway_id, created by
+# deploy/scripts/add_gateway_user.ps1) is scoped to its own subtree by the %u
+# pattern. The old shared-gateway broad grant was retired 2026-07-10. Anything
+# not granted is denied.
 Write-Host "  -> Generating mosquitto ACL file on the VM..." -ForegroundColor Cyan
-$acl_cmd = "printf 'user $mq_u\ntopic readwrite amphive/#\ntopic read `$SYS/#\n\nuser $mqg_u\ntopic readwrite amphive/gateways/#\n\npattern readwrite amphive/gateways/%%u/#\n' | sudo tee $REMOTE_DIR/mosquitto_acl > /dev/null && sudo chown 1883:1883 $REMOTE_DIR/mosquitto_acl && sudo chmod 600 $REMOTE_DIR/mosquitto_acl"
+$acl_cmd = "printf 'user $mq_u\ntopic readwrite amphive/#\ntopic read `$SYS/#\n\npattern readwrite amphive/gateways/%%u/#\n' | sudo tee $REMOTE_DIR/mosquitto_acl > /dev/null && sudo chown 1883:1883 $REMOTE_DIR/mosquitto_acl && sudo chmod 600 $REMOTE_DIR/mosquitto_acl"
 gcloud compute ssh --quiet $VM_NAME --zone=$VM_ZONE --command=$acl_cmd
 
 # ---- Step 4: Rebuild and restart containers ----
