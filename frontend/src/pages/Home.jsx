@@ -10,12 +10,14 @@ import { useNavigate } from 'react-router-dom';
 import WalletCard from '../components/WalletCard';
 import { useAuth } from '../contexts/AuthContext';
 import { useSession } from '../contexts/SessionContext';
+import { useConfig } from '../contexts/ConfigContext';
 import api from '../api/client';
 import MapComponent from '../components/MapComponent';
 
 const Home = () => {
   const { user } = useAuth();
   const { startSession, activeSessions, switchSession, error: sessionError, socket } = useSession();
+  const { coins_per_kwh, min_start_balance_coins } = useConfig();
   const navigate = useNavigate();
 
   const [plugId, setPlugId] = useState('');
@@ -167,6 +169,33 @@ const Home = () => {
           {(startError || sessionError) && (
             <div className="error-text mt-2">{startError || sessionError}</div>
           )}
+
+          {/* Pricing hint: tariff + what the current balance covers, so the
+              driver knows the cost before starting. */}
+          {(() => {
+            const balance = Number(user.coin_balance) || 0;
+            const rate = coins_per_kwh || 5;
+            const belowMin = balance < (min_start_balance_coins || 0);
+            const estKwh = rate > 0 ? balance / rate : 0;
+            return (
+              <div style={{ marginTop: '0.75rem', fontSize: '0.82rem', color: 'var(--color-text-muted)' }}>
+                Rate <strong style={{ color: 'var(--color-text-secondary)' }}>{rate} coins/kWh</strong>
+                {' · '}your balance (<strong style={{ color: 'var(--color-text-secondary)' }}>{balance.toFixed(2)}</strong> coins)
+                covers ≈ <strong style={{ color: 'var(--color-text-secondary)' }}>{estKwh.toFixed(1)} kWh</strong>.
+                {belowMin && (
+                  <span style={{ color: 'var(--color-warning, #f0a020)' }}>
+                    {' '}Minimum {min_start_balance_coins} coins to start —{' '}
+                    <span
+                      style={{ color: 'var(--color-primary)', cursor: 'pointer', textDecoration: 'underline' }}
+                      onClick={() => navigate('/topup')}
+                    >
+                      top up
+                    </span>.
+                  </span>
+                )}
+              </div>
+            );
+          })()}
         </div>
       )}
 
@@ -206,13 +235,24 @@ const Home = () => {
             </div>
           ) : (
             <div className="flex flex-col gap-3">
-              {plugs.map((plug, index) => (
+              {plugs.map((plug, index) => {
+                // A plug is startable only if it is available AND its gateway is
+                // reachable right now. gateway_online defaults true for older
+                // API data; an unreachable charger is shown but not clickable so
+                // the driver isn't sent into a 409 at start.
+                const unreachable = plug.gateway_online === false;
+                const startable = plug.status === 'available' && !unreachable;
+                return (
                 <div
                   key={plug.id}
                   className="glass glass-card flex justify-between items-center animate-slide-up"
-                  style={{ animationDelay: `${index * 0.06}s` }}
+                  style={{
+                    animationDelay: `${index * 0.06}s`,
+                    cursor: startable ? 'pointer' : 'default',
+                    opacity: unreachable ? 0.6 : 1,
+                  }}
                   onClick={() => {
-                    if (plug.status === 'available') {
+                    if (startable) {
                       handleStartSession(null, plug.id);
                     }
                   }}
@@ -220,8 +260,8 @@ const Home = () => {
                   <div>
                     <div className="flex items-center gap-2" style={{ marginBottom: '0.25rem' }}>
                       <span style={{ fontWeight: 600 }}>{plug.name}</span>
-                      <span className={`badge ${statusColor(plug.status)}`}>
-                        {plug.status}
+                      <span className={`badge ${unreachable ? 'badge-danger' : statusColor(plug.status)}`}>
+                        {unreachable ? 'charger offline' : plug.status}
                       </span>
                     </div>
                     <div className="flex items-center gap-3" style={{ fontSize: '0.85rem', color: 'var(--color-text-secondary)' }}>
@@ -236,13 +276,18 @@ const Home = () => {
                       )}
                     </div>
                   </div>
-                  {plug.status === 'available' && (
+                  {startable ? (
                     <span style={{ color: 'var(--color-primary)', fontWeight: 600, fontSize: '0.9rem' }}>
                       Charge →
                     </span>
-                  )}
+                  ) : unreachable ? (
+                    <span style={{ color: 'var(--color-text-muted)', fontSize: '0.8rem' }}>
+                      Unreachable
+                    </span>
+                  ) : null}
                 </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>

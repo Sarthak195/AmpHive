@@ -83,9 +83,38 @@ class PlugResponse(BaseModel):
     # Effective map coordinates: the plug's own, else its gateway's, else None.
     latitude: Optional[float] = None
     longitude: Optional[float] = None
+    # Whether the plug's gateway is live right now (ONLINE + recently seen). The
+    # driver UI uses this to warn that a plug is unreachable before a start is
+    # attempted, instead of only discovering it via a 409 at session start.
+    gateway_online: bool = True
+
+
+class GatewayEventResponse(BaseModel):
+    """A gateway/plug operational event (alarm, safety cutoff, OTA notice)."""
+    id: int
+    gateway_id: str
+    plug_id: Optional[int] = None
+    event_type: str
+    severity: str
+    detail: Optional[str] = None
+    acknowledged: bool
+    created_at: Optional[str] = None
 
 
 # --- Payment Schemas ---
+
+class LedgerEntryResponse(BaseModel):
+    """A single wallet ledger row — a top-up credit or a session debit."""
+    id: int
+    amount: float                 # signed: positive = credit, negative = debit
+    transaction_type: str         # e.g. "topup", "session_debit"
+    direction: str                # "credit" | "debit" (derived from the sign)
+    description: Optional[str] = None
+    balance_after: float
+    session_id: Optional[int] = None
+    razorpay_payment_id: Optional[str] = None
+    created_at: Optional[str] = None
+
 
 class CreateOrderRequest(BaseModel):
     amount_inr: float  # Amount in Rupees (e.g. 100 for ₹100)
@@ -137,11 +166,15 @@ class CpoGatewayCreateRequest(BaseModel):
 class CpoGatewayOtaRequest(BaseModel):
     """Trigger an OTA firmware update on a gateway.
 
-    `firmware_url` must be an http(s) URL the *gateway* can reach (the overlay
-    IP of the image server, or a LAN address) — not a URL relative to the
-    backend. The firmware downloads it into its passive OTA slot and reboots.
+    `firmware_url` must be an **https** URL the *gateway* can reach (the
+    public OTA image bucket — see docs/FIRMWARE.md) — not a URL relative to
+    the backend. Plain http is rejected: direct-MQTT gateways fetch images
+    across the public internet, and firmware ≥ 1.4.0 refuses non-TLS
+    downloads anyway (and verifies the image's ECDSA app signature before
+    installing). The firmware downloads the image into its passive OTA slot
+    and reboots.
     """
-    firmware_url: str = Field(pattern=r"^https?://", max_length=512)
+    firmware_url: str = Field(pattern=r"^https://", max_length=512)
 
 
 class CpoPlugCreateRequest(BaseModel):

@@ -14,6 +14,7 @@ import {
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
 } from 'recharts';
 import CpoLayout from '../../components/CpoLayout';
+import CpoAlerts from '../../components/CpoAlerts';
 import api from '../../api/client';
 
 /**
@@ -147,6 +148,9 @@ const CpoDashboard = () => {
         <h1>Dashboard</h1>
         <p>Overview of your charging network performance</p>
       </div>
+
+      {/* Active alerts (safety cutoffs, unauthorized-on, OTA) */}
+      <CpoAlerts />
 
       {/* Stat Cards Row */}
       <div className="stat-cards">
@@ -290,7 +294,19 @@ const CpoDashboard = () => {
 
       {/* Load Graph — power draw over the last 24h (from persisted telemetry) */}
       <div className="chart-container animate-fade-in animate-delay-2" style={{ marginBottom: '2rem' }}>
-        <h3>⚡ Load (Last 24h)</h3>
+        <div className="flex justify-between items-center" style={{ flexWrap: 'wrap', gap: '0.5rem' }}>
+          <h3 style={{ margin: 0 }}>⚡ Load (Last 24h)</h3>
+          {loadData.length > 0 && (() => {
+            const peakW = Math.max(...loadData.map((d) => d.max_power_w || 0));
+            const peakA = Math.max(...loadData.map((d) => d.max_current_a || 0));
+            return (
+              <span style={{ color: 'var(--color-text-muted)', fontSize: '0.82rem' }}>
+                Peak <strong style={{ color: 'var(--color-text-secondary)' }}>{peakW.toFixed(0)} W</strong>
+                {' · '}<strong style={{ color: 'var(--color-text-secondary)' }}>{peakA.toFixed(1)} A</strong>
+              </span>
+            );
+          })()}
+        </div>
         {loadData.length > 0 ? (
           <ResponsiveContainer width="100%" height={220}>
             <AreaChart data={loadData}>

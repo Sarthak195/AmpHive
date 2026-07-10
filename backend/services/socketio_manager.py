@@ -44,6 +44,20 @@ async def emit_plug_status(plug_id: int, status: str) -> None:
         logger.error(f"Failed to emit plug_status for plug {plug_id}: {e}")
 
 
+async def emit_gateway_alarm(event: Dict[str, Any]) -> None:
+    """
+    Broadcast a gateway alarm/event (safety cutoff, unauthorized-on, OTA notice)
+    to every connected client. The CPO portal renders it in an alert feed; a
+    driver whose active plug matches reacts (e.g. an unauthorized-on warning).
+    Broadcast is global for simplicity — the payload carries no wallet/PII, only
+    operational fault metadata, and clients filter to what they display.
+    """
+    try:
+        await sio.emit("gateway_alarm", event)
+    except Exception as e:
+        logger.error(f"Failed to emit gateway_alarm: {e}")
+
+
 @sio.event
 async def connect(sid, environ, auth=None):
     """

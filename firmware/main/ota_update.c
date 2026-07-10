@@ -47,14 +47,14 @@ static void ota_task(void *arg)
         .url = url,
         .timeout_ms = 30000,
         .keep_alive_enable = true,
-        /* Validate HTTPS image hosts against the built-in Mozilla CA bundle
-           (CONFIG_MBEDTLS_CERTIFICATE_BUNDLE). Since direct-MQTT devices fetch
-           OTA images across the public internet, serve them from an https://
-           URL (GitHub release, GCS, a TLS-fronted VM) so the download is
-           authenticated + encrypted. Plain http:// is still permitted
-           (CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP) for LAN/overlay hosting, but it is
-           MITM-able on untrusted networks — prefer https there. The image is
-           additionally app-validated and rollback-protected by esp_https_ota. */
+        /* Validate the HTTPS image host against the built-in Mozilla CA bundle
+           (CONFIG_MBEDTLS_CERTIFICATE_BUNDLE). Direct-MQTT devices fetch OTA
+           images across the public internet, so https:// is REQUIRED — plain
+           http:// is rejected both here (ota_update_start) and by esp_https_ota
+           (CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP is off). On top of transport auth,
+           the image itself must carry a valid ECDSA app signature
+           (CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT): esp_https_ota_finish
+           refuses an unsigned/forged image even from a compromised host. */
         .crt_bundle_attach = esp_crt_bundle_attach,
     };
     esp_https_ota_config_t ota_cfg = {
@@ -118,7 +118,8 @@ esp_err_t ota_update_start(const char *url)
     if (s_in_progress) {
         return ESP_ERR_INVALID_STATE;
     }
-    if (!url || strncmp(url, "http", 4) != 0) {
+    /* https only: images traverse the public internet (see ota_task). */
+    if (!url || strncmp(url, "https://", 8) != 0) {
         return ESP_ERR_INVALID_ARG;
     }
     char *url_copy = strdup(url);
