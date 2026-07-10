@@ -1029,6 +1029,10 @@ async def cpo_analytics_telemetry(
             func.max(TelemetryReading.power_w).label("max_power_w"),
             # energy_kwh is cumulative-per-session, so max() = value at end of bucket
             func.max(TelemetryReading.energy_kwh).label("energy_kwh"),
+            # Current (amps): avg + peak per bucket, so a CPO can see draw, not
+            # just power. Persisted on every reading (derived power/voltage).
+            func.avg(TelemetryReading.current_a).label("avg_current_a"),
+            func.max(TelemetryReading.current_a).label("max_current_a"),
             func.count(TelemetryReading.id).label("sample_count"),
         )
         .where(and_(*conditions))
@@ -1044,7 +1048,9 @@ async def cpo_analytics_telemetry(
             "avg_power_w": round(float(row[1]), 1),
             "max_power_w": round(float(row[2]), 1),
             "energy_kwh": round(float(row[3]), 3),
-            "sample_count": int(row[4]),
+            "avg_current_a": round(float(row[4]), 2),
+            "max_current_a": round(float(row[5]), 2),
+            "sample_count": int(row[6]),
         }
         for row in rows
     ]
