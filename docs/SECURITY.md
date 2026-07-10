@@ -120,6 +120,15 @@ BFG + force-push) to purge the dead values entirely.
     both get `not authorised`; backend, fake plug, and the real ESP32 all
     stayed connected under the ACLs. The overlay 1883 listener is unchanged
     (legacy/transition + backend-internal).
+  - [Follow-up 2026-07-10] **OTA image transport.** Direct devices fetch OTA
+    images across the public internet, so fw ≥ 1.3.1 attaches the Mozilla CA
+    bundle and images should be served over **HTTPS** (`ota_update.c`). Plain
+    HTTP is still permitted (`CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP`) and remains
+    **MITM-able** — a valid-but-malicious image would install (no code
+    signing yet). OTA over the direct path was verified 2026-07-10 (`1.3.0 →
+    1.3.1`), but that jump used HTTP because the old image predated the
+    bundle. **TODO:** public HTTPS image host + signed OTA / secure boot so the
+    edge can't be pushed a forged image.
 - [Fixed + deployed 2026-07-06] **CORS** is restricted to an explicit allowlist
   (localhost, `amphive.duckdns.org`, VM IP; http+https) with the wildcard removed,
   in `backend/main.py:187`. Verified in prod: an allowed origin is echoed, a

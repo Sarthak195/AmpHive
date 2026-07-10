@@ -219,7 +219,19 @@ payloads show `kwh` starting at 0 per session and the echoed `session_id`).
 `esp_https_ota` with bootloader rollback, triggered by an `OTA` MQTT command
 (`ota_update.c`/`.h`); the new image only cancels rollback once it re-reaches
 the broker. A live `1.1.0 → 1.1.1` push downloaded into `ota_1`, rebooted,
-and committed (`marking image valid`) on real hardware. Remaining gap: the
-control-plane host constants still default to Tailscale (Headscale retarget
-pending). See
+and committed (`marking image valid`) on real hardware.
+
+**OTA over the direct-MQTT path — verified 2026-07-10.** A `1.3.0 → 1.3.1`
+push, image hosted at a **public** URL (`http://8.231.81.12/...`) and triggered
+over the public broker, downloaded (1 MB in ~20 s), swapped `ota_0 → ota_1`,
+rebooted into `1.3.1-direct`, reconnected, and `marking image valid` — no
+overlay anywhere. Because direct devices fetch images across the public
+internet, `ota_update.c` now attaches the **Mozilla CA bundle**
+(`esp_crt_bundle_attach`, fw ≥ 1.3.1), so images should be served from an
+**`https://`** URL (GitHub release / GCS / TLS-fronted VM) — authenticated +
+encrypted. Plain `http://` is still accepted (`CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP`)
+for LAN/overlay hosting but is MITM-able on untrusted networks; the 1.3.0→1.3.1
+jump used it only because the *old* running image predated the cert bundle.
+Follow-up: stand up the public HTTPS image host + consider signed OTA
+(secure boot) so a valid-but-malicious image can't be installed. See
 [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for the full matrix.

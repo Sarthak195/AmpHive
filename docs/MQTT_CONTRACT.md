@@ -105,6 +105,12 @@ It does **not** currently subscribe to `/alarms`.
   plug_id for OTA). The gateway
   downloads the image into its passive OTA slot and reboots
   (rollback-protected); it refuses the update while a session is active.
+  The `url` must be reachable by the **gateway**: for direct-MQTT devices
+  (fw ≥ 1.3.0) that means a **public** URL, and fw ≥ 1.3.1 validates
+  `https://` hosts against the built-in Mozilla CA bundle — prefer HTTPS
+  (plain HTTP is accepted but MITM-able on the public internet). Verified
+  over the direct path 2026-07-10 (`1.3.0 → 1.3.1`, public host, slot swap +
+  rollback-cancel).
 
 ## Inbound handling (backend) — live
 

@@ -7,6 +7,7 @@
 #include "freertos/task.h"
 
 #include "esp_app_desc.h"
+#include "esp_crt_bundle.h"
 #include "esp_https_ota.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
@@ -46,10 +47,15 @@ static void ota_task(void *arg)
         .url = url,
         .timeout_ms = 30000,
         .keep_alive_enable = true,
-        /* Plain-HTTP OTA is allowed (CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP): the
-           gateway only reaches the broker/backend over the WireGuard overlay
-           or the local LAN. Move to HTTPS + cert pinning if images are ever
-           served across untrusted networks. */
+        /* Validate HTTPS image hosts against the built-in Mozilla CA bundle
+           (CONFIG_MBEDTLS_CERTIFICATE_BUNDLE). Since direct-MQTT devices fetch
+           OTA images across the public internet, serve them from an https://
+           URL (GitHub release, GCS, a TLS-fronted VM) so the download is
+           authenticated + encrypted. Plain http:// is still permitted
+           (CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP) for LAN/overlay hosting, but it is
+           MITM-able on untrusted networks — prefer https there. The image is
+           additionally app-validated and rollback-protected by esp_https_ota. */
+        .crt_bundle_attach = esp_crt_bundle_attach,
     };
     esp_https_ota_config_t ota_cfg = {
         .http_config = &http_cfg,
