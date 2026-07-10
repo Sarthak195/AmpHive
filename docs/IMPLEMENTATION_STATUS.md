@@ -12,7 +12,7 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 ### Backend
 | Capability | Status | Notes |
 |------------|:------:|-------|
-| REST API (auth, groups, plugs, sessions, payments, direct, CPO portal) | ✅ | 40 endpoints (CPO events feed `GET /api/cpo/events` + `POST /api/cpo/events/{id}/ack` added 2026-07-10) — see [API_REFERENCE.md](API_REFERENCE.md) |
+| REST API (auth, groups, plugs, sessions, payments, direct, CPO portal) | ✅ | 41 endpoints (2026-07-10: CPO events feed `GET /api/cpo/events` + `POST /api/cpo/events/{id}/ack`, unified `GET /api/wallet/ledger`) — see [API_REFERENCE.md](API_REFERENCE.md) |
 | JWT auth + bcrypt | ✅ | Env-configurable expiry (`JWT_EXPIRY_DAYS`, default 7); user loaded fresh per request. **Revocable** via the `token_version` epoch (`tv` claim, re-checked per request; `POST /api/auth/logout` bumps it — "log out everywhere"). |
 | Role-based access control | ✅ | Enforced via `services/rbac.py` `require_role(...)` on all `/api/cpo/*` routes (checks the DB role, not just the token) |
 | MQTT command publish (ON/OFF) | ✅ | QoS 1, 3 s wait |
@@ -40,7 +40,8 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 | Charger groups (join/list) | ✅ | |
 | CPO operator portal (setup, dashboard, plugs, groups, sessions) | ✅ | `pages/cpo/*` behind `CpoProtectedRoute`; charts via `recharts` |
 | Map of available plugs | ✅ | Leaflet/OpenStreetMap `MapComponent` on Home. Plug geolocation is now persisted (`Plug.latitude`/`longitude`, falling back to the gateway's coords); markers use real coordinates and plugs without a known location are omitted — the old `Math.random()` fallback (which also jittered markers on every re-render) is gone. |
-| "View History" button (WalletCard) | ✅ | `WalletCard` button → `/history` route (`App.jsx`) → `History.jsx`, which fetches `GET /api/sessions/history`. Shows charging-session debits; does not yet show a unified ledger with top-up credits. |
+| "View History" button (WalletCard) | ✅ | `WalletCard` button → `/history` route → `History.jsx`, now **tabbed**: "Charging Sessions" (`GET /api/sessions/history`) and "Wallet Ledger" (`GET /api/wallet/ledger`) — the latter is the unified money trail (top-up credits **and** session debits, signed amount + running `balance_after`), closing the old "debits-only" gap (2026-07-10). |
+| CPO gateways management + OTA-from-UI | ✅ | New `/cpo/gateways` page (sidebar link) lists each gateway's status, reported firmware, last-seen, and plug count, with an "Update Firmware" action that POSTs `/api/cpo/gateways/{id}/ota` (https image URL; button disabled unless the gateway is online with ≥1 plug). Completes the OTA loop the fw-tracking surfaced (2026-07-10). |
 | TypeScript usage | — | **Decided against 2026-07-07** (TD#14): toolchain removed; all app code is plain `.jsx`/`.js` by policy. ESLint now actually lints `js/jsx` (the old config matched only `ts,tsx` — zero files). |
 | Frontend tests (Vitest + RTL) | ✅ | 20 tests: AuthContext, ProtectedRoute/CpoProtectedRoute, TopUp payment handler (no client amount on `/verify`), multi-session SessionContext. `npm test` runs in CI. |
 

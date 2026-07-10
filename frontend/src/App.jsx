@@ -23,6 +23,7 @@ import { ProtectedRoute, CpoProtectedRoute } from './components/ProtectedRoutes'
 // CPO Admin Dashboard pages
 import CpoSetup from './pages/cpo/CpoSetup';
 import CpoDashboard from './pages/cpo/CpoDashboard';
+import CpoGateways from './pages/cpo/CpoGateways';
 import CpoPlugs from './pages/cpo/CpoPlugs';
 import CpoGroups from './pages/cpo/CpoGroups';
 import CpoSessions from './pages/cpo/CpoSessions';
@@ -59,6 +60,9 @@ function App() {
           {/* CPO Dashboard routes — require auth + CPO role */}
           <Route path="/cpo/dashboard" element={
             <CpoProtectedRoute><CpoDashboard /></CpoProtectedRoute>
+          } />
+          <Route path="/cpo/gateways" element={
+            <CpoProtectedRoute><CpoGateways /></CpoProtectedRoute>
           } />
           <Route path="/cpo/plugs" element={
             <CpoProtectedRoute><CpoPlugs /></CpoProtectedRoute>

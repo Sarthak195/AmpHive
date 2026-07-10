@@ -103,6 +103,19 @@ class GatewayEventResponse(BaseModel):
 
 # --- Payment Schemas ---
 
+class LedgerEntryResponse(BaseModel):
+    """A single wallet ledger row — a top-up credit or a session debit."""
+    id: int
+    amount: float                 # signed: positive = credit, negative = debit
+    transaction_type: str         # e.g. "topup", "session_debit"
+    direction: str                # "credit" | "debit" (derived from the sign)
+    description: Optional[str] = None
+    balance_after: float
+    session_id: Optional[int] = None
+    razorpay_payment_id: Optional[str] = None
+    created_at: Optional[str] = None
+
+
 class CreateOrderRequest(BaseModel):
     amount_inr: float  # Amount in Rupees (e.g. 100 for ₹100)
 

@@ -242,6 +242,17 @@ Cross-references [TECH_DEBT.md](TECH_DEBT.md) items as `TD#n` and
       `relay_on`/`voltage_v`/`is_stale`/`age_sec`; the session monitor shows a
       client-side ticking clock, a "reconnecting" staleness banner, a voltage +
       relay line, and per-plug alarm banners. Tests in `SessionMonitor.test.jsx`.
+- [x] **Gateway firmware-version tracking.** `gateways.firmware_version`
+      (Alembic `0006`) populated from the `online` status `fw`; exposed in
+      `GET /api/cpo/gateways` and shown in the CPO plugs table. Verified live
+      (real gateway → `1.5.0-direct`).
+- [x] **CPO Gateways page + OTA-from-UI.** New `/cpo/gateways` fleet view
+      (status, fw, last-seen, plug count) with a one-click OTA modal
+      (`POST /api/cpo/gateways/{id}/ota`), so operators push updates without curl.
+- [x] **Unified wallet ledger.** `GET /api/wallet/ledger` returns top-up
+      credits **and** session debits with running balance; the driver History
+      page is now tabbed (Charging Sessions / Wallet Ledger). Closes the
+      old debits-only gap.
 - [x] **Token revocation / shorter-lived JWTs** (2026-07-08): every JWT
       carries the user's `token_version` epoch (`tv` claim), re-checked per
       request; `POST /api/auth/logout` bumps it to revoke all of a user's
