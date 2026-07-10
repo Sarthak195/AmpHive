@@ -126,15 +126,30 @@ BFG + force-push) to purge the dead values entirely.
     both get `not authorised`; backend, fake plug, and the real ESP32 all
     stayed connected under the ACLs. The overlay 1883 listener is unchanged
     (legacy/transition + backend-internal).
-  - [Follow-up 2026-07-10] **OTA image transport.** Direct devices fetch OTA
-    images across the public internet, so fw ≥ 1.3.1 attaches the Mozilla CA
-    bundle and images should be served over **HTTPS** (`ota_update.c`). Plain
-    HTTP is still permitted (`CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP`) and remains
-    **MITM-able** — a valid-but-malicious image would install (no code
-    signing yet). OTA over the direct path was verified 2026-07-10 (`1.3.0 →
-    1.3.1`), but that jump used HTTP because the old image predated the
-    bundle. **TODO:** public HTTPS image host + signed OTA / secure boot so the
-    edge can't be pushed a forged image.
+  - [Hardened 2026-07-10 — code complete, rollout pending] **OTA image
+    transport + signing.** Both halves of the earlier TODO are implemented
+    (fw ≥ 1.4.0):
+    * **HTTPS-only images**: hosted on the public-read GCS bucket
+      `gs://amphive-fw` (`https://storage.googleapis.com/amphive-fw/...`,
+      public-CA cert the firmware's Mozilla bundle validates; public-read
+      user-approved 2026-07-10 — images hold no secrets and are signed).
+      Plain `http://` is refused by the firmware
+      (`CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP` removed + an explicit scheme check
+      in `ota_update_start`) *and* by the backend
+      (`CpoGatewayOtaRequest` now requires `https://`).
+    * **Signed OTA** (signed-app verification *without* secure boot, ECDSA
+      scheme v1, `CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT`): the device
+      rejects any update lacking a valid signature from
+      `firmware/secure_boot_signing_key.pem` (gitignored; **back it up** —
+      losing it strands fielded devices on USB reflash). A
+      valid-but-malicious image from a MITM or a compromised bucket no longer
+      installs. No eFuses burned; boot-time verification stays off (full
+      secure boot remains a possible future step).
+    **Rollout state:** the signed `1.4.0-direct` image is built + published;
+    the OTA push to the real gateway and the `deploy.ps1` run shipping the
+    backend https-only validation are pending (see
+    `deploy/docs/ota_image_publishing.md`). Pre-1.4.0 firmware ignores the
+    signature trailer, so the migration jump installs cleanly.
 - [Fixed + deployed 2026-07-06] **CORS** is restricted to an explicit allowlist
   (localhost, `amphive.duckdns.org`, VM IP; http+https) with the wildcard removed,
   in `backend/main.py:187`. Verified in prod: an allowed origin is echoed, a

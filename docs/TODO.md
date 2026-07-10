@@ -208,6 +208,16 @@ Cross-references [TECH_DEBT.md](TECH_DEBT.md) items as `TD#n` and
       presents them as a parallel deployment model. (TD#15)
 - [ ] **TimescaleDB** (hypertables/retention/continuous-aggregates) for
       `telemetry_readings` if telemetry volume grows. (IMPL 2)
+- [~] **Signed OTA + public HTTPS image host** (2026-07-10, code complete —
+      rollout pending): fw ≥ 1.4.0 verifies an ECDSA app signature on every
+      update (`SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT`; key
+      `firmware/secure_boot_signing_key.pem`, gitignored — **back it up**)
+      and refuses plain-http downloads (`ALLOW_HTTP` removed; backend
+      `CpoGatewayOtaRequest` now `^https://` too). Images live on the
+      public-read bucket `gs://amphive-fw`; signed `1.4.0-direct` is built +
+      published. **Pending:** OTA push to the real gateway + `deploy.ps1`
+      run for the backend validation — runbook
+      `deploy/docs/ota_image_publishing.md`. (SEC §3)
 - [x] **Token revocation / shorter-lived JWTs** (2026-07-08): every JWT
       carries the user's `token_version` epoch (`tv` claim), re-checked per
       request; `POST /api/auth/logout` bumps it to revoke all of a user's

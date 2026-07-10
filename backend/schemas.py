@@ -137,11 +137,15 @@ class CpoGatewayCreateRequest(BaseModel):
 class CpoGatewayOtaRequest(BaseModel):
     """Trigger an OTA firmware update on a gateway.
 
-    `firmware_url` must be an http(s) URL the *gateway* can reach (the overlay
-    IP of the image server, or a LAN address) — not a URL relative to the
-    backend. The firmware downloads it into its passive OTA slot and reboots.
+    `firmware_url` must be an **https** URL the *gateway* can reach (the
+    public OTA image bucket — see docs/FIRMWARE.md) — not a URL relative to
+    the backend. Plain http is rejected: direct-MQTT gateways fetch images
+    across the public internet, and firmware ≥ 1.4.0 refuses non-TLS
+    downloads anyway (and verifies the image's ECDSA app signature before
+    installing). The firmware downloads the image into its passive OTA slot
+    and reboots.
     """
-    firmware_url: str = Field(pattern=r"^https?://", max_length=512)
+    firmware_url: str = Field(pattern=r"^https://", max_length=512)
 
 
 class CpoPlugCreateRequest(BaseModel):
