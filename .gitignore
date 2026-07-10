@@ -71,6 +71,8 @@ __pycache__/
 *.pyo
 *.pyd
 .pytest_cache/
+# Python packaging artifacts
+*.egg-info/
 .coverage
 htmlcov/
 .venv/
