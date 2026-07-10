@@ -12,7 +12,7 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 ### Backend
 | Capability | Status | Notes |
 |------------|:------:|-------|
-| REST API (auth, groups, plugs, sessions, payments, direct, CPO portal) | ✅ | 41 endpoints (2026-07-10: CPO events feed `GET /api/cpo/events` + `POST /api/cpo/events/{id}/ack`, unified `GET /api/wallet/ledger`) — see [API_REFERENCE.md](API_REFERENCE.md) |
+| REST API (auth, groups, plugs, sessions, payments, direct, CPO portal) | ✅ | 42 endpoints (2026-07-10: CPO events feed `GET /api/cpo/events` + `POST /api/cpo/events/{id}/ack`, unified `GET /api/wallet/ledger`, public `GET /api/config`) — see [API_REFERENCE.md](API_REFERENCE.md) |
 | JWT auth + bcrypt | ✅ | Env-configurable expiry (`JWT_EXPIRY_DAYS`, default 7); user loaded fresh per request. **Revocable** via the `token_version` epoch (`tv` claim, re-checked per request; `POST /api/auth/logout` bumps it — "log out everywhere"). |
 | Role-based access control | ✅ | Enforced via `services/rbac.py` `require_role(...)` on all `/api/cpo/*` routes (checks the DB role, not just the token) |
 | MQTT command publish (ON/OFF) | ✅ | QoS 1, 3 s wait |
@@ -37,6 +37,7 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 | Driver plug list: gateway-offline UX | ✅ | Home marks a plug whose gateway is unreachable (`gateway_online === false`) as "charger offline", dims it, and disables start — no more blind 409s at session start. |
 | CPO alert feed | ✅ | `CpoAlerts` on the dashboard fetches `GET /api/cpo/events?unacknowledged_only=true`, merges live `gateway_alarm` broadcasts, and dismisses via the ack endpoint. Severity-styled (critical/warning/info). |
 | Razorpay top-up flow | ✅ | CDN script + `window.Razorpay`; key comes from backend order. Formats and displays decimal coin balances. |
+| Pricing clarity | ✅ | `GET /api/config` (public) feeds a `ConfigProvider`; Home shows the tariff (`coins_per_kwh`) + what the driver's balance covers (≈ kWh) with a top-up nudge below the minimum, and the session monitor reads the rate from config instead of hardcoding it. The session-start minimum is now env-driven (`MIN_START_BALANCE_COINS`) and the 402 message matches the displayed number (2026-07-10). |
 | Charger groups (join/list) | ✅ | |
 | CPO operator portal (setup, dashboard, plugs, groups, sessions) | ✅ | `pages/cpo/*` behind `CpoProtectedRoute`; charts via `recharts` |
 | Map of available plugs | ✅ | Leaflet/OpenStreetMap `MapComponent` on Home. Plug geolocation is now persisted (`Plug.latitude`/`longitude`, falling back to the gateway's coords); markers use real coordinates and plugs without a known location are omitted — the old `Math.random()` fallback (which also jittered markers on every re-render) is gone. |

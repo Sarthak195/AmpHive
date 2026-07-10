@@ -49,6 +49,11 @@ router = APIRouter()
 # needs no code change.
 MAX_ACTIVE_SESSIONS_PER_USER = int(os.getenv("MAX_ACTIVE_SESSIONS_PER_USER", "2"))
 
+# Minimum wallet balance (coins) required to START a session — a float so a
+# session can't begin with too little credit to cover meaningful charging. Also
+# exposed via GET /api/config so the UI shows the same number it enforces.
+MIN_START_BALANCE_COINS = float(os.getenv("MIN_START_BALANCE_COINS", "50"))
+
 # ===========================================================================
 # Charging Session Endpoints
 # ===========================================================================
@@ -134,11 +139,14 @@ async def start_charging_session(
                     detail="You don't have access to this plug. Join the group first.",
                 )
 
-    # 2. Check wallet balance (minimum 50 coins to start)
-    if user.coin_balance < 50:
+    # 2. Check wallet balance (minimum coins to start; env-configurable)
+    if user.coin_balance < MIN_START_BALANCE_COINS:
         raise HTTPException(
             status_code=402,
-            detail=f"Insufficient balance. You have {user.coin_balance} coins. Minimum 50 required.",
+            detail=(
+                f"Insufficient balance. You have {user.coin_balance} coins. "
+                f"Minimum {MIN_START_BALANCE_COINS:g} required."
+            ),
         )
 
     # 3. Claim the plug (still holding the row lock). Only OCCUPIED blocks a

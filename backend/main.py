@@ -199,6 +199,23 @@ def health_check():
     return {"status": "healthy", "service": "amphive-backend", "version": "2.0.0"}
 
 
+@app.get("/api/config")
+def public_config():
+    """
+    Public pricing/config the frontend needs to show accurate numbers instead of
+    hardcoding them: the charging tariff (coins per kWh), the minimum balance to
+    start a session (matches the 402 the start path enforces), and the coin↔INR
+    rate (the top-up flow mints coins 1:1 with rupees).
+    """
+    from backend.routers.sessions import MIN_START_BALANCE_COINS
+    return {
+        "coins_per_kwh": COINS_PER_KWH,
+        "min_start_balance_coins": MIN_START_BALANCE_COINS,
+        "coin_inr_rate": 1.0,
+        "currency": "INR",
+    }
+
+
 
 # ===========================================================================
 # Routers — the 35 API routes live in backend/routers/ (TD#7 split);

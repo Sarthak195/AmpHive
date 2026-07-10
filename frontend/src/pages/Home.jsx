@@ -10,12 +10,14 @@ import { useNavigate } from 'react-router-dom';
 import WalletCard from '../components/WalletCard';
 import { useAuth } from '../contexts/AuthContext';
 import { useSession } from '../contexts/SessionContext';
+import { useConfig } from '../contexts/ConfigContext';
 import api from '../api/client';
 import MapComponent from '../components/MapComponent';
 
 const Home = () => {
   const { user } = useAuth();
   const { startSession, activeSessions, switchSession, error: sessionError, socket } = useSession();
+  const { coins_per_kwh, min_start_balance_coins } = useConfig();
   const navigate = useNavigate();
 
   const [plugId, setPlugId] = useState('');
@@ -167,6 +169,33 @@ const Home = () => {
           {(startError || sessionError) && (
             <div className="error-text mt-2">{startError || sessionError}</div>
           )}
+
+          {/* Pricing hint: tariff + what the current balance covers, so the
+              driver knows the cost before starting. */}
+          {(() => {
+            const balance = Number(user.coin_balance) || 0;
+            const rate = coins_per_kwh || 5;
+            const belowMin = balance < (min_start_balance_coins || 0);
+            const estKwh = rate > 0 ? balance / rate : 0;
+            return (
+              <div style={{ marginTop: '0.75rem', fontSize: '0.82rem', color: 'var(--color-text-muted)' }}>
+                Rate <strong style={{ color: 'var(--color-text-secondary)' }}>{rate} coins/kWh</strong>
+                {' · '}your balance (<strong style={{ color: 'var(--color-text-secondary)' }}>{balance.toFixed(2)}</strong> coins)
+                covers ≈ <strong style={{ color: 'var(--color-text-secondary)' }}>{estKwh.toFixed(1)} kWh</strong>.
+                {belowMin && (
+                  <span style={{ color: 'var(--color-warning, #f0a020)' }}>
+                    {' '}Minimum {min_start_balance_coins} coins to start —{' '}
+                    <span
+                      style={{ color: 'var(--color-primary)', cursor: 'pointer', textDecoration: 'underline' }}
+                      onClick={() => navigate('/topup')}
+                    >
+                      top up
+                    </span>.
+                  </span>
+                )}
+              </div>
+            );
+          })()}
         </div>
       )}
 

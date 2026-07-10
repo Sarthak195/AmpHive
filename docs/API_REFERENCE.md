@@ -30,6 +30,7 @@ Interactive docs: `http://<host>:8000/docs`.
 | Method | Path | Auth | Response |
 |--------|------|------|----------|
 | GET | `/api/health` | none | `{"status":"healthy","service":"amphive-backend","version":"2.0.0"}` |
+| GET | `/api/config` | none | Public pricing/config so the UI doesn't hardcode it: `{coins_per_kwh, min_start_balance_coins, coin_inr_rate, currency}`. `min_start_balance_coins` matches the 402 the session-start path enforces (`MIN_START_BALANCE_COINS`, env). |
 
 ## Authentication (`services/auth.py`)
 

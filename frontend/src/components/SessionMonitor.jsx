@@ -15,6 +15,7 @@
 
 import { useEffect, useState } from 'react';
 import { useSession } from '../contexts/SessionContext';
+import { useConfig } from '../contexts/ConfigContext';
 
 // Consider the live feed stale after this many ms without a telemetry frame.
 // Matches the backend TELEMETRY_STALE_AFTER_SEC default (15 s).
@@ -55,6 +56,7 @@ const SessionMonitor = () => {
     sessionData, isActive, stopSession,
     lastFrameAt, focusedStartedAt, alarms,
   } = useSession();
+  const { coins_per_kwh } = useConfig();
 
   // A 1 Hz clock so the elapsed timer and the staleness check update smoothly
   // between telemetry frames.
@@ -232,7 +234,7 @@ const SessionMonitor = () => {
             </strong>
           </span>
         )}
-        <span style={{ color: 'var(--color-text-muted)' }}>Rate: 5 coins / kWh</span>
+        <span style={{ color: 'var(--color-text-muted)' }}>Rate: {coins_per_kwh} coins / kWh</span>
       </div>
 
       {/* Stop button */}
