@@ -253,6 +253,14 @@ Cross-references [TECH_DEBT.md](TECH_DEBT.md) items as `TD#n` and
       credits **and** session debits with running balance; the driver History
       page is now tabbed (Charging Sessions / Wallet Ledger). Closes the
       old debits-only gap.
+- [x] **Pricing clarity.** Public `GET /api/config` (tariff, min-balance,
+      coin↔INR); Home shows the rate + balance-covers-≈-kWh with a top-up nudge;
+      session monitor reads the rate from config. `MIN_START_BALANCE_COINS` env.
+- [x] **Prepaid protection: auto-stop on balance exhaustion.** Backend
+      finalizes a session once accrued cost reaches the wallet balance (env
+      `AUTO_STOP_ON_BALANCE_EXHAUSTED`), so a drained wallet can't keep charging
+      for free. Driver-facing low-balance warning in the monitor pairs with it.
+      Tests in `test_mqtt_manager.py` + `SessionMonitor.test.jsx`.
 - [x] **Token revocation / shorter-lived JWTs** (2026-07-08): every JWT
       carries the user's `token_version` epoch (`tv` claim), re-checked per
       request; `POST /api/auth/logout` bumps it to revoke all of a user's

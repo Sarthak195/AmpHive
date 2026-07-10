@@ -15,11 +15,35 @@ thread.
 import asyncio
 import json
 import threading
-from unittest.mock import MagicMock
+from decimal import Decimal
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from backend.services.mqtt_manager import MQTTManager
+
+
+class _FakeResult:
+    def __init__(self, val):
+        self._val = val
+
+    def scalar_one_or_none(self):
+        return self._val
+
+
+class _FakeDB:
+    """Minimal async-context DB whose execute() always yields the same row."""
+    def __init__(self, row):
+        self._row = row
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    async def execute(self, *_a, **_k):
+        return _FakeResult(self._row)
 
 
 @pytest.mark.asyncio
@@ -362,4 +386,52 @@ async def test_persist_discovery_unknown_gateway_publishes_nothing():
 
     assert session.added == []
     mgr.client.publish.assert_not_called()
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("balance,energy_kwh,should_stop", [
+    (Decimal("100"), 25.0, True),    # cost 25*5=125 >= 100 → exhausted, auto-stop
+    (Decimal("100"), 19.0, False),   # cost 95 < 100 → still covered, no stop
+    (Decimal("100"), 20.0, True),    # cost 100 == 100 → exhausted (>=)
+])
+async def test_auto_stop_on_balance_exhaustion(balance, energy_kwh, should_stop):
+    """
+    When the accrued energy cost (energy_kwh * COINS_PER_KWH, default 5) meets or
+    exceeds the driver's wallet balance, the session is finalized via the shared
+    finalize path; otherwise it keeps running.
+    """
+    MQTTManager._instance = None
+    user = MagicMock()
+    user.coin_balance = balance
+    mgr = MQTTManager(db_session_factory=lambda: _FakeDB(user))
+
+    finalize_mock = AsyncMock(return_value={"energy_kwh": energy_kwh, "coins_spent": 0})
+    with patch("backend.services.session_lifecycle.finalize_charging_session", finalize_mock):
+        await mgr._maybe_auto_stop_on_exhaustion(session_id=7, user_id=3, energy_kwh=energy_kwh)
+
+    assert finalize_mock.called is should_stop
+    if should_stop:
+        args, kwargs = finalize_mock.call_args
+        assert args[1] == 7  # session_id
+        assert "exhaust" in kwargs.get("reason", "").lower()
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_auto_stop_disabled_by_flag(monkeypatch):
+    """With AUTO_STOP_ON_BALANCE_EXHAUSTED off, the wallet check is skipped."""
+    import backend.services.mqtt_manager as mm
+    monkeypatch.setattr(mm, "AUTO_STOP_ON_BALANCE_EXHAUSTED", False)
+
+    MQTTManager._instance = None
+    user = MagicMock()
+    user.coin_balance = Decimal("1")  # would be exhausted if the check ran
+    mgr = MQTTManager(db_session_factory=lambda: _FakeDB(user))
+
+    finalize_mock = AsyncMock()
+    with patch("backend.services.session_lifecycle.finalize_charging_session", finalize_mock):
+        await mgr._maybe_auto_stop_on_exhaustion(session_id=7, user_id=3, energy_kwh=100.0)
+
+    finalize_mock.assert_not_called()
     MQTTManager._instance = None

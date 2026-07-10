@@ -8,9 +8,13 @@ import { render, screen } from '@testing-library/react';
 
 import SessionMonitor from './SessionMonitor';
 import { useSession } from '../contexts/SessionContext';
+import { useWallet } from '../contexts/WalletContext';
 
 vi.mock('../contexts/SessionContext', () => ({
   useSession: vi.fn(),
+}));
+vi.mock('../contexts/WalletContext', () => ({
+  useWallet: vi.fn(() => ({ balance: 1000 })), // plenty by default → no low-balance banner
 }));
 
 const baseData = {
@@ -27,6 +31,8 @@ const baseData = {
 beforeEach(() => {
   vi.clearAllMocks();
   vi.useFakeTimers();
+  // Default: ample balance so the low-balance banner is off unless a test opts in.
+  useWallet.mockReturnValue({ balance: 1000 });
 });
 
 afterEach(() => {
@@ -91,6 +97,35 @@ describe('SessionMonitor', () => {
     });
     render(<SessionMonitor />);
     expect(screen.getByText(/Plug switched ON with no active session/)).toBeInTheDocument();
+  });
+
+  it('shows a low-balance warning as accrued cost nears the wallet balance', () => {
+    useWallet.mockReturnValue({ balance: 12 }); // cost 10 → remaining 2, below the 10-coin floor
+    useSession.mockReturnValue({
+      sessionData: { ...baseData, cost_coins: 10, is_stale: false },
+      isActive: true,
+      stopSession: vi.fn(),
+      lastFrameAt: Date.now(),
+      focusedStartedAt: new Date().toISOString(),
+      alarms: [],
+    });
+    render(<SessionMonitor />);
+    expect(screen.getByText(/Low balance/)).toBeInTheDocument();
+    expect(screen.getByText(/stop\s+automatically/)).toBeInTheDocument();
+  });
+
+  it('does not warn when the balance comfortably covers the accrued cost', () => {
+    useWallet.mockReturnValue({ balance: 1000 });
+    useSession.mockReturnValue({
+      sessionData: { ...baseData, cost_coins: 10, is_stale: false },
+      isActive: true,
+      stopSession: vi.fn(),
+      lastFrameAt: Date.now(),
+      focusedStartedAt: new Date().toISOString(),
+      alarms: [],
+    });
+    render(<SessionMonitor />);
+    expect(screen.queryByText(/Low balance/)).not.toBeInTheDocument();
   });
 
   it('ignores an alarm for a different plug', () => {

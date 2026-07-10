@@ -26,6 +26,7 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 | Razorpay create-order + verify | ✅ | HMAC-verified; credits coins + ledger. Supports decimal INR amounts and coin balances (money columns are `Numeric(12,2)`/Decimal as of 2026-07-06). **2026-07-05:** `/verify` now credits the **Razorpay-confirmed** amount fetched server-side (the client-sent `amount_inr` is deprecated/ignored — it was previously trusted, allowing arbitrary wallet inflation). |
 | Razorpay webhook auto-credit | ✅ | Credits coins on `payment.captured`; atomic + idempotent vs. `/verify` (dedupes on the UNIQUE `razorpay_payment_id` via `IntegrityError`). Money columns are `Numeric(12,2)`/Decimal (2026-07-06). |
 | Wallet debit on stop + ledger | ✅ | Row-locked (`SELECT ... FOR UPDATE`) in stop/verify/webhook paths |
+| Prepaid protection: auto-stop on balance exhaustion | ✅ | On each telemetry write, if the accrued energy cost (`kwh × COINS_PER_KWH`) reaches the driver's wallet balance, the session is auto-stopped via the shared `finalize_charging_session` path (own txn, row-locked, race-safe with a user stop / the reaper). Caps free charging past a drained wallet to ≤ one telemetry interval. Env-toggle `AUTO_STOP_ON_BALANCE_EXHAUSTED` (default on). Tests in `test_mqtt_manager.py`. |
 | Direct Mode Tapo endpoints | ✅ | Gated by `DIRECT_MODE`; lib or relay mode |
 
 ### Frontend
@@ -38,6 +39,7 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 | CPO alert feed | ✅ | `CpoAlerts` on the dashboard fetches `GET /api/cpo/events?unacknowledged_only=true`, merges live `gateway_alarm` broadcasts, and dismisses via the ack endpoint. Severity-styled (critical/warning/info). |
 | Razorpay top-up flow | ✅ | CDN script + `window.Razorpay`; key comes from backend order. Formats and displays decimal coin balances. |
 | Pricing clarity | ✅ | `GET /api/config` (public) feeds a `ConfigProvider`; Home shows the tariff (`coins_per_kwh`) + what the driver's balance covers (≈ kWh) with a top-up nudge below the minimum, and the session monitor reads the rate from config instead of hardcoding it. The session-start minimum is now env-driven (`MIN_START_BALANCE_COINS`) and the 402 message matches the displayed number (2026-07-10). |
+| Low-balance live warning | ✅ | The session monitor warns (with remaining coins ≈ kWh) as accrued cost nears the wallet balance, pairing with the backend auto-stop so the driver sees it coming. Tests in `SessionMonitor.test.jsx`. |
 | Charger groups (join/list) | ✅ | |
 | CPO operator portal (setup, dashboard, plugs, groups, sessions) | ✅ | `pages/cpo/*` behind `CpoProtectedRoute`; charts via `recharts` |
 | Map of available plugs | ✅ | Leaflet/OpenStreetMap `MapComponent` on Home. Plug geolocation is now persisted (`Plug.latitude`/`longitude`, falling back to the gateway's coords); markers use real coordinates and plugs without a known location are omitted — the old `Math.random()` fallback (which also jittered markers on every re-render) is gone. |

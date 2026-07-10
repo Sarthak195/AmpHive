@@ -16,6 +16,7 @@
 import { useEffect, useState } from 'react';
 import { useSession } from '../contexts/SessionContext';
 import { useConfig } from '../contexts/ConfigContext';
+import { useWallet } from '../contexts/WalletContext';
 
 // Consider the live feed stale after this many ms without a telemetry frame.
 // Matches the backend TELEMETRY_STALE_AFTER_SEC default (15 s).
@@ -57,6 +58,7 @@ const SessionMonitor = () => {
     lastFrameAt, focusedStartedAt, alarms,
   } = useSession();
   const { coins_per_kwh } = useConfig();
+  const { balance } = useWallet();
 
   // A 1 Hz clock so the elapsed timer and the staleness check update smoothly
   // between telemetry frames.
@@ -108,6 +110,16 @@ const SessionMonitor = () => {
     sessionData?.is_stale === true ||
     (noFrameFor !== null && noFrameFor > STALE_AFTER_MS)
   );
+
+  // Low-balance warning: the wallet balance was captured at start (it's only
+  // debited on stop), so remaining ≈ balance − accrued cost. Warn as it nears
+  // zero; the backend auto-stops the session when the wallet is exhausted.
+  const walletBalance = Number(balance) || 0;
+  const accruedCost = Number(sessionData?.cost_coins) || 0;
+  const remainingCoins = walletBalance - accruedCost;
+  const rate = coins_per_kwh || 5;
+  const lowBalance = isActive && accruedCost > 0 &&
+    remainingCoins <= Math.max(10, walletBalance * 0.15);
 
   // The most recent unacknowledged alarm for this plug (last 2 minutes).
   const plugId = sessionData?.plug_id;
@@ -209,6 +221,28 @@ const SessionMonitor = () => {
         >
           <span style={{ fontSize: '1.1rem' }}>🚨</span>
           <span>{recentAlarm.detail || `Charger alarm: ${recentAlarm.event_type}`}</span>
+        </div>
+      )}
+
+      {/* Low-balance warning */}
+      {lowBalance && (
+        <div
+          className="flex items-center gap-2"
+          style={{
+            padding: '0.75rem 1rem',
+            borderRadius: 'var(--radius-md)',
+            background: 'hsla(38, 90%, 50%, 0.12)',
+            border: '1px solid hsla(38, 90%, 50%, 0.4)',
+            color: 'var(--color-warning, #f0a020)',
+            fontSize: '0.9rem',
+          }}
+        >
+          <span style={{ fontSize: '1.1rem' }}>🔋</span>
+          <span>
+            Low balance — about <strong>{Math.max(0, remainingCoins).toFixed(1)}</strong> coins
+            (≈ {Math.max(0, remainingCoins / rate).toFixed(2)} kWh) left. Charging will stop
+            automatically when your wallet is used up.
+          </span>
         </div>
       )}
 

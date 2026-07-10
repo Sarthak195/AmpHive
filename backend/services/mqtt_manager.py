@@ -2,6 +2,7 @@ import asyncio
 import functools
 import json
 import logging
+import os
 import re
 import time
 from datetime import datetime, timezone
@@ -16,6 +17,12 @@ logging.basicConfig(level=logging.INFO)
 # session starts) at most this often per gateway — it arrives every ~1-10 s
 # and each refresh is a DB write.
 GATEWAY_SEEN_BUMP_INTERVAL_SEC = 60.0
+
+# Prepaid protection: auto-stop a session once its accrued energy cost reaches
+# the driver's wallet balance, so a drained wallet can't keep charging for free
+# (the finalize path clamps the debit but doesn't end the session on its own).
+# Env-toggleable; on by default.
+AUTO_STOP_ON_BALANCE_EXHAUSTED = os.getenv("AUTO_STOP_ON_BALANCE_EXHAUSTED", "true").lower() in ("1", "true", "yes")
 
 
 class MQTTManager:
@@ -407,6 +414,10 @@ class MQTTManager:
         # Import here to avoid circular imports at module level
         from backend.database.models import Plug, ChargingSession, SessionStatus
 
+        # Captured for the post-commit balance check (see below).
+        updated_session_id: Optional[int] = None
+        updated_user_id: Optional[int] = None
+
         try:
             async with self.db_session_factory() as session:
                 from sqlalchemy import select, and_
@@ -442,10 +453,58 @@ class MQTTManager:
                         active_session.peak_power_w = watts
                     # Staleness signal read by the session reaper.
                     active_session.last_telemetry_at = datetime.now(timezone.utc)
+                    updated_session_id = active_session.id
+                    updated_user_id = active_session.user_id
 
                 await session.commit()
         except Exception as e:
             logger.error(f"Failed to persist telemetry for plug {plug_id}: {e}")
+            return
+
+        # Prepaid protection: if the accrued energy cost has reached the driver's
+        # wallet balance, auto-stop so they can't keep charging for free past a
+        # drained wallet (the finalize path only clamps the debit — it doesn't
+        # stop the session). Done in a separate txn after the persist commit.
+        if updated_session_id is not None and updated_user_id is not None:
+            await self._maybe_auto_stop_on_exhaustion(updated_session_id, updated_user_id, kwh)
+
+    async def _maybe_auto_stop_on_exhaustion(self, session_id: int, user_id: int, energy_kwh: float):
+        """Finalize an ACTIVE session once its accrued cost meets/exceeds the
+        user's wallet balance. No-op when disabled, when the wallet still
+        covers the energy, or when the session is already gone (finalize
+        re-checks ACTIVE under a row lock, so this is race-safe)."""
+        if not AUTO_STOP_ON_BALANCE_EXHAUSTED or not self.db_session_factory:
+            return
+        from backend.database.models import User
+        from backend.services.money import to_money
+        from backend.services.telemetry import COINS_PER_KWH
+        from sqlalchemy import select
+
+        try:
+            accrued_cost = to_money(energy_kwh * COINS_PER_KWH)
+            if accrued_cost <= 0:
+                return
+            async with self.db_session_factory() as db:
+                user = (await db.execute(
+                    select(User).where(User.id == user_id)
+                )).scalar_one_or_none()
+                if user is None or accrued_cost < user.coin_balance:
+                    return
+            # Wallet is exhausted — stop through the shared finalize path
+            # (own txn; row-locks + re-checks ACTIVE so a concurrent user stop
+            # or the reaper settles this exactly once).
+            from backend.services.session_lifecycle import finalize_charging_session
+            async with self.db_session_factory() as db:
+                outcome = await finalize_charging_session(
+                    db, session_id, reason="auto-stopped: wallet balance exhausted"
+                )
+            if outcome is not None:
+                logger.warning(
+                    f"Auto-stopped session {session_id} (user {user_id}): wallet exhausted "
+                    f"at {outcome['energy_kwh']} kWh / {outcome['coins_spent']} coins."
+                )
+        except Exception:
+            logger.exception(f"Balance-exhaustion auto-stop failed for session {session_id}")
 
     # -----------------------------------------------------------------------
     # Inbound status handler — updates gateway online/offline state in DB
