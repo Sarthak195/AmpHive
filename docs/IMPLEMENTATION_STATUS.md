@@ -12,7 +12,7 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 ### Backend
 | Capability | Status | Notes |
 |------------|:------:|-------|
-| REST API (auth, groups, plugs, sessions, payments, direct, CPO portal) | ✅ | 42 endpoints (2026-07-10: CPO events feed `GET /api/cpo/events` + `POST /api/cpo/events/{id}/ack`, unified `GET /api/wallet/ledger`, public `GET /api/config`) — see [API_REFERENCE.md](API_REFERENCE.md) |
+| REST API (auth, groups, plugs, sessions, payments, direct, CPO portal) | ✅ | 43 endpoints (2026-07-10: CPO events feed `GET /api/cpo/events` + `POST /api/cpo/events/{id}/ack`, unified `GET /api/wallet/ledger`, public `GET /api/config`, `GET /api/cpo/analytics/sessions.csv` export) — see [API_REFERENCE.md](API_REFERENCE.md) |
 | JWT auth + bcrypt | ✅ | Env-configurable expiry (`JWT_EXPIRY_DAYS`, default 7); user loaded fresh per request. **Revocable** via the `token_version` epoch (`tv` claim, re-checked per request; `POST /api/auth/logout` bumps it — "log out everywhere"). |
 | Role-based access control | ✅ | Enforced via `services/rbac.py` `require_role(...)` on all `/api/cpo/*` routes (checks the DB role, not just the token) |
 | MQTT command publish (ON/OFF) | ✅ | QoS 1, 3 s wait |

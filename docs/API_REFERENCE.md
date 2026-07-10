@@ -137,6 +137,7 @@ scoped to the caller's `tenant_id`, so operators only ever see their own assets.
 | DELETE | `/api/cpo/groups/{id}` | cpo/admin | — | Delete a group; assigned plugs become ungrouped. |
 | GET | `/api/cpo/analytics/overview` | cpo/admin | — | Plugs/gateways/active-session counts + today & all-time energy/revenue. |
 | GET | `/api/cpo/analytics/sessions` | cpo/admin | query `plug_id?, status_filter?, days=30, limit=50` | Session history enriched with plug name, user email, duration. |
+| GET | `/api/cpo/analytics/sessions.csv` | cpo/admin | query `plug_id?, status_filter?, days=30` | Same tenant scope/filters as above, returned as a downloadable `text/csv` attachment (capped 10k rows). |
 | GET | `/api/cpo/analytics/revenue` | cpo/admin | query `days=30` | Daily `{date, revenue_coins, session_count}` series. |
 | GET | `/api/cpo/analytics/energy` | cpo/admin | query `days=30` | Daily `{date, energy_kwh, session_count}` series. |
 | GET | `/api/cpo/analytics/telemetry` | cpo/admin | query `plug_id?, days=1, bucket=hour` | `date_trunc`-bucketed time-series from `telemetry_readings` (bucket ∈ {minute, hour, day}; 400 otherwise) → `[{timestamp, avg_power_w, max_power_w, energy_kwh, sample_count}]`. Powers the dashboard load graph. |

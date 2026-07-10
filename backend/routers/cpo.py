@@ -1,6 +1,8 @@
 """
 Cpo routes — moved verbatim from main.py (2026-07-07, TD#7 split).
 """
+import csv
+import io
 import json
 import logging
 import os
@@ -10,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import Response
 from sqlalchemy import Date, and_, cast, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -834,6 +837,73 @@ async def cpo_analytics_sessions(
         })
 
     return response
+
+
+@router.get("/api/cpo/analytics/sessions.csv")
+async def cpo_export_sessions_csv(
+    user: User = Depends(require_role("cpo", "admin")),
+    db: AsyncSession = Depends(get_db),
+    plug_id: Optional[int] = None,
+    status_filter: Optional[str] = None,
+    days: int = 30,
+):
+    """
+    Export the CPO's session history as CSV (accounting / spreadsheet import).
+    Same tenant scope and filters as `/api/cpo/analytics/sessions`, but returns
+    a downloadable `text/csv` attachment. Capped at 10k rows to bound memory.
+    """
+    query = (
+        select(ChargingSession, Plug.name, User.email)
+        .outerjoin(Plug, Plug.id == ChargingSession.plug_id)
+        .outerjoin(User, User.id == ChargingSession.user_id)
+        .where(ChargingSession.tenant_id == user.tenant_id)
+    )
+    if plug_id:
+        query = query.where(ChargingSession.plug_id == plug_id)
+    if status_filter:
+        try:
+            query = query.where(ChargingSession.status == SessionStatus(status_filter))
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid status filter '{status_filter}'. Valid: {[s.value for s in SessionStatus]}",
+            )
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    query = query.where(ChargingSession.started_at >= cutoff)
+    query = query.order_by(ChargingSession.started_at.desc()).limit(10000)
+
+    result = await db.execute(query)
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow([
+        "session_id", "plug_id", "plug_name", "user_email",
+        "started_at", "ended_at", "duration_minutes", "energy_kwh",
+        "coins_spent", "status",
+    ])
+    for s, plug_name, user_email in result.all():
+        duration_minutes = ""
+        if s.ended_at and s.started_at:
+            duration_minutes = round((s.ended_at - s.started_at).total_seconds() / 60, 1)
+        writer.writerow([
+            s.id,
+            s.plug_id,
+            plug_name if plug_name is not None else f"Plug #{s.plug_id}",
+            user_email if user_email is not None else "unknown",
+            s.started_at.isoformat() if s.started_at else "",
+            s.ended_at.isoformat() if s.ended_at else "",
+            duration_minutes,
+            round(s.energy_kwh, 3),
+            round(float(s.coins_spent), 2),
+            s.status.value,
+        ])
+
+    filename = f"amphive-sessions-{datetime.now(timezone.utc).strftime('%Y%m%d')}.csv"
+    return Response(
+        content=buf.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.get("/api/cpo/analytics/revenue")
