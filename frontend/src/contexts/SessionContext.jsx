@@ -29,7 +29,7 @@ const SessionContext = createContext();
 const API_BASE = import.meta.env.VITE_API_URL || '';
 
 export const SessionProvider = ({ children }) => {
-  const { user } = useAuth();
+  const { user, refreshUser } = useAuth();
   // A user can hold several active sessions (backend caps them, default 2).
   // `activeSessions` lists them all; `sessionId`/`sessionData`/`isActive`
   // track the *focused* one — the session the live monitor is subscribed to.
@@ -48,6 +48,8 @@ export const SessionProvider = ({ children }) => {
   const [focusedStartedAt, setFocusedStartedAt] = useState(null);
   // Recent gateway alarms (safety cutoff / unauthorized-on / OTA), newest first.
   const [alarms, setAlarms] = useState([]);
+  // The final billing summary from the most recent stop, shown as a receipt.
+  const [receipt, setReceipt] = useState(null);
 
   // Manage the Socket.io lifecycle (connect on login, disconnect on logout).
   // The cleanup below disconnects the previous socket on every user change,
@@ -123,6 +125,7 @@ export const SessionProvider = ({ children }) => {
   const switchSession = useCallback((session) => {
     setSessionId(session.session_id);
     setIsActive(true);
+    setReceipt(null);
     setFocusedStartedAt(session.started_at || new Date().toISOString());
     setLastFrameAt(null);
     setSessionData({
@@ -154,6 +157,7 @@ export const SessionProvider = ({ children }) => {
       ]);
       setSessionId(result.session_id);
       setIsActive(true);
+      setReceipt(null);
       setFocusedStartedAt(startedAt);
       setLastFrameAt(null);
       setSessionData(null);
@@ -173,6 +177,10 @@ export const SessionProvider = ({ children }) => {
         // Keep last sessionData for receipt view, but mark as completed
         setSessionData(prev => prev ? { ...prev, status: 'completed' } : null);
         setIsActive(false);
+        // Show the final billing summary as a receipt and refresh the wallet
+        // so the balance updates immediately after the debit.
+        setReceipt(result);
+        refreshUser().catch(() => {});
         return result;
       }
     } catch (err) {
@@ -183,7 +191,9 @@ export const SessionProvider = ({ children }) => {
       refreshActiveSessions().catch(() => {});
       throw err;
     }
-  }, [sessionId, refreshActiveSessions]);
+  }, [sessionId, refreshActiveSessions, refreshUser]);
+
+  const dismissReceipt = useCallback(() => setReceipt(null), []);
 
   const clearSession = useCallback(() => {
     setSessionData(null);
@@ -191,6 +201,7 @@ export const SessionProvider = ({ children }) => {
     setIsActive(false);
     setFocusedStartedAt(null);
     setLastFrameAt(null);
+    setReceipt(null);
     setError(null);
   }, []);
 
@@ -222,8 +233,8 @@ export const SessionProvider = ({ children }) => {
     <SessionContext.Provider value={{
       socket,
       activeSessions, sessionData, sessionId, isActive, error,
-      lastFrameAt, focusedStartedAt, alarms,
-      startSession, stopSession, clearSession, switchSession,
+      lastFrameAt, focusedStartedAt, alarms, receipt,
+      startSession, stopSession, clearSession, switchSession, dismissReceipt,
     }}>
       {children}
     </SessionContext.Provider>
