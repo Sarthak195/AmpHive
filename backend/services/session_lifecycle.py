@@ -215,10 +215,27 @@ async def finalize_charging_session(
         f"{final_energy:.3f} kWh, {actual_debit:.2f} coins"
     )
 
+    # Duration for the receipt (started_at is tz-aware; ended_at was just set).
+    duration_sec = None
+    if session.started_at and session.ended_at:
+        started = session.started_at
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=timezone.utc)
+        duration_sec = int((session.ended_at - started).total_seconds())
+
     return {
         "status": "completed",
         "session_id": session.id,
+        "plug_id": plug.id,
+        "plug_name": plug.name,
         "energy_kwh": round(final_energy, 3),
+        "peak_power_w": round(session.peak_power_w or 0.0, 1),
         "coins_spent": round(actual_debit, 2),
+        "shortfall_coins": round(shortfall, 2),
+        "balance_before": round(prev_balance, 2),
         "balance_remaining": round(locked_user.coin_balance, 2),
+        "duration_sec": duration_sec,
+        "started_at": session.started_at.isoformat() if session.started_at else None,
+        "ended_at": session.ended_at.isoformat() if session.ended_at else None,
+        "reason": reason,
     }

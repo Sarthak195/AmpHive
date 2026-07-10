@@ -261,6 +261,13 @@ Cross-references [TECH_DEBT.md](TECH_DEBT.md) items as `TD#n` and
       `AUTO_STOP_ON_BALANCE_EXHAUSTED`), so a drained wallet can't keep charging
       for free. Driver-facing low-balance warning in the monitor pairs with it.
       Tests in `test_mqtt_manager.py` + `SessionMonitor.test.jsx`.
+- [x] **Post-session receipt.** The stop path returns a full billing summary
+      (energy, peak power, duration, coins charged/shortfall, balance before→
+      after, plug, timestamps); the Session page shows a `SessionReceipt` card
+      on stop. **Verified live end-to-end** (real billed session on the fake
+      plug: 0.101 kWh → 0.51 coins, wallet debited + ledger reconciled).
+- [x] **CPO session CSV export** and **operator-side amps** in the load
+      analytics (`avg_current_a`/`max_current_a`; dashboard shows peak W + A).
 - [x] **Token revocation / shorter-lived JWTs** (2026-07-08): every JWT
       carries the user's `token_version` epoch (`tv` claim), re-checked per
       request; `POST /api/auth/logout` bumps it to revoke all of a user's

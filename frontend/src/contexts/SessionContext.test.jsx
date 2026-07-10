@@ -19,7 +19,7 @@ const { MOCK_USER } = vi.hoisted(() => ({
   MOCK_USER: { id: 1, email: 'driver@amphive.test' },
 }));
 vi.mock('./AuthContext', () => ({
-  useAuth: () => ({ user: MOCK_USER }),
+  useAuth: () => ({ user: MOCK_USER, refreshUser: vi.fn().mockResolvedValue(undefined) }),
 }));
 vi.mock('socket.io-client', () => ({
   io: vi.fn(() => ({
