@@ -218,10 +218,16 @@ persisted across the run.
   `PlugProvider`; register in `providers/__init__.build_providers()`.
 - **Credentials:** TP-Link creds are used **locally** (KLAP), not sent to their
   cloud — better than the cloud API, and energy works. Store encrypted at rest.
-- **Packaging:** ship as a Docker image / `pipx` app / a Pi image; auto-start,
-  auto-reconnect (paho does backoff), health to `/status`.
-- **Provisioning:** the agent needs its `gateway_id` + broker creds — same claim
-  flow as an ESP gateway (QR/portal); plugs then auto-populate via `/discovery`.
+- **Packaging:** a [`Dockerfile`](../agent/Dockerfile) ships it as a container
+  (`docker build -t amphive-agent --build-arg EXTRAS=all agent/`); `pip install`
+  / `pipx` also work (console script `amphive-agent`). State is a `/state`
+  volume; use `--network host` on Linux so LAN discovery (kasa/shelly) can
+  broadcast and receive replies. Auto-reconnect is built in (paho backoff).
+- **Provisioning:** the agent needs its `gateway_id` + broker creds — same
+  manual flow as an ESP gateway (`deploy/docs/gateway_provisioning.md`): the
+  operator picks a `gateway_id`, mints a per-gateway broker account with
+  `add_gateway_user.ps1`, and sets `AMPHIVE_MQTT_USER/PASS` + `AMPHIVE_CA_FILE`.
+  Plugs then auto-populate via `/discovery` → `/assign`.
 
 ## Provider roadmap
 
@@ -238,8 +244,17 @@ persisted across the run.
    `plug_id` *is* the DB `plugs.id`, so the agent announces `unique_id` on
    `/discovery` and adopts the backend's `/assign` map. The backend consumes the
    discovery topic (`_persist_plug_discovery`).
-2. **Agent vs ESP overlap** — if a client runs both, dedupe by `unique_id` so the
-   same physical plug isn't billed twice. (Open.)
+2. **Agent vs ESP overlap** — **Resolved: operational separation + future
+   auto-dedupe.** The ESP gateway and the Agent are *alternative* gateways for a
+   given plug; a client uses one or the other per physical device. Running both
+   against the **same** plug is unsupported — it double-represents the device
+   (the ESP drives it by `target_plug` IP with no stored MAC; the Agent
+   discovers it as `unique_id "kasa:<MAC>"` — different `plugs` rows), so it
+   could double-bill. Automatic dedupe isn't possible today because ESP-driven
+   plug rows don't record the device MAC. Future enhancement: store the plug MAC
+   on ESP-driven plugs and have `_persist_plug_discovery` skip/merge a discovery
+   whose MAC matches an existing plug. Until then, the operator must not register
+   the same physical plug under both.
 3. ~~**Backend discovery support**~~ **Resolved: implemented.** The backend
    subscribes `amphive/gateways/+/discovery`, upserts by `(gateway_id, unique_id)`,
    and publishes the retained `/assign` map.

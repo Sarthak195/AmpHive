@@ -16,6 +16,19 @@ cd agent
 pip install -e ".[all]"     # or ".[kasa]", ".[shelly]", or bare for sim-only
 ```
 
+Or as a container (see [`Dockerfile`](Dockerfile)):
+
+```bash
+docker build -t amphive-agent --build-arg EXTRAS=all .
+# LAN discovery (kasa/shelly) needs host networking on Linux: add --network host
+docker run --rm --network host \
+  -e AMPHIVE_GATEWAY_ID=agent-lab-01 -e AMPHIVE_PROVIDERS=kasa \
+  -e AMPHIVE_BROKER=8.231.81.12 -e AMPHIVE_CA_FILE=/certs/ca.crt \
+  -e AMPHIVE_MQTT_USER=agent-lab-01 -e AMPHIVE_MQTT_PASS=... \
+  -v $PWD/../deploy/config/mqtt-certs/ca.crt:/certs/ca.crt:ro \
+  -v amphive-agent-state:/state amphive-agent
+```
+
 ## Run
 
 Configure via env (see [`.env.example`](.env.example)), then:
