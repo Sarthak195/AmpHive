@@ -58,15 +58,30 @@ the WireGuard tunnel. `TARGET_PLUG_ID 1`. SSID, WiFi password, auth key,
 device name, gateway id, target plug IP, and MQTT credentials all come from
 NVS (namespace `storage`) populated by the captive portal.
 
-## 2. Captive portal (✅ implemented)
+## 2. Captive portal (✅ implemented; locked down fw 1.6.0)
 
-If WiFi config is missing/invalid, the device starts SoftAP `AmpHive_Setup_XXXX`
-(open), runs `esp_http_server` on `192.168.4.1`, serves an HTML form, and on POST
-`/save` parses **8 fields** (WiFi SSID/password, Tailscale/Headscale auth key,
-device name, gateway id, target plug IP, **Tapo account email + password**),
-URL-decodes them, writes them to NVS, and reboots. The Tapo credentials are used
-by the KLAP driver's auth hash (see §4). This is one of the few fully-delivered
-product features.
+If WiFi config is missing or the STA connection fails, the device starts SoftAP
+`AmpHive_Setup_XXXX` — **WPA2-protected since fw 1.6.0** (passphrase = the
+per-device **setup code**, see below) — and runs `esp_http_server` on
+`192.168.4.1` in **AP-only mode** (no STA interface, so the portal is reachable
+exclusively via the setup AP). The form collects the setup code plus **6 config
+fields** (WiFi SSID/password, target plug IP, **Tapo account email + password**,
+per-gateway MQTT password); `gateway_id`, `device_name`, and `mqtt_user` are
+derived from the STA MAC, not typed. POST `/save` verifies the setup code
+(constant-time compare; wrong code → 1 s throttle + 403, nothing written),
+URL-decodes the fields, writes them to NVS, and reboots. The Tapo credentials
+are used by the KLAP driver's auth hash (see §4).
+
+- **Setup code:** 10 chars from an unambiguous alphabet, generated via
+  `esp_random()` the first time the portal runs, persisted in NVS
+  (`setup_code`), and printed over serial at **every** portal start — copy it
+  onto the unit label. One secret serves as both the AP's WPA2 passphrase and
+  the `/save` token (defense-in-depth against other clients on the setup AP).
+  After a full NVS erase a new code is generated — re-label the unit.
+- **Idle timeout:** the portal reboots the device after **10 min** without HTTP
+  activity, so the boot-time Wi-Fi-loss fallback (SECURITY.md §8.4) no longer
+  leaves an AP up indefinitely — a provisioned gateway retries its STA link on
+  the way back up.
 
 ## 3. MQTT control loop & watchdogs
 

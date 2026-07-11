@@ -13,10 +13,13 @@ been fixed by the 2026-07-08…11 work — see the shipped sections below).*
 
 ## Immediate (this week) — security & correctness
 
-- [ ] **[2026-07-06 audit] Lock down the ESP32 provisioning portal** — the setup
-      AP is open (`WIFI_AUTH_OPEN`) and `/save` is unauthenticated, so anyone in
-      Wi-Fi range can sniff Tapo/Wi-Fi/MQTT secrets or overwrite config. Add
-      WPA2 + a setup PIN/token + timeout. (SEC §8.1, **CRITICAL**)
+- [x] **[2026-07-06 audit] Lock down the ESP32 provisioning portal.** Done
+      fw 1.6.0 (2026-07-11) — a per-device setup code (random, NVS-persisted,
+      printed over serial for the unit label) is the WPA2 passphrase of the
+      setup AP **and** a constant-time-checked token on `/save` (wrong code →
+      1 s throttle + 403); the portal runs AP-only and the device reboots
+      after 10 min of portal inactivity (also self-heals the §8.4 Wi-Fi-loss
+      fallback). (SEC §8.1, was **CRITICAL**)
 - [x] **[2026-07-06 audit] Reject session starts on OFFLINE/MAINTENANCE plugs.**
       Done 2026-07-11 — any non-`AVAILABLE` status now 409s; new plugs (default
       OFFLINE) need a CPO enable before first use. (TD#22)
@@ -151,9 +154,11 @@ been fixed by the 2026-07-08…11 work — see the shipped sections below).*
 - [x] **[2026-07-06 audit] Registration validation.** Done 2026-07-11 —
       `EmailStr` + 8-72 char password rule; login left unvalidated for
       pre-rule accounts. (TD#30)
-- [ ] **[2026-07-06 audit] Portal input CSS + reachability test** — fix
-      `width:100%%` and test Wi-Fi/plug reachability before saving config
-      (onboarding). (TD#31)
+- [ ] **[2026-07-06 audit] Portal reachability test** — test Wi-Fi/plug
+      reachability before saving config (onboarding). The CSS half of TD#31
+      was closed in fw 1.6.0 (`box-sizing:border-box`; the reported
+      `width:100%%` was a mis-diagnosis — the HTML *is* printf-formatted, so
+      `%%` already rendered as `%`). (TD#31)
 - [x] **Kill N+1 queries** (2026-07-07) in `get_available_plugs`,
       `cpo_list_plugs`, `cpo_analytics_sessions`, `get_my_groups` — each is a
       single JOINed statement now; driver endpoints verified byte-identical
@@ -237,8 +242,9 @@ been fixed by the 2026-07-08…11 work — see the shipped sections below).*
       Agent already handles multi-plug — this is ESP32-only. (TD#20, SEC §8.5)
 - [ ] **[2026-07-06 audit] Device security hardening** — flash encryption +
       Secure Boot v2 (NVS secrets are plaintext-extractable) and button-hold
-      provisioning instead of the boot-time open-portal fallback. The
-      overlay-key/anonymous-broker half of the original item was resolved
+      provisioning instead of the boot-time portal fallback (now LOW: the
+      portal is WPA2-locked + code-gated + idle-times-out since fw 1.6.0).
+      The overlay-key/anonymous-broker half of the original item was resolved
       2026-07-10 (direct MQTT: per-gateway creds + ACLs + TLS).
       (SEC §8.2/§8.4)
 - [ ] **[2026-07-06 audit] Driver notifications** — session start/stop, low

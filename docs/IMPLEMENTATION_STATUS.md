@@ -59,7 +59,7 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 | **Richer telemetry: relay state + trapezoidal energy (fw ≥ 1.5.0)** | ✅ | Telemetry now carries the actual `relay` (device_on) state alongside derived `current`/nominal `voltage`; the driver-side kWh integrator switched from left-rectangle to the **trapezoidal rule** (averages consecutive power samples) for lower error on ramping loads at the 10 s cadence. **Verified on the wire 2026-07-10** (real gateway telemetry shows `"relay":false`). |
 | `microlink` Tailscale client (Noise/ts2021, DERP, DISCO, STUN, WG) | 🟡 | **Demoted to legacy transport** (`AMPHIVE_DIRECT_MQTT=0`): works for full-cone NATs, but symmetric NAT defeats DISCO hole-punching (root-caused 2026-07-09) — the reason for the direct-MQTT pivot. Kept compilable for rollback/comparison. |
 | MQTT control loop + topic contract | 🟡 | Matches backend topics. **2026-07-06 audit: single-plug only** — `main.c` has one `target_plug_ip`/`active_session` and `tapo_protocol.c` one global KLAP session + energy integrator, so on a gateway with >1 plug a command for plug B toggles plug A and telemetry is misattributed. Multi-plug needs a per-plug state table + instance-based KLAP driver. (The software **AmpHive Agent** already handles multiple plugs per gateway — this limit is ESP32-firmware-only.) (§3.50, TD#20, SEC §8.5) |
-| Captive portal provisioning | ✅ | `AmpHive_Setup_XXXX` → NVS → reboot |
+| Captive portal provisioning | ✅ | `AmpHive_Setup_XXXX` → NVS → reboot. **Locked down fw 1.6.0** (SEC §8.1 closed): WPA2 AP + `/save` gated by a per-device setup code (NVS-persisted, printed over serial for the unit label), AP-only interface, 10-min idle timeout → reboot/STA retry. Built, not yet OTA'd to the fleet. |
 | Edge watchdogs (duration/energy/thermal/over-current) | ✅ | Thermal + over-current now use the plug's `overheat_status`/`overcurrent_status` flags (the P110 has no °C sensor) |
 | Over-current cutoff | ✅ | Enforced via the plug's `overcurrent_status` flag → local OFF + `OVERCURRENT_CUTOFF` alarm |
 | Tapo P110 driver (KLAP/AES) | ✅ | **Real KLAP v2** (mbedTLS SHA/AES + `esp_http_client`); fully verified on-device; builds on **ESP-IDF v5.3** (not v6) |
@@ -425,19 +425,25 @@ audit merged; statuses below are as of 2026-07-11.*
     buffered across an MQTT outage are attributed to the plug's *current*
     ACTIVE session on resync — the stale-overwrite window remains for the
     buffered path. (TD#24)
-54. **[Open, reduced scope] Device / provisioning security.** Still open: open
-    setup AP + unauthenticated `/save`, no flash-encryption (plaintext NVS
-    secrets — Wi-Fi, Tapo account, per-gateway MQTT creds), and the boot-time
-    fallback into the open portal. Since the audit: OTA images are **signed**
-    (ECDSA verify-on-update) and HTTPS-only, and the reusable-overlay-key +
-    anonymous-broker item is **gone** (devices left the overlay for direct
-    MQTT with per-gateway credentials + topic ACLs + TLS, 2026-07-10).
-    (SEC §8)
+54. **[Open, reduced scope] Device / provisioning security.** Still open:
+    no flash-encryption (plaintext NVS secrets — Wi-Fi, Tapo account,
+    per-gateway MQTT creds, setup code) and the boot-time fallback into the
+    portal (now LOW — the portal itself is locked, see below). Since the
+    audit: OTA images are **signed** (ECDSA verify-on-update) and HTTPS-only,
+    the reusable-overlay-key + anonymous-broker item is **gone** (devices left
+    the overlay for direct MQTT with per-gateway credentials + topic ACLs +
+    TLS, 2026-07-10), and the **open setup AP + unauthenticated `/save` was
+    closed in fw 1.6.0** (2026-07-11): WPA2 AP + per-device setup code on
+    `/save` (constant-time check, 1 s throttle + 403 on mismatch), AP-only
+    interface, 10-min idle timeout → reboot/STA retry. (SEC §8)
 55. **[Partially resolved] Observability / onboarding polish.** Fixed since the
     audit: unified wallet ledger (endpoint + History tab, 2026-07-10 — TD#29),
     gateway staleness (read-time `gateway_is_live` + `gateway_online` in the
-    driver API + session reaper — TD#27), and the shared-`Event` latency nit
-    (closed by retiring SSE 2026-07-07 — TD#32). Still open: unstructured
-    stdout-only logging (no correlation ids — TD#28), no CPO admin audit log
-    (TD#26), registration skips `EmailStr`/password rules (TD#30), and the
-    captive-portal inputs render narrow (`width:100%%` — TD#31). (TD#26–31)
+    driver API + session reaper — TD#27), the shared-`Event` latency nit
+    (closed by retiring SSE 2026-07-07 — TD#32), registration validation
+    (`EmailStr` + password rule, 2026-07-11 — TD#30), and the portal input CSS
+    (`box-sizing:border-box`, fw 1.6.0 — the `width:100%%` diagnosis was
+    wrong: the HTML is printf-formatted, so `%%` already rendered as `%`).
+    Still open: unstructured stdout-only logging (no correlation ids — TD#28),
+    no CPO admin audit log (TD#26), and the portal Wi-Fi/plug reachability
+    pre-check (TD#31, second half). (TD#26–31)

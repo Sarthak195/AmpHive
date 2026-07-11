@@ -9,6 +9,7 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "esp_random.h"
 #include "esp_mac.h"
 #include "nvs_flash.h"
 #include "nvs.h"
@@ -210,13 +211,67 @@ static void save_config_to_nvs(const char* ssid, const char* pwd, const char* au
 
 // ─── Captive Portal HTTP Server ─────────────────────────────────────────────
 
+// Per-device setup code (SECURITY.md §8.1): doubles as the WPA2 passphrase of
+// the setup AP and as the token gating POST /save. Generated once (first time
+// the portal runs), persisted in NVS ("setup_code"), and printed over serial so
+// the installer can copy it onto the unit label. WPA2 needs >= 8 chars.
+#define SETUP_CODE_LEN 10
+static char setup_code[SETUP_CODE_LEN + 1] = "";
+
+// Reboot the portal after this long with no HTTP activity. Bounds how long the
+// Wi-Fi-loss fallback (SECURITY.md §8.4) leaves the AP up, and lets a
+// provisioned gateway retry its STA connection once Wi-Fi comes back.
+#define PORTAL_IDLE_TIMEOUT_MS (10 * 60 * 1000)
+static volatile TickType_t portal_last_activity;
+
+static void load_or_create_setup_code(void) {
+    nvs_handle_t my_handle;
+    if (nvs_open("storage", NVS_READWRITE, &my_handle) == ESP_OK) {
+        size_t size = sizeof(setup_code);
+        nvs_get_str(my_handle, "setup_code", setup_code, &size);
+    } else {
+        my_handle = 0;
+    }
+    if (strlen(setup_code) < 8) {
+        // Unambiguous alphabet (no 0/O, 1/l/i) — the code gets hand-copied.
+        static const char alphabet[] = "23456789abcdefghjkmnpqrstuvwxyz";
+        for (int i = 0; i < SETUP_CODE_LEN; i++) {
+            setup_code[i] = alphabet[esp_random() % (sizeof(alphabet) - 1)];
+        }
+        setup_code[SETUP_CODE_LEN] = '\0';
+        if (my_handle) {
+            nvs_set_str(my_handle, "setup_code", setup_code);
+            nvs_commit(my_handle);
+        } else {
+            ESP_LOGE(TAG, "NVS open failed — setup code NOT persisted (valid this boot only)");
+        }
+    }
+    if (my_handle) nvs_close(my_handle);
+    ESP_LOGI(TAG, "==============================================");
+    ESP_LOGI(TAG, "  SETUP CODE: %s", setup_code);
+    ESP_LOGI(TAG, "  (WPA2 password of the setup AP AND the");
+    ESP_LOGI(TAG, "   'Setup Code' form field — label the unit)");
+    ESP_LOGI(TAG, "==============================================");
+}
+
+static bool setup_code_matches(const char *submitted) {
+    size_t n = strlen(setup_code);
+    if (n < 8 || strlen(submitted) != n) return false;
+    unsigned char diff = 0;
+    for (size_t i = 0; i < n; i++) {
+        diff |= (unsigned char)(submitted[i] ^ setup_code[i]);
+    }
+    return diff == 0;
+}
+
 static const char* portal_html = \
     "<html><head><title>AmpHive Gateway Setup</title>"
-    "<style>body{font-family:sans-serif;margin:40px;background:#1e1e1e;color:#fff;} input{padding:10px;margin:5px 0 20px 0;width:100%%;border-radius:5px;border:none;} button{padding:10px 20px;background:#00d2ff;border:none;border-radius:5px;cursor:pointer;font-weight:bold;} code{background:#333;padding:3px 8px;border-radius:4px;color:#00d2ff;}</style>"
+    "<style>body{font-family:sans-serif;margin:40px;background:#1e1e1e;color:#fff;} input{padding:10px;margin:5px 0 20px 0;width:100%%;box-sizing:border-box;border-radius:5px;border:none;} button{padding:10px 20px;background:#00d2ff;border:none;border-radius:5px;cursor:pointer;font-weight:bold;} code{background:#333;padding:3px 8px;border-radius:4px;color:#00d2ff;}</style>"
     "</head><body><h2>AmpHive Gateway Config</h2>"
     "<p>Gateway ID (auto-detected): <code>%s</code><br>"
     "<small>Give this ID to your AmpHive operator to get the MQTT password.</small></p>"
     "<form method='POST' action='/save'>"
+    "<label>Setup Code (on the unit label):</label><input name='setup_code' required>"
     "<label>WiFi SSID:</label><input name='ssid' required>"
     "<label>WiFi Password:</label><input name='pwd' type='password'>"
     "<label>Target Plug IP:</label><input name='plug_ip' required>"
@@ -227,8 +282,10 @@ static const char* portal_html = \
     "</form></body></html>";
 
 static esp_err_t portal_get_handler(httpd_req_t *req) {
+    portal_last_activity = xTaskGetTickCount();
     // Render with the auto-detected gateway_id embedded (load_config derives it).
-    char page[1400];
+    // Static: 2 KB would crowd the httpd task stack, and handlers are serialized.
+    static char page[2048];
     snprintf(page, sizeof(page), portal_html, gateway_id);
     httpd_resp_send(req, page, HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
@@ -262,6 +319,8 @@ static esp_err_t portal_post_handler(httpd_req_t *req) {
     char buf[512];
     int ret, remaining = req->content_len;
 
+    portal_last_activity = xTaskGetTickCount();
+
     if (remaining >= sizeof(buf)) {
         httpd_resp_send_500(req);
         return ESP_FAIL;
@@ -275,6 +334,21 @@ static esp_err_t portal_post_handler(httpd_req_t *req) {
         return ESP_FAIL;
     }
     buf[ret] = '\0';
+
+    // The setup code gates /save even for clients already on the (WPA2) AP —
+    // e.g. another device that joined while the installer provisions.
+    char code[32] = {0};
+    httpd_query_key_value(buf, "setup_code", code, sizeof(code));
+    url_decode(code);
+    if (!setup_code_matches(code)) {
+        ESP_LOGW(TAG, "Portal /save rejected: wrong setup code");
+        vTaskDelay(pdMS_TO_TICKS(1000)); // throttle brute-force attempts
+        httpd_resp_set_status(req, "403 Forbidden");
+        httpd_resp_send(req, "<html><body><h2>Wrong setup code.</h2>"
+                             "<p>Use the code on the unit label.</p></body></html>",
+                        HTTPD_RESP_USE_STRLEN);
+        return ESP_OK;
+    }
 
     // gateway_id, device_name and mqtt_user are derived from the MAC (see
     // load_config_from_nvs), so the portal no longer collects them — the
@@ -308,31 +382,38 @@ static esp_err_t portal_post_handler(httpd_req_t *req) {
 
 static void start_captive_portal(void) {
     ESP_LOGI(TAG, "Starting Captive Portal Access Point...");
-    
+
+    load_or_create_setup_code();
+    portal_last_activity = xTaskGetTickCount();
+
     esp_netif_create_default_wifi_ap();
-    
+
     wifi_config_t ap_config = {
         .ap = {
             .ssid = "AmpHive_Setup",
             .ssid_len = strlen("AmpHive_Setup"),
             .channel = 1,
-            .password = "",
-            .max_connection = 4,
-            .authmode = WIFI_AUTH_OPEN
+            .max_connection = 2,
+            .authmode = WIFI_AUTH_WPA2_PSK
         },
     };
-    
+    // The per-device setup code is the WPA2 passphrase (>= 8 chars), so the
+    // submitted secrets are never sent over open air (SECURITY.md §8.1).
+    strncpy((char*)ap_config.ap.password, setup_code, sizeof(ap_config.ap.password) - 1);
+
     // Add MAC address to SSID to make it unique
     uint8_t mac[6];
     esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP);
     snprintf((char*)ap_config.ap.ssid, 32, "AmpHive_Setup_%02X%02X", mac[4], mac[5]);
     ap_config.ap.ssid_len = strlen((char*)ap_config.ap.ssid);
 
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
+    // AP-only (not APSTA): the STA interface stays down, so the portal is
+    // reachable exclusively via the setup AP at 192.168.4.1.
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_config));
     ESP_ERROR_CHECK(esp_wifi_start());
-    
-    ESP_LOGI(TAG, "AP Started: %s", ap_config.ap.ssid);
+
+    ESP_LOGI(TAG, "AP Started: %s (WPA2, password = setup code)", ap_config.ap.ssid);
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     httpd_handle_t server = NULL;
@@ -891,9 +972,19 @@ void app_main(void) {
     if (!wifi_connected) {
         // Fallback: Start Captive Portal if config is missing or STA connection failed
         start_captive_portal();
-        // Wait here infinitely until the user submits the portal form (which triggers reboot)
-        while(1) {
+        // Wait until the user submits the portal form (which triggers reboot),
+        // or reboot after PORTAL_IDLE_TIMEOUT_MS with no HTTP activity: a
+        // provisioned gateway then retries its STA link (recovers from
+        // transient Wi-Fi loss), and an unprovisioned one re-enters the portal
+        // with a fresh window.
+        while (1) {
             vTaskDelay(pdMS_TO_TICKS(1000));
+            if ((xTaskGetTickCount() - portal_last_activity) * portTICK_PERIOD_MS
+                    >= PORTAL_IDLE_TIMEOUT_MS) {
+                ESP_LOGW(TAG, "Portal idle for %d min — rebooting to retry STA",
+                         PORTAL_IDLE_TIMEOUT_MS / 60000);
+                esp_restart();
+            }
         }
     }
 
