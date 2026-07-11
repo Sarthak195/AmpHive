@@ -19,10 +19,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend import state
 from backend.database.models import (
     ChargingSession, Gateway, GatewayStatus, LedgerTransaction, Plug,
-    PlugStatus, SessionStatus, TransactionType, User,
+    PlugStatus, SessionStatus, TransactionType,
 )
-from backend.services.money import to_money, ZERO_MONEY
+from backend.services.money import to_money
 from backend.services.telemetry import COINS_PER_KWH
+from backend.services.wallet import debit_wallet_clamped
 
 logger = logging.getLogger("amphive.api")
 
@@ -161,21 +162,21 @@ async def finalize_charging_session(
     session.ended_at = datetime.now(timezone.utc)
     session.energy_kwh = final_energy
 
-    # 4. Deduct coins from user wallet and create ledger entry (Atomic)
-    user_result = await db.execute(
-        select(User).where(User.id == session.user_id).with_for_update()
+    # 4. Deduct coins from user wallet and create ledger entry (Atomic).
+    #    debit_wallet_clamped locks and reads the balance as a column, fresh
+    #    from the DB — an entity re-select here (even with_for_update) would
+    #    return the request session's identity-mapped User loaded at auth
+    #    time, whose stale balance silently undoes writes committed since
+    #    (e.g. a webhook top-up landing mid-request). It also debits only
+    #    what the wallet actually holds: a ledger row whose `amount`
+    #    disagrees with the real balance delta (as `max(0, ...)` used to,
+    #    while still recording -final_cost) breaks reconciliation. If the
+    #    bill exceeds the balance, the shortfall is forgiven but recorded
+    #    for observability.
+    actual_debit, new_balance = await debit_wallet_clamped(
+        db, session.user_id, final_cost
     )
-    locked_user = user_result.scalar_one()
-
-    # Debit only what the wallet actually holds. Writing a ledger row whose
-    # `amount` disagrees with the real balance delta (as `max(0, ...)` used to,
-    # while still recording -final_cost) breaks reconciliation: the running
-    # balance can no longer be derived by summing `amount`. If the bill exceeds
-    # the balance, the shortfall is forgiven but recorded for observability.
-    prev_balance = locked_user.coin_balance if locked_user.coin_balance > 0 else ZERO_MONEY
-    actual_debit = min(final_cost, prev_balance)  # both Decimal
     shortfall = final_cost - actual_debit
-    locked_user.coin_balance = prev_balance - actual_debit
     session.coins_spent = actual_debit  # what was actually collected from the wallet
 
     description = f"Charging session on {plug.name}: {final_energy:.3f} kWh"
@@ -184,17 +185,17 @@ async def finalize_charging_session(
     if shortfall > 0:
         description += f" (shortfall {shortfall:.2f} coins uncollected)"
         logger.warning(
-            f"Session {session.id}: billed {final_cost:.2f} coins but wallet held "
-            f"only {prev_balance:.2f}; {shortfall:.2f} coins uncollected"
+            f"Session {session.id}: billed {final_cost:.2f} coins but wallet "
+            f"held only {actual_debit:.2f}; {shortfall:.2f} coins uncollected"
         )
 
     ledger_entry = LedgerTransaction(
-        user_id=locked_user.id,
+        user_id=session.user_id,
         session_id=session.id,
         amount=-actual_debit,  # Negative = debit; matches the real balance delta
         transaction_type=TransactionType.SESSION_DEBIT,
         description=description,
-        balance_after=locked_user.coin_balance,
+        balance_after=new_balance,
     )
     db.add(ledger_entry)
 
@@ -232,8 +233,9 @@ async def finalize_charging_session(
         "peak_power_w": round(session.peak_power_w or 0.0, 1),
         "coins_spent": round(actual_debit, 2),
         "shortfall_coins": round(shortfall, 2),
-        "balance_before": round(prev_balance, 2),
-        "balance_remaining": round(locked_user.coin_balance, 2),
+        # debit_wallet_clamped guarantees new_balance = prev_balance - actual_debit
+        "balance_before": round(new_balance + actual_debit, 2),
+        "balance_remaining": round(new_balance, 2),
         "duration_sec": duration_sec,
         "started_at": session.started_at.isoformat() if session.started_at else None,
         "ended_at": session.ended_at.isoformat() if session.ended_at else None,

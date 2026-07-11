@@ -41,6 +41,7 @@ from backend.services.session_lifecycle import (
     gateway_is_live, set_plug_telemetry_interval,
 )
 from backend.services.telemetry import COINS_PER_KWH
+from backend.services.wallet import credit_wallet
 
 logger = logging.getLogger("amphive.api")
 router = APIRouter()
@@ -74,25 +75,27 @@ async def _credit_topup(
     INSERT raises IntegrityError, we roll back (undoing the balance bump), and
     return None so the caller reports an idempotent no-op.
 
+    The balance bump happens DB-side (credit_wallet's atomic UPDATE), never as
+    arithmetic on an ORM instance: on the /verify path the request session
+    already holds the auth-loaded User in its identity map, and a re-select —
+    even with_for_update — returns that cached instance with its stale
+    balance, silently undoing any write committed since auth (lost update).
+
     Returns the new balance on success, or None if this payment was already
     credited by a concurrent request.
     """
-    user_result = await db.execute(
-        select(User).where(User.id == user_id).with_for_update()
-    )
-    locked_user = user_result.scalar_one_or_none()
-    if locked_user is None:
+    credit = to_money(coins)  # normalise the float from the payment service
+    new_balance = await credit_wallet(db, user_id, credit)
+    if new_balance is None:
         return None
 
-    credit = to_money(coins)  # normalise the float from the payment service
-    locked_user.coin_balance = locked_user.coin_balance + credit
     db.add(LedgerTransaction(
-        user_id=locked_user.id,
+        user_id=user_id,
         amount=credit,  # Positive = credit
         transaction_type=TransactionType.TOPUP,
         description=description,
         razorpay_payment_id=payment_id,
-        balance_after=locked_user.coin_balance,
+        balance_after=new_balance,
     ))
     try:
         await db.commit()
@@ -100,7 +103,7 @@ async def _credit_topup(
         # Another request (webhook vs verify) already inserted this payment_id.
         await db.rollback()
         return None
-    return locked_user.coin_balance
+    return new_balance
 
 
 @router.get("/api/wallet/ledger", response_model=List[LedgerEntryResponse])
@@ -238,7 +241,9 @@ async def verify_payment(
     already = await _already_credited(db, req.razorpay_payment_id)
     if already:
         logger.info(f"Payment {req.razorpay_payment_id} already credited — skipping verify (idempotent).")
-        return {"status": "success", "coins_credited": 0, "new_balance": round(user.coin_balance, 2)}
+        # Column select: `user` was loaded at auth time and may be stale.
+        fresh = await db.execute(select(User.coin_balance).where(User.id == user.id))
+        return {"status": "success", "coins_credited": 0, "new_balance": round(fresh.scalar_one(), 2)}
 
     # Calculate coins to credit from the Razorpay-confirmed amount
     coins = payment_service.calculate_coins(amount_inr)

@@ -96,15 +96,20 @@ async def test_legacy_token_rejected_after_first_revoke():
 
 @pytest.mark.asyncio
 async def test_logout_bumps_token_version():
+    """The bump must be a DB-side atomic UPDATE (token_version + 1), not
+    Python arithmetic on the auth-loaded instance — a stale identity-mapped
+    epoch would collapse concurrent bumps (lost update)."""
     user = _user(token_version=4)
-    locked = _user(token_version=4)
     result = MagicMock()
-    result.scalar_one.return_value = locked
+    result.scalar_one.return_value = 5  # RETURNING users.token_version
     db = AsyncMock()
     db.execute = AsyncMock(return_value=result)
 
     res = await logout(user, db)
 
     assert res == {"status": "logged_out"}
-    assert locked.token_version == 5
+    stmt = str(db.execute.await_args.args[0])
+    assert stmt.startswith("UPDATE users")
+    assert "token_version + " in stmt
+    assert "RETURNING users.token_version" in stmt
     db.commit.assert_awaited_once()
