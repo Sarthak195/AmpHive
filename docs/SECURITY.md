@@ -64,6 +64,21 @@ BFG + force-push) to purge the dead values entirely.
 
 ## 3. Open / unauthenticated surfaces
 
+- [Code complete 2026-07-11, **rollout pending**] **Web tier served plain HTTP.**
+  The SPA, API, and Socket.io are (still, until the next deploy) served
+  http-only on `:80` — logins, JWTs, and the Razorpay checkout travel
+  cleartext. `deploy.ps1` now ships a **Caddy TLS front door by default**
+  (`docker-compose.tls.yml`): auto-renewed Let's Encrypt cert for
+  `CADDY_DOMAIN` (`.env`; Caddyfile generated on the VM), HTTP→HTTPS and
+  bare-IP→canonical-origin redirects, and the frontend container no longer
+  publishes a host port (Caddy is the only public web entrypoint). CORS /
+  Socket.io allowlists already carry the https origins. The firewall rule
+  `allow-amphive-https` (tcp:443) was created and DNS verified 2026-07-11
+  (`amphive.duckdns.org` → `8.231.81.12`; updater cron on the VM). Rollback:
+  `deploy.ps1 -NoTls`. **Follow-up once HTTPS is verified:** drop tcp:8000
+  from `allow-amphive-ports` (the backend's direct plain-HTTP port — the SPA
+  reaches the API via the frontend nginx proxy, so nothing public needs it)
+  and consider HSTS.
 - **MQTT broker is anonymous + no TLS** (`mosquitto.conf`: `allow_anonymous true`).
   It *used* to be reachable on **1883 from `0.0.0.0/0`** — anyone could
   publish/subscribe, send plug `ON`/`OFF`, and **forge telemetry that feeds
@@ -255,6 +270,9 @@ read as still-open.*
 ## Quick remediation checklist
 
 Status — open items and recently closed:
+- [ ] **Deploy + verify the web HTTPS front door** (code complete 2026-07-11 —
+      run `deploy/scripts/deploy.ps1`), then drop tcp:8000 from
+      `allow-amphive-ports`. See §3 and `deploy/docs/web_tls_rollout.md`.
 - [x] **Rotate** WireGuard keys, DuckDNS token, Tapo & DB passwords at the source
       (2026-07-06). Dead old values remain in git history — *optional* scrub.
 - [x] **Commit + deploy** the CORS allowlist (2026-07-06) — live in prod.

@@ -163,6 +163,17 @@ Cross-references [TECH_DEBT.md](TECH_DEBT.md) items as `TD#n` and
       no client amount), and the multi-session `SessionContext`
       (restore/switch/start/stop). `npm test` wired into CI. (TESTING Phase 4)
 
+## Launch readiness (opened 2026-07-11)
+
+- [~] **Web HTTPS — Caddy TLS front door** (2026-07-11, code complete,
+      **rollout pending**): `deploy.ps1` now ships `docker-compose.tls.yml` by
+      default (Caddy on 80/443, auto Let's Encrypt for `CADDY_DOMAIN`,
+      Caddyfile generated from `.env`; `-NoTls` = plain-HTTP rollback). The
+      tls compose was brought to prod parity (it predated direct-MQTT).
+      tcp:443 firewall rule created + DNS verified. **Next `deploy.ps1` run
+      makes prod HTTPS** — then verify (see `deploy/docs/web_tls_rollout.md`)
+      and drop public tcp:8000. (SEC §3)
+
 ## Long term — productionization
 
 - [x] **MQTT broker auth** — **enforced 2026-07-07** (SEC §3):
