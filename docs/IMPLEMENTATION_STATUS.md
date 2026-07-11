@@ -389,18 +389,18 @@ audit merged; statuses below are as of 2026-07-11.*
     `gateway_events` rows and broadcast to the CPO events feed
     (`GET /api/cpo/events` + ack) — see the alarm-handling row above.
     (TD#21)
-48. **[Open] Backend trusts the payload `plug_id`.** `_handle_gateway_telemetry`
-    bills whatever `plug_id` the body claims without verifying it belongs to the
-    topic's `gateway_id`. The per-gateway broker ACLs (2026-07-10) confine a
-    gateway to its own *topics*, so the spoofer must now hold a real gateway's
-    credentials — but a compromised gateway can still attribute energy/billing
-    to another tenant's plug. Add a `plug.gateway_id == <topic gateway>` check.
-    (SEC §3, §8.5)
-49. **[Open] Unguarded telemetry casts.** `float(payload.get(...))` in
-    `_handle_gateway_telemetry` has no try/except; a malformed value throws in
-    the paho callback and drops the message. The broker now requires per-gateway
-    auth (severity down from the audit's "anonymous broker" framing), but a
-    buggy gateway can still silently lose readings. (TD#25)
+48. **[Resolved 2026-07-11] Backend trusts the payload `plug_id`.**
+    `_persist_telemetry` now verifies `plug.gateway_id == <topic gateway>` and
+    drops (with a warning) readings claiming a foreign or nonexistent plug —
+    the raw time-series enqueue was moved behind the same check, so neither
+    session totals nor `telemetry_readings` history can be written across
+    gateways. Residual: the in-memory live-stream store is still fed before
+    the DB check (UI-only, no billing effect). (SEC §3, §8.5)
+49. **[Resolved 2026-07-11] Unguarded telemetry casts.** `plug_id` is
+    int-coerced and the `float(...)` casts in `_handle_gateway_telemetry` are
+    guarded with a warn-and-drop path; non-finite values (NaN/inf) are
+    rejected too. A malformed reading now logs a warning instead of throwing
+    inside the paho callback. (TD#25)
 50. **[Open] ESP32 firmware is single-plug.** `main.c` (`target_plug_ip`,
     `active_session`, `active_plug_id`, `telemetry_interval_ms`) and
     `tapo_protocol.c` (global `s_sess`, `s_energy_wh`) are single-instance:
@@ -408,12 +408,12 @@ audit merged; statuses below are as of 2026-07-11.*
     telemetry is published under the last-commanded id. The data model allows
     many plugs per gateway, and the software AmpHive Agent already drives
     multiple plugs — this is firmware-only. (TD#20, SEC §8.5)
-51. **[Open] Sessions startable on OFFLINE/MAINTENANCE plugs.**
-    `start_charging_session` (`backend/routers/sessions.py`) rejects only
-    `OCCUPIED` plug status. The dead-*gateway* case is now closed (409 unless
-    `gateway_is_live`, §3.40), but a plug a CPO deliberately set to
-    MAINTENANCE/OFFLINE on a live gateway is still startable. Require
-    `AVAILABLE`. (TD#22)
+51. **[Resolved 2026-07-11] Sessions startable on OFFLINE/MAINTENANCE plugs.**
+    `start_charging_session` now 409s on any non-`AVAILABLE` status (OCCUPIED
+    keeps its "in use" message; OFFLINE/MAINTENANCE get "out of service").
+    Behavior change: new plugs default to OFFLINE, so a freshly registered
+    plug must be set AVAILABLE in the CPO portal before its first session
+    (finalize already resets used plugs to AVAILABLE). (TD#22)
 52. **[Open] Crash-recovery resets the duration watchdog.** On reboot the
     recovered session's `start_time_s` is reset to "now" (`main.c`, tick-based,
     no wall clock), so the time cap restarts from zero each reboot (the energy

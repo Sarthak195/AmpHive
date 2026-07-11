@@ -58,8 +58,20 @@ export async function apiRequest(endpoint, options = {}) {
   const data = await response.json().catch(() => null);
 
   if (!response.ok) {
-    const errorMessage = data?.detail || `Request failed with status ${response.status}`;
-    throw new Error(errorMessage);
+    let errorMessage = data?.detail;
+    // FastAPI validation errors (422) send `detail` as a list of
+    // {loc, msg, ...} objects — flatten to "field: message" lines so the UI
+    // shows something readable instead of "[object Object]".
+    if (Array.isArray(errorMessage)) {
+      errorMessage = errorMessage
+        .map((e) => {
+          const field = Array.isArray(e?.loc) ? e.loc[e.loc.length - 1] : null;
+          return field ? `${field}: ${e?.msg}` : e?.msg;
+        })
+        .filter(Boolean)
+        .join('; ');
+    }
+    throw new Error(errorMessage || `Request failed with status ${response.status}`);
   }
 
   return data;

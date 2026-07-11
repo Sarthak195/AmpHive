@@ -38,7 +38,7 @@ async def test_register_duplicate_race_maps_to_400():
     db = _db_passing_exists_check()
     db.commit = AsyncMock(side_effect=_integrity_error())
 
-    req = RegisterRequest(email="dup@example.com", password="pw", full_name="Dup")
+    req = RegisterRequest(email="dup@example.com", password="a-valid-pw", full_name="Dup")
     with pytest.raises(HTTPException) as exc_info:
         await register(req, db)
 

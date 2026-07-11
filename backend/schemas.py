@@ -7,14 +7,19 @@ driver and CPO plug routes).
 """
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, EmailStr, Field
 
 
 # --- Auth Schemas ---
 
 class RegisterRequest(BaseModel):
-    email: str
-    password: str
+    # EmailStr + password length rule (TD#30): previously any string was
+    # accepted verbatim as an email and one-character passwords were legal.
+    # Max 72: bcrypt silently truncates beyond 72 bytes, so longer would give
+    # a false sense of entropy. Login deliberately stays a plain `str` so
+    # accounts created before this rule can still sign in.
+    email: EmailStr
+    password: str = Field(min_length=8, max_length=72)
     full_name: str
 
 class LoginRequest(BaseModel):

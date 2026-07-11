@@ -120,8 +120,9 @@ async def test_session_id_parsed_and_forwarded_to_persist(reported_sid, expected
 
     captured = {}
 
-    async def fake_persist(plug_id, watts, kwh, session_id=None):
-        captured.update(plug_id=plug_id, watts=watts, kwh=kwh, session_id=session_id)
+    async def fake_persist(gateway_id, plug_id, watts, kwh, session_id=None, sample=None):
+        captured.update(gateway_id=gateway_id, plug_id=plug_id, watts=watts,
+                        kwh=kwh, session_id=session_id)
 
     mgr._persist_telemetry = fake_persist
 
@@ -132,6 +133,7 @@ async def test_session_id_parsed_and_forwarded_to_persist(reported_sid, expected
     mgr._handle_gateway_telemetry("gw-1", payload)
     await asyncio.sleep(0.05)  # let the scheduled coroutine run
 
+    assert captured.get("gateway_id") == "gw-1"
     assert captured.get("plug_id") == 3
     assert captured.get("kwh") == 0.5
     assert captured.get("session_id") == expected
@@ -434,4 +436,128 @@ async def test_auto_stop_disabled_by_flag(monkeypatch):
         await mgr._maybe_auto_stop_on_exhaustion(session_id=7, user_id=3, energy_kwh=100.0)
 
     finalize_mock.assert_not_called()
+    MQTTManager._instance = None
+
+# ---------------------------------------------------------------------------
+# Telemetry ingestion guards (TD#25 + payload plug ownership, 2026-07-06 audit)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload", [
+    {"plug_id": 1, "watts": "abc"},                 # non-numeric watts
+    {"plug_id": 1, "kwh": {"nested": 1}},           # non-castable kwh
+    {"plug_id": 1, "current": [1, 2]},              # non-castable current
+    {"plug_id": "not-a-number", "watts": 10.0},     # non-integer plug_id
+    {"plug_id": None, "watts": 10.0},               # explicit null plug_id
+    {"plug_id": 1, "watts": "NaN"},                 # parses, but non-finite
+    {"plug_id": 1, "voltage": "inf"},               # parses, but non-finite
+])
+async def test_malformed_telemetry_dropped_without_crashing(payload):
+    """
+    A malformed telemetry payload must be logged and dropped — it must not
+    raise in the paho callback, feed the store, or reach persistence (TD#25:
+    the old bare float() casts threw and silently killed the reading).
+    """
+    MQTTManager._instance = None
+    loop = asyncio.get_running_loop()
+    store = MagicMock()
+    mgr = MQTTManager(telemetry_store=store, db_session_factory=lambda: None,
+                      event_loop=loop)
+
+    persists = []
+
+    async def fake_persist(*a, **k):
+        persists.append(a)
+
+    mgr._persist_telemetry = fake_persist
+
+    mgr._handle_gateway_telemetry("gw-1", payload)  # must not raise
+    await asyncio.sleep(0.05)
+
+    store.update.assert_not_called()
+    assert persists == []
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_string_plug_id_coerced_to_int():
+    """A numeric-string plug_id ("3") is coerced to int so downstream DB
+    comparisons and store keys stay type-consistent."""
+    MQTTManager._instance = None
+    store = MagicMock()
+    mgr = MQTTManager(telemetry_store=store)  # no loop: direct update path
+
+    mgr._handle_gateway_telemetry("gw-1", {
+        "plug_id": "3", "watts": 5.0, "kwh": 0.1,
+        "voltage": 230.0, "current": 0.02, "status": "occupied",
+    })
+
+    kwargs = store.update.call_args.kwargs
+    assert kwargs["plug_id"] == 3
+    assert isinstance(kwargs["plug_id"], int)
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_persist_telemetry_drops_foreign_plug():
+    """
+    The payload's plug_id must belong to the topic's gateway: broker ACLs
+    scope *topics*, not payload claims, so a compromised gateway could
+    otherwise attribute energy/billing to another tenant's plug. Nothing is
+    committed or enqueued for a foreign plug.
+    """
+    MQTTManager._instance = None
+    plug = MagicMock()
+    plug.gateway_id = "gw-other"
+    session = _FakeSession([_FakeResult(scalar=plug)])
+    fake_tp = MagicMock()
+    mgr = MQTTManager(db_session_factory=lambda: session,
+                      telemetry_persistence=fake_tp)
+
+    await mgr._persist_telemetry("gw-1", 5, 100.0, 1.0, None, {"plug_id": 5})
+
+    assert session.committed is False
+    fake_tp.enqueue.assert_not_called()
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_persist_telemetry_drops_unknown_plug():
+    """A plug_id that doesn't exist at all is dropped the same way."""
+    MQTTManager._instance = None
+    session = _FakeSession([_FakeResult(scalar=None)])
+    fake_tp = MagicMock()
+    mgr = MQTTManager(db_session_factory=lambda: session,
+                      telemetry_persistence=fake_tp)
+
+    await mgr._persist_telemetry("gw-1", 99, 100.0, 1.0, None, {"plug_id": 99})
+
+    assert session.committed is False
+    fake_tp.enqueue.assert_not_called()
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_persist_telemetry_accepts_own_plug_and_enqueues_sample():
+    """For the gateway's own plug the snapshot commits and the raw sample is
+    enqueued (the enqueue is deferred here from the handler so it sits behind
+    the ownership check)."""
+    MQTTManager._instance = None
+    plug = MagicMock()
+    plug.gateway_id = "gw-1"
+    session = _FakeSession([
+        _FakeResult(scalar=plug),   # plug lookup: owned
+        _FakeResult(scalar=None),   # no ACTIVE session on the plug
+    ])
+    fake_tp = MagicMock()
+    mgr = MQTTManager(db_session_factory=lambda: session,
+                      telemetry_persistence=fake_tp)
+
+    sample = {"plug_id": 5, "power_w": 100.0}
+    await mgr._persist_telemetry("gw-1", 5, 100.0, 1.0, None, sample)
+
+    assert session.committed is True
+    assert plug.current_power_w == 100.0
+    fake_tp.enqueue.assert_called_once_with(sample)
     MQTTManager._instance = None
