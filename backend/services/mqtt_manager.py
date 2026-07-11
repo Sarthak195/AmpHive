@@ -2,6 +2,7 @@ import asyncio
 import functools
 import json
 import logging
+import math
 import os
 import re
 import time
@@ -173,11 +174,38 @@ class MQTTManager:
         if plug_id is None:
             logger.warning(f"Telemetry from gateway {gateway_id} missing plug_id, ignoring.")
             return
+        try:
+            plug_id = int(plug_id)
+        except (TypeError, ValueError):
+            logger.warning(
+                f"Telemetry from gateway {gateway_id} has non-integer plug_id "
+                f"{payload.get('plug_id')!r}, ignoring."
+            )
+            return
 
-        watts = float(payload.get("watts", 0.0))
-        kwh = float(payload.get("kwh", 0.0))
-        voltage = float(payload.get("voltage", 230.0))
-        current = float(payload.get("current", 0.0))
+        # Guarded casts (TD#25): a malformed value used to raise inside the
+        # paho callback — the reading vanished with no log line and (paho
+        # version depending) could kill message dispatch. Non-finite values
+        # (NaN/inf parse fine as JSON-ish strings) are rejected too: NaN
+        # watts would poison the peak-power comparison and session totals.
+        try:
+            watts = float(payload.get("watts", 0.0))
+            kwh = float(payload.get("kwh", 0.0))
+            voltage = float(payload.get("voltage", 230.0))
+            current = float(payload.get("current", 0.0))
+        except (TypeError, ValueError):
+            logger.warning(
+                f"Telemetry from gateway {gateway_id} plug {plug_id} has "
+                f"non-numeric fields, ignoring: {payload}"
+            )
+            return
+        if not all(math.isfinite(v) for v in (watts, kwh, voltage, current)):
+            logger.warning(
+                f"Telemetry from gateway {gateway_id} plug {plug_id} has "
+                f"non-finite values, ignoring: {payload}"
+            )
+            return
+
         status = payload.get("status", "occupied")
         # Actual relay state as reported by the plug (firmware ≥ 1.5.0). Distinct
         # from `status` (our session state) — lets the UI show the physical relay.
@@ -231,12 +259,17 @@ class MQTTManager:
                 relay_on=relay_on,
             )
 
-        # --- 2. Enqueue a raw sample for time-series persistence ---
+        # --- 2. Build the raw sample for time-series persistence ---
         # Buffered + batch-flushed by TelemetryPersistenceService. This is where
         # voltage/current/status (parsed above but not used for session totals)
-        # get persisted to telemetry_readings.
+        # get persisted to telemetry_readings. When a DB is available the
+        # enqueue is deferred into _persist_telemetry so it only happens after
+        # the plug-ownership check (a gateway must not write history rows for
+        # another gateway's plug); with no DB there is nothing to check
+        # against, so enqueue directly (unit tests / standalone use).
+        sample = None
         if self.telemetry_persistence:
-            self.telemetry_persistence.enqueue({
+            sample = {
                 "plug_id": plug_id,
                 "recorded_at": datetime.now(timezone.utc),
                 "power_w": watts,
@@ -244,12 +277,14 @@ class MQTTManager:
                 "voltage_v": voltage,
                 "current_a": current,
                 "status": status,
-            })
+            }
+            if not (self.db_session_factory and self.event_loop):
+                self.telemetry_persistence.enqueue(sample)
 
         # --- 3. Persist authoritative session totals (async, fire-and-forget) ---
         if self.db_session_factory and self.event_loop:
             asyncio.run_coroutine_threadsafe(
-                self._persist_telemetry(plug_id, watts, kwh, session_id),
+                self._persist_telemetry(gateway_id, plug_id, watts, kwh, session_id, sample),
                 self.event_loop,
             )
             # Telemetry proves the gateway is alive — refresh its liveness
@@ -396,10 +431,18 @@ class MQTTManager:
         except Exception as e:
             logger.error(f"Failed to broadcast gateway alarm for {gateway_id}: {e}")
 
-    async def _persist_telemetry(self, plug_id: int, watts: float, kwh: float, session_id: Optional[int] = None):
+    async def _persist_telemetry(self, gateway_id: str, plug_id: int, watts: float, kwh: float,
+                                 session_id: Optional[int] = None,
+                                 sample: Optional[Dict[str, Any]] = None):
         """
         Persist the latest telemetry snapshot to the database:
+        - Verify the claimed plug actually belongs to the publishing gateway
+          (the broker ACLs scope *topics* to a gateway, not payload claims — a
+          compromised gateway could otherwise attribute energy/billing to
+          another tenant's plug).
         - Update `plugs.current_power_w` so the plug list shows real-time power.
+        - Enqueue the raw `sample` for time-series persistence (deferred here
+          from the handler so it sits behind the same ownership check).
         - Update the target `charging_sessions` row with cumulative energy and
           peak power, so that even if the server crashes, the last-known values
           are saved.
@@ -422,13 +465,26 @@ class MQTTManager:
             async with self.db_session_factory() as session:
                 from sqlalchemy import select, and_
 
-                # Update plug's current power reading
+                # Ownership check: the payload's plug_id must name a plug of
+                # the gateway that published on this topic.
                 plug_result = await session.execute(
                     select(Plug).where(Plug.id == plug_id)
                 )
                 plug = plug_result.scalar_one_or_none()
-                if plug:
-                    plug.current_power_w = watts
+                if plug is None or plug.gateway_id != gateway_id:
+                    owner = "does not exist" if plug is None else f"belongs to gateway {plug.gateway_id}"
+                    logger.warning(
+                        f"Telemetry from gateway {gateway_id} claims plug {plug_id}, "
+                        f"which {owner} — dropping reading."
+                    )
+                    return
+
+                # Update plug's current power reading
+                plug.current_power_w = watts
+
+                # Raw time-series sample — enqueue now that ownership is proven.
+                if self.telemetry_persistence and sample is not None:
+                    self.telemetry_persistence.enqueue(sample)
 
                 # Find the session to update (see docstring for selection rules).
                 if session_id is not None:

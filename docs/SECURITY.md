@@ -200,13 +200,15 @@ BFG + force-push) to purge the dead values entirely.
   HMAC signature check plus idempotency on `razorpay_payment_id`, but a leaked
   `RAZORPAY_WEBHOOK_SECRET` would allow forged credits — keep it secret and rotate
   if exposed.
-- [2026-07-06 audit; still open] **Backend trusts the payload `plug_id`.**
-  `_handle_gateway_telemetry` bills whatever `plug_id` the telemetry body claims
-  without checking it belongs to the topic's `gateway_id`. The per-gateway broker
-  ACLs (2026-07-10) confine a gateway to its own *topics*, so spoofing now
-  requires a real gateway's credentials — but a compromised gateway can still
-  attribute energy/billing to another tenant's plug. Add a
-  `plug.gateway_id == <topic gateway>` check. (TECH_DEBT — related to TD#24/§8.)
+- [Resolved 2026-07-11] ~~**Backend trusts the payload `plug_id`.**~~
+  `_persist_telemetry` now verifies the claimed plug belongs to the topic's
+  gateway (`plug.gateway_id == <topic gateway>`) and drops foreign/unknown
+  claims with a warning; the raw `telemetry_readings` enqueue sits behind the
+  same check, so neither billing totals nor history can be written across
+  gateways. Ingestion casts are also guarded now (int `plug_id`, try/except
+  floats, NaN/inf rejected — TD#25). Residual: the in-memory live-stream
+  store is fed before the DB check (UI display only, no billing effect).
+  (Found by the 2026-07-06 audit; TECH_DEBT #25, §8.5.)
 - [Resolved 2026-07-10] ~~**Firmware safety alarms are never consumed.**~~ The
   backend now subscribes `amphive/gateways/+/alarms`; alarms persist as
   `gateway_events` rows and feed the CPO events API (verified live in prod).
@@ -361,7 +363,7 @@ over or harvest the owner's Tapo account. Ordered by severity.*
   subtree), and **TLS** on the public 8883. Verified in prod 2026-07-10.
 - Residual risk: a credential extracted via §8.1/§8.2 still impersonates *that
   one gateway* within its own subtree — which is why the backend-side
-  `plug.gateway_id` check (§3) still matters.
+  `plug.gateway_id` check mattered (shipped 2026-07-11, see §3).
 
 ### 8.4 Boot-time fallback into the open portal — **MEDIUM, open**
 
@@ -385,8 +387,9 @@ capture it here:
 - Broker ACLs are **per-gateway**, not per-plug (live since 2026-07-10:
   `pattern readwrite amphive/gateways/%u/#`) — keep it that way: one gateway
   legitimately drives several plugs under its own subtree.
-- Backend must validate `plug.gateway_id == <topic gateway>` before billing (see
-  §3) so a gateway can only report for plugs it actually owns.
+- Backend-side `plug.gateway_id == <topic gateway>` validation shipped
+  2026-07-11 (see §3): a gateway can only report for plugs it actually owns —
+  the multi-plug refactor must not weaken that check.
 
 ### 8.6 Backend authn hardening — **LOW/MEDIUM, partly resolved**
 
@@ -397,9 +400,10 @@ capture it here:
 - [Open] **No rate limiting** on `/api/auth/login` and `/api/auth/register` —
   brute-force / account-enumeration open. Add rate limiting (login already returns
   a generic "Invalid email or password").
-- [Open] **Registration input** isn't validated: `email` is a bare `str` (not
-  `EmailStr`) and there's no password-strength rule (`backend/schemas.py`;
-  TD#30).
+- ~~**Registration input isn't validated**~~ **Resolved 2026-07-11**:
+  `RegisterRequest` uses `EmailStr` and an 8-72 char password rule (72 =
+  bcrypt truncation boundary). Login is intentionally unvalidated so accounts
+  created before the rule can still sign in (`backend/schemas.py`; TD#30).
 
 ---
 
@@ -444,8 +448,9 @@ Device security (2026-07-06 audit, statuses as of 2026-07-11 — see
       topic ACLs + TLS are live (§8.3).
 - [ ] **Require a button-hold for provisioning** instead of auto-opening the open
       portal on Wi-Fi loss (§8.4, MEDIUM).
-- [ ] **Validate `plug.gateway_id` against the topic gateway** before billing
-      telemetry (§3, §8.5).
+- [x] **Validate `plug.gateway_id` against the topic gateway** before billing
+      telemetry (2026-07-11; §3, §8.5) — plus guarded ingestion casts (TD#25)
+      and registration validation (TD#30) in the same change.
 - [x] ~~Consume `+/alarms`~~ **Resolved 2026-07-10** — alarms persist as
       `gateway_events` + CPO events feed (§3, TD#21).
 - [ ] **Auth rate limiting** on login/register (§8.6) — JWT revocation itself

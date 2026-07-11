@@ -100,7 +100,7 @@ async def test_telemetry_schedules_gateway_seen_refresh_throttled():
 
     persisted = []
 
-    async def fake_persist_telemetry(plug_id, watts, kwh, session_id=None):
+    async def fake_persist_telemetry(gateway_id, plug_id, watts, kwh, session_id=None, sample=None):
         pass
 
     async def fake_persist_gateway_seen(gateway_id):

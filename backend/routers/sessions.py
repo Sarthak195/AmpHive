@@ -149,10 +149,23 @@ async def start_charging_session(
             ),
         )
 
-    # 3. Claim the plug (still holding the row lock). Only OCCUPIED blocks a
-    #    start; offline/maintenance plugs are handled by the gateway/telemetry.
+    # 3. Claim the plug (still holding the row lock). Anything but AVAILABLE
+    #    blocks the start (TD#22): OCCUPIED means in use, and OFFLINE /
+    #    MAINTENANCE mean the CPO took the plug out of service (or it was
+    #    never commissioned — new plugs default to OFFLINE and must be set
+    #    AVAILABLE in the CPO portal). Previously only OCCUPIED was rejected,
+    #    so an out-of-service plug was still startable — it pinned OCCUPIED
+    #    and billed nothing.
     if plug.status == PlugStatus.OCCUPIED:
         raise HTTPException(status_code=409, detail="This plug is currently in use.")
+    if plug.status != PlugStatus.AVAILABLE:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"This plug is out of service ({plug.status.value}). "
+                "Ask the operator to re-enable it."
+            ),
+        )
 
     gw_result = await db.execute(select(Gateway).where(Gateway.id == plug.gateway_id))
     gateway = gw_result.scalar_one()

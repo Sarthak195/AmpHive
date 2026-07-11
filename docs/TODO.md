@@ -17,14 +17,13 @@ been fixed by the 2026-07-08…11 work — see the shipped sections below).*
       AP is open (`WIFI_AUTH_OPEN`) and `/save` is unauthenticated, so anyone in
       Wi-Fi range can sniff Tapo/Wi-Fi/MQTT secrets or overwrite config. Add
       WPA2 + a setup PIN/token + timeout. (SEC §8.1, **CRITICAL**)
-- [ ] **[2026-07-06 audit] Reject session starts on OFFLINE/MAINTENANCE plugs** —
-      `start_charging_session` blocks only `OCCUPIED` plug status (the
-      dead-gateway case is closed by the liveness 409), so a plug a CPO took out
-      of service is still startable. Require `AVAILABLE`. (TD#22)
-- [ ] **[2026-07-06 audit] Guard telemetry ingestion** — wrap the `float(...)`
-      casts in `_handle_gateway_telemetry` and validate
-      `plug.gateway_id == <topic gateway>` before billing (broker ACLs confine
-      topics, not payload claims). (TD#25, SEC §3/§8.5)
+- [x] **[2026-07-06 audit] Reject session starts on OFFLINE/MAINTENANCE plugs.**
+      Done 2026-07-11 — any non-`AVAILABLE` status now 409s; new plugs (default
+      OFFLINE) need a CPO enable before first use. (TD#22)
+- [x] **[2026-07-06 audit] Guard telemetry ingestion.** Done 2026-07-11 —
+      guarded casts + int plug_id + finiteness check, and
+      `plug.gateway_id == <topic gateway>` verified before session totals AND
+      the raw-sample enqueue. (TD#25, SEC §3/§8.5)
 
 - [x] **Commit the `tools/` secret strip.** Done (`3e20dbd`, 2026-07-05) — all
       five helpers now read `TAPO_EMAIL` / `TAPO_PASSWORD` / `TAPO_PLUG_IP` from
@@ -149,8 +148,9 @@ been fixed by the 2026-07-08…11 work — see the shipped sections below).*
 - [ ] **[2026-07-06 audit] Structured logging + correlation ids** across backend
       (JSON, request ids) and a firmware log topic for field diagnostics;
       persist the broker log. (TD#28)
-- [ ] **[2026-07-06 audit] Registration validation** — `EmailStr` + a
-      password-strength rule. (TD#30)
+- [x] **[2026-07-06 audit] Registration validation.** Done 2026-07-11 —
+      `EmailStr` + 8-72 char password rule; login left unvalidated for
+      pre-rule accounts. (TD#30)
 - [ ] **[2026-07-06 audit] Portal input CSS + reachability test** — fix
       `width:100%%` and test Wi-Fi/plug reachability before saving config
       (onboarding). (TD#31)
