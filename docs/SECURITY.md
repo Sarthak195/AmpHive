@@ -64,6 +64,27 @@ BFG + force-push) to purge the dead values entirely.
 
 ## 3. Open / unauthenticated surfaces
 
+- [Resolved 2026-07-11, **deployed + verified in prod**] **Web tier served
+  plain HTTP.** The SPA, API, and Socket.io were served http-only on `:80` —
+  logins, JWTs, and the Razorpay checkout traveled cleartext. `deploy.ps1`
+  now ships a **Caddy TLS front door by default** (`docker-compose.tls.yml`):
+  auto-renewed Let's Encrypt cert for `CADDY_DOMAIN` (`.env`; Caddyfile
+  generated on the VM), HTTP→HTTPS redirect for the domain, and the frontend
+  container no longer publishes a host port (Caddy is the only public web
+  entrypoint). Bare-IP/unknown-Host requests are **served** (plain http)
+  rather than redirected, so a DNS outage can't take the site down. CORS /
+  Socket.io allowlists already carried the https origins; firewall rule
+  `allow-amphive-https` (tcp:443) added. **Verified live:** `https://` 200
+  with a validated LE cert (CN `amphive.duckdns.org`, expires 2026-10-09,
+  auto-renew), domain http→https 308, `/api` + Socket.io over https, CPO
+  login; broker + both gateways unaffected. The rollout rode out a real
+  **DuckDNS authoritative-nameserver outage** (~1 h; Caddy auto-retried the
+  cert in — incident log: `deploy/docs/web_tls_rollout.md`). Rollback:
+  `deploy.ps1 -NoTls`. **Remaining follow-ups:** drop tcp:8000 from
+  `allow-amphive-ports` (the backend's direct plain-HTTP port — the SPA
+  reaches the API via the frontend nginx proxy, so nothing public needs it),
+  add HSTS + flip bare-IP back to a redirect, and replace DuckDNS with a
+  real domain (this outage makes it a proven SPOF — see §6).
 - **MQTT broker is anonymous + no TLS** (`mosquitto.conf`: `allow_anonymous true`).
   It *used* to be reachable on **1883 from `0.0.0.0/0`** — anyone could
   publish/subscribe, send plug `ON`/`OFF`, and **forge telemetry that feeds
@@ -255,6 +276,12 @@ read as still-open.*
 ## Quick remediation checklist
 
 Status — open items and recently closed:
+- [x] **Web HTTPS front door deployed + verified in prod** (2026-07-11):
+      Caddy on 80/443, validated Let's Encrypt cert, http→https redirect.
+      See §3 and `deploy/docs/web_tls_rollout.md`.
+- [ ] Drop tcp:8000 from `allow-amphive-ports` (nothing public needs the
+      backend's direct port now that Caddy fronts the web tier); add HSTS;
+      replace DuckDNS with a real domain (proven SPOF — §3/§6).
 - [x] **Rotate** WireGuard keys, DuckDNS token, Tapo & DB passwords at the source
       (2026-07-06). Dead old values remain in git history — *optional* scrub.
 - [x] **Commit + deploy** the CORS allowlist (2026-07-06) — live in prod.

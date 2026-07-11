@@ -163,6 +163,23 @@ Cross-references [TECH_DEBT.md](TECH_DEBT.md) items as `TD#n` and
       no client amount), and the multi-session `SessionContext`
       (restore/switch/start/stop). `npm test` wired into CI. (TESTING Phase 4)
 
+## Launch readiness (opened 2026-07-11)
+
+- [x] **Web HTTPS — Caddy TLS front door** (2026-07-11, **deployed + verified
+      in prod**): `deploy.ps1` ships `docker-compose.tls.yml` by default
+      (Caddy on 80/443, auto Let's Encrypt for `CADDY_DOMAIN`, Caddyfile
+      generated from `.env`; `-NoTls` = plain-HTTP rollback); bare-IP requests
+      are served, not redirected, so a DNS outage can't kill the site.
+      Verified live: `https://amphive.duckdns.org` 200 with a validated LE
+      cert (expires 2026-10-09, auto-renew), http→https 308, `/api` +
+      Socket.io over https, CPO login; broker + gateways unaffected. The
+      rollout rode out a real **DuckDNS nameserver outage** (~1 h; Caddy
+      auto-retried the cert in — `deploy/docs/web_tls_rollout.md`). (SEC §3)
+- [ ] **Web HTTPS follow-ups**: drop tcp:8000 from `allow-amphive-ports`,
+      add HSTS + flip bare-IP back to a redirect, and **replace DuckDNS with
+      a real domain** (proven SPOF; also needed for Razorpay live-mode
+      legal pages). (SEC §3/§6)
+
 ## Long term — productionization
 
 - [x] **MQTT broker auth** — **enforced 2026-07-07** (SEC §3):
