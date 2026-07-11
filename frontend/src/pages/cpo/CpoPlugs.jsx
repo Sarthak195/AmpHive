@@ -8,7 +8,7 @@
  * Data source: /api/cpo/plugs, /api/cpo/gateways, /api/cpo/groups
  */
 
-import React, { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import CpoLayout from '../../components/CpoLayout';
 import api from '../../api/client';
 
@@ -40,6 +40,13 @@ const CpoPlugs = () => {
   const [tenantName, setTenantName] = useState('');
   const [loading, setLoading] = useState(true);
   const [statusFilter, setStatusFilter] = useState('');
+
+  // Gateway lookup so the plug table can show each gateway's live state + fw.
+  const gatewaysById = useMemo(() => {
+    const map = {};
+    for (const gw of gateways) map[gw.id] = gw;
+    return map;
+  }, [gateways]);
 
   // Modal state
   const [showAddModal, setShowAddModal] = useState(false);
@@ -234,7 +241,31 @@ const CpoPlugs = () => {
                   <td style={{ color: 'var(--color-text-primary)', fontWeight: 500 }}>
                     {plug.name}
                   </td>
-                  <td>{plug.gateway_id}</td>
+                  <td>
+                    {(() => {
+                      const gw = gatewaysById[plug.gateway_id];
+                      const online = gw?.status === 'online';
+                      return (
+                        <div className="flex flex-col" style={{ gap: '0.15rem' }}>
+                          <span className="flex items-center gap-1" style={{ fontSize: '0.85rem' }}>
+                            <span
+                              title={online ? 'Online' : 'Offline'}
+                              style={{
+                                width: '8px', height: '8px', borderRadius: '50%', flexShrink: 0,
+                                background: online ? 'var(--color-success)' : 'var(--color-text-muted)',
+                              }}
+                            />
+                            {plug.gateway_id}
+                          </span>
+                          {gw?.firmware_version && (
+                            <span style={{ color: 'var(--color-text-muted)', fontSize: '0.72rem' }}>
+                              fw {gw.firmware_version}
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })()}
+                  </td>
                   <td style={{ fontFamily: 'monospace', fontSize: '0.82rem' }}>{plug.local_ip}</td>
                   <td>{plug.group_name || <span style={{ color: 'var(--color-text-muted)' }}>Ungrouped</span>}</td>
                   <td>

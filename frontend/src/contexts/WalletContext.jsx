@@ -9,7 +9,7 @@
  * after successful payment verification.
  */
 
-import React, { createContext, useContext, useCallback } from 'react';
+import { createContext, useContext, useCallback } from 'react';
 import { useAuth } from './AuthContext';
 
 const WalletContext = createContext();

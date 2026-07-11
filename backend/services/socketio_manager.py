@@ -44,6 +44,20 @@ async def emit_plug_status(plug_id: int, status: str) -> None:
         logger.error(f"Failed to emit plug_status for plug {plug_id}: {e}")
 
 
+async def emit_gateway_alarm(event: Dict[str, Any]) -> None:
+    """
+    Broadcast a gateway alarm/event (safety cutoff, unauthorized-on, OTA notice)
+    to every connected client. The CPO portal renders it in an alert feed; a
+    driver whose active plug matches reacts (e.g. an unauthorized-on warning).
+    Broadcast is global for simplicity — the payload carries no wallet/PII, only
+    operational fault metadata, and clients filter to what they display.
+    """
+    try:
+        await sio.emit("gateway_alarm", event)
+    except Exception as e:
+        logger.error(f"Failed to emit gateway_alarm: {e}")
+
+
 @sio.event
 async def connect(sid, environ, auth=None):
     """
@@ -160,8 +174,8 @@ async def stream_telemetry_task(session_id: int, plug_id: int):
     Background task to stream telemetry for a session.
     It runs as long as the room has participants and the session is not completed.
     """
-    # Import inside the function to avoid circular imports
-    from backend.main import set_plug_telemetry_interval
+    # Late import so unit tests can stub the module with a DB-free fake
+    from backend.services.session_lifecycle import set_plug_telemetry_interval
     room_name = f"session_{session_id}"
     logger.info(f"Starting telemetry stream task for session {session_id} (plug {plug_id})")
     

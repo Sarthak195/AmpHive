@@ -15,10 +15,12 @@ known security gaps, not a formal audit. Items are roughly ordered by severity.*
 > credits idempotently. The items in §1–§6 are the gaps that **remain**.
 
 > **2026-07-06 follow-up audit:** [§8](#8-firmware--gateway-device-security--backend-follow-up-gaps-2026-07-06-audit)
-> adds the **firmware/gateway device attack surface** (open provisioning AP, no
-> flash-encryption, reusable overlay key + anonymous broker) plus a few
-> backend authn/integrity gaps. These are the highest-severity *open* items —
-> read §8 first.
+> adds the **firmware/gateway device attack surface** plus a few backend
+> authn/integrity gaps. Statuses re-checked 2026-07-11: the overlay-key +
+> anonymous-broker item (§8.3) and JWT revocation (§8.6) were resolved by the
+> 2026-07-08…10 work; the still-open device items (open provisioning AP, no
+> flash-encryption, boot-time portal fallback) are the highest-severity *open*
+> gaps — read §8 first.
 
 ---
 
@@ -58,9 +60,39 @@ BFG + force-push) to purge the dead values entirely.
   live DB and is set via `.env` `POSTGRES_PASSWORD`; `deploy.ps1` now **rejects**
   the old `amphive_db_admin` literal as insecure. (The dead old value remains in
   git history.)
+- [Added 2026-07-08] **JWT revocation.** Tokens were previously irrevocable
+  until their 7-day expiry — a leaked token stayed valid. Every token now
+  carries the user's `token_version` epoch (`tv` claim), re-checked per
+  request; `POST /api/auth/logout` bumps the epoch, killing all of that
+  user's tokens server-side ("log out everywhere"). Expiry is now
+  env-configurable (`JWT_EXPIRY_DAYS`, default 7). No blacklist table (the
+  epoch is per-user, not per-token); single-device logout isn't distinguished
+  from all-device. Legacy pre-`tv` tokens are treated as epoch 0 (valid until
+  the first revoke), so the change didn't force-log-out existing sessions.
 
 ## 3. Open / unauthenticated surfaces
 
+- [Resolved 2026-07-11, **deployed + verified in prod**] **Web tier served
+  plain HTTP.** The SPA, API, and Socket.io were served http-only on `:80` —
+  logins, JWTs, and the Razorpay checkout traveled cleartext. `deploy.ps1`
+  now ships a **Caddy TLS front door by default** (`docker-compose.tls.yml`):
+  auto-renewed Let's Encrypt cert for `CADDY_DOMAIN` (`.env`; Caddyfile
+  generated on the VM), HTTP→HTTPS redirect for the domain, and the frontend
+  container no longer publishes a host port (Caddy is the only public web
+  entrypoint). Bare-IP/unknown-Host requests are **served** (plain http)
+  rather than redirected, so a DNS outage can't take the site down. CORS /
+  Socket.io allowlists already carried the https origins; firewall rule
+  `allow-amphive-https` (tcp:443) added. **Verified live:** `https://` 200
+  with a validated LE cert (CN `amphive.duckdns.org`, expires 2026-10-09,
+  auto-renew), domain http→https 308, `/api` + Socket.io over https, CPO
+  login; broker + both gateways unaffected. The rollout rode out a real
+  **DuckDNS authoritative-nameserver outage** (~1 h; Caddy auto-retried the
+  cert in — incident log: `deploy/docs/web_tls_rollout.md`). Rollback:
+  `deploy.ps1 -NoTls`. **Remaining follow-ups:** drop tcp:8000 from
+  `allow-amphive-ports` (the backend's direct plain-HTTP port — the SPA
+  reaches the API via the frontend nginx proxy, so nothing public needs it),
+  add HSTS + flip bare-IP back to a redirect, and replace DuckDNS with a
+  real domain (this outage makes it a proven SPOF — see §6).
 - **MQTT broker is anonymous + no TLS** (`mosquitto.conf`: `allow_anonymous true`).
   It *used* to be reachable on **1883 from `0.0.0.0/0`** — anyone could
   publish/subscribe, send plug `ON`/`OFF`, and **forge telemetry that feeds
@@ -72,9 +104,89 @@ BFG + force-push) to purge the dead values entirely.
     connects over the overlay and the backend uses the internal compose network,
     so nothing needs the public port. The unused websocket port 9001 is no longer
     published.
-  - Still to do: add broker **auth** (needs a firmware credentials field before
-    `allow_anonymous false` can be enabled) so overlay peers can't publish
-    anonymously.
+  - [Done 2026-07-07] Broker **auth is enforced**: `allow_anonymous false` +
+    `password_file` (generated on the VM by `deploy.ps1` from `MQTT_USERNAME` /
+    `MQTT_PASSWORD` — backend client — and `MQTT_GW_USERNAME` /
+    `MQTT_GW_PASSWORD` — shared gateway account — in `.env`, all validated
+    alphanumeric). The compose healthcheck authenticates; the backend sends
+    its credentials via env; the firmware presents NVS `mqtt_user`/`mqtt_pwd`
+    (provisioned via the portal's optional MQTT fields — a credential-less
+    gateway can no longer connect). **Verified in prod:** anonymous
+    `mosquitto_sub` → `Connection Refused: not authorised`; backend + the
+    real ESP32 reconnected authenticated and telemetry flows.
+  - [Added 2026-07-08, rollout in progress] Broker **TLS** listener on **8883**
+    (`mosquitto.conf`): a self-signed CA + server cert
+    (`deploy/config/gen_mqtt_certs.sh`); the gateway firmware embeds the CA and
+    validates the broker cert (chain + IP SAN — dates aren't checked, no clock
+    needed). Server-auth only; clients still present username/password.
+    Rollout is staged for safety: the plaintext **1883** listener stays up
+    during the transition (backend on the internal Docker network; OTA-
+    rollback target for gateways), and is bound internal-only once every
+    gateway is confirmed on 8883.
+  - [Done 2026-07-10] **8883 is deliberately PUBLIC — the direct-MQTT path.**
+    The overlay proved fragile for devices behind symmetric NAT (DISCO
+    hole-punching fails; see §7), so the transport is now a plain **outbound**
+    MQTT/TLS connection: devices/agents dial `mqtts://8.231.81.12:8883` (the
+    VM's reserved static IP; GCP rule `allow-amphive-mqtts`), which traverses
+    any NAT/CGNAT without STUN/DERP/port-forwards. The trust the tailnet used
+    to provide implicitly is now explicit:
+    * **TLS**: server cert (SANs `100.87.241.70` + `8.231.81.12`) chained to
+      the AmpHive CA; CA regenerated 2026-07-10 with proper
+      `basicConstraints`/`keyUsage` extensions (Python 3.13 strict validators —
+      i.e. the AmpHive Agent — reject a CA without them). Firmware embeds the
+      new CA from 1.3.0.
+    * **AuthN**: `allow_anonymous false` + passwd file. **Per-gateway accounts**
+      (username == gateway_id) via `deploy/scripts/add_gateway_user.ps1`;
+      the passwd file survives redeploys (no more `-c` truncation). The shared
+      `amphive-gateway` account was **retired 2026-07-10** — every device has
+      its own account (real ESP `1cc3abb4fb54`, fake plug `fakeplug-gw-01`),
+      and `deploy.ps1` no longer provisions a shared one.
+    * **AuthZ**: mosquitto **topic ACLs** (`mosquitto_acl`, generated on the VM
+      by `deploy.ps1`): backend → `amphive/#` + `$SYS` read; per-gateway
+      accounts → `pattern readwrite amphive/gateways/%u/#` (a gateway can only
+      touch its own subtree — no cross-site forgery). The old shared broad
+      grant (`amphive/gateways/#`) is **gone**. Verified 2026-07-10: an account
+      subscribed to another gateway's telemetry receives nothing.
+      *Ops note:* the ACL/passwd files are **bind-mounted**, so edit them
+      **in place** (mosquitto_passwd / `tee`) — replacing via `mv` swaps the
+      inode and the running broker keeps the old file until restarted.
+    **Verified in prod 2026-07-10:** TLS 1.3 handshake from the public internet
+    validates against the CA (strict mode); anonymous and bogus credentials
+    both get `not authorised`; backend, fake plug, and the real ESP32 all
+    stayed connected under the ACLs. The overlay 1883 listener is unchanged
+    (legacy/transition + backend-internal).
+  - [Hardened + rolled out 2026-07-10] **OTA image
+    transport + signing.** Both halves of the earlier TODO are implemented
+    (fw ≥ 1.4.0):
+    * **HTTPS-only images**: hosted on the public-read GCS bucket
+      `gs://amphive-fw` (`https://storage.googleapis.com/amphive-fw/...`,
+      public-CA cert the firmware's Mozilla bundle validates; public-read
+      user-approved 2026-07-10 — images hold no secrets and are signed).
+      Plain `http://` is refused by the firmware
+      (`CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP` removed + an explicit scheme check
+      in `ota_update_start`) *and* by the backend
+      (`CpoGatewayOtaRequest` now requires `https://`).
+    * **Signed OTA** (signed-app verification *without* secure boot, ECDSA
+      scheme v1, `CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT`): the device
+      rejects any update lacking a valid signature from
+      `firmware/secure_boot_signing_key.pem` (gitignored; **back it up** —
+      losing it strands fielded devices on USB reflash). A
+      valid-but-malicious image from a MITM or a compromised bucket no longer
+      installs. No eFuses burned; boot-time verification stays off (full
+      secure boot remains a possible future step).
+    **Rolled out 2026-07-10:** the real gateway was OTA'd to the signed
+    `1.5.0-direct` image over https, and the backend `^https://` validation
+    is deployed (see `deploy/docs/ota_image_publishing.md`). Pre-1.4.0
+    firmware ignores the signature trailer, so the migration jump installed
+    cleanly; from 1.4.0 on, only signed images install.
+- [Added 2026-07-10, fw 1.5.0] **Unauthorized-use safety control.** The plug's
+  physical button and the Tapo app are control paths that bypass AmpHive
+  entirely — a relay could be energized with no authorized session (free,
+  unmetered power). The firmware now enforces this locally: with no active
+  session, a relay found ON is forced OFF every telemetry cycle and raised
+  (once per episode) as a **critical `UNAUTHORIZED_ON` event** surfaced to the
+  operator (`gateway_events` table → `GET /api/cpo/events`) — a defense
+  against out-of-band plug activation.
 - [Fixed + deployed 2026-07-06] **CORS** is restricted to an explicit allowlist
   (localhost, `amphive.duckdns.org`, VM IP; http+https) with the wildcard removed,
   in `backend/main.py:187`. Verified in prod: an allowed origin is echoed, a
@@ -84,16 +196,17 @@ BFG + force-push) to purge the dead values entirely.
   HMAC signature check plus idempotency on `razorpay_payment_id`, but a leaked
   `RAZORPAY_WEBHOOK_SECRET` would allow forged credits — keep it secret and rotate
   if exposed.
-- [2026-07-06 audit] **Backend trusts the payload `plug_id`.**
+- [2026-07-06 audit; still open] **Backend trusts the payload `plug_id`.**
   `_handle_gateway_telemetry` bills whatever `plug_id` the telemetry body claims
-  without checking it belongs to the topic's `gateway_id`. Even once broker ACLs
-  land, add a `plug.gateway_id == <topic gateway>` check so a compromised or
-  spoofing gateway can't attribute energy/billing to another tenant's plug.
-  (TECH_DEBT — related to TD#24/§8.)
-- [2026-07-06 audit] **Firmware safety alarms are never consumed.** The firmware
-  publishes `THERMAL_CUTOFF`/`OVERCURRENT_CUTOFF` to `amphive/gateways/{id}/alarms`,
-  but the backend subscribes only to `+/telemetry` + `+/status`, so cutoffs are
-  dropped — no record, no alert (accountability gap; TECH_DEBT #21).
+  without checking it belongs to the topic's `gateway_id`. The per-gateway broker
+  ACLs (2026-07-10) confine a gateway to its own *topics*, so spoofing now
+  requires a real gateway's credentials — but a compromised gateway can still
+  attribute energy/billing to another tenant's plug. Add a
+  `plug.gateway_id == <topic gateway>` check. (TECH_DEBT — related to TD#24/§8.)
+- [Resolved 2026-07-10] ~~**Firmware safety alarms are never consumed.**~~ The
+  backend now subscribes `amphive/gateways/+/alarms`; alarms persist as
+  `gateway_events` rows and feed the CPO events API (verified live in prod).
+  (Found by the 2026-07-06 audit; TECH_DEBT #21.)
 
 ## 4. AuthZ gaps
 
@@ -106,11 +219,14 @@ BFG + force-push) to purge the dead values entirely.
 
 - Wallet credit/debit is now **row-locked** (`SELECT ... FOR UPDATE`) in the stop,
   verify, and webhook paths — the previous race is closed. Remaining hardening:
-  consider a single atomic `UPDATE ... SET balance = balance + :n` and DB-level
-  check constraints to prevent negative balances.
+  consider a single atomic `UPDATE ... SET balance = balance + :n`.
 - [2026-07-06] Money columns migrated from `Float` to `Numeric(12,2)` (Decimal),
   and all wallet math goes through `services/money.to_money` — float rounding
-  drift is closed. A DB-level non-negative-balance CHECK is still not in place.
+  drift is closed.
+- [2026-07-07] **DB-level non-negative-balance CHECK is in place**: Alembic
+  revision `0002_wallet_non_negative` adds `ck_users_coin_balance_non_negative`
+  on `users.coin_balance` (clamping legacy negative rows to 0 first), so no
+  write path — buggy or otherwise — can drive a wallet negative.
 - [2026-07-06] The `stop_charging_session` ledger now debits only what the wallet
   holds (`min(final_cost, balance)`) and records that same delta in `amount` /
   `balance_after` / `coins_spent`, so the ledger reconciles even when a bill
@@ -178,54 +294,58 @@ read as still-open.*
 
 ## 8. Firmware / gateway device security & backend follow-up gaps (2026-07-06 audit)
 
-*New in the 2026-07-06 follow-up audit. These are **open** and, for the device
-items, the highest-severity gaps in the project — an attacker with brief Wi-Fi
-proximity or physical access to a gateway can take it over or harvest the owner's
-Tapo account. Ordered by severity.*
+*Found by the 2026-07-06 follow-up audit; statuses re-checked 2026-07-11 when
+the audit merged (the 2026-07-08…11 work resolved §8.3 and half of §8.6). The
+still-open device items remain the highest-severity gaps in the project — an
+attacker with brief Wi-Fi proximity or physical access to a gateway can take it
+over or harvest the owner's Tapo account. Ordered by severity.*
 
-### 8.1 Provisioning portal is an open, unauthenticated door — **CRITICAL**
+### 8.1 Provisioning portal is an open, unauthenticated door — **CRITICAL, open**
 
-- The setup Access Point is `WIFI_AUTH_OPEN` with an empty password
-  (`firmware/main/main.c:245-247`), and the `/save` handler requires **no
-  authentication** (`main.c:191`).
+- The setup Access Point is `WIFI_AUTH_OPEN` with an empty password and the
+  `/save` handler requires **no authentication** (`firmware/main/main.c`).
 - Anyone within Wi-Fi range during provisioning can (a) **sniff** the submitted
-  Tapo password, Wi-Fi password, and Headscale auth key over the open air, and
-  (b) **POST** arbitrary config to overwrite all of them → full device takeover /
-  redirect to attacker infrastructure.
+  Tapo password, Wi-Fi password, and per-gateway MQTT credentials over the open
+  air, and (b) **POST** arbitrary config to overwrite all of them → full device
+  takeover / redirect to attacker infrastructure.
 - **Fix:** WPA2 on the setup AP with a per-device password (derive from the MAC,
   print on the unit label), a setup PIN/token gating `/save`, and a portal
   timeout. Serve the portal only on the AP interface.
 
-### 8.2 No flash encryption / secure boot — secrets are extractable — **HIGH**
+### 8.2 No flash encryption — NVS secrets are extractable — **HIGH, open**
 
-- `firmware/sdkconfig`: `CONFIG_SECURE_FLASH_ENC_ENABLED` and `CONFIG_SECURE_BOOT`
-  are both **unset**. Wi-Fi password, the full **Tapo account email + password**,
-  and the overlay auth key sit in **plaintext NVS**, readable with
-  `esptool read_flash` given brief physical access.
-- That yields the victim's entire Tapo account plus a working overlay credential.
+- `CONFIG_SECURE_FLASH_ENC_ENABLED` and full `CONFIG_SECURE_BOOT` are **unset**.
+  The Wi-Fi password, the full **Tapo account email + password**, and the
+  gateway's MQTT credentials sit in **plaintext NVS**, readable with
+  `esptool read_flash` given brief physical access — the victim's entire Tapo
+  account plus a credential that impersonates this gateway (scoped to its own
+  topic subtree by the broker ACLs, see §8.3).
+- Improved since the audit: **OTA images are signed** (ECDSA
+  verify-on-update, `sdkconfig.defaults`, fw ≥ 1.4.0) and HTTPS-only, so flash
+  extraction doesn't enable a malicious-update path; the overlay auth key no
+  longer exists on-device (direct MQTT, 2026-07-10).
 - **Fix:** enable flash encryption + Secure Boot v2 for production units; at
   minimum use NVS encryption.
 
-### 8.3 Reusable overlay key + anonymous broker = forge anything — **HIGH**
+### 8.3 ~~Reusable overlay key + anonymous broker = forge anything~~ — **RESOLVED 2026-07-10**
 
-- The Headscale/Tailscale auth key stored on-device is typically reusable.
-  Extracted (§8.2) or sniffed (§8.1), an attacker joins the overlay. The MQTT
-  broker is `allow_anonymous true`, no ACLs, no TLS (`deploy/config/mosquitto.conf`),
-  so **any** overlay node can publish forged telemetry for **any** `plug_id`
-  (drives billing) and send `ON`/`OFF` to **any** gateway's command topic.
-- This is the "bad actor on the overlay" threat and is currently unmitigated
-  beyond "you must be on the overlay" (which §8.1/§8.2 make cheap to breach).
-- **Fix:** (a) ephemeral, single-use, **tagged** auth keys with Headscale ACLs
-  restricting each gateway to just the broker; (b) broker **auth** (per-gateway
-  credentials or client-cert) + **ACLs** limiting a gateway to
-  `amphive/gateways/<own-id>/#` publish and its own command topic subscribe;
-  (c) **TLS** on 1883. (Extends §3's open-broker note; TD#3 auth item.)
+- Was: an extracted/sniffed overlay key joined the attacker to the tailnet,
+  where the broker was anonymous with no ACLs — forged telemetry or `ON`/`OFF`
+  for **any** plug/gateway.
+- The fix shipped as part of the direct-MQTT pivot (see §3): devices no longer
+  hold overlay keys at all; the broker enforces **per-gateway credentials**
+  (username == gateway_id, shared account retired), **topic ACLs**
+  (`pattern readwrite amphive/gateways/%u/#` — a gateway can only touch its own
+  subtree), and **TLS** on the public 8883. Verified in prod 2026-07-10.
+- Residual risk: a credential extracted via §8.1/§8.2 still impersonates *that
+  one gateway* within its own subtree — which is why the backend-side
+  `plug.gateway_id` check (§3) still matters.
 
-### 8.4 Boot-time fallback into the open portal — **MEDIUM**
+### 8.4 Boot-time fallback into the open portal — **MEDIUM, open**
 
 - On boot with Wi-Fi down, the device drops into the open portal
-  (`main.c:701-708`). An attacker who deauths/jams the STA link and forces a
-  reboot lands the gateway in §8.1's unauthenticated portal.
+  (`firmware/main/main.c`). An attacker who deauths/jams the STA link and
+  forces a reboot lands the gateway in §8.1's unauthenticated portal.
 - **Fix:** require a physical button-hold to enter provisioning instead of
   auto-opening it on transient Wi-Fi loss; keep retrying STA otherwise.
 
@@ -240,31 +360,41 @@ capture it here:
 - Prefer carrying the target `local_ip` in the backend `ON` command payload (the
   backend already stores `plugs.local_ip`) over shipping a plug roster to the
   device — fewer secrets on-device.
-- Broker ACLs stay **per-gateway**, not per-plug: one gateway legitimately drives
-  several plugs under `amphive/gateways/<id>/plugs/+/…`.
+- Broker ACLs are **per-gateway**, not per-plug (live since 2026-07-10:
+  `pattern readwrite amphive/gateways/%u/#`) — keep it that way: one gateway
+  legitimately drives several plugs under its own subtree.
 - Backend must validate `plug.gateway_id == <topic gateway>` before billing (see
   §3) so a gateway can only report for plugs it actually owns.
 
-### 8.6 Backend authn hardening — **LOW/MEDIUM**
+### 8.6 Backend authn hardening — **LOW/MEDIUM, partly resolved**
 
-- **JWT: 7-day expiry, no revocation/blacklist** (`backend/services/auth.py`). A
-  stolen token is valid for a week. Consider short-lived access tokens + refresh,
-  or a revocation list — especially for CPO/admin.
-- **No rate limiting** on `/api/auth/login` and `/api/auth/register` —
+- ~~**JWT: 7-day expiry, no revocation/blacklist**~~ **Resolved 2026-07-08**:
+  tokens carry a per-user `token_version` epoch re-checked each request;
+  logout revokes server-side, and expiry is env-configurable
+  (`JWT_EXPIRY_DAYS`) — see §2.
+- [Open] **No rate limiting** on `/api/auth/login` and `/api/auth/register` —
   brute-force / account-enumeration open. Add rate limiting (login already returns
   a generic "Invalid email or password").
-- **Registration input** isn't validated: `email` is a bare `str` (not the
-  imported `EmailStr`) and there's no password-strength rule (`backend/main.py:210`).
+- [Open] **Registration input** isn't validated: `email` is a bare `str` (not
+  `EmailStr`) and there's no password-strength rule (`backend/schemas.py`;
+  TD#30).
 
 ---
 
 ## Quick remediation checklist
 
 Status — open items and recently closed:
+- [x] **Web HTTPS front door deployed + verified in prod** (2026-07-11):
+      Caddy on 80/443, validated Let's Encrypt cert, http→https redirect.
+      See §3 and `deploy/docs/web_tls_rollout.md`.
+- [ ] Drop tcp:8000 from `allow-amphive-ports` (nothing public needs the
+      backend's direct port now that Caddy fronts the web tier); add HSTS;
+      replace DuckDNS with a real domain (proven SPOF — §3/§6).
 - [x] **Rotate** WireGuard keys, DuckDNS token, Tapo & DB passwords at the source
       (2026-07-06). Dead old values remain in git history — *optional* scrub.
 - [x] **Commit + deploy** the CORS allowlist (2026-07-06) — live in prod.
-- [ ] Add MQTT broker **auth** (firmware credentials field needed).
+- [x] Add MQTT broker **auth** — enforced 2026-07-07; per-gateway accounts +
+      topic ACLs + TLS on public 8883 as of 2026-07-10 (see §3, §8.3).
 - [ ] Set a strong `JWT_SECRET_KEY` in every environment (enforced by
       deploy.ps1 as of 2026-07-05; backend falls back to an ephemeral key).
 - [x] MQTT bound to the overlay IP + public 1883 firewall rule dropped (2026-07-06).
@@ -275,20 +405,23 @@ Status — open items and recently closed:
       `uq_ledger_razorpay_payment_id` + `IntegrityError` handling in
       `_credit_topup` closes the concurrent /verify + webhook double-credit race.
 
-Device security — open (2026-07-06 audit, see [§8](#8-firmware--gateway-device-security--backend-follow-up-gaps-2026-07-06-audit)):
+Device security (2026-07-06 audit, statuses as of 2026-07-11 — see
+[§8](#8-firmware--gateway-device-security--backend-follow-up-gaps-2026-07-06-audit)):
 - [ ] **Lock down the provisioning portal** — WPA2 setup AP + PIN/token on
       `/save` + timeout (§8.1, CRITICAL).
 - [ ] **Enable flash encryption + Secure Boot v2** so NVS secrets (Tapo account,
-      overlay key) aren't extractable (§8.2, HIGH).
-- [ ] **Ephemeral/tagged overlay keys + broker auth/ACL/TLS** so an overlay peer
-      can't forge telemetry or ON/OFF for arbitrary plugs (§8.3, HIGH).
+      MQTT credentials) aren't extractable (§8.2, HIGH).
+- [x] ~~Ephemeral/tagged overlay keys + broker auth/ACL/TLS~~ **Resolved
+      2026-07-10** — devices left the overlay; per-gateway broker credentials +
+      topic ACLs + TLS are live (§8.3).
 - [ ] **Require a button-hold for provisioning** instead of auto-opening the open
       portal on Wi-Fi loss (§8.4, MEDIUM).
 - [ ] **Validate `plug.gateway_id` against the topic gateway** before billing
       telemetry (§3, §8.5).
-- [ ] **Consume `+/alarms`** so THERMAL/OVERCURRENT cutoffs are recorded/alerted
-      (§3, TD#21).
-- [ ] **Shorter-lived JWTs / revocation + auth rate limiting** (§8.6).
+- [x] ~~Consume `+/alarms`~~ **Resolved 2026-07-10** — alarms persist as
+      `gateway_events` + CPO events feed (§3, TD#21).
+- [ ] **Auth rate limiting** on login/register (§8.6) — JWT revocation itself
+      shipped 2026-07-08 (§2).
 
 Done (2026-07-05):
 - [x] Remove committed secrets from tracked files; add `.example` / env-var paths

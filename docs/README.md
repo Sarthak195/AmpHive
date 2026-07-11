@@ -36,7 +36,7 @@ This folder is the **technical reference** for the AmpHive platform, and the
 
 ## Project map (one-liner per component)
 
-- **`backend/`** — FastAPI app (single `main.py`, 37 REST routes), SQLAlchemy 2.0 + async PostgreSQL, MQTT bridge, Razorpay payments, Socket.io live telemetry with time-series persistence, and a "Direct Mode" Tapo driver. See [API_REFERENCE](API_REFERENCE.md) / [DATA_MODEL](DATA_MODEL.md).
+- **`backend/`** — FastAPI app (36 REST routes in `routers/`, schemas in `schemas.py`, assembly-only `main.py`), SQLAlchemy 2.0 + async PostgreSQL with Alembic migrations, authenticated MQTT bridge, Razorpay payments, Socket.io live telemetry with time-series persistence (90-day retention), and a dormant "Direct Mode" Tapo driver. See [API_REFERENCE](API_REFERENCE.md) / [DATA_MODEL](DATA_MODEL.md).
 - **`frontend/`** — React 19 + Vite SPA (driver web app). Login/register, plug-ID charging, live Socket.io session monitor, Razorpay top-up, charger groups. See [ARCHITECTURE](ARCHITECTURE.md#frontend).
 - **`firmware/`** — ESP32-S3 (ESP-IDF) gateway. A near-complete from-scratch Tailscale client (`microlink`) + MQTT control loop + safety watchdogs, with a **real KLAP v2** Tapo plug driver. See [FIRMWARE](FIRMWARE.md).
 - **`deploy/`** — Docker Compose (dev/prod), GCP deploy scripts, K8s manifests, Mosquitto/WireGuard configs, and runbooks. See [DEPLOYMENT](DEPLOYMENT.md).

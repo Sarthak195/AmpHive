@@ -10,7 +10,6 @@
  * are shown the setup page instead.
  */
 
-import React from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import Navbar from './components/Navbar';
 import Home from './pages/Home';
@@ -19,42 +18,15 @@ import Session from './pages/Session';
 import Login from './pages/Login';
 import Groups from './pages/Groups';
 import History from './pages/History';
-import { useAuth } from './contexts/AuthContext';
+import { ProtectedRoute, CpoProtectedRoute } from './components/ProtectedRoutes';
 
 // CPO Admin Dashboard pages
 import CpoSetup from './pages/cpo/CpoSetup';
 import CpoDashboard from './pages/cpo/CpoDashboard';
+import CpoGateways from './pages/cpo/CpoGateways';
 import CpoPlugs from './pages/cpo/CpoPlugs';
 import CpoGroups from './pages/cpo/CpoGroups';
 import CpoSessions from './pages/cpo/CpoSessions';
-
-/**
- * Protected route wrapper — redirects to /login if user is not authenticated.
- * Used for routes that require a signed-in user (TopUp, Session, Groups).
- */
-const ProtectedRoute = ({ children }) => {
-  const { user } = useAuth();
-  if (!user) {
-    return <Navigate to="/login" replace />;
-  }
-  return children;
-};
-
-/**
- * CPO-protected route wrapper — requires authentication AND the 'cpo' role.
- * Users who are authenticated but not CPOs are redirected to /cpo (setup page).
- * Unauthenticated users are redirected to /login.
- */
-const CpoProtectedRoute = ({ children }) => {
-  const { user } = useAuth();
-  if (!user) {
-    return <Navigate to="/login" replace />;
-  }
-  if (user.role !== 'cpo' && user.role !== 'admin') {
-    return <Navigate to="/cpo" replace />;
-  }
-  return children;
-};
 
 function App() {
   return (
@@ -88,6 +60,9 @@ function App() {
           {/* CPO Dashboard routes — require auth + CPO role */}
           <Route path="/cpo/dashboard" element={
             <CpoProtectedRoute><CpoDashboard /></CpoProtectedRoute>
+          } />
+          <Route path="/cpo/gateways" element={
+            <CpoProtectedRoute><CpoGateways /></CpoProtectedRoute>
           } />
           <Route path="/cpo/plugs" element={
             <CpoProtectedRoute><CpoPlugs /></CpoProtectedRoute>

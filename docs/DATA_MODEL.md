@@ -1,12 +1,15 @@
 # AmpHive — Data Model
 
-*Verified against `backend/database/models.py`, `schema.sql`, `schema_v2.sql` on 2026-07-06.*
+*Verified against `backend/database/models.py` on 2026-07-07.*
 
-> **Source of truth at runtime is `models.py`.** `init_db()` (`backend/database/db.py`)
-> calls SQLAlchemy `Base.metadata.create_all` on startup — the `.sql` files are
-> **not executed by the app**; they are reference/manual-migration artifacts.
-> This matters because the SQL files carry constraints and indexes the ORM omits
-> (see [§4](#4-schema-vs-orm-drift)).
+> **Source of truth is `models.py`, applied via Alembic** (adopted 2026-07-07).
+> `init_db()` (`backend/database/db.py`) runs `alembic upgrade head` at startup
+> (stamping pre-Alembic databases at the frozen baseline
+> `backend/migrations/versions/0001_baseline.py` first). The old
+> `create_all` + `_INPLACE_UPGRADES` path and the drifted reference
+> `schema.sql`/`schema_v2.sql` files are **gone** — schema changes ship as
+> Alembic revisions, and CI (`backend/tests/test_migrations.py`) fails when
+> migrations and models disagree.
 
 ORM: SQLAlchemy 2.0 `DeclarativeBase` with `mapped_column`. Enums use
 `values_callable`, so the DB stores the lowercase string values.
@@ -32,12 +35,28 @@ Owns users, gateways, sessions, charger_groups (cascade delete-orphan).
 ### `users`
 `id` PK · `tenant_id` → tenants (SET NULL, nullable) · `email` unique ·
 `hashed_password` · `full_name` · `role` (default `driver`) ·
-`coin_balance` **NUMERIC(12,2)** (Decimal, default 0.00) · `created_at`.
+`coin_balance` **NUMERIC(12,2)** (Decimal, default 0.00) ·
+`token_version` INTEGER (default 0; JWT-revocation epoch, embedded as the
+`tv` claim and re-checked per request — revision `0003_token_version`,
+2026-07-08) · `created_at`.
+CHECK `ck_users_coin_balance_non_negative` (`coin_balance >= 0`, revision
+`0002_wallet_non_negative`, 2026-07-07) — the DB-level backstop behind the
+row-locked, clamped wallet debits.
 
 ### `gateways`
 `id` **VARCHAR(50) PK** (caller-supplied MAC/UUID) · `tenant_id` → tenants
 (CASCADE, **not null**) · `name` · `vpn_ip` unique · `status` (default `offline`)
-· `last_seen_at` (`onupdate=now`) · `created_at`. Owns plugs.
+· `firmware_version` VARCHAR(32) nullable (fw last reported in the `online`
+status; rev `0006`, LWT never clobbers it) · `latitude`/`longitude` nullable
+· `last_seen_at` · `created_at`. Owns plugs.
+
+`last_seen_at` is the **liveness marker**: written only by the MQTT handlers
+(status connect/LWT, plus a telemetry-driven refresh throttled to once per
+gateway per minute) and read by the session-start liveness gate
+(`gateway_is_live`: status ONLINE **and** seen within
+`GATEWAY_LIVENESS_WINDOW_SEC`, default 120 s). The old `onupdate=now` hook was
+removed 2026-07-06 — an unrelated row edit must not make a dead gateway look
+freshly seen.
 
 ### `plugs`
 `id` PK · `gateway_id` → gateways (CASCADE) · `name` · `local_ip` ·
@@ -49,8 +68,13 @@ Owns users, gateways, sessions, charger_groups (cascade delete-orphan).
 `id` PK · `tenant_id` → tenants (CASCADE) · `user_id` → users (CASCADE) ·
 `plug_id` → plugs (CASCADE) · `started_at` · `ended_at` (nullable) ·
 `energy_kwh` float · `peak_power_w` float *(populated from inbound telemetry in
-`mqtt_manager.py`)* · `coins_spent` **NUMERIC(12,2)** (Decimal) · `status`
-(default `active`).
+`mqtt_manager.py`)* · `last_telemetry_at` (nullable) · `coins_spent`
+**NUMERIC(12,2)** (Decimal) · `status` (default `active`).
+
+`last_telemetry_at` (added 2026-07-06) is the session reaper's staleness
+signal — stamped by `MQTTManager._persist_telemetry` on every reading
+attributed to the session; the reaper judges sessions by
+`COALESCE(last_telemetry_at, started_at)`.
 
 ### `ledger_transactions`
 Double-entry-style wallet audit. `id` PK · `user_id` → users (CASCADE) ·
@@ -87,6 +111,19 @@ VARCHAR(20) (raw firmware signal, nullable). Composite indexes on `(plug_id, rec
 the buffered batch-flush service `backend/services/telemetry_persistence.py`; read
 by `GET /api/cpo/analytics/telemetry` via `date_trunc` aggregation.
 
+### `gateway_events`
+Operational events/alarms feed for the CPO portal (firmware safety alarms
+`THERMAL_CUTOFF` / `OVERCURRENT_CUTOFF` / `UNAUTHORIZED_ON` + OTA lifecycle
+notices), fed by `services/mqtt_manager._handle_gateway_alarm` and read by
+`GET /api/cpo/events` (ack'd via `POST /api/cpo/events/{id}/ack`). `id`
+**BIGINT PK** · `tenant_id` → tenants (CASCADE) · `gateway_id` → gateways
+VARCHAR(50) (CASCADE) · `plug_id` → plugs (SET NULL, nullable) · `event_type`
+VARCHAR(48) · `severity` VARCHAR(16) (default `warning`;
+`critical`|`warning`|`info`) · `detail` VARCHAR(255) (nullable) ·
+`acknowledged` bool (default false) · `created_at` TIMESTAMPTZ. Composite
+indexes on `(tenant_id, created_at)` and `(gateway_id, created_at)`. Added by
+Alembic revision `0005_gateway_events` (2026-07-10).
+
 ## 3. Relationships
 
 ```
@@ -96,6 +133,7 @@ tenants ─┬─< users ─┬─< charging_sessions >─┬─ plugs >── g
          ├─< gateways ─< plugs               │
          ├─< charging_sessions               │
          ├─< telemetry_readings >── plugs / charging_sessions (nullable)
+         ├─< gateway_events >── gateways / plugs (nullable)
          └─< charger_groups ─┬─< plugs       │
                              └─< group_memberships
 ```
@@ -104,28 +142,24 @@ A plug is reachable by a user if it is **ungrouped** (`group_id IS NULL`, public
 to everyone), in a **public** group, or in a **private** group the user has
 joined via `access_code`.
 
-## 4. Schema-vs-ORM drift
+## 4. Migrations (Alembic, since 2026-07-07)
 
-- **`schema.sql`** = original full schema: tenants, users, gateways, plugs,
-  charging_sessions, ledger_transactions + the 5 enum types. It does **not**
-  include `charger_groups`, `group_memberships`, or `plugs.group_id`.
-- **`schema_v2.sql`** = a *migration delta* only: `CREATE TABLE IF NOT EXISTS
-  charger_groups / group_memberships` and `ALTER TABLE plugs ADD COLUMN group_id`.
-  Apply **after** `schema.sql`.
-- **`models.py`** = the union of all 9 tables and the authoritative runtime schema.
-- **`telemetry_readings`** is the exception to the drift pattern: its three
-  composite indexes are declared in `models.py` (`__table_args__`), so
-  `create_all` creates them at runtime. `schema.sql` mirrors the same DDL for
-  reference parity.
-
-Constraints/indexes present in the SQL files but **missing from the ORM** (so a
-DB created by the running app will not have them):
-
-| Missing in ORM | Defined in |
-|----------------|-----------|
-| `UNIQUE (gateway_id, local_ip)` on `plugs` | schema.sql |
-| `UNIQUE (user_id, group_id)` on `group_memberships` (dedup is enforced only in app logic) | schema_v2.sql |
-| All performance `CREATE INDEX`es | schema.sql / schema_v2.sql |
+- **`backend/migrations/versions/0001_baseline.py`** — frozen PostgreSQL DDL
+  snapshot of the full 9-table schema at adoption (includes everything the
+  retired `_INPLACE_UPGRADES` produced). Never edit or regenerate it. (The
+  live schema is now **10 tables** — `gateway_events` arrived later via
+  revision `0005_gateway_events`, 2026-07-10.)
+- **New schema change** = new revision: `alembic -c backend/alembic.ini
+  revision --autogenerate -m "..."` (autogenerate needs a reachable database —
+  use the CI postgres or the VM; dev boxes run no DB by policy).
+- **Startup** applies `upgrade head` automatically; a database predating
+  Alembic (built by the old `create_all` path) is detected (tables exist, no
+  `alembic_version`) and stamped at the baseline first.
+- The old `schema.sql`/`schema_v2.sql` reference files are deleted. Two
+  constraints they described were never in the ORM and therefore do **not**
+  exist in any real database (still true today — add as revisions if wanted):
+  `UNIQUE (gateway_id, local_ip)` on `plugs`, and `UNIQUE (user_id, group_id)`
+  on `group_memberships` (dedup enforced only in app logic).
 
 ## 5. Notes / gaps
 
@@ -135,7 +169,8 @@ DB created by the running app will not have them):
   verify, and webhook paths), so concurrent top-ups/debits no longer race.
 - Time-series telemetry **is** now persisted to `telemetry_readings` via a
   buffered background batch-flush (`backend/services/telemetry_persistence.py`),
-  decoupled from the live in-memory `TelemetryStore` (which still drives SSE).
+  decoupled from the live in-memory `TelemetryStore` (which drives the live
+  Socket.io stream).
   This uses **plain Postgres** + `date_trunc` aggregation; the spec's TimescaleDB
   (hypertables, native retention, continuous aggregates) is *not* used and is a
   possible future upgrade. Retention is an opt-in periodic prune gated by

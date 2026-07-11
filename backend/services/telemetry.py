@@ -23,6 +23,13 @@ from typing import Dict, Optional, AsyncGenerator
 # Default 5.0 means 1 kWh costs 5 coins (= ₹5 at the default 1:1 coin:rupee rate).
 COINS_PER_KWH = float(os.getenv("COINS_PER_KWH", "5.0"))
 
+# A live telemetry snapshot older than this (seconds) is flagged `is_stale` in
+# the stream so the frontend can warn the driver that the gateway link dropped
+# instead of showing frozen values as if they were current. Should comfortably
+# exceed the fastest firmware cadence (1 s while a listener is attached) plus
+# network jitter; a dead gateway crosses it within a few missed reports.
+TELEMETRY_STALE_AFTER_SEC = float(os.getenv("TELEMETRY_STALE_AFTER_SEC", "15"))
+
 
 @dataclass
 class TelemetrySnapshot:
@@ -39,6 +46,7 @@ class TelemetrySnapshot:
     duration_sec: int = 0         # Session elapsed time in seconds
     cost_coins: float = 0.0       # Running cost deducted from wallet
     status: str = "idle"          # "idle" | "starting" | "charging" | "completed"
+    relay_on: bool = False        # Plug's actual reported relay state (device_on)
     updated_at: float = field(default_factory=time.time)
 
     def to_dict(self) -> dict:
@@ -87,7 +95,8 @@ class TelemetryStore:
 
     def update(self, plug_id: int, power_w: float, current_a: float,
                energy_kwh: float, status: str = "charging",
-               cost_coins: Optional[float] = None) -> None:
+               cost_coins: Optional[float] = None,
+               voltage_v: float = 230.0, relay_on: bool = False) -> None:
         """
         Called by the MQTT manager when a telemetry payload arrives from
         a gateway. Updates the in-memory snapshot and signals any waiting
@@ -110,10 +119,12 @@ class TelemetryStore:
             plug_id=plug_id,
             power_w=power_w,
             current_a=current_a,
+            voltage_v=voltage_v,
             energy_kwh=energy_kwh,
             duration_sec=elapsed,
             cost_coins=cost_coins,
             status=status,
+            relay_on=relay_on,
         )
 
         # Signal any SSE consumers waiting on this plug's data
@@ -165,6 +176,12 @@ class TelemetryStore:
                 snapshot_dict = snapshot.to_dict()
                 if plug_id in self._session_start_times:
                     snapshot_dict["duration_sec"] = int(time.time() - self._session_start_times[plug_id])
+                # Flag stale data so the client can warn the driver the gateway
+                # link dropped rather than presenting frozen values as live.
+                # Age is measured from when this snapshot was last written by MQTT.
+                age = time.time() - snapshot.updated_at
+                snapshot_dict["is_stale"] = age > TELEMETRY_STALE_AFTER_SEC
+                snapshot_dict["age_sec"] = round(age, 1)
                 yield snapshot_dict
 
                 # Stop streaming if the session is completed

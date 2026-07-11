@@ -26,7 +26,9 @@ Everything cloud-side is identical between the two; only the last hop differs.
 
 | You want to change… | Go to |
 |---|---|
-| A REST endpoint or its schema | `backend/main.py` (all 37 routes + all Pydantic models are here) |
+| A REST endpoint | `backend/routers/{auth,groups,plugs,sessions,payments,direct,cpo}.py` (since the 2026-07-07 split; `main.py` is assembly only) |
+| A request/response schema | `backend/schemas.py` |
+| Runtime handles (mqtt_manager, telemetry_store, …) | `backend/state.py` (set by the lifespan — always access as `state.x`, never from-import) |
 | Auth / JWT / password hashing | `backend/services/auth.py` |
 | Role gating on `/api/cpo/*` | `backend/services/rbac.py` |
 | MQTT publish/ingest contract | `backend/services/mqtt_manager.py` + [MQTT_CONTRACT.md](MQTT_CONTRACT.md) |
@@ -90,18 +92,22 @@ commands you run against the VM there.**
 
 - **The VM public IP is ephemeral** and is recorded inconsistently across docs.
   Always re-check with `gcloud compute instances list`. Prefer the DuckDNS name.
-- **`create_all` never alters existing tables.** New columns need a hand-written
-  idempotent `ALTER` in `db.py:_INPLACE_UPGRADES` (there is no migration tool).
-  The `.sql` files are reference-only and have drifted.
-- **Money is stored as `Float`.** Expect rounding; don't compare balances for
-  exact equality.
-- **MQTT is anonymous and (by default) public.** Forged telemetry feeds billing.
-  Set `MQTT_BIND_IP` and drop the public 1883 firewall rule before real users.
+- **Schema changes are Alembic revisions** (since 2026-07-07): add a revision
+  under `backend/migrations/versions/` (`alembic -c backend/alembic.ini
+  revision --autogenerate` — needs a reachable DB: the CI postgres or the VM;
+  never edit `0001_baseline`). Startup runs `upgrade head` automatically and
+  stamps pre-Alembic databases. The old `_INPLACE_UPGRADES` and `.sql` files
+  are gone; CI fails if the migrations drift from the models.
+- **Money is `NUMERIC(12,2)`/Decimal** (since 2026-07-06); route all wallet
+  math through `services/money.to_money`, never raw floats.
+- **MQTT requires authentication** (since 2026-07-07): broker credentials come
+  from `.env` (`MQTT_*`), and every gateway needs `mqtt_user`/`mqtt_pwd` in
+  NVS — an unprovisioned gateway cannot connect.
 - **Firmware builds on ESP-IDF v5.3.3**, not v6 (v6 causes a LoadProhibited panic
   on custom netif registration). `eim_config.toml` mentions v6.0.1 — ignore it
   for building; use v5.3.x.
-- **Two live-telemetry transports exist** (SSE + Socket.io). The frontend uses
-  Socket.io; the SSE endpoint is legacy/fallback.
+- **Live telemetry is Socket.io only** (the legacy SSE endpoint was retired
+  2026-07-07).
 
 ## 8. First things to fix if you inherit this today
 See [TODO.md](TODO.md) and [TECH_DEBT.md](TECH_DEBT.md). The top three:

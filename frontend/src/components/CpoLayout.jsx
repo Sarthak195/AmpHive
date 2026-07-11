@@ -9,7 +9,7 @@
  * the CPO portal from the driver-facing app.
  */
 
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 
@@ -19,6 +19,7 @@ import { useAuth } from '../contexts/AuthContext';
  */
 const NAV_ITEMS = [
   { path: '/cpo/dashboard', label: 'Dashboard', icon: '📊' },
+  { path: '/cpo/gateways', label: 'Gateways', icon: '📡' },
   { path: '/cpo/plugs', label: 'Plugs', icon: '🔌' },
   { path: '/cpo/groups', label: 'Groups', icon: '👥' },
   { path: '/cpo/sessions', label: 'Sessions', icon: '⚡' },

@@ -7,7 +7,7 @@
  * Data source: /api/cpo/analytics/sessions, /api/cpo/plugs
  */
 
-import React, { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import CpoLayout from '../../components/CpoLayout';
 import api from '../../api/client';
 
@@ -80,6 +80,42 @@ const CpoSessions = () => {
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
+  const [exporting, setExporting] = useState(false);
+
+  // Download the current filtered session history as CSV. Uses a raw
+  // authenticated fetch (the JSON api client can't hand back a file blob),
+  // then triggers a browser download of the text/csv attachment.
+  const exportCsv = async () => {
+    setExporting(true);
+    try {
+      const params = new URLSearchParams();
+      params.set('days', daysFilter);
+      if (plugFilter) params.set('plug_id', plugFilter);
+      if (statusFilter) params.set('status_filter', statusFilter);
+
+      const base = import.meta.env.VITE_API_URL || '';
+      const token = localStorage.getItem('amphive_token');
+      const res = await fetch(`${base}/api/cpo/analytics/sessions.csv?${params.toString()}`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      if (!res.ok) throw new Error(`Export failed (${res.status})`);
+
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `amphive-sessions-${new Date().toISOString().slice(0, 10)}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error('CSV export failed:', err);
+    } finally {
+      setExporting(false);
+    }
+  };
+
   /**
    * Calculate summary stats from the current sessions list.
    */
@@ -140,6 +176,16 @@ const CpoSessions = () => {
             <option key={opt.value} value={opt.value}>{opt.label}</option>
           ))}
         </select>
+
+        <button
+          className="btn btn-ghost btn-sm"
+          onClick={exportCsv}
+          disabled={exporting || sessions.length === 0}
+          title="Download the filtered sessions as CSV"
+          style={{ marginLeft: 'auto' }}
+        >
+          {exporting ? 'Exporting…' : '⬇ Export CSV'}
+        </button>
       </div>
 
       {/* Summary Stats Bar */}

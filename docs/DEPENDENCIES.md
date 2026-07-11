@@ -13,20 +13,23 @@ thin service or the data layer. The import graph is acyclic
 (`main.py` → `services/*` → `database/*`).
 
 ```
-main.py  (FastAPI app — 35 REST endpoints, all schemas, lifespan)
+main.py  (app assembly only since 2026-07-07: lifespan, CORS, health, router includes, Socket.io wrap)
 │
-├── database/db.py         async engine + async_sessionmaker + get_db + init_db (create_all)
+├── routers/               7 route modules (auth, groups, plugs, sessions, payments, direct, cpo)
+├── schemas.py             all Pydantic request/response models
+├── state.py               mutable runtime handles (mqtt_manager, telemetry_store, …) set by lifespan
+├── database/db.py         async engine + async_sessionmaker + get_db + init_db (alembic upgrade head)
 │    └── database/models.py → Base
-├── database/models.py     9 ORM tables + 5 enums  (runtime source of truth)
+├── database/models.py     9 ORM tables + 5 enums  (source of truth, applied via Alembic)
 │    └── sqlalchemy / sqlalchemy.orm, enum
 ├── database/init_db.py    standalone DB-init helper (duplicates db.py:init_db — see §5)
-├── database/schema.sql / schema_v2.sql   reference SQL, NOT executed by the app
+├── migrations/            Alembic env.py + versions/ (0001_baseline = frozen full schema)
 │
 ├── services/auth.py       JWT (python-jose, HS256, 7-day) + bcrypt (passlib) + get_current_user
 ├── services/rbac.py       require_role(...) dependency factory → guards all /api/cpo/* routes
 ├── services/mqtt_manager.py  paho-mqtt bridge: publishes ON/OFF; ingests telemetry
 │                             (updates TelemetryStore + persists energy/peak_power) & status
-├── services/telemetry.py  in-memory TelemetryStore singleton + SSE generator (COINS pricing)
+├── services/telemetry.py  in-memory TelemetryStore singleton + async stream() (COINS pricing)
 ├── services/socketio_manager.py Socket.io server, auth, session rooms, and telemetry broadcasting
 ├── services/payments.py   razorpay create-order / verify / webhook (HMAC, idempotent credit)
 ├── services/tapo_direct.py  Direct-Mode Tapo driver (tapo lib or HTTP relay via TAPO_RELAY_URL)
@@ -47,7 +50,6 @@ main.py  (FastAPI app — 35 REST endpoints, all schemas, lifespan)
 | `python-dotenv` | `.env` loading |
 | `razorpay` | Payment gateway SDK |
 | `python-socketio`, `python-engineio` | Socket.io server and engine for real-time WebSockets |
-| `sse-starlette` | Server-Sent Events (legacy fallback) |
 | `tapo` | Rust-backed TP-Link Tapo control (Direct Mode) |
 
 ---
@@ -121,7 +123,7 @@ main/CMakeLists.txt → SRCS main.c tapo_protocol.c session_nvs.c offline_log.c
 
 | File | Why it's critical |
 |------|-------------------|
-| `backend/main.py` | All 35 endpoints, business logic, and Pydantic schemas |
+| `backend/main.py` | App assembly only (lifespan, CORS, health, router includes, Socket.io wrap); routes live in `backend/routers/`, schemas in `backend/schemas.py` |
 | `backend/database/models.py` | All ORM models — changes alter the runtime DB schema |
 | `backend/services/auth.py` | JWT secret, password hashing, auth dependency for most routes |
 | `backend/services/rbac.py` | Role enforcement for the entire CPO surface |
@@ -140,8 +142,8 @@ main/CMakeLists.txt → SRCS main.c tapo_protocol.c session_nvs.c offline_log.c
 
 | File | Status | Recommendation |
 |------|--------|----------------|
-| `backend/database/init_db.py` | Duplicates `db.py:init_db()` | Consolidate or remove |
-| `backend/database/schema.sql` / `schema_v2.sql` | Reference only — not executed by the app | Keep as reference; they carry constraints/indexes the ORM omits (see [DATA_MODEL.md](DATA_MODEL.md#4-schema-vs-orm-drift)) |
+| `backend/database/init_db.py` | Duplicates `db.py:init_db()` (and predates Alembic) | Consolidate or remove |
+| ~~`backend/database/schema.sql` / `schema_v2.sql`~~ | **Deleted 2026-07-07** — replaced by Alembic (`backend/migrations/`, see [DATA_MODEL.md §4](DATA_MODEL.md#4-migrations-alembic-since-2026-07-07)) | — |
 | `frontend/README.md` | Stock Vite template, not project docs | Replace with project-specific notes |
 
 > `frontend/src/api/mockSse.js` (a former Phase-1 leftover) has already been

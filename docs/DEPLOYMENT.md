@@ -2,11 +2,10 @@
 
 *Verified against `deploy/`, `scripts/`, and `tools/` on 2026-07-02.*
 
-There are **two parallel deployment models** in the repo:
-1. **Docker Compose on a GCP Compute Engine VM** — this is the **live/canonical**
-   deployment.
-2. **Kubernetes (K3s) manifests** under `deploy/k8s/` — present and internally
-   consistent, but **not** what production runs. Treat as an alternative/future.
+The deployment model is **Docker Compose on a GCP Compute Engine VM**.
+(The K3s manifests under `deploy/k8s/` were **retired 2026-07-07** — see
+[§5](#5-kubernetes-manifests-deployk8s-retired) and `deploy/k8s/README.md`;
+they are unmaintained reference material, not an alternative.)
 
 ---
 
@@ -19,17 +18,22 @@ There are **two parallel deployment models** in the repo:
 | Database | PostgreSQL 15 running as a **Docker container** (`amphive-db`) on the VM. Data persists in the `postgres_data` named Docker volume. |
 | ~~Cloud SQL~~ | ~~`amphive-db-in`~~ — **Decommissioned and deleted** on 2026-06-29. |
 
-The VM runs `docker-compose.prod.yml` (version `3.7`) from a flat `~/amphive/` directory
-(`docker-compose.yml`, `mosquitto.conf`, `.env`, `backend/`, `frontend/`).
+The VM runs the **TLS compose** (`deploy/docker/docker-compose.tls.yml`, shipped
+as `docker-compose.yml` — the default since 2026-07-11) from a flat `~/amphive/`
+directory (`docker-compose.yml`, `Caddyfile`, `mosquitto.conf`,
+`mosquitto_passwd`, `mosquitto_acl`, `mqtt-certs/`, `.env`, `backend/`,
+`frontend/`). `docker-compose.prod.yml` is the plain-HTTP variant, kept in
+lockstep as the `-NoTls` rollback target.
 
-### Containers (prod compose)
+### Containers (TLS compose)
 
 | Container | Image/build | Port | Notes |
 |-----------|-------------|------|---------|
-| `amphive-db` | `postgres:15-alpine` | internal | Postgres on the VM itself. `POSTGRES_PASSWORD` interpolated from `.env` (value rotated 2026-07-06). |
+| `amphive-caddy` | `caddy:2-alpine` | **80, 443** | The only public web entrypoint. Terminates HTTPS with an auto-renewed Let's Encrypt cert for `CADDY_DOMAIN` (HTTP-01; cert persists in the `caddy_data` volume); HTTP and bare-IP requests redirect to the canonical https origin. |
+| `amphive-frontend` | build `./frontend` | internal | Nginx serves the SPA + proxies `/api/` and `/socket.io/` → backend; reached only by Caddy as `frontend:80`. |
 | `amphive-backend` | build `./backend` | 8000 | env via `${...}` from `.env`; depends on `db` + `mqtt`. |
-| `amphive-frontend` | build `./frontend` | 80 | Nginx serves the SPA + proxies `/api/` → backend |
-| `amphive-mqtt` | `eclipse-mosquitto:2.0` | 1883, 9001 | persistence volumes + healthcheck |
+| `amphive-db` | `postgres:15-alpine` | internal | Postgres on the VM itself. `POSTGRES_PASSWORD` interpolated from `.env` (value rotated 2026-07-06). |
+| `amphive-mqtt` | `eclipse-mosquitto:2.0` | 1883 (overlay-bound), **8883 public TLS** | auth + topic ACLs + persistence volumes + authenticated healthcheck — see [§2](#2-mqtt-broker-config-deployconfigmosquittoconf) |
 
 Restart policy `always`.
 
@@ -47,17 +51,28 @@ Restart policy `always`.
 Root and dev are local stacks (include Postgres); prod targets the VM. The dev
 file omits all secrets, so Direct Mode / Razorpay won't work there.
 
-### Deploy script — `deploy/scripts/deploy.ps1`
+### Deploy script — `deploy/scripts/deploy.ps1` (default: TLS stack; `-NoTls` for plain HTTP)
 
-1. Set `DATABASE_URL=postgresql+asyncpg://postgres:<POSTGRES_PASSWORD>@db:5432/amphive` in
-   local `.env` (the hostname `db` resolves within the Docker Compose network).
+1. Validate `.env` (refuses missing/weak `JWT_SECRET_KEY` / `POSTGRES_PASSWORD` /
+   MQTT credentials) and set
+   `DATABASE_URL=postgresql+asyncpg://postgres:<POSTGRES_PASSWORD>@db:5432/amphive`
+   (the hostname `db` resolves within the Docker Compose network). Reads
+   `CADDY_DOMAIN` (defaults to `amphive.duckdns.org` if missing) and optional
+   `ACME_EMAIL` for the TLS front door.
 2. `tar` up `backend/` + `frontend/` (excluding node_modules/.venv/.git) and
    `gcloud compute scp` the tarball to `~/amphive/`.
-3. SCP `mosquitto.conf` (via `/tmp/` + `sudo mv` to handle permissions),
-   `docker-compose.prod.yml` (as `docker-compose.yml`), and `.env`.
+3. SCP `mosquitto.conf` + the broker TLS certs (via `/tmp/` + `sudo mv` to
+   handle permissions), `docker-compose.tls.yml` (as `docker-compose.yml`;
+   `-NoTls` ships `docker-compose.prod.yml` instead), and `.env`; generate the
+   mosquitto passwd + ACL files and the **Caddyfile** (from
+   `CADDY_DOMAIN`/`ACME_EMAIL`) on the VM.
 4. SSH: extract and `sudo docker-compose up -d --build`.
 
-**Total time:** ~1–2 minutes (no Cloud SQL polling wait).
+**Total time:** ~1–2 minutes (no Cloud SQL polling wait). First TLS deploy also
+needs ~a minute for Caddy's initial Let's Encrypt issuance (requires tcp:80 +
+tcp:443 open — firewall rules `allow-amphive-ports` / `allow-amphive-https` —
+and `CADDY_DOMAIN` resolving to the VM's static IP; the DuckDNS updater cron on
+the VM keeps `amphive.duckdns.org` current).
 
 ### One-time VM bootstrap — `deploy/scripts/startup.sh`
 
@@ -105,18 +120,20 @@ Once completed, the database will be populated with default test accounts (all u
 
 ## 2. MQTT broker config (`deploy/config/mosquitto.conf`)
 
-```
-listener 1883 0.0.0.0
-allow_anonymous true
-persistence true
-persistence_location /mosquitto/data/
-log_dest stdout
-```
+Two listeners, both authenticated (`allow_anonymous false` + passwd file) and
+topic-ACL'd (per-gateway accounts are scoped to `amphive/gateways/<id>/#`):
 
-Single listener on 1883, **anonymous, no TLS**. Compose/K8s also publish port
-9001 (websockets) but the config declares **no 9001 listener**, so that port is
-exposed but not served. Combined with the firewall opening 1883 to `0.0.0.0/0`,
-the broker is effectively an open public endpoint — see [SECURITY.md](SECURITY.md).
+- **8883 (TLS, public)** — the primary **direct-MQTT** path: gateways/agents dial
+  outbound `mqtts://8.231.81.12:8883` and validate the broker cert against the
+  embedded AmpHive CA. Certs live in `~/amphive/mqtt-certs` (shipped by
+  `deploy.ps1`).
+- **1883 (plaintext)** — backend over the internal Docker network + legacy/
+  transition path, published only on the overlay IP (`MQTT_BIND_IP`). To be
+  bound internal-only once no gateway needs it.
+
+The passwd and ACL files are generated on the VM by `deploy.ps1`; per-gateway
+accounts are added with `deploy/scripts/add_gateway_user.ps1`. Full history and
+verification in [SECURITY.md §3](SECURITY.md).
 
 ## 3. Direct-Mode WireGuard tunnel
 
@@ -139,9 +156,11 @@ tunnel. (This file **commits a WireGuard private key** — see [SECURITY.md](SEC
 
 ⚠️ All four hard-code Tapo account credentials — see [SECURITY.md](SECURITY.md).
 
-## 5. Kubernetes manifests (`deploy/k8s/`, not live)
+## 5. Kubernetes manifests (`deploy/k8s/`, RETIRED)
 
-Namespace `amphive`, all Deployments `replicas: 1`. Differs from prod reality:
+**Retired 2026-07-07 (TD#15)** — kept as unmaintained reference only;
+`deploy/k8s/README.md` carries the banner. Known divergence from prod at
+retirement time (namespace `amphive`, all Deployments `replicas: 1`):
 - In-cluster **Postgres** (PVC) instead of Cloud SQL.
 - Backend/frontend pull Docker Hub images `sarthak195/amphive-*:latest` instead
   of building from source — these may be stale/unpublished.
@@ -162,9 +181,10 @@ Reference repos under the author's GitHub (read-only context, not build inputs):
 
 | File | Covers |
 |------|--------|
+| `web_tls_rollout.md` | Caddy HTTPS front door — rollout, verification, rollback |
 | `new_device_setup.md` | Setting up a new dev workstation |
 | `deploy_guide.md` | Cloud hosting, DuckDNS, VPN networking |
-| `deployment_checklist.md` | Step-by-step physical site deployment (contains stale "EC2" wording) |
+| `deployment_checklist.md` | Step-by-step physical site deployment |
 | `gcp_migration_runbook.md` | Full AWS EC2 → GCP, then region migration log |
-| `wireguard_tunnel_setup.md` | Direct-Mode WireGuard setup (pre-generated keys/configs) |
+| `wireguard_tunnel_setup.md` | Direct-Mode WireGuard setup — **retired** (Path B is gone; kept as historical reference) |
 | `phase2_walkthrough.md` | Phase-2 work log |

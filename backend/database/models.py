@@ -15,7 +15,7 @@ import enum
 from datetime import datetime
 from typing import List, Optional
 from decimal import Decimal
-from sqlalchemy import Column, Integer, BigInteger, String, Float, Numeric, Boolean, ForeignKey, DateTime, Enum as SQLEnum, Index, text
+from sqlalchemy import CheckConstraint, Column, Integer, BigInteger, String, Float, Numeric, Boolean, ForeignKey, DateTime, Enum as SQLEnum, Index, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 class Base(DeclarativeBase):
@@ -69,6 +69,14 @@ class Tenant(Base):
 class User(Base):
     __tablename__ = "users"
 
+    # DB-level backstop for the wallet: application code already row-locks and
+    # clamps debits to the available balance, but only this constraint makes a
+    # negative balance impossible through any write path. Added in migration
+    # 0002 (which also clamps pre-existing negative rows to 0).
+    __table_args__ = (
+        CheckConstraint("coin_balance >= 0", name="ck_users_coin_balance_non_negative"),
+    )
+
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     tenant_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("tenants.id", ondelete="SET NULL"), nullable=True)
     email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
@@ -78,6 +86,11 @@ class User(Base):
     # Money: NUMERIC(12,2) → Decimal in Python. All wallet math goes through
     # services.money.to_money to avoid float rounding drift. See models money note.
     coin_balance: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal("0.00"), nullable=False)
+    # Monotonic token epoch: embedded in every JWT as the `tv` claim and
+    # re-checked on each request. Bumping it (logout, password change, admin
+    # revoke) invalidates all previously issued tokens for this user without a
+    # blacklist table. Added in migration 0003.
+    token_version: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
 
     # Relationships
@@ -96,9 +109,17 @@ class Gateway(Base):
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     vpn_ip: Mapped[str] = mapped_column(String(45), unique=True, nullable=False)
     status: Mapped[GatewayStatus] = mapped_column(SQLEnum(GatewayStatus, name="gateway_status", values_callable=lambda x: [e.value for e in x]), default=GatewayStatus.OFFLINE, nullable=False)
+    # Firmware version last reported in the gateway's `online` status payload
+    # (e.g. "1.5.0-direct"). NULL until the gateway first connects and reports
+    # it. Lets a CPO see which gateways need an OTA.
+    firmware_version: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     latitude: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     longitude: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), onupdate=datetime.now, nullable=False)
+    # Liveness marker: written ONLY by the MQTT handlers (status connect/LWT +
+    # throttled telemetry refresh) and read by the session-start liveness gate.
+    # No onupdate hook — an unrelated row edit (e.g. a CPO rename) must not
+    # make a dead gateway look freshly seen.
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
 
     # Relationships
@@ -114,6 +135,11 @@ class Plug(Base):
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     local_ip: Mapped[str] = mapped_column(String(45), nullable=False) # VLAN 20 IP
     plug_model: Mapped[str] = mapped_column(String(50), default="tapo_p110", nullable=False)
+    # Stable device identity reported by the AmpHive Agent's discovery
+    # (brand-scoped, e.g. "kasa:AA:BB:CC:DD:EE:FF"). NULL for ESP-gateway or
+    # manually-provisioned plugs. Used to auto-populate + reconcile agent-
+    # discovered plugs idempotently (the agent then adopts the assigned id).
+    unique_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True, index=True)
     status: Mapped[PlugStatus] = mapped_column(SQLEnum(PlugStatus, name="plug_status", values_callable=lambda x: [e.value for e in x]), default=PlugStatus.OFFLINE, nullable=False)
     current_power_w: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     # Geolocation for the map. NULL = unknown → callers fall back to the plug's
@@ -143,6 +169,10 @@ class ChargingSession(Base):
     ended_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     energy_kwh: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     peak_power_w: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    # Staleness signal for the session reaper: stamped by MQTTManager's
+    # _persist_telemetry on every reading attributed to this session. NULL
+    # until the first reading arrives (the reaper falls back to started_at).
+    last_telemetry_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     # Money: NUMERIC(12,2) → Decimal (energy_kwh/peak_power_w stay Float — measurements).
     coins_spent: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal("0.00"), nullable=False)
     status: Mapped[SessionStatus] = mapped_column(SQLEnum(SessionStatus, name="session_status", values_callable=lambda x: [e.value for e in x]), default=SessionStatus.ACTIVE, nullable=False)
@@ -268,4 +298,42 @@ class TelemetryReading(Base):
         Index("idx_telemetry_plug_recorded", "plug_id", "recorded_at"),
         Index("idx_telemetry_session_recorded", "session_id", "recorded_at"),
         Index("idx_telemetry_tenant_recorded", "tenant_id", "recorded_at"),
+    )
+
+
+# --- Gateway / Plug Events (alarms, faults, operational notices) ---
+
+class GatewayEvent(Base):
+    """
+    Operational events raised by a gateway/plug: firmware safety alarms
+    (THERMAL_CUTOFF, OVERCURRENT_CUTOFF, UNAUTHORIZED_ON), OTA lifecycle
+    notices, and backend-detected conditions. Surfaced to the CPO portal as an
+    alert feed so an operator can see, e.g., a plug that was switched on
+    out-of-band (physical button / Tapo app) with no authorized session.
+
+    Design notes mirror TelemetryReading:
+    - event_type / severity are plain Strings, not PG enums: they are raw
+      firmware/operational signals that evolve without a schema migration.
+    - tenant_id is denormalized (gateway -> tenant) so the CPO feed filters
+      without a join. plug_id is nullable (some events are gateway-wide).
+    - acknowledged lets an operator clear an alert from the active feed
+      without deleting the audit row.
+    """
+    __tablename__ = "gateway_events"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    gateway_id: Mapped[str] = mapped_column(String(50), ForeignKey("gateways.id", ondelete="CASCADE"), nullable=False)
+    plug_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("plugs.id", ondelete="SET NULL"), nullable=True)
+    # e.g. "UNAUTHORIZED_ON", "THERMAL_CUTOFF", "OVERCURRENT_CUTOFF", "OTA_FAILED"
+    event_type: Mapped[str] = mapped_column(String(48), nullable=False)
+    # "critical" | "warning" | "info" — drives feed styling / prioritization.
+    severity: Mapped[str] = mapped_column(String(16), default="warning", nullable=False)
+    detail: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    acknowledged: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+
+    __table_args__ = (
+        Index("idx_gateway_events_tenant_created", "tenant_id", "created_at"),
+        Index("idx_gateway_events_gateway_created", "gateway_id", "created_at"),
     )

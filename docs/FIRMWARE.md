@@ -5,15 +5,19 @@
 *Verified against `firmware/` on 2026-07-06.*
 
 The gateway is an ESP-IDF application targeting **ESP32-S3-N16R8** (16 MB flash /
-8 MB PSRAM). It joins a Tailscale-style overlay, receives MQTT commands, drives a
-local Tapo plug, and enforces edge safety watchdogs. The standout piece is
-`microlink` — a substantial, near-complete **from-scratch Tailscale-protocol
-client written in C**.
+8 MB PSRAM). Since fw **1.3.0** it connects **directly to the public broker over
+outbound MQTT/TLS** (`AMPHIVE_DIRECT_MQTT=1`, the default — NAT/CGNAT-immune, no
+overlay; see [MQTT_CONTRACT.md](MQTT_CONTRACT.md) and [SECURITY.md §3](SECURITY.md)),
+receives MQTT commands, drives a local Tapo plug, and enforces edge safety
+watchdogs. The legacy transport (`AMPHIVE_DIRECT_MQTT=0`) joins a Tailscale-style
+overlay via `microlink` — a substantial, near-complete **from-scratch
+Tailscale-protocol client written in C** — kept compilable for rollback, but
+defeated by symmetric NAT (root-caused 2026-07-09) and no longer the default.
 
 ```
 firmware/
 ├── CMakeLists.txt            # ESP-IDF project "amphive-gateway"
-├── sdkconfig.defaults        # PSRAM octal, 16MB flash, single-app-large partition
+├── sdkconfig.defaults        # PSRAM octal, 16MB flash, dual-OTA custom partition
 ├── main/
 │   ├── main.c                # boot, WiFi, captive portal, MQTT loop, watchdogs
 │   ├── tapo_protocol.c/.h    # Tapo P110 driver — real KLAP v2 (mbedTLS + esp_http_client)
@@ -35,18 +39,24 @@ firmware/
    submits the setup form (which triggers `esp_restart()`).
 3. `tapo_init()` (also restores the persisted energy integrator from NVS).
 4. Create `telemetry_safety` task (stack 8192, prio 5).
-5. Create `microlink_vpn` task (stack 32768, prio 6).
+5. Direct build (default): `start_mqtt_client()` immediately (esp-mqtt owns
+   reconnects). Legacy overlay build: create `microlink_vpn` task (stack 32768,
+   prio 6) which starts MQTT lazily once the overlay is up.
 
 | Task | Stack | Prio | Core |
 |------|-------|------|------|
 | `telemetry_safety` | 8192 | 5 | floating |
-| `microlink_vpn` | 32768 | 6 | floating |
-| `ml_coord_poll` (inside microlink) | 8 KB | max-1 | pinned Core 1 |
+| `microlink_vpn` (legacy build only) | 32768 | 6 | floating |
+| `ml_coord_poll` (inside microlink, legacy build only) | 8 KB | max-1 | pinned Core 1 |
 
-Hard-coded constants: `SERVER_VPN_IP "100.64.0.1"`, `MQTT_BROKER_URL
-"mqtt://100.64.0.1:1883"`, `TARGET_PLUG_ID 1`. SSID, WiFi password, auth key,
-device name, gateway id, and target plug IP all come from NVS (namespace
-`storage`) populated by the captive portal.
+Hard-coded constants: `AMPHIVE_DIRECT_MQTT 1` → `MQTT_BROKER_URL
+"mqtts://8.231.81.12:8883"` (the VM's static public IP; the broker CA is
+embedded via `EMBED_TXTFILES "certs/mqtt_ca.crt"` and validated by mbedTLS:
+chain + IP SAN, no date check). The legacy build (`AMPHIVE_DIRECT_MQTT 0`) keeps
+`SERVER_VPN_IP "100.87.241.70"` + plaintext `mqtt://100.87.241.70:1883` inside
+the WireGuard tunnel. `TARGET_PLUG_ID 1`. SSID, WiFi password, auth key,
+device name, gateway id, target plug IP, and MQTT credentials all come from
+NVS (namespace `storage`) populated by the captive portal.
 
 ## 2. Captive portal (✅ implemented)
 
@@ -60,7 +70,9 @@ product features.
 
 ## 3. MQTT control loop & watchdogs
 
-- Lazy MQTT start once the overlay is up; topics per [MQTT_CONTRACT.md](MQTT_CONTRACT.md).
+- Direct build: MQTT starts right after Wi-Fi (TLS to the public broker). Legacy
+  build: lazy MQTT start once the overlay is up. Topics per
+  [MQTT_CONTRACT.md](MQTT_CONTRACT.md).
 - Commands parsed with **cJSON** (`"action":"ON"`/`"OFF"`/`"SET_INTERVAL"`, optional
   `max_duration_seconds` / `max_kwh` / `session_id`, `interval_ms`); topic/data
   buffers 256/512 B with an oversized/fragmented-payload guard. Defaults: 14400 s,
@@ -82,6 +94,13 @@ product features.
     - **Over-current:** plug reports `overcurrent_status != "normal"` → local OFF +
       NVS clear + publish `OVERCURRENT_CUTOFF` alarm. (The plug does the sensing;
       this replaces the previously-unimplemented 13 A/5-min rule.)
+  - **Unauthorized physical-on guard (fw 1.5.0):** when there is **no** active
+    session, the loop checks the plug's real `device_on`; if the relay is ON
+    (physical button, Tapo app, or NVS crash-recovery resuming a stale session)
+    it commands OFF every cycle and publishes
+    `{"error":"UNAUTHORIZED_ON","plug_id":N}` once per episode (rising edge).
+  - Since fw 1.5.0 the telemetry payload also includes `"relay":<bool>` — the
+    actual `device_on` state, distinct from `"status"` (session state).
 - On MQTT reconnect, buffered offline telemetry entries are drained and published
   with `"offline":true` and `"offline_ts"` so the backend can distinguish replayed data.
 
@@ -121,7 +140,7 @@ current, or temperature. So the `tapo_telemetry_t` fields map as:
 | Field | Source |
 |-------|--------|
 | `power_w` | **real** — `current_power` (mW) ÷ 1000 |
-| `energy_kwh` | **real** — driver-side monotonic **lifetime** Wh integrator (robust vs the plug's daily `today_energy` reset); persisted to NVS across reboots and updated under the driver mutex |
+| `energy_kwh` | **real** — driver-side monotonic **lifetime** Wh integrator (robust vs the plug's daily `today_energy` reset); persisted to NVS across reboots and updated under the driver mutex. Since fw 1.5.0 it integrates with the **trapezoidal rule** (average of consecutive power samples × dt) instead of left-rectangle, reducing error on ramping loads at the 10 s poll cadence; a new module static `s_energy_last_power_w` holds the previous sample |
 | `device_on` / `overheated` / `overcurrent` | **real** — from `get_device_info` status strings |
 | `voltage_v` | **nominal** (configured, default 230 V) |
 | `current_a` | **derived** — `power_w / voltage_v` |
@@ -175,10 +194,23 @@ an auth key but not a control-plane host.
 
 - PSRAM: `CONFIG_SPIRAM=y`, octal 80 MHz; stacks allowed in external RAM; 32 KB
   internal reserved. 16 MB flash.
-- **Partition table:** `CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE` — **single app,
-  no OTA partitions**, so the spec'd OTA dual-partition rollback is not possible
-  without changing this.
+- **Partition table:** `CONFIG_PARTITION_TABLE_CUSTOM` → `partitions_ota.csv`
+  (2026-07-07) — **dual OTA app slots** (`ota_0`/`ota_1`, 1920 KB each) +
+  `otadata`, with `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`. NVS keeps its
+  pre-OTA offset (`0x9000`) so provisioning survives the one-time migration
+  reflash. The ~1.1 MB image uses ~55% of a slot. (Was
+  `SINGLE_APP_LARGE` — no OTA — before this.)
 - mbedTLS TLS 1.2 + full cert bundle (for DERP/coordination TLS). lwIP IPv4-only.
+- **Signed OTA (2026-07-10):** `CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT` +
+  ECDSA scheme (v1) + `CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT` — every
+  OTA image must carry a valid ECDSA signature or `esp_https_ota_finish`
+  rejects it. Software-only verification (no eFuses burned, no boot-time
+  check — reversible). The build signs automatically
+  (`CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES`) with
+  `firmware/secure_boot_signing_key.pem` — **gitignored, back it up**: losing
+  it means devices only accept a USB reflash. Plain-http OTA is gone
+  (`CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP` removed; `ota_update_start` also refuses
+  non-`https://` URLs).
 - Main task stack 32768. `CONFIG_MICROLINK_DISCO_PORT=51821` (cosmetic, actual port is hardcoded to `41641` to match standard magicsock).
 
 ## 7. Build & flash
@@ -189,6 +221,30 @@ idf.py set-target esp32
 idf.py -p COM5 flash monitor
 ```
 
+Building requires the OTA signing key at `firmware/secure_boot_signing_key.pem`
+(gitignored; generate once with
+`python -m espsecure generate_signing_key --version 1 secure_boot_signing_key.pem`
+and back it up — see §6). The build output `build/amphive-gateway.bin` is
+already signed; `build/amphive-gateway-unsigned.bin` is the pre-signature
+artifact (68 bytes smaller) and must never be shipped.
+
+### Publishing an OTA image
+
+Images are served from the **public-read GCS bucket `gs://amphive-fw`**
+(`https://storage.googleapis.com/amphive-fw/...`) — a valid public-CA TLS
+host the firmware's Mozilla bundle validates. Upload + trigger:
+
+```bash
+gcloud storage cp firmware/build/amphive-gateway.bin \
+    gs://amphive-fw/amphive-gateway-<version>.bin
+# then POST /api/cpo/gateways/{gateway_id}/ota with that https URL
+```
+
+or run `deploy/scripts/publish_firmware.ps1`, which reads the version from
+`firmware/CMakeLists.txt`, uploads, and prints the OTA-trigger call. Full
+runbook (including the one-time bucket setup that was run 2026-07-10):
+[deploy/docs/ota_image_publishing.md](../deploy/docs/ota_image_publishing.md).
+
 ## 8. Maturity summary
 
 A working **demo/prototype**, not production firmware: `microlink` is deep and
@@ -198,7 +254,49 @@ mostly functional (with unified magicsock NAT traversal now fully operational), 
 real P110 via `tools/klap_probe.py`; builds on **ESP-IDF v5.3**, not v6).
 Path A has now been run end-to-end on real hardware (a billed session with correct
 energy delivery); the firmware-side billing fix (session-relative `kwh`) and the
-`session_id` echo are in code but **need an on-device reflash** to take effect.
-Remaining gaps: there is no OTA, and the control-plane host constants still default
-to Tailscale (Headscale retarget pending). See
+`session_id` echo were **reflashed and verified on-device 2026-07-06** (raw MQTT
+payloads show `kwh` starting at 0 per session and the echoed `session_id`).
+**OTA is now implemented and verified end-to-end** (2026-07-08): dual-slot
+`esp_https_ota` with bootloader rollback, triggered by an `OTA` MQTT command
+(`ota_update.c`/`.h`); the new image only cancels rollback once it re-reaches
+the broker. A live `1.1.0 → 1.1.1` push downloaded into `ota_1`, rebooted,
+and committed (`marking image valid`) on real hardware.
+
+**OTA over the direct-MQTT path — verified 2026-07-10.** A `1.3.0 → 1.3.1`
+push, image hosted at a **public** URL (`http://8.231.81.12/...`) and triggered
+over the public broker, downloaded (1 MB in ~20 s), swapped `ota_0 → ota_1`,
+rebooted into `1.3.1-direct`, reconnected, and `marking image valid` — no
+overlay anywhere. Because direct devices fetch images across the public
+internet, `ota_update.c` attaches the **Mozilla CA bundle**
+(`esp_crt_bundle_attach`, fw ≥ 1.3.1); the 1.3.0→1.3.1 jump itself used plain
+http only because the *old* running image predated the cert bundle.
+
+**OTA hardening — signed + https-only (2026-07-10, fw ≥ 1.4.0, rolled
+out).** Both follow-ups from the direct-MQTT pivot are implemented:
+images are hosted on the public HTTPS bucket `gs://amphive-fw` (see §7), and
+every update must carry a valid **ECDSA app signature** (§6) — a
+valid-but-malicious image from a MITM'd or compromised host is now rejected
+by the device itself. Plain `http://` is refused in the firmware
+(`ALLOW_HTTP` removed + explicit scheme check) *and* by the backend
+(`CpoGatewayOtaRequest` requires `https://`). **Verified on-device
+2026-07-10:** the real gateway `1cc3abb4fb54` was OTA'd `1.3.2 → 1.5.0` with
+a signed image over https, and the backend `^https://` validation is
+deployed. The pre-1.4.0 running image accepted the jump (it doesn't check
+signatures; the signature is a trailer it ignores); from 1.4.0 on, only
+signed images install. See
 [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for the full matrix.
+
+**fw `1.5.0-direct` (current) — OTA'd + verified on the real gateway
+`1cc3abb4fb54` 2026-07-10** (`1.3.2 → 1.5.0`; the new `relay` field seen on
+the wire). Three changes:
+- **Unauthorized physical-on guard** — with no active session, a relay found
+  ON (physical button, Tapo app, or NVS crash-recovery resuming a stale
+  session) is commanded OFF every telemetry cycle and
+  `{"error":"UNAUTHORIZED_ON","plug_id":N}` is published once per episode
+  (rising edge). See §3.
+- **Trapezoidal energy integration** — `tapo_protocol.c` integrates energy
+  with the trapezoidal rule (average of consecutive power samples × dt)
+  instead of left-rectangle, reducing error on ramping loads at the 10 s poll
+  cadence (`s_energy_last_power_w` holds the previous sample). See §4.
+- **Telemetry `relay` field** — telemetry now includes `"relay":<bool>` (the
+  actual `device_on`), distinct from `"status"` (session state). See §3.

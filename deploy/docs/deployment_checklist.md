@@ -50,7 +50,7 @@ This document is a comprehensive checklist detailing the exact steps required to
 ## Phase 2: Gateway Configuration & Hardware Flashing
 
 - [ ] **2.1. Generate Headscale Gateway Authentication Key**
-  - On your EC2 server, find the Headscale pod name:
+  - On your GCP VM (or wherever Headscale runs), find the Headscale pod name:
     ```bash
     POD_NAME=$(kubectl get pods -l app=headscale -n amphive -o jsonpath="{.items[0].metadata.name}")
     ```

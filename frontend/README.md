@@ -1,73 +1,66 @@
-# React + TypeScript + Vite
+# AmpHive Frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+React 19 + Vite single-page app for the AmpHive shared EV-charging network:
+driver flows (wallet top-up via Razorpay, plug discovery on a Leaflet map,
+live session monitoring over Socket.io) and a CPO operator portal
+(gateways, plugs, groups, session analytics via Recharts).
 
-Currently, two official plugins are available:
+> Canonical technical docs live in [`../docs/`](../docs/) — start with
+> [IMPLEMENTATION_STATUS.md](../docs/IMPLEMENTATION_STATUS.md) and
+> [API_REFERENCE.md](../docs/API_REFERENCE.md). This README only covers
+> working in this package.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## Commands
 
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+npm install
+npm run dev      # Vite dev server (http://localhost:5173)
+npm run lint     # ESLint (same check CI runs)
+npm test         # Vitest + React Testing Library (also in CI)
+npm run build    # production build to dist/
+npm run preview  # serve the production build locally
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+Note: this repo's workflow does **not** run the app stack locally — the
+frontend is served from the GCP VM (deployed via
+`deploy/scripts/deploy.ps1`, which builds the Docker image from this
+source). `npm run dev` is only useful against a reachable backend.
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+## Environment
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+| Variable | Purpose |
+|----------|---------|
+| `VITE_API_URL` | Backend base URL. Empty (default) = same-origin, which is how production serves it. |
+
+(The Razorpay checkout key is not an env var — it comes from the backend's
+create-order response.)
+
+## Layout
+
 ```
+src/
+├── api/client.js       # fetch wrapper: JWT header, JSON errors
+├── contexts/           # AuthContext (JWT/user), SessionContext (active
+│                       #   sessions + focused live session over Socket.io)
+├── components/         # SessionMonitor, WalletCard, MapComponent (Leaflet), …
+├── pages/              # Home, Login, Session, TopUp, Groups, History
+│   └── cpo/            # operator portal (Setup, Dashboard, Plugs, Groups,
+│                       #   Sessions) behind CpoProtectedRoute
+└── styles/
+```
+
+Conventions worth knowing:
+
+- All app code is plain `.jsx`/`.js` **by decision** (2026-07-07, TD#14) —
+  the unused TypeScript toolchain was removed; don't reintroduce `@types/*`
+  or tsconfigs piecemeal.
+- Live telemetry is Socket.io only — connect with the JWT in the auth
+  payload, then `subscribe_session` with a session id (see the Socket.io
+  events reference in [API_REFERENCE.md](../docs/API_REFERENCE.md)).
+- A user can hold up to 2 concurrent sessions (backend-enforced);
+  `SessionContext` tracks the full `activeSessions` list plus one *focused*
+  session that drives the live monitor.
+- Tests are Vitest + React Testing Library, colocated as `src/**/*.test.jsx`
+  (contexts, route guards, the TopUp payment handler). Import test APIs
+  explicitly from `vitest` — globals are off; RTL cleanup is registered in
+  `src/test-setup.js`.

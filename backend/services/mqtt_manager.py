@@ -1,7 +1,10 @@
 import asyncio
+import functools
 import json
 import logging
+import os
 import re
+import time
 from datetime import datetime, timezone
 from typing import Callable, Dict, Any, Optional
 
@@ -9,6 +12,17 @@ import paho.mqtt.client as mqtt
 
 logger = logging.getLogger("amphive.mqtt")
 logging.basicConfig(level=logging.INFO)
+
+# Telemetry refreshes gateways.last_seen_at (the liveness signal that gates
+# session starts) at most this often per gateway — it arrives every ~1-10 s
+# and each refresh is a DB write.
+GATEWAY_SEEN_BUMP_INTERVAL_SEC = 60.0
+
+# Prepaid protection: auto-stop a session once its accrued energy cost reaches
+# the driver's wallet balance, so a drained wallet can't keep charging for free
+# (the finalize path clamps the debit but doesn't end the session on its own).
+# Env-toggleable; on by default.
+AUTO_STOP_ON_BALANCE_EXHAUSTED = os.getenv("AUTO_STOP_ON_BALANCE_EXHAUSTED", "true").lower() in ("1", "true", "yes")
 
 
 class MQTTManager:
@@ -43,6 +57,9 @@ class MQTTManager:
         self.event_loop = event_loop
         # Buffered batch-flush sink for time-series persistence (optional).
         self.telemetry_persistence = telemetry_persistence
+        # Per-gateway monotonic timestamp of the last last_seen_at refresh
+        # (see GATEWAY_SEEN_BUMP_INTERVAL_SEC). Only touched on the paho thread.
+        self._gateway_seen_bumped: Dict[str, float] = {}
         
         self.client = mqtt.Client(client_id="amphive_backend_server", callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
         
@@ -58,6 +75,10 @@ class MQTTManager:
         self.telemetry_pattern = re.compile(r"^amphive/gateways/([^/]+)/telemetry$")
         # gateways/{gateway_id}/status
         self.status_pattern = re.compile(r"^amphive/gateways/([^/]+)/status$")
+        # gateways/{gateway_id}/discovery  (AmpHive Agent plug discovery)
+        self.discovery_pattern = re.compile(r"^amphive/gateways/([^/]+)/discovery$")
+        # gateways/{gateway_id}/alarms  (firmware safety alarms + OTA lifecycle)
+        self.alarm_pattern = re.compile(r"^amphive/gateways/([^/]+)/alarms$")
 
     def start(self):
         logger.info(f"Connecting to MQTT broker at {self.broker_host}:{self.broker_port}...")
@@ -75,6 +96,11 @@ class MQTTManager:
             # Subscribe to all gateway telemetry and status topics
             self.client.subscribe("amphive/gateways/+/telemetry", qos=0)
             self.client.subscribe("amphive/gateways/+/status", qos=1)
+            # AmpHive Agent plug discovery (auto-populate) — retained announcements.
+            self.client.subscribe("amphive/gateways/+/discovery", qos=1)
+            # Firmware safety alarms (THERMAL/OVERCURRENT/UNAUTHORIZED_ON) + OTA
+            # lifecycle events — persisted as GatewayEvents and surfaced to CPOs.
+            self.client.subscribe("amphive/gateways/+/alarms", qos=1)
         else:
             logger.error(f"Failed to connect to MQTT broker, return code {rc}")
 
@@ -103,6 +129,20 @@ class MQTTManager:
         if telemetry_match:
             gateway_id = telemetry_match.group(1)
             self._handle_gateway_telemetry(gateway_id, payload)
+            return
+
+        # Match discovery topic (AmpHive Agent auto-populate)
+        discovery_match = self.discovery_pattern.match(msg.topic)
+        if discovery_match:
+            gateway_id = discovery_match.group(1)
+            self._handle_gateway_plug_discovery(gateway_id, payload)
+            return
+
+        # Match alarms topic (firmware safety alarms + OTA lifecycle events)
+        alarm_match = self.alarm_pattern.match(msg.topic)
+        if alarm_match:
+            gateway_id = alarm_match.group(1)
+            self._handle_gateway_alarm(gateway_id, payload)
             return
 
     # -----------------------------------------------------------------------
@@ -139,6 +179,9 @@ class MQTTManager:
         voltage = float(payload.get("voltage", 230.0))
         current = float(payload.get("current", 0.0))
         status = payload.get("status", "occupied")
+        # Actual relay state as reported by the plug (firmware ≥ 1.5.0). Distinct
+        # from `status` (our session state) — lets the UI show the physical relay.
+        relay_on = bool(payload.get("relay", status == "occupied"))
 
         # Optional backend session id echoed by the firmware. Empty/absent when
         # the plug is idle, or on pre-session_id firmware. Used to attribute the
@@ -170,8 +213,11 @@ class MQTTManager:
         # (cost_coins is left to TelemetryStore to auto-calc via COINS_PER_KWH.)
         if self.telemetry_store and self.event_loop:
             self.event_loop.call_soon_threadsafe(
-                self.telemetry_store.update,
-                plug_id, watts, current, kwh, telem_status,
+                functools.partial(
+                    self.telemetry_store.update,
+                    plug_id, watts, current, kwh, telem_status,
+                    voltage_v=voltage, relay_on=relay_on,
+                )
             )
         elif self.telemetry_store:
             # No loop reference (e.g. unit tests): safe to call directly.
@@ -181,6 +227,8 @@ class MQTTManager:
                 current_a=current,
                 energy_kwh=kwh,
                 status=telem_status,
+                voltage_v=voltage,
+                relay_on=relay_on,
             )
 
         # --- 2. Enqueue a raw sample for time-series persistence ---
@@ -204,6 +252,149 @@ class MQTTManager:
                 self._persist_telemetry(plug_id, watts, kwh, session_id),
                 self.event_loop,
             )
+            # Telemetry proves the gateway is alive — refresh its liveness
+            # marker (throttled). Status messages alone only arrive on
+            # connect/LWT, so a long-connected gateway would otherwise look
+            # stale to the session-start liveness gate.
+            if self._should_bump_gateway_seen(gateway_id):
+                asyncio.run_coroutine_threadsafe(
+                    self._persist_gateway_seen(gateway_id),
+                    self.event_loop,
+                )
+
+    def _should_bump_gateway_seen(self, gateway_id: str) -> bool:
+        """Rate-limit last_seen_at refreshes to one per gateway per
+        GATEWAY_SEEN_BUMP_INTERVAL_SEC. Runs on the paho thread only."""
+        now = time.monotonic()
+        last = self._gateway_seen_bumped.get(gateway_id)
+        if last is not None and (now - last) < GATEWAY_SEEN_BUMP_INTERVAL_SEC:
+            return False
+        self._gateway_seen_bumped[gateway_id] = now
+        return True
+
+    async def _persist_gateway_seen(self, gateway_id: str):
+        """Mark a gateway ONLINE + freshly seen because telemetry arrived from
+        it (also heals a gateway stuck OFFLINE after a missed retained status)."""
+        from backend.database.models import Gateway, GatewayStatus
+        from sqlalchemy import select
+
+        try:
+            async with self.db_session_factory() as session:
+                result = await session.execute(
+                    select(Gateway).where(Gateway.id == gateway_id)
+                )
+                gateway = result.scalar_one_or_none()
+                if gateway:
+                    gateway.status = GatewayStatus.ONLINE
+                    gateway.last_seen_at = datetime.now(timezone.utc)
+                    await session.commit()
+        except Exception as e:
+            logger.error(f"Failed to refresh last_seen_at for gateway {gateway_id}: {e}")
+
+    # -----------------------------------------------------------------------
+    # Inbound alarm handler — persists GatewayEvents + broadcasts to clients
+    # -----------------------------------------------------------------------
+    # Map a firmware alarm/event string to a UI severity. Safety cutoffs and an
+    # unauthorized energize are operator-critical; OTA lifecycle notices are
+    # informational. Unknown strings default to "warning" so nothing is silently
+    # swallowed.
+    _EVENT_SEVERITY = {
+        "THERMAL_CUTOFF": "critical",
+        "OVERCURRENT_CUTOFF": "critical",
+        "UNAUTHORIZED_ON": "critical",
+        "OTA_STARTED": "info",
+        "OTA_OK_REBOOTING": "info",
+        "OTA_FAILED": "warning",
+        "OTA_REFUSED_SESSION_ACTIVE": "info",
+        "OTA_START_FAILED": "warning",
+    }
+
+    _EVENT_DETAIL = {
+        "UNAUTHORIZED_ON": "Plug switched ON with no active session (physical button / app / stale resume) — forced OFF locally.",
+        "THERMAL_CUTOFF": "Plug reported overheat — session cut off locally.",
+        "OVERCURRENT_CUTOFF": "Plug reported over-current — session cut off locally.",
+    }
+
+    def _handle_gateway_alarm(self, gateway_id: str, payload: Dict[str, Any]):
+        """
+        Process an alarm/event from a gateway (topic .../alarms). Two shapes:
+          {"error": "UNAUTHORIZED_ON", "plug_id": 1}   # safety alarm/fault
+          {"event": "OTA_STARTED"}                       # OTA lifecycle notice
+        Persists a GatewayEvent (audit + CPO feed) and broadcasts it so a live
+        client can react (e.g. warn the driver, flash the operator's alert feed).
+        """
+        event_type = payload.get("error") or payload.get("event")
+        if not event_type:
+            logger.warning(f"Alarm from gateway {gateway_id} missing error/event: {payload}")
+            return
+
+        event_type = str(event_type)[:48]
+        severity = self._EVENT_SEVERITY.get(event_type, "warning")
+        detail = self._EVENT_DETAIL.get(event_type)
+
+        plug_id = payload.get("plug_id")
+        try:
+            plug_id = int(plug_id) if plug_id is not None else None
+        except (ValueError, TypeError):
+            plug_id = None
+
+        logger.warning(
+            f"ALARM from gw={gateway_id} plug={plug_id}: {event_type} ({severity})"
+        )
+
+        if self.db_session_factory and self.event_loop:
+            asyncio.run_coroutine_threadsafe(
+                self._persist_gateway_event(gateway_id, plug_id, event_type, severity, detail),
+                self.event_loop,
+            )
+
+    async def _persist_gateway_event(self, gateway_id: str, plug_id: Optional[int],
+                                     event_type: str, severity: str, detail: Optional[str]):
+        """Store the event (tenant resolved from the gateway) and broadcast it."""
+        from backend.database.models import Gateway, GatewayEvent
+
+        from sqlalchemy import select
+
+        try:
+            async with self.db_session_factory() as session:
+                gw = (await session.execute(
+                    select(Gateway).where(Gateway.id == gateway_id)
+                )).scalar_one_or_none()
+                if not gw:
+                    logger.warning(f"Alarm for unknown gateway {gateway_id}; dropping event.")
+                    return
+
+                event = GatewayEvent(
+                    tenant_id=gw.tenant_id,
+                    gateway_id=gateway_id,
+                    plug_id=plug_id,
+                    event_type=event_type,
+                    severity=severity,
+                    detail=detail,
+                )
+                session.add(event)
+                await session.commit()
+                event_id = event.id
+                created_at = event.created_at
+        except Exception as e:
+            logger.error(f"Failed to persist gateway event for {gateway_id}: {e}")
+            return
+
+        # Broadcast to connected clients (best-effort; import late to avoid a
+        # circular import at module load).
+        try:
+            from backend.services.socketio_manager import emit_gateway_alarm
+            await emit_gateway_alarm({
+                "id": event_id,
+                "gateway_id": gateway_id,
+                "plug_id": plug_id,
+                "event_type": event_type,
+                "severity": severity,
+                "detail": detail,
+                "created_at": created_at.isoformat() if created_at else None,
+            })
+        except Exception as e:
+            logger.error(f"Failed to broadcast gateway alarm for {gateway_id}: {e}")
 
     async def _persist_telemetry(self, plug_id: int, watts: float, kwh: float, session_id: Optional[int] = None):
         """
@@ -222,6 +413,10 @@ class MQTTManager:
         """
         # Import here to avoid circular imports at module level
         from backend.database.models import Plug, ChargingSession, SessionStatus
+
+        # Captured for the post-commit balance check (see below).
+        updated_session_id: Optional[int] = None
+        updated_user_id: Optional[int] = None
 
         try:
             async with self.db_session_factory() as session:
@@ -256,10 +451,60 @@ class MQTTManager:
                     # Track peak power — only update if this reading is higher
                     if watts > active_session.peak_power_w:
                         active_session.peak_power_w = watts
+                    # Staleness signal read by the session reaper.
+                    active_session.last_telemetry_at = datetime.now(timezone.utc)
+                    updated_session_id = active_session.id
+                    updated_user_id = active_session.user_id
 
                 await session.commit()
         except Exception as e:
             logger.error(f"Failed to persist telemetry for plug {plug_id}: {e}")
+            return
+
+        # Prepaid protection: if the accrued energy cost has reached the driver's
+        # wallet balance, auto-stop so they can't keep charging for free past a
+        # drained wallet (the finalize path only clamps the debit — it doesn't
+        # stop the session). Done in a separate txn after the persist commit.
+        if updated_session_id is not None and updated_user_id is not None:
+            await self._maybe_auto_stop_on_exhaustion(updated_session_id, updated_user_id, kwh)
+
+    async def _maybe_auto_stop_on_exhaustion(self, session_id: int, user_id: int, energy_kwh: float):
+        """Finalize an ACTIVE session once its accrued cost meets/exceeds the
+        user's wallet balance. No-op when disabled, when the wallet still
+        covers the energy, or when the session is already gone (finalize
+        re-checks ACTIVE under a row lock, so this is race-safe)."""
+        if not AUTO_STOP_ON_BALANCE_EXHAUSTED or not self.db_session_factory:
+            return
+        from backend.database.models import User
+        from backend.services.money import to_money
+        from backend.services.telemetry import COINS_PER_KWH
+        from sqlalchemy import select
+
+        try:
+            accrued_cost = to_money(energy_kwh * COINS_PER_KWH)
+            if accrued_cost <= 0:
+                return
+            async with self.db_session_factory() as db:
+                user = (await db.execute(
+                    select(User).where(User.id == user_id)
+                )).scalar_one_or_none()
+                if user is None or accrued_cost < user.coin_balance:
+                    return
+            # Wallet is exhausted — stop through the shared finalize path
+            # (own txn; row-locks + re-checks ACTIVE so a concurrent user stop
+            # or the reaper settles this exactly once).
+            from backend.services.session_lifecycle import finalize_charging_session
+            async with self.db_session_factory() as db:
+                outcome = await finalize_charging_session(
+                    db, session_id, reason="auto-stopped: wallet balance exhausted"
+                )
+            if outcome is not None:
+                logger.warning(
+                    f"Auto-stopped session {session_id} (user {user_id}): wallet exhausted "
+                    f"at {outcome['energy_kwh']} kWh / {outcome['coins_spent']} coins."
+                )
+        except Exception:
+            logger.exception(f"Balance-exhaustion auto-stop failed for session {session_id}")
 
     # -----------------------------------------------------------------------
     # Inbound status handler — updates gateway online/offline state in DB
@@ -271,16 +516,19 @@ class MQTTManager:
         Updates the gateway's status and last_seen_at in the database.
         """
         status = payload.get("status", "offline")
-        logger.info(f"Gateway {gateway_id} status: {status}")
-        
+        # Firmware version rides on the `online` status payload ({"fw": "..."}).
+        fw = payload.get("fw")
+        fw = str(fw)[:32] if fw else None
+        logger.info(f"Gateway {gateway_id} status: {status}" + (f" fw={fw}" if fw else ""))
+
         if self.db_session_factory and self.event_loop:
             asyncio.run_coroutine_threadsafe(
-                self._persist_gateway_status(gateway_id, status),
+                self._persist_gateway_status(gateway_id, status, fw),
                 self.event_loop,
             )
 
-    async def _persist_gateway_status(self, gateway_id: str, status: str):
-        """Persist gateway online/offline status to the database."""
+    async def _persist_gateway_status(self, gateway_id: str, status: str, firmware_version: Optional[str] = None):
+        """Persist gateway online/offline status (+ reported fw) to the database."""
         from backend.database.models import Gateway, GatewayStatus
 
         try:
@@ -294,18 +542,160 @@ class MQTTManager:
                 if gateway:
                     gateway.status = GatewayStatus.ONLINE if status == "online" else GatewayStatus.OFFLINE
                     gateway.last_seen_at = datetime.now(timezone.utc)
+                    # Only overwrite the recorded fw when the payload carried one
+                    # (the LWT/offline message has no fw — don't clobber it).
+                    if firmware_version:
+                        gateway.firmware_version = firmware_version
                     await session.commit()
                     logger.info(f"Gateway {gateway_id} DB status updated to {status}")
                 else:
                     logger.warning(f"Gateway {gateway_id} not found in DB, ignoring status update.")
         except Exception as e:
             logger.error(f"Failed to persist gateway status for {gateway_id}: {e}")
+            return
+
+        if status == "online":
+            await self._republish_off_for_orphaned_plugs(gateway_id)
+
+    async def _republish_off_for_orphaned_plugs(self, gateway_id: str):
+        """
+        On gateway reconnect, re-send OFF to each of its plugs that has no
+        ACTIVE session. OFF commands aren't retained, so a gateway that was
+        dead when its session got finalized (e.g. by the session reaper) never
+        received one — and its NVS crash recovery resumes the session on
+        reboot with the relay ON and nobody billing (observed 2026-07-07).
+        Idempotent: an OFF to an already-off plug is a no-op on the firmware.
+        """
+        from backend.database.models import ChargingSession, Plug, SessionStatus
+
+        try:
+            async with self.db_session_factory() as session:
+                from sqlalchemy import select
+
+                plug_result = await session.execute(
+                    select(Plug.id).where(Plug.gateway_id == gateway_id)
+                )
+                plug_ids = list(plug_result.scalars().all())
+                if not plug_ids:
+                    return
+
+                active_result = await session.execute(
+                    select(ChargingSession.plug_id).where(
+                        ChargingSession.plug_id.in_(plug_ids),
+                        ChargingSession.status == SessionStatus.ACTIVE,
+                    )
+                )
+                active_plug_ids = set(active_result.scalars().all())
+
+            for plug_id in plug_ids:
+                if plug_id not in active_plug_ids:
+                    # wait=False: we're on the event loop — don't block it on
+                    # the broker ack for a best-effort cleanup publish.
+                    self.send_plug_command(gateway_id, plug_id, "OFF", wait=False)
+                    logger.info(
+                        f"Republished OFF to gw={gateway_id} plug={plug_id} "
+                        f"on reconnect (no ACTIVE session)"
+                    )
+        except Exception as e:
+            logger.error(f"OFF republish on reconnect failed for gateway {gateway_id}: {e}")
+
+    # -----------------------------------------------------------------------
+    # Inbound plug-discovery handler — auto-populate agent-discovered plugs
+    # -----------------------------------------------------------------------
+
+    def _handle_gateway_plug_discovery(self, gateway_id: str, payload: Dict[str, Any]):
+        """
+        Process a plug-discovery announcement from an AmpHive Agent.
+
+        Expected payload (docs/AMPHIVE_AGENT.md):
+            {"unique_id": "kasa:AA:BB:..", "provider": "kasa",
+             "model": "KP115", "alias": "Bay 3", "capabilities": ["switch","power","energy"]}
+
+        The backend is authoritative for plug_id: it upserts a Plug keyed by the
+        stable `unique_id` (the DB assigns `plugs.id`), then publishes the current
+        {unique_id: plug_id} map back so the agent adopts the assigned ids. This
+        is required because the MQTT plug_id IS the global `plugs.id` used by the
+        telemetry handler — an agent must not invent its own.
+        """
+        unique_id = payload.get("unique_id")
+        if not unique_id:
+            logger.warning(f"Discovery from gateway {gateway_id} missing unique_id, ignoring.")
+            return
+        if self.db_session_factory and self.event_loop:
+            asyncio.run_coroutine_threadsafe(
+                self._persist_plug_discovery(gateway_id, payload),
+                self.event_loop,
+            )
+
+    async def _persist_plug_discovery(self, gateway_id: str, payload: Dict[str, Any]):
+        """Upsert the discovered plug by unique_id, then publish the assignment map."""
+        from backend.database.models import Gateway, Plug
+        from sqlalchemy import select
+
+        unique_id = payload.get("unique_id")
+        alias = str(payload.get("alias") or unique_id)[:100]
+        model = str(payload.get("model") or "agent")[:50]
+        local_ip = str(payload.get("ip") or "agent")[:45]
+
+        try:
+            async with self.db_session_factory() as session:
+                # Only auto-populate for a gateway that already exists (is claimed).
+                gateway = (
+                    await session.execute(select(Gateway).where(Gateway.id == gateway_id))
+                ).scalar_one_or_none()
+                if gateway is None:
+                    logger.warning(
+                        f"Discovery for unknown gateway {gateway_id}, ignoring "
+                        f"(claim the gateway first)."
+                    )
+                    return
+
+                existing = (
+                    await session.execute(
+                        select(Plug).where(
+                            Plug.gateway_id == gateway_id, Plug.unique_id == unique_id
+                        )
+                    )
+                ).scalar_one_or_none()
+
+                if existing is None:
+                    session.add(Plug(
+                        gateway_id=gateway_id, name=alias, local_ip=local_ip,
+                        plug_model=model, unique_id=unique_id,
+                    ))
+                    logger.info(f"Auto-populated new plug '{alias}' ({unique_id}) on {gateway_id}")
+                else:
+                    existing.name = alias
+                    existing.plug_model = model
+
+                await session.commit()
+
+                # Rebuild the full {unique_id: plug_id} map for this gateway.
+                rows = (
+                    await session.execute(
+                        select(Plug.unique_id, Plug.id).where(
+                            Plug.gateway_id == gateway_id, Plug.unique_id.is_not(None)
+                        )
+                    )
+                ).all()
+                assignments = {uid: pid for uid, pid in rows}
+        except Exception as e:
+            logger.error(f"Failed to persist plug discovery for {gateway_id}: {e}")
+            return
+
+        # Hand the authoritative ids back to the agent (retained, so it survives
+        # an agent restart / late subscribe).
+        self.client.publish(
+            f"amphive/gateways/{gateway_id}/assign",
+            json.dumps(assignments), qos=1, retain=True,
+        )
+        logger.info(f"Published plug assignments for {gateway_id}: {assignments}")
 
     # -----------------------------------------------------------------------
     # Outbound command publisher
     # -----------------------------------------------------------------------
 
-    def send_plug_command(self, gateway_id: str, plug_id: int, action: str, max_duration: int = 14400, max_kwh: float = 30.0, session_id: Optional[int] = None) -> bool:
+    def send_plug_command(self, gateway_id: str, plug_id: int, action: str, max_duration: int = 14400, max_kwh: float = 30.0, session_id: Optional[int] = None, wait: bool = True) -> bool:
         """
         Sends an ON/OFF command to a specific plug registered under a gateway.
         Topic: amphive/gateways/{gateway_id}/plugs/{plug_id}/commands
@@ -315,6 +705,10 @@ class MQTTManager:
         The firmware persists it for crash recovery and echoes it back in
         telemetry so the backend can attribute a reading to the exact session
         rather than just "the active session on this plug".
+
+        `wait=False` skips the blocking wait for the broker ack — for
+        best-effort publishes issued from the event loop (blocking it up to
+        3 s per publish would stall every other coroutine).
         """
         topic = f"amphive/gateways/{gateway_id}/plugs/{plug_id}/commands"
         payload = {
@@ -324,15 +718,42 @@ class MQTTManager:
         }
         if session_id is not None:
             payload["session_id"] = str(session_id)
-        
+
         try:
             payload_str = json.dumps(payload)
             info = self.client.publish(topic, payload_str, qos=1)
+            if not wait:
+                logger.info(f"Published command (no-wait) to {topic}: {payload_str}")
+                return info.rc == mqtt.MQTT_ERR_SUCCESS
             info.wait_for_publish(timeout=3.0)
             logger.info(f"Published command to {topic}: {payload_str}")
             return info.is_published()
         except Exception as e:
             logger.error(f"Failed to publish command to {topic}: {e}")
+            return False
+
+    def send_gateway_ota(self, gateway_id: str, plug_id: int, firmware_url: str) -> bool:
+        """
+        Trigger an OTA firmware update on a gateway.
+
+        The firmware subscribes only to the per-plug command topic
+        (amphive/gateways/{gw}/plugs/+/commands), so the OTA command rides one
+        of the gateway's plug topics; the firmware ignores the plug_id for
+        OTA (it's a gateway-scoped action) and does not touch active_plug_id.
+        Payload: {"action": "OTA", "url": "<http(s) url>"}. The gateway
+        refuses the update while a session is active and reboots into the
+        passive slot on success (rollback-protected).
+        """
+        topic = f"amphive/gateways/{gateway_id}/plugs/{plug_id}/commands"
+        payload = {"action": "OTA", "url": firmware_url}
+        try:
+            payload_str = json.dumps(payload)
+            info = self.client.publish(topic, payload_str, qos=1)
+            info.wait_for_publish(timeout=3.0)
+            logger.info(f"Published OTA command to {topic}: {payload_str}")
+            return info.is_published()
+        except Exception as e:
+            logger.error(f"Failed to publish OTA command to {topic}: {e}")
             return False
 
     def send_plug_interval(self, gateway_id: str, plug_id: int, interval_ms: int) -> bool:

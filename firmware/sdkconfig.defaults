@@ -2,8 +2,28 @@
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
 
-# Partition table
-CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+# Partition table - dual-OTA slots + rollback (2026-07-07). NVS keeps the
+# pre-OTA offset so provisioning survives the migration flash.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_ota.csv"
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# OTA hardening (2026-07-10): direct-MQTT devices fetch images across the
+# public internet, so plain http:// is no longer accepted (ALLOW_HTTP removed;
+# esp_https_ota rejects non-https URLs) and every update must be SIGNED.
+#
+# Signed-app verification WITHOUT hardware secure boot (ECDSA scheme v1):
+# the build appends an ECDSA NIST256p signature made with
+# firmware/secure_boot_signing_key.pem (gitignored - generate once with
+# `espsecure.py generate_signing_key --version 1`, back it up; losing it means
+# devices only accept a physical reflash). The public half is embedded in the
+# app; esp_ota_set_boot_partition verifies the downloaded image on update.
+# No eFuses are burned and boot-time verification stays off - fully reversible.
+CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT=y
+CONFIG_SECURE_SIGNED_APPS_ECDSA_SCHEME=y
+CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT=y
+CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=y
+CONFIG_SECURE_BOOT_SIGNING_KEY="secure_boot_signing_key.pem"
 
 # TLS/HTTPS
 CONFIG_ESP_TLS_USING_MBEDTLS=y
