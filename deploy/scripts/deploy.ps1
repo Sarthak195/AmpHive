@@ -256,6 +256,12 @@ Write-Host "  -> Generating mosquitto ACL file on the VM..." -ForegroundColor Cy
 $acl_cmd = "printf 'user $mq_u\ntopic readwrite amphive/#\ntopic read `$SYS/#\n\npattern readwrite amphive/gateways/%%u/#\n' | sudo tee $REMOTE_DIR/mosquitto_acl > /dev/null && sudo chown 1883:1883 $REMOTE_DIR/mosquitto_acl && sudo chmod 600 $REMOTE_DIR/mosquitto_acl"
 gcloud compute ssh --quiet $VM_NAME --zone=$VM_ZONE --command=$acl_cmd
 
+# Nightly backup script (a VM cron job runs it at 21:00 UTC; setup + restore
+# procedure in deploy/docs/db_backup_restore.md). tr strips Windows CRLF so
+# the shebang survives; tee keeps the existing inode.
+gcloud compute scp --quiet "$PROJECT_ROOT\deploy\scripts\backup_db.sh" "${VM_NAME}:/tmp/backup_db.sh" --zone=$VM_ZONE
+gcloud compute ssh --quiet $VM_NAME --zone=$VM_ZONE --command="tr -d '\r' < /tmp/backup_db.sh | sudo tee $REMOTE_DIR/backup_db.sh > /dev/null && rm /tmp/backup_db.sh && sudo chmod 755 $REMOTE_DIR/backup_db.sh"
+
 # ---- Step 4: Rebuild and restart containers ----
 Write-Host "`n[4/4] Extracting application and restarting Docker Compose on VM..." -ForegroundColor Cyan
 gcloud compute ssh --quiet $VM_NAME --zone=$VM_ZONE --command="cd $REMOTE_DIR && tar -xzf amphive_app.tar.gz && rm amphive_app.tar.gz && sudo docker-compose up -d --build"

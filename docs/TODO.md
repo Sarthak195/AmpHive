@@ -215,6 +215,16 @@ been fixed by the 2026-07-08…11 work — see the shipped sections below).*
       add HSTS + flip bare-IP back to a redirect, and **replace DuckDNS with
       a real domain** (proven SPOF; also needed for Razorpay live-mode
       legal pages). (SEC §3/§6)
+- [x] **Database + config backups** (2026-07-11, **live + verified
+      end-to-end**): nightly `backup_db.sh` cron (21:00 UTC) does
+      `pg_dump -Fc` + ops-config tarball (broker passwd/ACL hashes exist only
+      on the VM) → `gs://amphive-db-backups` (private, 30-day lifecycle),
+      last 3 sets kept locally; daily **disk snapshots** (14-day retention)
+      attached to the VM disk. VM uploads keylessly (`devstorage.read_write`
+      scope, ~48 s approved downtime); bucket IAM is create+view only —
+      deletes from the VM are **denied**. Upload set verified in the bucket;
+      **restore tested** into a scratch DB (row counts matched). Remaining
+      ritual: quarterly restore drill (`deploy/docs/db_backup_restore.md`).
 
 ## Long term — productionization
 
