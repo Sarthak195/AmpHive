@@ -34,6 +34,9 @@ from backend.services.auth import (
     hash_password, verify_password,
 )
 from backend.services.money import ZERO_MONEY, to_money
+from backend.services.rate_limit import (
+    login_rate_limiter, rate_limit_dependency, register_rate_limiter,
+)
 from backend.services.rbac import require_role
 from backend.services.session_lifecycle import (
     check_and_speed_up_active_session, finalize_charging_session,
@@ -48,12 +51,18 @@ router = APIRouter()
 # Authentication Endpoints
 # ===========================================================================
 
-@router.post("/api/auth/register", response_model=AuthResponse)
+@router.post(
+    "/api/auth/register",
+    response_model=AuthResponse,
+    dependencies=[Depends(rate_limit_dependency(register_rate_limiter, "registration"))],
+)
 async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
     """
     Register a new driver account.
     Creates the user with a hashed password and returns a JWT token.
     New users start with 0 coin balance and the 'driver' role.
+    Rate-limited per client IP (REGISTER_RATE_LIMIT) against bulk
+    account creation / email enumeration.
     """
     # Check if email already exists (fast path for a clean error message; the
     # unique index is the real guard — a concurrent duplicate slips past this
@@ -90,11 +99,17 @@ async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
     )
 
 
-@router.post("/api/auth/login", response_model=AuthResponse)
+@router.post(
+    "/api/auth/login",
+    response_model=AuthResponse,
+    dependencies=[Depends(rate_limit_dependency(login_rate_limiter, "login"))],
+)
 async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
     """
     Authenticate a user with email and password.
     Returns a JWT token on success.
+    Rate-limited per client IP (LOGIN_RATE_LIMIT) against brute force;
+    attempts count regardless of outcome.
     """
     result = await db.execute(select(User).where(User.email == req.email))
     user = result.scalar_one_or_none()
