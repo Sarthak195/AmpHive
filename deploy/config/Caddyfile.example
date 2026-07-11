@@ -21,7 +21,11 @@ amphive.duckdns.org {
 	reverse_proxy frontend:80
 }
 
-# Requests arriving by bare IP / unknown Host go to the canonical origin.
+# Bare-IP / unknown-Host requests: SERVE the app (plain http) rather than
+# redirect to the domain, so the site stays reachable by IP when the DNS
+# provider has an outage (seen with DuckDNS 2026-07-11). Tighten to a
+# redir once a paid/reliable domain is in place.
 http:// {
-	redir https://amphive.duckdns.org{uri}
+	encode gzip
+	reverse_proxy frontend:80
 }

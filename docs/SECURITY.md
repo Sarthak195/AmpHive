@@ -64,21 +64,27 @@ BFG + force-push) to purge the dead values entirely.
 
 ## 3. Open / unauthenticated surfaces
 
-- [Code complete 2026-07-11, **rollout pending**] **Web tier served plain HTTP.**
-  The SPA, API, and Socket.io are (still, until the next deploy) served
-  http-only on `:80` — logins, JWTs, and the Razorpay checkout travel
-  cleartext. `deploy.ps1` now ships a **Caddy TLS front door by default**
-  (`docker-compose.tls.yml`): auto-renewed Let's Encrypt cert for
-  `CADDY_DOMAIN` (`.env`; Caddyfile generated on the VM), HTTP→HTTPS and
-  bare-IP→canonical-origin redirects, and the frontend container no longer
-  publishes a host port (Caddy is the only public web entrypoint). CORS /
-  Socket.io allowlists already carry the https origins. The firewall rule
-  `allow-amphive-https` (tcp:443) was created and DNS verified 2026-07-11
-  (`amphive.duckdns.org` → `8.231.81.12`; updater cron on the VM). Rollback:
-  `deploy.ps1 -NoTls`. **Follow-up once HTTPS is verified:** drop tcp:8000
-  from `allow-amphive-ports` (the backend's direct plain-HTTP port — the SPA
-  reaches the API via the frontend nginx proxy, so nothing public needs it)
-  and consider HSTS.
+- [Deployed 2026-07-11, **cert pending DuckDNS recovery**] **Web tier served
+  plain HTTP.** The SPA, API, and Socket.io were served http-only on `:80` —
+  logins, JWTs, and the Razorpay checkout traveled cleartext. `deploy.ps1`
+  now ships a **Caddy TLS front door by default** (`docker-compose.tls.yml`,
+  deployed to prod 2026-07-11): auto-renewed Let's Encrypt cert for
+  `CADDY_DOMAIN` (`.env`; Caddyfile generated on the VM), HTTP→HTTPS
+  redirect for the domain, and the frontend container no longer publishes a
+  host port (Caddy is the only public web entrypoint). Bare-IP/unknown-Host
+  requests are **served** (plain http) rather than redirected, so a DNS
+  outage can't take the site down. CORS / Socket.io allowlists already carry
+  the https origins; firewall rule `allow-amphive-https` (tcp:443) created.
+  Front door verified in prod by IP (SPA/API/Socket.io/login; broker + both
+  gateways unaffected); the **cert itself is blocked by DuckDNS's
+  authoritative nameservers SERVFAILing** during the rollout — Caddy
+  auto-retries until it lands (incident log:
+  `deploy/docs/web_tls_rollout.md`). Rollback: `deploy.ps1 -NoTls`.
+  **Follow-ups once https is confirmed:** drop tcp:8000 from
+  `allow-amphive-ports` (the backend's direct plain-HTTP port — the SPA
+  reaches the API via the frontend nginx proxy, so nothing public needs it),
+  add HSTS + flip bare-IP back to a redirect, and replace DuckDNS with a
+  real domain (this outage makes it a proven SPOF — see §6).
 - **MQTT broker is anonymous + no TLS** (`mosquitto.conf`: `allow_anonymous true`).
   It *used* to be reachable on **1883 from `0.0.0.0/0`** — anyone could
   publish/subscribe, send plug `ON`/`OFF`, and **forge telemetry that feeds

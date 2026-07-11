@@ -165,14 +165,17 @@ Cross-references [TECH_DEBT.md](TECH_DEBT.md) items as `TD#n` and
 
 ## Launch readiness (opened 2026-07-11)
 
-- [~] **Web HTTPS — Caddy TLS front door** (2026-07-11, code complete,
-      **rollout pending**): `deploy.ps1` now ships `docker-compose.tls.yml` by
-      default (Caddy on 80/443, auto Let's Encrypt for `CADDY_DOMAIN`,
-      Caddyfile generated from `.env`; `-NoTls` = plain-HTTP rollback). The
-      tls compose was brought to prod parity (it predated direct-MQTT).
-      tcp:443 firewall rule created + DNS verified. **Next `deploy.ps1` run
-      makes prod HTTPS** — then verify (see `deploy/docs/web_tls_rollout.md`)
-      and drop public tcp:8000. (SEC §3)
+- [~] **Web HTTPS — Caddy TLS front door** (2026-07-11, **deployed to prod**;
+      cert pending): `deploy.ps1` ships `docker-compose.tls.yml` by default
+      (Caddy on 80/443, auto Let's Encrypt for `CADDY_DOMAIN`, Caddyfile
+      generated from `.env`; `-NoTls` = plain-HTTP rollback); bare-IP requests
+      are served, not redirected, so a DNS outage can't kill the site. Front
+      door verified in prod by IP (SPA/API/Socket.io/login; broker + gateways
+      unaffected). The Let's Encrypt cert is blocked by a **DuckDNS
+      authoritative-nameserver outage** during rollout — Caddy auto-retries
+      until it lands (`deploy/docs/web_tls_rollout.md` incident log).
+      Remaining: confirm https once DuckDNS recovers, drop public tcp:8000,
+      HSTS, and **replace DuckDNS with a real domain** (proven SPOF). (SEC §3)
 
 ## Long term — productionization
 

@@ -215,14 +215,20 @@ if (-not $NoTls) {
     $caddy_lines += "`treverse_proxy frontend:80"
     $caddy_lines += "}"
     $caddy_lines += ""
-    $caddy_lines += "# Requests arriving by bare IP / unknown Host go to the canonical origin."
+    $caddy_lines += "# Bare-IP / unknown-Host requests: SERVE the app (plain http) rather than"
+    $caddy_lines += "# redirect to the domain, so the site stays reachable by IP when the DNS"
+    $caddy_lines += "# provider has an outage (seen with DuckDNS 2026-07-11). Tighten to a"
+    $caddy_lines += "# redir once a paid/reliable domain is in place."
     $caddy_lines += "http:// {"
-    $caddy_lines += "`tredir https://$($caddy_domain){uri}"
+    $caddy_lines += "`tencode gzip"
+    $caddy_lines += "`treverse_proxy frontend:80"
     $caddy_lines += "}"
     $caddyfile_tmp = Join-Path $env:TEMP "amphive_Caddyfile"
     [System.IO.File]::WriteAllText($caddyfile_tmp, (($caddy_lines -join "`n") + "`n"))
     gcloud compute scp --quiet $caddyfile_tmp "${VM_NAME}:/tmp/Caddyfile" --zone=$VM_ZONE
-    gcloud compute ssh --quiet $VM_NAME --zone=$VM_ZONE --command="sudo mv /tmp/Caddyfile $REMOTE_DIR/Caddyfile"
+    # tee (not mv): the file is bind-mounted into the caddy container, and mv
+    # swaps the inode — the running container would keep seeing the old file.
+    gcloud compute ssh --quiet $VM_NAME --zone=$VM_ZONE --command="sudo tee $REMOTE_DIR/Caddyfile > /dev/null < /tmp/Caddyfile && rm /tmp/Caddyfile"
     Remove-Item $caddyfile_tmp
 }
 
@@ -253,6 +259,14 @@ gcloud compute ssh --quiet $VM_NAME --zone=$VM_ZONE --command=$acl_cmd
 # ---- Step 4: Rebuild and restart containers ----
 Write-Host "`n[4/4] Extracting application and restarting Docker Compose on VM..." -ForegroundColor Cyan
 gcloud compute ssh --quiet $VM_NAME --zone=$VM_ZONE --command="cd $REMOTE_DIR && tar -xzf amphive_app.tar.gz && rm amphive_app.tar.gz && sudo docker-compose up -d --build"
+
+# compose won't restart caddy for a config-only change (the Caddyfile is a
+# bind-mounted volume, not part of the service definition), so reload it
+# explicitly. No-op when the config is unchanged; '|| true' covers -NoTls /
+# a caddy container that is still starting.
+if (-not $NoTls) {
+    gcloud compute ssh --quiet $VM_NAME --zone=$VM_ZONE --command="sudo docker exec amphive-caddy caddy reload --config /etc/caddy/Caddyfile 2>/dev/null || true"
+}
 
 $vm_ip = (gcloud compute instances describe $VM_NAME --zone=$VM_ZONE --format="value(networkInterfaces[0].accessConfigs[0].natIP)").Trim()
 Write-Host "`nDeployment complete!" -ForegroundColor Green
