@@ -13,17 +13,18 @@ async def test_connect_valid_token():
         
         mock_decode.return_value = {"sub": "42"}
         mock_sio.save_session = AsyncMock()
-        
-        # Scenario 1: Token in auth
+
+        # Token in the auth payload (CONNECT packet body) — the only accepted path
         res = await connect("sid-123", {}, {"token": "valid-jwt"})
         assert res is True
         mock_sio.save_session.assert_awaited_once_with("sid-123", {"user_id": 42})
-        
-        # Scenario 2: Token in query string
+
+        # Token in the query string is NOT accepted (removed 2026-07-09: query
+        # strings land in proxy/access logs, turning them into bearer creds)
         mock_sio.save_session.reset_mock()
         res = await connect("sid-123", {"QUERY_STRING": "token=query-jwt"}, None)
-        assert res is True
-        mock_sio.save_session.assert_awaited_once_with("sid-123", {"user_id": 42})
+        assert res is False
+        mock_sio.save_session.assert_not_awaited()
 
 @pytest.mark.asyncio
 async def test_connect_invalid_or_missing_token():

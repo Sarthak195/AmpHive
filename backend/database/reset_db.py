@@ -6,11 +6,11 @@ migration tool and NEVER something to run against a database with real data.
 To prevent an accidental production wipe it refuses to run unless explicitly
 confirmed:
 
-    AMPHIVE_CONFIRM_DROP=yes python -m backend.database.init_db
+    AMPHIVE_CONFIRM_DROP=yes python -m backend.database.reset_db
     # or
-    python -m backend.database.init_db --drop
+    python -m backend.database.reset_db --drop
 
-Normal startup uses db.init_db() (create-only), not this script.
+Normal startup uses db.init_db() (Alembic upgrade), not this script.
 """
 import asyncio
 import os

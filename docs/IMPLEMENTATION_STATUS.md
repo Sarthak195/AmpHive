@@ -58,7 +58,7 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 | **Unauthorized physical-on guard (fw ≥ 1.5.0)** | ✅ | The relay ON with no active session (physical button / Tapo app / stale NVS resume) is forced OFF locally every poll and alarmed once per episode (`UNAUTHORIZED_ON`, rising-edge). Uses the plug's real `device_on` (previously read but discarded). **Live on the real gateway 2026-07-10** (OTA'd to `1.5.0-direct`); the backend ingests the alarm end-to-end (verified in prod). The remote out-of-band physical-press trigger itself is unit-tested + by-construction (no LAN path to press the button remotely). |
 | **Richer telemetry: relay state + trapezoidal energy (fw ≥ 1.5.0)** | ✅ | Telemetry now carries the actual `relay` (device_on) state alongside derived `current`/nominal `voltage`; the driver-side kWh integrator switched from left-rectangle to the **trapezoidal rule** (averages consecutive power samples) for lower error on ramping loads at the 10 s cadence. **Verified on the wire 2026-07-10** (real gateway telemetry shows `"relay":false`). |
 | `microlink` Tailscale client (Noise/ts2021, DERP, DISCO, STUN, WG) | 🟡 | **Demoted to legacy transport** (`AMPHIVE_DIRECT_MQTT=0`): works for full-cone NATs, but symmetric NAT defeats DISCO hole-punching (root-caused 2026-07-09) — the reason for the direct-MQTT pivot. Kept compilable for rollback/comparison. |
-| MQTT control loop + topic contract | 🟡 | Matches backend topics. **2026-07-06 audit: single-plug only** — `main.c` has one `target_plug_ip`/`active_session` and `tapo_protocol.c` one global KLAP session + energy integrator, so on a gateway with >1 plug a command for plug B toggles plug A and telemetry is misattributed. Multi-plug needs a per-plug state table + instance-based KLAP driver. (The software **AmpHive Agent** already handles multiple plugs per gateway — this limit is ESP32-firmware-only.) (§3.49, TD#20, SEC §8.5) |
+| MQTT control loop + topic contract | 🟡 | Matches backend topics. **2026-07-06 audit: single-plug only** — `main.c` has one `target_plug_ip`/`active_session` and `tapo_protocol.c` one global KLAP session + energy integrator, so on a gateway with >1 plug a command for plug B toggles plug A and telemetry is misattributed. Multi-plug needs a per-plug state table + instance-based KLAP driver. (The software **AmpHive Agent** already handles multiple plugs per gateway — this limit is ESP32-firmware-only.) (§3.50, TD#20, SEC §8.5) |
 | Captive portal provisioning | ✅ | `AmpHive_Setup_XXXX` → NVS → reboot |
 | Edge watchdogs (duration/energy/thermal/over-current) | ✅ | Thermal + over-current now use the plug's `overheat_status`/`overcurrent_status` flags (the P110 has no °C sensor) |
 | Over-current cutoff | ✅ | Enforced via the plug's `overcurrent_status` flag → local OFF + `OVERCURRENT_CUTOFF` alarm |
@@ -355,6 +355,23 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
     the cap check under the user lock; served frontend bundle carries the
     multi-session context). The 409-at-cap itself is unit-tested only — a
     live check would need two real sessions on the physical plug.
+46. [Resolved 2026-07-09] **Wallet lost-update via the stale identity map.**
+    The row-locked read-modify-write in `_credit_topup` and
+    `finalize_charging_session` looked race-safe, but the request session
+    already held the auth-loaded `User` (get_current_user shares the
+    request's `db`), and SQLAlchemy returns that **cached instance without
+    refreshing attributes** from a later `select(User).with_for_update()` —
+    the lock was taken, the arithmetic ran on the balance as of auth time.
+    A credit/debit committed between auth and the lock (webhook top-up
+    during a stop request, reaper debit during /verify) was silently
+    overwritten. Wallet writes are now DB-side atomics centralized in
+    `services/wallet.py` (`credit_wallet`, `debit_wallet_clamped`); the
+    logout `token_version` bump had the same shape and is also an atomic
+    `UPDATE … RETURNING` now. Postgres-backed regression tests
+    (stale-instance scenarios, duplicate-topup rollback, clamp, lock
+    serialization): `backend/tests/test_wallet.py` — these are the first
+    tests to use CI's postgres service for billing correctness (the purpose
+    it was provisioned for).
 
 ### 2026-07-06 follow-up audit (statuses re-checked 2026-07-11)
 
@@ -363,7 +380,7 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 Several items were fixed by the 2026-07-08…11 work (PRs #4–#7) before this
 audit merged; statuses below are as of 2026-07-11.*
 
-46. **[Resolved 2026-07-10] Firmware safety alarms were dropped.** The firmware
+47. **[Resolved 2026-07-10] Firmware safety alarms were dropped.** The firmware
     publishes `THERMAL_CUTOFF`/`OVERCURRENT_CUTOFF` (and, fw ≥ 1.5.0,
     `UNAUTHORIZED_ON`) to `amphive/gateways/{id}/alarms`, but `MQTTManager`
     subscribed only to `+/telemetry` + `+/status`, so cutoffs were unrecorded
@@ -371,43 +388,43 @@ audit merged; statuses below are as of 2026-07-11.*
     `gateway_events` rows and broadcast to the CPO events feed
     (`GET /api/cpo/events` + ack) — see the alarm-handling row above.
     (TD#21)
-47. **[Open] Backend trusts the payload `plug_id`.** `_handle_gateway_telemetry`
+48. **[Open] Backend trusts the payload `plug_id`.** `_handle_gateway_telemetry`
     bills whatever `plug_id` the body claims without verifying it belongs to the
     topic's `gateway_id`. The per-gateway broker ACLs (2026-07-10) confine a
     gateway to its own *topics*, so the spoofer must now hold a real gateway's
     credentials — but a compromised gateway can still attribute energy/billing
     to another tenant's plug. Add a `plug.gateway_id == <topic gateway>` check.
     (SEC §3, §8.5)
-48. **[Open] Unguarded telemetry casts.** `float(payload.get(...))` in
+49. **[Open] Unguarded telemetry casts.** `float(payload.get(...))` in
     `_handle_gateway_telemetry` has no try/except; a malformed value throws in
     the paho callback and drops the message. The broker now requires per-gateway
     auth (severity down from the audit's "anonymous broker" framing), but a
     buggy gateway can still silently lose readings. (TD#25)
-49. **[Open] ESP32 firmware is single-plug.** `main.c` (`target_plug_ip`,
+50. **[Open] ESP32 firmware is single-plug.** `main.c` (`target_plug_ip`,
     `active_session`, `active_plug_id`, `telemetry_interval_ms`) and
     `tapo_protocol.c` (global `s_sess`, `s_energy_wh`) are single-instance:
     commands for a second plug on the same gateway actuate the first, and
     telemetry is published under the last-commanded id. The data model allows
     many plugs per gateway, and the software AmpHive Agent already drives
     multiple plugs — this is firmware-only. (TD#20, SEC §8.5)
-50. **[Open] Sessions startable on OFFLINE/MAINTENANCE plugs.**
+51. **[Open] Sessions startable on OFFLINE/MAINTENANCE plugs.**
     `start_charging_session` (`backend/routers/sessions.py`) rejects only
     `OCCUPIED` plug status. The dead-*gateway* case is now closed (409 unless
     `gateway_is_live`, §3.40), but a plug a CPO deliberately set to
     MAINTENANCE/OFFLINE on a live gateway is still startable. Require
     `AVAILABLE`. (TD#22)
-51. **[Open] Crash-recovery resets the duration watchdog.** On reboot the
+52. **[Open] Crash-recovery resets the duration watchdog.** On reboot the
     recovered session's `start_time_s` is reset to "now" (`main.c`, tick-based,
     no wall clock), so the time cap restarts from zero each reboot (the energy
     cap still holds). (TD#23)
-52. **[Open, narrowed] Offline-resync telemetry can bill the wrong session.**
+53. **[Open, narrowed] Offline-resync telemetry can bill the wrong session.**
     Live readings are now attributed by the firmware-echoed `session_id`
     (fw ≥ 1.4.x), which closes the plug-reused-while-online case. But
     `offline_log` ring-buffer entries still carry no `session_id`, so readings
     buffered across an MQTT outage are attributed to the plug's *current*
     ACTIVE session on resync — the stale-overwrite window remains for the
     buffered path. (TD#24)
-53. **[Open, reduced scope] Device / provisioning security.** Still open: open
+54. **[Open, reduced scope] Device / provisioning security.** Still open: open
     setup AP + unauthenticated `/save`, no flash-encryption (plaintext NVS
     secrets — Wi-Fi, Tapo account, per-gateway MQTT creds), and the boot-time
     fallback into the open portal. Since the audit: OTA images are **signed**
@@ -415,7 +432,7 @@ audit merged; statuses below are as of 2026-07-11.*
     anonymous-broker item is **gone** (devices left the overlay for direct
     MQTT with per-gateway credentials + topic ACLs + TLS, 2026-07-10).
     (SEC §8)
-54. **[Partially resolved] Observability / onboarding polish.** Fixed since the
+55. **[Partially resolved] Observability / onboarding polish.** Fixed since the
     audit: unified wallet ledger (endpoint + History tab, 2026-07-10 — TD#29),
     gateway staleness (read-time `gateway_is_live` + `gateway_online` in the
     driver API + session reaper — TD#27), and the shared-`Event` latency nit

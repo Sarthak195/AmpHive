@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy import Date, and_, cast, func, or_, select
+from sqlalchemy import Date, and_, cast, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -142,16 +142,21 @@ async def logout(
     """
     Revoke every outstanding token for this user by bumping token_version
     (server-side "log out everywhere"). The current token — and any issued on
-    other devices — is rejected on its next request. Row-locked so concurrent
-    logouts increment exactly once.
+    other devices — is rejected on its next request. The bump happens DB-side:
+    incrementing `user.token_version` in Python would reuse the auth-loaded
+    identity-mapped instance, whose stale epoch can collapse concurrent bumps
+    (same lost-update class as the wallet — see services/wallet.py).
     """
-    locked = await db.execute(
-        select(User).where(User.id == user.id).with_for_update()
+    result = await db.execute(
+        update(User)
+        .where(User.id == user.id)
+        .values(token_version=User.token_version + 1)
+        .returning(User.token_version)
+        .execution_options(synchronize_session=False)
     )
-    locked_user = locked.scalar_one()
-    locked_user.token_version += 1
+    new_epoch = result.scalar_one()
     await db.commit()
-    logger.info(f"User logged out (tokens revoked): {user.email} (tv={locked_user.token_version})")
+    logger.info(f"User logged out (tokens revoked): {user.email} (tv={new_epoch})")
     return {"status": "logged_out"}
 
 

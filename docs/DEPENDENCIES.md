@@ -22,7 +22,7 @@ main.py  (app assembly only since 2026-07-07: lifespan, CORS, health, router inc
 │    └── database/models.py → Base
 ├── database/models.py     9 ORM tables + 5 enums  (source of truth, applied via Alembic)
 │    └── sqlalchemy / sqlalchemy.orm, enum
-├── database/init_db.py    standalone DB-init helper (duplicates db.py:init_db — see §5)
+├── database/reset_db.py   destructive dev-only reset (drop_all + create_all; confirmation-gated)
 ├── migrations/            Alembic env.py + versions/ (0001_baseline = frozen full schema)
 │
 ├── services/auth.py       JWT (python-jose, HS256, 7-day) + bcrypt (passlib) + get_current_user
@@ -142,7 +142,7 @@ main/CMakeLists.txt → SRCS main.c tapo_protocol.c session_nvs.c offline_log.c
 
 | File | Status | Recommendation |
 |------|--------|----------------|
-| `backend/database/init_db.py` | Duplicates `db.py:init_db()` (and predates Alembic) | Consolidate or remove |
+| ~~`backend/database/init_db.py`~~ | **Renamed 2026-07-09** to `reset_db.py` (TD#8) — the destructive drop-all reset no longer shares a name with `db.py:init_db()` | — |
 | ~~`backend/database/schema.sql` / `schema_v2.sql`~~ | **Deleted 2026-07-07** — replaced by Alembic (`backend/migrations/`, see [DATA_MODEL.md §4](DATA_MODEL.md#4-migrations-alembic-since-2026-07-07)) | — |
 | `frontend/README.md` | Stock Vite template, not project docs | Replace with project-specific notes |
 
