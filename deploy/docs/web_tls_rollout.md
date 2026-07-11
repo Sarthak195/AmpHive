@@ -81,6 +81,13 @@ Verified through the front door by IP during the outage: SPA 200, `/api/config`,
 Socket.io open packet (websocket upgrade offered), CPO login + gateway list
 (both gateways online, fresh `last_seen_at`).
 
+**Resolution:** DuckDNS recovered ~01:45 UTC (outage ≈ 1 h); Caddy's retry
+loop obtained the certificate with no manual action (`notBefore` 2026-07-11
+00:46:42 GMT, expires 2026-10-09, issuer Let's Encrypt). Full checklist then
+verified: https 200 with validated cert, domain http→https 308, `/api/config`
++ Socket.io open packet over https, CPO login OK, both gateways online
+throughout.
+
 **Launch note:** this outage is a live demonstration that DuckDNS is a
 single point of failure — get a real domain before launch (SECURITY.md §6
 already recommends it).

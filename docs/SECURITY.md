@@ -64,23 +64,23 @@ BFG + force-push) to purge the dead values entirely.
 
 ## 3. Open / unauthenticated surfaces
 
-- [Deployed 2026-07-11, **cert pending DuckDNS recovery**] **Web tier served
+- [Resolved 2026-07-11, **deployed + verified in prod**] **Web tier served
   plain HTTP.** The SPA, API, and Socket.io were served http-only on `:80` —
   logins, JWTs, and the Razorpay checkout traveled cleartext. `deploy.ps1`
-  now ships a **Caddy TLS front door by default** (`docker-compose.tls.yml`,
-  deployed to prod 2026-07-11): auto-renewed Let's Encrypt cert for
-  `CADDY_DOMAIN` (`.env`; Caddyfile generated on the VM), HTTP→HTTPS
-  redirect for the domain, and the frontend container no longer publishes a
-  host port (Caddy is the only public web entrypoint). Bare-IP/unknown-Host
-  requests are **served** (plain http) rather than redirected, so a DNS
-  outage can't take the site down. CORS / Socket.io allowlists already carry
-  the https origins; firewall rule `allow-amphive-https` (tcp:443) created.
-  Front door verified in prod by IP (SPA/API/Socket.io/login; broker + both
-  gateways unaffected); the **cert itself is blocked by DuckDNS's
-  authoritative nameservers SERVFAILing** during the rollout — Caddy
-  auto-retries until it lands (incident log:
-  `deploy/docs/web_tls_rollout.md`). Rollback: `deploy.ps1 -NoTls`.
-  **Follow-ups once https is confirmed:** drop tcp:8000 from
+  now ships a **Caddy TLS front door by default** (`docker-compose.tls.yml`):
+  auto-renewed Let's Encrypt cert for `CADDY_DOMAIN` (`.env`; Caddyfile
+  generated on the VM), HTTP→HTTPS redirect for the domain, and the frontend
+  container no longer publishes a host port (Caddy is the only public web
+  entrypoint). Bare-IP/unknown-Host requests are **served** (plain http)
+  rather than redirected, so a DNS outage can't take the site down. CORS /
+  Socket.io allowlists already carried the https origins; firewall rule
+  `allow-amphive-https` (tcp:443) added. **Verified live:** `https://` 200
+  with a validated LE cert (CN `amphive.duckdns.org`, expires 2026-10-09,
+  auto-renew), domain http→https 308, `/api` + Socket.io over https, CPO
+  login; broker + both gateways unaffected. The rollout rode out a real
+  **DuckDNS authoritative-nameserver outage** (~1 h; Caddy auto-retried the
+  cert in — incident log: `deploy/docs/web_tls_rollout.md`). Rollback:
+  `deploy.ps1 -NoTls`. **Remaining follow-ups:** drop tcp:8000 from
   `allow-amphive-ports` (the backend's direct plain-HTTP port — the SPA
   reaches the API via the frontend nginx proxy, so nothing public needs it),
   add HSTS + flip bare-IP back to a redirect, and replace DuckDNS with a
@@ -276,9 +276,12 @@ read as still-open.*
 ## Quick remediation checklist
 
 Status — open items and recently closed:
-- [ ] **Deploy + verify the web HTTPS front door** (code complete 2026-07-11 —
-      run `deploy/scripts/deploy.ps1`), then drop tcp:8000 from
-      `allow-amphive-ports`. See §3 and `deploy/docs/web_tls_rollout.md`.
+- [x] **Web HTTPS front door deployed + verified in prod** (2026-07-11):
+      Caddy on 80/443, validated Let's Encrypt cert, http→https redirect.
+      See §3 and `deploy/docs/web_tls_rollout.md`.
+- [ ] Drop tcp:8000 from `allow-amphive-ports` (nothing public needs the
+      backend's direct port now that Caddy fronts the web tier); add HSTS;
+      replace DuckDNS with a real domain (proven SPOF — §3/§6).
 - [x] **Rotate** WireGuard keys, DuckDNS token, Tapo & DB passwords at the source
       (2026-07-06). Dead old values remain in git history — *optional* scrub.
 - [x] **Commit + deploy** the CORS allowlist (2026-07-06) — live in prod.
