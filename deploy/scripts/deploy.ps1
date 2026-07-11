@@ -212,6 +212,8 @@ if (-not $NoTls) {
     }
     $caddy_lines += "$caddy_domain {"
     $caddy_lines += "`tencode gzip"
+    $caddy_lines += "`t# HSTS: browsers pin https for this domain for 1 year (SECURITY.md 3)."
+    $caddy_lines += "`theader Strict-Transport-Security `"max-age=31536000`""
     $caddy_lines += "`treverse_proxy frontend:80"
     $caddy_lines += "}"
     $caddy_lines += ""
@@ -281,6 +283,6 @@ if ($NoTls) {
     Write-Host "  Backend  : http://${vm_ip}:8000/docs" -ForegroundColor Yellow
 } else {
     Write-Host "  Frontend : https://$caddy_domain (http redirects; first cert issuance can take ~a minute)" -ForegroundColor Yellow
-    Write-Host "  Backend  : https://$caddy_domain/api (direct: http://${vm_ip}:8000/docs)" -ForegroundColor Yellow
+    Write-Host "  Backend  : https://$caddy_domain/api (:8000 is firewalled since 2026-07-11 - VM-local only)" -ForegroundColor Yellow
     Write-Host "  Requires : GCP firewall allows tcp:80 AND tcp:443; $caddy_domain resolves to $vm_ip" -ForegroundColor Yellow
 }

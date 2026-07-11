@@ -89,6 +89,9 @@ services:
       - COINS_PER_RUPEE=${COINS_PER_RUPEE}
       - COINS_PER_KWH=${COINS_PER_KWH}
       - TELEMETRY_RETENTION_DAYS=${TELEMETRY_RETENTION_DAYS}
+      # Auth rate limits ("<attempts>/<window sec>" per IP); empty = code defaults
+      - LOGIN_RATE_LIMIT=${LOGIN_RATE_LIMIT}
+      - REGISTER_RATE_LIMIT=${REGISTER_RATE_LIMIT}
       # [Direct Mode] Tapo P110 control via WireGuard tunnel (bypasses ESP32)
       - DIRECT_MODE=${DIRECT_MODE}
       - TAPO_USERNAME=${TAPO_USERNAME}
