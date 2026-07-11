@@ -16,7 +16,15 @@ deploy/config/amphive_tunnel.conf
 # server cert; the CA + server keys stay local (+ on the VM). See
 # deploy/config/mqtt-certs/README.md.
 deploy/config/mqtt-certs/*.key
+# Rotated-out cert material kept locally for reference — never commit.
+deploy/config/mqtt-certs/retired-*/
 *.key
+
+# OTA firmware signing key (ECDSA, signed-app verification) — NEVER commit.
+# Generate once (`espsecure.py generate_signing_key --version 1`) and BACK IT
+# UP: devices with signed OTA enabled only accept images signed with this key;
+# losing it means recovery-by-USB-reflash. See docs/FIRMWARE.md.
+firmware/secure_boot_signing_key.pem
 
 # Dependency directories
 node_modules/
@@ -69,6 +77,8 @@ __pycache__/
 *.pyo
 *.pyd
 .pytest_cache/
+# Python packaging artifacts
+*.egg-info/
 .coverage
 htmlcov/
 .venv/
@@ -77,3 +87,6 @@ env/
 .env/
 # Local test-account credentials (seeded fixture logins) - never commit
 TEST_ACCOUNTS.local.txt
+
+# Local reference clones of third-party plug-API repos (see docs/PLUG_CONNECTIVITY_OPTIONS.md)
+research/

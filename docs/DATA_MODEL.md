@@ -46,6 +46,8 @@ row-locked, clamped wallet debits.
 ### `gateways`
 `id` **VARCHAR(50) PK** (caller-supplied MAC/UUID) · `tenant_id` → tenants
 (CASCADE, **not null**) · `name` · `vpn_ip` unique · `status` (default `offline`)
+· `firmware_version` VARCHAR(32) nullable (fw last reported in the `online`
+status; rev `0006`, LWT never clobbers it) · `latitude`/`longitude` nullable
 · `last_seen_at` · `created_at`. Owns plugs.
 
 `last_seen_at` is the **liveness marker**: written only by the MQTT handlers
@@ -109,6 +111,19 @@ VARCHAR(20) (raw firmware signal, nullable). Composite indexes on `(plug_id, rec
 the buffered batch-flush service `backend/services/telemetry_persistence.py`; read
 by `GET /api/cpo/analytics/telemetry` via `date_trunc` aggregation.
 
+### `gateway_events`
+Operational events/alarms feed for the CPO portal (firmware safety alarms
+`THERMAL_CUTOFF` / `OVERCURRENT_CUTOFF` / `UNAUTHORIZED_ON` + OTA lifecycle
+notices), fed by `services/mqtt_manager._handle_gateway_alarm` and read by
+`GET /api/cpo/events` (ack'd via `POST /api/cpo/events/{id}/ack`). `id`
+**BIGINT PK** · `tenant_id` → tenants (CASCADE) · `gateway_id` → gateways
+VARCHAR(50) (CASCADE) · `plug_id` → plugs (SET NULL, nullable) · `event_type`
+VARCHAR(48) · `severity` VARCHAR(16) (default `warning`;
+`critical`|`warning`|`info`) · `detail` VARCHAR(255) (nullable) ·
+`acknowledged` bool (default false) · `created_at` TIMESTAMPTZ. Composite
+indexes on `(tenant_id, created_at)` and `(gateway_id, created_at)`. Added by
+Alembic revision `0005_gateway_events` (2026-07-10).
+
 ## 3. Relationships
 
 ```
@@ -118,6 +133,7 @@ tenants ─┬─< users ─┬─< charging_sessions >─┬─ plugs >── g
          ├─< gateways ─< plugs               │
          ├─< charging_sessions               │
          ├─< telemetry_readings >── plugs / charging_sessions (nullable)
+         ├─< gateway_events >── gateways / plugs (nullable)
          └─< charger_groups ─┬─< plugs       │
                              └─< group_memberships
 ```
@@ -130,7 +146,9 @@ joined via `access_code`.
 
 - **`backend/migrations/versions/0001_baseline.py`** — frozen PostgreSQL DDL
   snapshot of the full 9-table schema at adoption (includes everything the
-  retired `_INPLACE_UPGRADES` produced). Never edit or regenerate it.
+  retired `_INPLACE_UPGRADES` produced). Never edit or regenerate it. (The
+  live schema is now **10 tables** — `gateway_events` arrived later via
+  revision `0005_gateway_events`, 2026-07-10.)
 - **New schema change** = new revision: `alembic -c backend/alembic.ini
   revision --autogenerate -m "..."` (autogenerate needs a reachable database —
   use the CI postgres or the VM; dev boxes run no DB by policy).

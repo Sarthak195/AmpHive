@@ -25,9 +25,9 @@ from backend.schemas import (
     CpoGroupUpdateRequest, CpoPlugCreateRequest, CpoPlugUpdateRequest,
     CpoSetupRequest, CreateOrderRequest, CreateOrderResponse,
     DirectPlugRequest, GatewayRegisterRequest, GroupResponse,
-    JoinGroupRequest, LoginRequest, PlugRegisterRequest, PlugResponse,
-    RegisterRequest, SessionStartRequest, SessionStopRequest, UserResponse,
-    VerifyPaymentRequest,
+    JoinGroupRequest, LedgerEntryResponse, LoginRequest, PlugRegisterRequest,
+    PlugResponse, RegisterRequest, SessionStartRequest, SessionStopRequest,
+    UserResponse, VerifyPaymentRequest,
 )
 from backend.services import payments as payment_service
 from backend.services.auth import (
@@ -104,6 +104,44 @@ async def _credit_topup(
         await db.rollback()
         return None
     return new_balance
+
+
+@router.get("/api/wallet/ledger", response_model=List[LedgerEntryResponse])
+async def get_wallet_ledger(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    limit: int = 100,
+):
+    """
+    Unified wallet ledger for the current user: **both** top-up credits and
+    session debits, newest first, each with the running `balance_after`. The
+    driver History view previously showed only charging-session debits; this is
+    the full money trail (`transaction_type` distinguishes them, `direction`
+    is derived from the sign for convenient client rendering).
+    """
+    limit = max(1, min(limit, 500))
+    result = await db.execute(
+        select(LedgerTransaction)
+        .where(LedgerTransaction.user_id == user.id)
+        .order_by(LedgerTransaction.created_at.desc(), LedgerTransaction.id.desc())
+        .limit(limit)
+    )
+    rows = list(result.scalars().all())
+
+    return [
+        LedgerEntryResponse(
+            id=tx.id,
+            amount=float(tx.amount),
+            transaction_type=tx.transaction_type.value,
+            direction="credit" if tx.amount >= 0 else "debit",
+            description=tx.description,
+            balance_after=float(tx.balance_after),
+            session_id=tx.session_id,
+            razorpay_payment_id=tx.razorpay_payment_id,
+            created_at=tx.created_at.isoformat() if tx.created_at else None,
+        )
+        for tx in rows
+    ]
 
 
 @router.post("/api/payments/create-order", response_model=CreateOrderResponse)

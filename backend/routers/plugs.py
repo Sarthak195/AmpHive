@@ -74,7 +74,7 @@ async def get_available_plugs(
     )
 
     rows = await db.execute(
-        select(Plug, ChargerGroup.name, Gateway.latitude, Gateway.longitude)
+        select(Plug, ChargerGroup.name, Gateway)
         .join(Gateway, Gateway.id == Plug.gateway_id)
         .outerjoin(ChargerGroup, ChargerGroup.id == Plug.group_id)
         .where(
@@ -86,6 +86,7 @@ async def get_available_plugs(
         )
     )
 
+    now = datetime.now(timezone.utc)
     return [
         PlugResponse(
             id=plug.id,
@@ -94,10 +95,11 @@ async def get_available_plugs(
             current_power_w=plug.current_power_w,
             plug_model=plug.plug_model,
             group_name=group_name,
-            latitude=plug.latitude if plug.latitude is not None else gw_lat,
-            longitude=plug.longitude if plug.longitude is not None else gw_lng,
+            latitude=plug.latitude if plug.latitude is not None else gateway.latitude,
+            longitude=plug.longitude if plug.longitude is not None else gateway.longitude,
+            gateway_online=gateway_is_live(gateway, now),
         )
-        for plug, group_name, gw_lat, gw_lng in rows.all()
+        for plug, group_name, gateway in rows.all()
     ]
 
 
@@ -150,11 +152,13 @@ async def get_plug(
         group_name = row[0] if row else None
 
     # Effective coords: the plug's own, else its gateway's site location.
+    # Also load the gateway to report live reachability to the driver.
     gw_row = await db.execute(
-        select(Gateway.latitude, Gateway.longitude).where(Gateway.id == plug.gateway_id)
+        select(Gateway).where(Gateway.id == plug.gateway_id)
     )
-    gw_coords = gw_row.first()
-    gw_lat, gw_lng = (gw_coords[0], gw_coords[1]) if gw_coords else (None, None)
+    gateway = gw_row.scalar_one_or_none()
+    gw_lat = gateway.latitude if gateway else None
+    gw_lng = gateway.longitude if gateway else None
 
     return PlugResponse(
         id=plug.id,
@@ -165,6 +169,7 @@ async def get_plug(
         group_name=group_name,
         latitude=plug.latitude if plug.latitude is not None else gw_lat,
         longitude=plug.longitude if plug.longitude is not None else gw_lng,
+        gateway_online=gateway_is_live(gateway) if gateway else False,
     )
 
 

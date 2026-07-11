@@ -61,6 +61,8 @@ static SemaphoreHandle_t s_mutex = NULL;
 static double     s_energy_wh = 0.0;
 static TickType_t s_energy_last_tick = 0;
 static double     s_energy_persisted_wh = 0.0;
+/* last power sample, for trapezoidal integration (see tapo_get_telemetry) */
+static float      s_energy_last_power_w = 0.0f;
 
 #define ENERGY_NVS_NAMESPACE         "energy"
 #define ENERGY_NVS_KEY               "wh"
@@ -492,9 +494,17 @@ esp_err_t tapo_get_telemetry(const char *plug_ip, tapo_telemetry_t *out) {
     TickType_t now = xTaskGetTickCount();
     if (s_energy_last_tick != 0) {
         float dt_h = (float)(now - s_energy_last_tick) * portTICK_PERIOD_MS / 3600000.0f;
-        s_energy_wh += (double)power_w * dt_h;
+        /* Trapezoidal rule: average the previous and current power samples over
+         * the interval instead of holding the last sample constant (left
+         * rectangle). For a load that ramps between polls — the norm for EV
+         * charging at the default 10 s cadence — the rectangle rule systematically
+         * over/under-counts each ramp; the trapezoid halves that error for the
+         * same samples. First sample after boot has no predecessor, so it seeds
+         * s_energy_last_power_w without accruing. */
+        s_energy_wh += ((double)s_energy_last_power_w + (double)power_w) * 0.5 * dt_h;
     }
     s_energy_last_tick = now;
+    s_energy_last_power_w = power_w;
     double energy_wh_snapshot = s_energy_wh;
 
     /* Persist across reboots (throttled by accrual threshold) so a mid-session

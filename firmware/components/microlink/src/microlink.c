@@ -259,6 +259,16 @@ esp_err_t microlink_disconnect(microlink_t *ml) {
 
     ESP_LOGI(TAG, "Disconnecting...");
 
+    // Notify the app BEFORE tearing down subsystems, so it can close any
+    // connection that rides the overlay (e.g. stop the MQTT client) while the
+    // WireGuard netif still exists. microlink_wireguard_deinit() frees that
+    // netif; freeing it out from under a live lwIP TCP PCB is a use-after-free
+    // (LoadProhibited crash) — exactly what happened on ERROR-triggered
+    // reconnects, where the esp-mqtt transport was mid-read on the netif.
+    if (ml->config.on_disconnected) {
+        ml->config.on_disconnected();
+    }
+
     // Clean up subsystems
     microlink_coordination_deinit(ml);
     microlink_wireguard_deinit(ml);
@@ -279,11 +289,6 @@ esp_err_t microlink_disconnect(microlink_t *ml) {
     ml->vpn_ip = 0;
     ml->peer_count = 0;
     memset(&ml->stats, 0, sizeof(microlink_stats_t));
-
-    // Trigger callback
-    if (ml->config.on_disconnected) {
-        ml->config.on_disconnected();
-    }
 
     microlink_set_state(ml, MICROLINK_STATE_IDLE);
 

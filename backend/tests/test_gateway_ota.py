@@ -16,7 +16,7 @@ from backend.database.models import GatewayStatus
 from backend.routers.cpo import cpo_gateway_ota
 from backend.schemas import CpoGatewayOtaRequest
 
-URL = "http://100.87.241.70:8070/amphive-gateway-1.1.1.bin"
+URL = "https://storage.googleapis.com/amphive-fw/amphive-gateway-1.4.0.bin"
 
 
 def _online_gateway(last_seen_at=None):
@@ -100,3 +100,10 @@ def test_ota_request_rejects_non_http_url():
     import pydantic
     with pytest.raises(pydantic.ValidationError):
         CpoGatewayOtaRequest(firmware_url="ftp://evil/x.bin")
+
+
+def test_ota_request_rejects_plain_http_url():
+    """Images cross the public internet; fw >= 1.4.0 refuses http anyway."""
+    import pydantic
+    with pytest.raises(pydantic.ValidationError):
+        CpoGatewayOtaRequest(firmware_url="http://100.87.241.70:8070/fw.bin")

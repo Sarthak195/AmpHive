@@ -41,14 +41,37 @@ char mqtt_password[64] = "";
 bool config_loaded = false;
 static uint32_t telemetry_interval_ms = 10000; // Default 10s (10000ms)
 
+// ── Transport selection ──────────────────────────────────────────────────────
+// 1: DIRECT MQTT (default since 1.3.0) — plain outbound TLS to the broker's
+//    PUBLIC IP. No overlay: survives symmetric NAT/CGNAT (the device only
+//    dials out), which the microlink overlay could not (see docs/SECURITY.md
+//    §3 and docs/MQTT_CONTRACT.md). Confidentiality/authenticity = TLS against
+//    the embedded CA; authorization = per-gateway broker creds + topic ACLs.
+// 0: legacy overlay transport (microlink/WireGuard to the server's tailnet IP,
+//    plaintext 1883 inside the encrypted tunnel).
+#define AMPHIVE_DIRECT_MQTT 1
+
+#if AMPHIVE_DIRECT_MQTT
+// The VM's reserved static public IP (gcloud: amphive-static-ip). The broker
+// cert carries this IP in its SANs; mbedTLS verifies it against the embedded CA.
+#define MQTT_BROKER_URL     "mqtts://8.231.81.12:8883"
+#define MQTT_USE_TLS        1
+#else
 // The central AmpHive server's Tailscale VPN IP
 #define SERVER_VPN_IP       "100.87.241.70"
-// TLS broker (port 8883). The self-signed CA below is validated by mbedTLS
-// (chain + IP SAN); cert dates are not checked (CONFIG_MBEDTLS_HAVE_TIME_DATE
-// is off), so no clock/SNTP is needed. The broker keeps a plaintext 1883
-// listener during the transition, so an older image (or an OTA rollback)
-// still connects.
-#define MQTT_BROKER_URL     "mqtts://100.87.241.70:8883"
+// INTERIM (2026-07-08): plaintext 1883. mqtts://8883 is verified
+// working on the broker, but the ESP's custom ml_* overlay cannot carry the TLS
+// handshake (transport stall — esp_tls timeout, no mbedTLS/cert error). The
+// overlay is already WireGuard-encrypted, so 1883 is not a confidentiality
+// regression. Restore to "mqtts://100.87.241.70:8883" once the overlay TLS
+// path is fixed (see auto-memory: broker-tls-ondevice-verify-pending).
+#define MQTT_BROKER_URL     "mqtt://100.87.241.70:1883"
+// Must match the URI scheme above: 1 for mqtts:// (TLS), 0 for mqtt:// (plain).
+// esp-mqtt refuses to init a client that has TLS verification configs set on a
+// non-SSL scheme ("Client was not initialized"), so the CA cert below is only
+// attached when this is 1. Set back to 1 when restoring the mqtts://8883 URL.
+#define MQTT_USE_TLS        0
+#endif
 #define TARGET_PLUG_ID      1
 
 // Broker CA, embedded via EMBED_TXTFILES (see main/CMakeLists.txt). The
@@ -99,9 +122,12 @@ static struct {
 // --- Forward Declarations ---
 static void start_mqtt_client(void);
 static void telemetry_task(void *pvParameters);
-static void microlink_task(void *pvParameters);
 static void start_captive_portal(void);
 static void resync_offline_logs(void);
+#if !AMPHIVE_DIRECT_MQTT
+static void on_overlay_disconnected(void);
+static void microlink_task(void *pvParameters);
+#endif
 
 // ─── NVS Configuration Helpers ───────────────────────────────────────────────
 static void load_config_from_nvs(void) {
@@ -134,11 +160,30 @@ static void load_config_from_nvs(void) {
     nvs_get_str(my_handle, "mqtt_pwd", mqtt_password, &size);
 
     nvs_close(my_handle);
-    
+
+    // gateway_id is ALWAYS the device's STA MAC (lower-case, no separators) —
+    // it is intrinsic to the hardware, so we derive it rather than ask the
+    // installer to type it. This overrides any stored value and keeps the id
+    // stable across re-provisioning. device_name (legacy/overlay-only) follows.
+    uint8_t mac[6];
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    snprintf(gateway_id, sizeof(gateway_id), "%02x%02x%02x%02x%02x%02x",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    if (device_name[0] == '\0') {
+        // gateway_id is a 12-char MAC hex; bound the field so the compiler's
+        // format-truncation check is satisfied (8 + 20 < sizeof device_name).
+        snprintf(device_name, sizeof(device_name), "amphive-%.20s", gateway_id);
+    }
+    // The broker account username == gateway_id, so default mqtt_user to it
+    // (the installer only needs to supply the per-gateway password).
+    if (mqtt_username[0] == '\0') {
+        strncpy(mqtt_username, gateway_id, sizeof(mqtt_username) - 1);
+    }
+
     if(config_loaded) {
-        ESP_LOGI(TAG, "Config loaded from NVS. SSID: %s", wifi_ssid);
+        ESP_LOGI(TAG, "Config loaded from NVS. SSID: %s | gateway_id: %s", wifi_ssid, gateway_id);
     } else {
-        ESP_LOGI(TAG, "No config found in NVS. Booting into setup mode.");
+        ESP_LOGI(TAG, "No config found in NVS. Booting into setup mode. gateway_id: %s", gateway_id);
     }
 }
 
@@ -167,24 +212,25 @@ static void save_config_to_nvs(const char* ssid, const char* pwd, const char* au
 
 static const char* portal_html = \
     "<html><head><title>AmpHive Gateway Setup</title>"
-    "<style>body{font-family:sans-serif;margin:40px;background:#1e1e1e;color:#fff;} input{padding:10px;margin:5px 0 20px 0;width:100%%;border-radius:5px;border:none;} button{padding:10px 20px;background:#00d2ff;border:none;border-radius:5px;cursor:pointer;font-weight:bold;}</style>"
+    "<style>body{font-family:sans-serif;margin:40px;background:#1e1e1e;color:#fff;} input{padding:10px;margin:5px 0 20px 0;width:100%%;border-radius:5px;border:none;} button{padding:10px 20px;background:#00d2ff;border:none;border-radius:5px;cursor:pointer;font-weight:bold;} code{background:#333;padding:3px 8px;border-radius:4px;color:#00d2ff;}</style>"
     "</head><body><h2>AmpHive Gateway Config</h2>"
+    "<p>Gateway ID (auto-detected): <code>%s</code><br>"
+    "<small>Give this ID to your AmpHive operator to get the MQTT password.</small></p>"
     "<form method='POST' action='/save'>"
     "<label>WiFi SSID:</label><input name='ssid' required>"
     "<label>WiFi Password:</label><input name='pwd' type='password'>"
-    "<label>Headscale Auth Key (mkey:...):</label><input name='auth' required>"
-    "<label>Device Name:</label><input name='dev_name' required>"
-    "<label>Gateway MAC/ID:</label><input name='gw_id' required>"
     "<label>Target Plug IP:</label><input name='plug_ip' required>"
     "<label>Tapo Account Email:</label><input name='tapo_email' type='email' required>"
     "<label>Tapo Account Password:</label><input name='tapo_pwd' type='password' required>"
-    "<label>MQTT Username (optional):</label><input name='mqtt_user'>"
-    "<label>MQTT Password (optional):</label><input name='mqtt_pwd' type='password'>"
-    "<button type='submit'>Save & Reboot</button>"
+    "<label>MQTT Password:</label><input name='mqtt_pwd' type='password' required>"
+    "<button type='submit'>Save &amp; Reboot</button>"
     "</form></body></html>";
 
 static esp_err_t portal_get_handler(httpd_req_t *req) {
-    httpd_resp_send(req, portal_html, HTTPD_RESP_USE_STRLEN);
+    // Render with the auto-detected gateway_id embedded (load_config derives it).
+    char page[1400];
+    snprintf(page, sizeof(page), portal_html, gateway_id);
+    httpd_resp_send(req, page, HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
 }
 
@@ -230,24 +276,25 @@ static esp_err_t portal_post_handler(httpd_req_t *req) {
     }
     buf[ret] = '\0';
 
-    char ssid[32] = {0}, pwd[64] = {0}, auth[128] = {0}, dev[32] = {0}, gw[32] = {0}, plug[16] = {0};
-    char t_email[64] = {0}, t_pwd[64] = {0}, m_user[64] = {0}, m_pwd[64] = {0};
+    // gateway_id, device_name and mqtt_user are derived from the MAC (see
+    // load_config_from_nvs), so the portal no longer collects them — the
+    // installer supplies only Wi-Fi, the plug IP, the Tapo account, and the
+    // per-gateway MQTT password.
+    char ssid[32] = {0}, pwd[64] = {0}, plug[16] = {0};
+    char t_email[64] = {0}, t_pwd[64] = {0}, m_pwd[64] = {0};
     httpd_query_key_value(buf, "ssid", ssid, sizeof(ssid));
     httpd_query_key_value(buf, "pwd", pwd, sizeof(pwd));
-    httpd_query_key_value(buf, "auth", auth, sizeof(auth));
-    httpd_query_key_value(buf, "dev_name", dev, sizeof(dev));
-    httpd_query_key_value(buf, "gw_id", gw, sizeof(gw));
     httpd_query_key_value(buf, "plug_ip", plug, sizeof(plug));
     httpd_query_key_value(buf, "tapo_email", t_email, sizeof(t_email));
     httpd_query_key_value(buf, "tapo_pwd", t_pwd, sizeof(t_pwd));
-    httpd_query_key_value(buf, "mqtt_user", m_user, sizeof(m_user));
     httpd_query_key_value(buf, "mqtt_pwd", m_pwd, sizeof(m_pwd));
 
-    url_decode(ssid); url_decode(pwd); url_decode(auth); url_decode(dev);
-    url_decode(gw); url_decode(plug); url_decode(t_email); url_decode(t_pwd);
-    url_decode(m_user); url_decode(m_pwd);
+    url_decode(ssid); url_decode(pwd); url_decode(plug);
+    url_decode(t_email); url_decode(t_pwd); url_decode(m_pwd);
 
-    save_config_to_nvs(ssid, pwd, auth, dev, gw, plug, t_email, t_pwd, m_user, m_pwd);
+    // mqtt_user == gateway_id (== MAC); ts_auth_key is unused in direct mode.
+    save_config_to_nvs(ssid, pwd, "", device_name, gateway_id, plug,
+                       t_email, t_pwd, gateway_id, m_pwd);
 
     const char* resp = "<html><body><h2>Saved! Rebooting gateway...</h2></body></html>";
     httpd_resp_send(req, resp, HTTPD_RESP_USE_STRLEN);
@@ -378,6 +425,20 @@ static void publish_ota_event(const char *event) {
     char payload[96];
     snprintf(topic, sizeof(topic), "amphive/gateways/%s/alarms", gateway_id);
     snprintf(payload, sizeof(payload), "{\"event\":\"%s\"}", event);
+    esp_mqtt_client_publish(mqtt_client, topic, payload, 0, 1, 0);
+}
+
+// ─── Safety alarm → alarms topic ────────────────────────────────────────────
+// Fault alarms (THERMAL_CUTOFF, OVERCURRENT_CUTOFF, UNAUTHORIZED_ON, …) carry
+// the plug id so the backend can attribute them; QoS 1 (best-effort delivery of
+// a one-shot event). Silent when offline — the condition is still enforced
+// locally regardless of the broker link.
+static void publish_alarm(const char *error) {
+    if (!mqtt_connected || mqtt_client == NULL) return;
+    char topic[128];
+    char payload[96];
+    snprintf(topic, sizeof(topic), "amphive/gateways/%s/alarms", gateway_id);
+    snprintf(payload, sizeof(payload), "{\"error\":\"%s\",\"plug_id\":%d}", error, active_plug_id);
     esp_mqtt_client_publish(mqtt_client, topic, payload, 0, 1, 0);
 }
 
@@ -555,10 +616,13 @@ static void start_mqtt_client(void) {
 
     esp_mqtt_client_config_t mqtt_cfg = {
         .broker.address.uri = MQTT_BROKER_URL,
+#if MQTT_USE_TLS
         /* TLS: verify the broker against our embedded self-signed CA. The URI
            scheme (mqtts://) selects TLS; the CA PEM authenticates the server
-           (chain + IP SAN). Dates aren't validated (no clock). */
+           (chain + IP SAN). Dates aren't validated (no clock). Only attach the
+           CA on a TLS scheme — esp-mqtt rejects SSL configs on plain mqtt://. */
         .broker.verification.certificate = (const char *)mqtt_ca_crt_start,
+#endif
         .session.last_will = {
             .topic = lwt_topic,
             .msg = "{\"status\":\"offline\"}",
@@ -584,6 +648,24 @@ static void start_mqtt_client(void) {
     esp_mqtt_client_register_event(mqtt_client, ESP_EVENT_ANY_ID, mqtt_event_handler, NULL);
     esp_mqtt_client_start(mqtt_client);
 }
+
+#if !AMPHIVE_DIRECT_MQTT
+// Overlay teardown hook — microlink calls this from microlink_disconnect() BEFORE
+// it frees the WireGuard netif (on an ERROR-triggered reconnect). Stop + destroy
+// the MQTT client here so its TCP socket/PCB is closed while the netif still
+// exists; freeing the netif under a live socket is a use-after-free crash
+// (LoadProhibited). Clearing mqtt_client makes microlink_task restart MQTT once
+// the overlay reconnects (state -> CONNECTED/MONITORING).
+static void on_overlay_disconnected(void) {
+    if (mqtt_client) {
+        ESP_LOGW(TAG, "Overlay down: stopping MQTT client before netif teardown");
+        esp_mqtt_client_stop(mqtt_client);
+        esp_mqtt_client_destroy(mqtt_client);
+        mqtt_client = NULL;
+        mqtt_connected = false;
+    }
+}
+#endif // !AMPHIVE_DIRECT_MQTT
 
 // ─── Offline Telemetry Resync ─────────────────────────────────────────────────
 static void resync_offline_logs(void) {
@@ -646,15 +728,19 @@ static void telemetry_task(void *pvParameters) {
             }
 
             /* Echo the backend session_id (empty when idle) so the backend can
-               attribute this reading to the exact session, not just the plug. */
-            char payload[256];
+               attribute this reading to the exact session, not just the plug.
+               "relay" is the plug's ACTUAL reported relay state (device_on),
+               distinct from "status" (which reflects our session state): the
+               backend/UI can flag a relay physically ON with no session. */
+            char payload[320];
             snprintf(payload, sizeof(payload),
-                     "{\"plug_id\":%d,\"watts\":%.1f,\"kwh\":%.4f,\"voltage\":%.1f,\"current\":%.2f,\"status\":\"%s\",\"session_id\":\"%s\"}",
+                     "{\"plug_id\":%d,\"watts\":%.1f,\"kwh\":%.4f,\"voltage\":%.1f,\"current\":%.2f,\"relay\":%s,\"status\":\"%s\",\"session_id\":\"%s\"}",
                      active_plug_id,
                      telemetry.power_w,
                      session_kwh,
                      telemetry.voltage_v,
                      telemetry.current_a,
+                     telemetry.device_on ? "true" : "false",
                      active_session.active ? "occupied" : "available",
                      active_session.active ? active_session.session_id : "");
 
@@ -700,24 +786,37 @@ static void telemetry_task(void *pvParameters) {
                     tapo_set_power_state(target_plug_ip, false);
                     active_session.active = false;
                     session_nvs_clear();
-
-                    if (mqtt_connected) {
-                        char alarm_topic[128];
-                        snprintf(alarm_topic, sizeof(alarm_topic), "amphive/gateways/%s/alarms", gateway_id);
-                        esp_mqtt_client_publish(mqtt_client, alarm_topic, "{\"error\":\"THERMAL_CUTOFF\"}", 0, 1, 0);
-                    }
+                    publish_alarm("THERMAL_CUTOFF");
                 }
                 else if (telemetry.overcurrent) {
                     ESP_LOGE(TAG, "OVERCURRENT ALARM: Plug reports overcurrent_status != normal. Shutting down plug locally!");
                     tapo_set_power_state(target_plug_ip, false);
                     active_session.active = false;
                     session_nvs_clear();
+                    publish_alarm("OVERCURRENT_CUTOFF");
+                }
+            }
 
-                    if (mqtt_connected) {
-                        char alarm_topic[128];
-                        snprintf(alarm_topic, sizeof(alarm_topic), "amphive/gateways/%s/alarms", gateway_id);
-                        esp_mqtt_client_publish(mqtt_client, alarm_topic, "{\"error\":\"OVERCURRENT_CUTOFF\"}", 0, 1, 0);
+            /* Unauthorized-use guard: relay physically ON with no active session.
+               A commercial charger must not deliver energy without authorization,
+               but a P110 can be switched on out-of-band — its physical button, the
+               Tapo app, a schedule, or NVS crash-recovery resuming a stale session.
+               Whenever we see device_on without a session we command OFF (every
+               cycle until it stays off) and raise UNAUTHORIZED_ON once per episode
+               (rising edge) so the backend can alert the operator without the alarm
+               repeating every poll. The edge resets when the relay is confirmed
+               off, so a genuinely new press re-alarms. */
+            if (!active_session.active) {
+                static bool unauthorized_flagged = false;
+                if (telemetry.device_on) {
+                    ESP_LOGW(TAG, "UNAUTHORIZED ON: relay is ON with no active session — forcing OFF.");
+                    tapo_set_power_state(target_plug_ip, false);
+                    if (!unauthorized_flagged) {
+                        publish_alarm("UNAUTHORIZED_ON");
+                        unauthorized_flagged = true;
                     }
+                } else {
+                    unauthorized_flagged = false;
                 }
             }
         }
@@ -726,6 +825,7 @@ static void telemetry_task(void *pvParameters) {
 }
 
 // ─── MicroLink VPN Tunnel Task ───────────────────────────────────────────────
+#if !AMPHIVE_DIRECT_MQTT
 static void microlink_task(void *pvParameters) {
     ESP_LOGI(TAG, "=== Starting AmpHive MicroLink Network Client ===");
 
@@ -736,6 +836,8 @@ static void microlink_task(void *pvParameters) {
     config.enable_derp  = true;
     config.enable_disco = true;
     config.enable_stun  = true;
+    // Stop the MQTT client before the overlay tears down its netif (UAF guard).
+    config.on_disconnected = on_overlay_disconnected;
 
     microlink_t *ml = microlink_init(&config);
     if (!ml) {
@@ -774,6 +876,7 @@ static void microlink_task(void *pvParameters) {
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
+#endif // !AMPHIVE_DIRECT_MQTT
 
 // ─── Entry Point ─────────────────────────────────────────────────────────────
 void app_main(void) {
@@ -829,6 +932,15 @@ void app_main(void) {
     //    Stack raised to 8 KB: the task now performs real KLAP crypto + HTTP each poll.
     xTaskCreate(telemetry_task, "telemetry_safety", 8192, NULL, 5, NULL);
 
+#if AMPHIVE_DIRECT_MQTT
+    // 6. Direct transport: Wi-Fi is up, so dial the public broker over TLS
+    //    right away. esp-mqtt owns reconnection (backoff on the default
+    //    reconnect_timeout_ms), and the Wi-Fi netif is never torn down by us,
+    //    so no overlay-style teardown hook is needed.
+    ESP_LOGI(TAG, "Direct MQTT transport: connecting to " MQTT_BROKER_URL);
+    start_mqtt_client();
+#else
     // 6. Start Tailscale connection client
     xTaskCreate(microlink_task, "microlink_vpn", 32768, NULL, 6, NULL);
+#endif
 }

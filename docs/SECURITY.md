@@ -64,12 +64,36 @@ BFG + force-push) to purge the dead values entirely.
 
 ## 3. Open / unauthenticated surfaces
 
-- **MQTT broker** — *largely closed as of 2026-07-08; TLS rollout in progress.*
-  It *used* to be anonymous and reachable on **1883 from `0.0.0.0/0`** — anyone
-  could publish/subscribe, send plug `ON`/`OFF`, and **forge telemetry that
-  feeds billing**. Since then: public exposure closed 2026-07-06, auth enforced
-  2026-07-07, TLS listener added 2026-07-08 (details below). Remaining: move
-  every gateway to 8883, then bind plaintext 1883 internal-only.
+- [Resolved 2026-07-11, **deployed + verified in prod**] **Web tier served
+  plain HTTP.** The SPA, API, and Socket.io were served http-only on `:80` —
+  logins, JWTs, and the Razorpay checkout traveled cleartext. `deploy.ps1`
+  now ships a **Caddy TLS front door by default** (`docker-compose.tls.yml`):
+  auto-renewed Let's Encrypt cert for `CADDY_DOMAIN` (`.env`; Caddyfile
+  generated on the VM), HTTP→HTTPS redirect for the domain, and the frontend
+  container no longer publishes a host port (Caddy is the only public web
+  entrypoint). Bare-IP/unknown-Host requests are **served** (plain http)
+  rather than redirected, so a DNS outage can't take the site down. CORS /
+  Socket.io allowlists already carried the https origins; firewall rule
+  `allow-amphive-https` (tcp:443) added. **Verified live:** `https://` 200
+  with a validated LE cert (CN `amphive.duckdns.org`, expires 2026-10-09,
+  auto-renew), domain http→https 308, `/api` + Socket.io over https, CPO
+  login; broker + both gateways unaffected. The rollout rode out a real
+  **DuckDNS authoritative-nameserver outage** (~1 h; Caddy auto-retried the
+  cert in — incident log: `deploy/docs/web_tls_rollout.md`). Rollback:
+  `deploy.ps1 -NoTls`. **Remaining follow-ups:** drop tcp:8000 from
+  `allow-amphive-ports` (the backend's direct plain-HTTP port — the SPA
+  reaches the API via the frontend nginx proxy, so nothing public needs it),
+  add HSTS + flip bare-IP back to a redirect, and replace DuckDNS with a
+  real domain (this outage makes it a proven SPOF — see §6).
+- **MQTT broker** — *largely closed as of 2026-07-10.* It *used* to be
+  anonymous and reachable on **1883 from `0.0.0.0/0`** — anyone could
+  publish/subscribe, send plug `ON`/`OFF`, and **forge telemetry that
+  feeds billing**. Since then: public exposure closed 2026-07-06, auth
+  enforced 2026-07-07, TLS listener added 2026-07-08, and the public **8883
+  direct-MQTT path** hardened with per-gateway credentials + topic ACLs
+  2026-07-10 (details below). Remaining: the plaintext 1883 listener stays
+  up (overlay/backend-internal, legacy/transition only) until every legacy
+  client is confirmed off it.
   - [Done 2026-07-06] MQTT now binds to the VM overlay IP `100.87.241.70`
     (`MQTT_BIND_IP` in `.env`), and the GCP firewall rule was restricted to
     tcp:80 + tcp:8000 — **1883 is no longer publicly reachable**. The ESP32
@@ -87,15 +111,78 @@ BFG + force-push) to purge the dead values entirely.
     `mosquitto_sub` → `Connection Refused: not authorised`; backend + the
     real ESP32 reconnected authenticated and telemetry flows.
   - [Added 2026-07-08, rollout in progress] Broker **TLS** listener on **8883**
-    (`mosquitto.conf`): a self-signed CA + server cert (SAN `IP:100.87.241.70`,
-    `deploy/config/gen_mqtt_certs.sh`); the gateway firmware embeds the CA and
+    (`mosquitto.conf`): a self-signed CA + server cert
+    (`deploy/config/gen_mqtt_certs.sh`); the gateway firmware embeds the CA and
     validates the broker cert (chain + IP SAN — dates aren't checked, no clock
     needed). Server-auth only; clients still present username/password.
     Rollout is staged for safety: the plaintext **1883** listener stays up
     during the transition (backend on the internal Docker network; OTA-
     rollback target for gateways), and is bound internal-only once every
-    gateway is confirmed on 8883. TLS here is defense-in-depth — the WireGuard
-    overlay already encrypts the transport.
+    gateway is confirmed on 8883.
+  - [Done 2026-07-10] **8883 is deliberately PUBLIC — the direct-MQTT path.**
+    The overlay proved fragile for devices behind symmetric NAT (DISCO
+    hole-punching fails; see §7), so the transport is now a plain **outbound**
+    MQTT/TLS connection: devices/agents dial `mqtts://8.231.81.12:8883` (the
+    VM's reserved static IP; GCP rule `allow-amphive-mqtts`), which traverses
+    any NAT/CGNAT without STUN/DERP/port-forwards. The trust the tailnet used
+    to provide implicitly is now explicit:
+    * **TLS**: server cert (SANs `100.87.241.70` + `8.231.81.12`) chained to
+      the AmpHive CA; CA regenerated 2026-07-10 with proper
+      `basicConstraints`/`keyUsage` extensions (Python 3.13 strict validators —
+      i.e. the AmpHive Agent — reject a CA without them). Firmware embeds the
+      new CA from 1.3.0.
+    * **AuthN**: `allow_anonymous false` + passwd file. **Per-gateway accounts**
+      (username == gateway_id) via `deploy/scripts/add_gateway_user.ps1`;
+      the passwd file survives redeploys (no more `-c` truncation). The shared
+      `amphive-gateway` account was **retired 2026-07-10** — every device has
+      its own account (real ESP `1cc3abb4fb54`, fake plug `fakeplug-gw-01`),
+      and `deploy.ps1` no longer provisions a shared one.
+    * **AuthZ**: mosquitto **topic ACLs** (`mosquitto_acl`, generated on the VM
+      by `deploy.ps1`): backend → `amphive/#` + `$SYS` read; per-gateway
+      accounts → `pattern readwrite amphive/gateways/%u/#` (a gateway can only
+      touch its own subtree — no cross-site forgery). The old shared broad
+      grant (`amphive/gateways/#`) is **gone**. Verified 2026-07-10: an account
+      subscribed to another gateway's telemetry receives nothing.
+      *Ops note:* the ACL/passwd files are **bind-mounted**, so edit them
+      **in place** (mosquitto_passwd / `tee`) — replacing via `mv` swaps the
+      inode and the running broker keeps the old file until restarted.
+    **Verified in prod 2026-07-10:** TLS 1.3 handshake from the public internet
+    validates against the CA (strict mode); anonymous and bogus credentials
+    both get `not authorised`; backend, fake plug, and the real ESP32 all
+    stayed connected under the ACLs. The overlay 1883 listener is unchanged
+    (legacy/transition + backend-internal).
+  - [Hardened + rolled out 2026-07-10] **OTA image
+    transport + signing.** Both halves of the earlier TODO are implemented
+    (fw ≥ 1.4.0):
+    * **HTTPS-only images**: hosted on the public-read GCS bucket
+      `gs://amphive-fw` (`https://storage.googleapis.com/amphive-fw/...`,
+      public-CA cert the firmware's Mozilla bundle validates; public-read
+      user-approved 2026-07-10 — images hold no secrets and are signed).
+      Plain `http://` is refused by the firmware
+      (`CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP` removed + an explicit scheme check
+      in `ota_update_start`) *and* by the backend
+      (`CpoGatewayOtaRequest` now requires `https://`).
+    * **Signed OTA** (signed-app verification *without* secure boot, ECDSA
+      scheme v1, `CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT`): the device
+      rejects any update lacking a valid signature from
+      `firmware/secure_boot_signing_key.pem` (gitignored; **back it up** —
+      losing it strands fielded devices on USB reflash). A
+      valid-but-malicious image from a MITM or a compromised bucket no longer
+      installs. No eFuses burned; boot-time verification stays off (full
+      secure boot remains a possible future step).
+    **Rolled out 2026-07-10:** the real gateway was OTA'd to the signed
+    `1.5.0-direct` image over https, and the backend `^https://` validation
+    is deployed (see `deploy/docs/ota_image_publishing.md`). Pre-1.4.0
+    firmware ignores the signature trailer, so the migration jump installed
+    cleanly; from 1.4.0 on, only signed images install.
+- [Added 2026-07-10, fw 1.5.0] **Unauthorized-use safety control.** The plug's
+  physical button and the Tapo app are control paths that bypass AmpHive
+  entirely — a relay could be energized with no authorized session (free,
+  unmetered power). The firmware now enforces this locally: with no active
+  session, a relay found ON is forced OFF every telemetry cycle and raised
+  (once per episode) as a **critical `UNAUTHORIZED_ON` event** surfaced to the
+  operator (`gateway_events` table → `GET /api/cpo/events`) — a defense
+  against out-of-band plug activation.
 - [Fixed + deployed 2026-07-06] **CORS** is restricted to an explicit allowlist
   (localhost, `amphive.duckdns.org`, VM IP; http+https) with the wildcard removed,
   in `backend/main.py:187`. Verified in prod: an allowed origin is echoed, a
@@ -211,6 +298,12 @@ read as still-open.*
 ## Quick remediation checklist
 
 Status — open items and recently closed:
+- [x] **Web HTTPS front door deployed + verified in prod** (2026-07-11):
+      Caddy on 80/443, validated Let's Encrypt cert, http→https redirect.
+      See §3 and `deploy/docs/web_tls_rollout.md`.
+- [ ] Drop tcp:8000 from `allow-amphive-ports` (nothing public needs the
+      backend's direct port now that Caddy fronts the web tier); add HSTS;
+      replace DuckDNS with a real domain (proven SPOF — §3/§6).
 - [x] **Rotate** WireGuard keys, DuckDNS token, Tapo & DB passwords at the source
       (2026-07-06). Dead old values remain in git history — *optional* scrub.
 - [x] **Commit + deploy** the CORS allowlist (2026-07-06) — live in prod.

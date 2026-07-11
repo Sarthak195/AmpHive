@@ -163,6 +163,23 @@ Cross-references [TECH_DEBT.md](TECH_DEBT.md) items as `TD#n` and
       no client amount), and the multi-session `SessionContext`
       (restore/switch/start/stop). `npm test` wired into CI. (TESTING Phase 4)
 
+## Launch readiness (opened 2026-07-11)
+
+- [x] **Web HTTPS — Caddy TLS front door** (2026-07-11, **deployed + verified
+      in prod**): `deploy.ps1` ships `docker-compose.tls.yml` by default
+      (Caddy on 80/443, auto Let's Encrypt for `CADDY_DOMAIN`, Caddyfile
+      generated from `.env`; `-NoTls` = plain-HTTP rollback); bare-IP requests
+      are served, not redirected, so a DNS outage can't kill the site.
+      Verified live: `https://amphive.duckdns.org` 200 with a validated LE
+      cert (expires 2026-10-09, auto-renew), http→https 308, `/api` +
+      Socket.io over https, CPO login; broker + gateways unaffected. The
+      rollout rode out a real **DuckDNS nameserver outage** (~1 h; Caddy
+      auto-retried the cert in — `deploy/docs/web_tls_rollout.md`). (SEC §3)
+- [ ] **Web HTTPS follow-ups**: drop tcp:8000 from `allow-amphive-ports`,
+      add HSTS + flip bare-IP back to a redirect, and **replace DuckDNS with
+      a real domain** (proven SPOF; also needed for Razorpay live-mode
+      legal pages). (SEC §3/§6)
+
 ## Long term — productionization
 
 - [x] **MQTT broker auth** — **enforced 2026-07-07** (SEC §3):
@@ -208,6 +225,66 @@ Cross-references [TECH_DEBT.md](TECH_DEBT.md) items as `TD#n` and
       presents them as a parallel deployment model. (TD#15)
 - [ ] **TimescaleDB** (hypertables/retention/continuous-aggregates) for
       `telemetry_readings` if telemetry volume grows. (IMPL 2)
+- [x] **Signed OTA + public HTTPS image host** (2026-07-10, **rolled out**):
+      fw ≥ 1.4.0 verifies an ECDSA app signature on every update
+      (`SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT`; key
+      `firmware/secure_boot_signing_key.pem`, gitignored — **back it up**)
+      and refuses plain-http downloads (`ALLOW_HTTP` removed; backend
+      `CpoGatewayOtaRequest` now `^https://`, **deployed**). Images live on the
+      public-read bucket `gs://amphive-fw`. The real gateway `1cc3abb4fb54`
+      was OTA'd end-to-end over direct-MQTT from `1.3.2-direct` → signed
+      **`1.5.0-direct`** (`OTA_OK_REBOOTING` → offline → back online on 1.5.0,
+      rollback cancelled). From 1.4.0 onward only signed images install.
+      Runbook: `deploy/docs/ota_image_publishing.md`. (SEC §3)
+
+## Shipped 2026-07-10 — safety, alarms & live UX
+
+- [x] **Firmware unauthorized physical-on guard (fw 1.5.0).** The relay ON with
+      no active session (physical button / Tapo app / stale NVS resume) is forced
+      OFF locally every poll and alarmed once per episode (`UNAUTHORIZED_ON`,
+      rising-edge) using the plug's real `device_on`. Live on the real gateway;
+      backend ingestion verified in prod. Remote physical-press trigger is
+      unit-tested + by-construction (no LAN path to press it remotely).
+- [x] **Trapezoidal energy integration (fw 1.5.0).** Driver-side kWh integrator
+      switched from left-rectangle to the trapezoidal rule (average of
+      consecutive power samples) for lower error on ramping loads at 10 s cadence.
+- [x] **Backend alarm ingestion + CPO events feed.** Subscribes
+      `amphive/gateways/+/alarms`; persists `gateway_events`
+      (Alembic `0005_gateway_events`); broadcasts `gateway_alarm` Socket.io;
+      `GET /api/cpo/events` + `POST /api/cpo/events/{id}/ack`. Tests in
+      `test_mqtt_manager.py`; verified live in prod.
+- [x] **Driver gateway-offline UX.** `/api/plugs/available` + `/api/plugs/{id}`
+      now return `gateway_online`; Home dims/disables unreachable chargers.
+- [x] **Live-monitor robustness.** Socket.io `telemetry` now carries
+      `relay_on`/`voltage_v`/`is_stale`/`age_sec`; the session monitor shows a
+      client-side ticking clock, a "reconnecting" staleness banner, a voltage +
+      relay line, and per-plug alarm banners. Tests in `SessionMonitor.test.jsx`.
+- [x] **Gateway firmware-version tracking.** `gateways.firmware_version`
+      (Alembic `0006`) populated from the `online` status `fw`; exposed in
+      `GET /api/cpo/gateways` and shown in the CPO plugs table. Verified live
+      (real gateway → `1.5.0-direct`).
+- [x] **CPO Gateways page + OTA-from-UI.** New `/cpo/gateways` fleet view
+      (status, fw, last-seen, plug count) with a one-click OTA modal
+      (`POST /api/cpo/gateways/{id}/ota`), so operators push updates without curl.
+- [x] **Unified wallet ledger.** `GET /api/wallet/ledger` returns top-up
+      credits **and** session debits with running balance; the driver History
+      page is now tabbed (Charging Sessions / Wallet Ledger). Closes the
+      old debits-only gap.
+- [x] **Pricing clarity.** Public `GET /api/config` (tariff, min-balance,
+      coin↔INR); Home shows the rate + balance-covers-≈-kWh with a top-up nudge;
+      session monitor reads the rate from config. `MIN_START_BALANCE_COINS` env.
+- [x] **Prepaid protection: auto-stop on balance exhaustion.** Backend
+      finalizes a session once accrued cost reaches the wallet balance (env
+      `AUTO_STOP_ON_BALANCE_EXHAUSTED`), so a drained wallet can't keep charging
+      for free. Driver-facing low-balance warning in the monitor pairs with it.
+      Tests in `test_mqtt_manager.py` + `SessionMonitor.test.jsx`.
+- [x] **Post-session receipt.** The stop path returns a full billing summary
+      (energy, peak power, duration, coins charged/shortfall, balance before→
+      after, plug, timestamps); the Session page shows a `SessionReceipt` card
+      on stop. **Verified live end-to-end** (real billed session on the fake
+      plug: 0.101 kWh → 0.51 coins, wallet debited + ledger reconciled).
+- [x] **CPO session CSV export** and **operator-side amps** in the load
+      analytics (`avg_current_a`/`max_current_a`; dashboard shows peak W + A).
 - [x] **Token revocation / shorter-lived JWTs** (2026-07-08): every JWT
       carries the user's `token_version` epoch (`tv` claim), re-checked per
       request; `POST /api/auth/logout` bumps it to revoke all of a user's
