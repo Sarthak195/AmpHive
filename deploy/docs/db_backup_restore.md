@@ -24,12 +24,13 @@ upload path degrades to local-only backups instead of none.
 `deploy.ps1` re-ships `deploy/scripts/backup_db.sh` to the VM on every deploy
 (CRLF stripped); the cron entry is one-time (already installed 2026-07-11).
 
-## One-time setup still pending (needs owner approval)
+## One-time setup (DONE 2026-07-11, owner-approved)
 
-The VM's OAuth scope is `devstorage.read_only` — uploads fail with
-`403 Provided scope(s) are not authorized` until it is raised. Scopes are
-immutable on a running instance, so this is **~2 min of downtime** (containers
-auto-start, gateways auto-reconnect):
+The VM's OAuth scope was `devstorage.read_only` — uploads failed with
+`403 Provided scope(s) are not authorized` until it was raised. Scopes are
+immutable on a running instance, so this cost **~48 s of downtime**
+(02:34:45–02:35:33 UTC; containers auto-started, both gateways auto-reconnected
+within ~2.5 min, the LE cert persisted in the `caddy_data` volume):
 
 ```powershell
 gcloud compute instances stop amphive-vm-in --zone=asia-south1-a
@@ -43,12 +44,18 @@ gcloud storage buckets add-iam-policy-binding gs://amphive-db-backups --member="
 gcloud storage buckets add-iam-policy-binding gs://amphive-db-backups --member="serviceAccount:930756667383-compute@developer.gserviceaccount.com" --role=roles/storage.objectViewer
 ```
 
-Then prove the pipeline: `gcloud compute ssh amphive-vm-in --zone=asia-south1-a
---command="~/amphive/backup_db.sh; tail -5 ~/amphive/backup.log"` and check
-`gsutil ls -r gs://amphive-db-backups/` shows the dump + tarball.
+**Gotcha found doing this:** gsutil caches the metadata-server token in
+`~/.gsutil/gcecredcache` / `credstore2` — after a scope change it keeps using
+the old read-only token (same 403) until the cache is removed:
+`rm -f ~/.gsutil/credstore2* ~/.gsutil/gcecredcache*`.
 
-(The unused `amphive-backup` service account exists for the key-file fallback;
-delete it if the scope route is taken.)
+**Verified 2026-07-11:** `backup_db.sh` exit 0; dump + config tarball listed in
+`gs://amphive-db-backups/2026/07/`; a `gsutil rm` from the VM is **denied**
+(`storage.objects.delete` — no role grants it), so a compromised VM cannot
+destroy the backups.
+
+(The `amphive-backup` service account was a key-file fallback that was never
+used — deleted 2026-07-11.)
 
 ## Restore — logical dump
 
