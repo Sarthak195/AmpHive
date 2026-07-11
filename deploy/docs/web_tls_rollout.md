@@ -100,11 +100,39 @@ already recommends it).
 
 ## Follow-ups once verified
 
-- Drop `tcp:8000` from `allow-amphive-ports` (backend's direct plain-HTTP
-  port; the SPA reaches the API via the frontend nginx proxy, so nothing
-  public needs it). Update the rule rather than deleting it — 80 must stay
-  for the ACME HTTP-01 challenge + redirect.
-- Consider HSTS (`header Strict-Transport-Security ...` in the generated
-  Caddyfile) once https has soaked.
-- Trim the plain-`http://` origins out of the backend CORS / Socket.io
-  allowlists (`backend/main.py`, `backend/services/socketio_manager.py`).
+- [x] ~~Drop `tcp:8000` from `allow-amphive-ports`~~ **Done 2026-07-11**
+  (see log below). The rule was updated, not deleted — 80 must stay for the
+  ACME HTTP-01 challenge + redirect. `:8000` remains published by compose
+  for VM-local debugging over SSH.
+- [x] ~~HSTS~~ **Done 2026-07-11**: the generated Caddyfile's domain block
+  now sends `Strict-Transport-Security: max-age=31536000` (deploy.ps1).
+- [ ] Trim the plain-`http://` origins out of the backend CORS / Socket.io
+  allowlists (`backend/main.py`, `backend/services/socketio_manager.py`) —
+  deferred: the bare-IP serve fallback still legitimately serves plain http,
+  and same-origin traffic doesn't consult CORS. Revisit with the
+  real-domain migration (which is also when bare-IP flips to a redirect).
+
+## Follow-up rollout log (2026-07-11, ~22:30–22:45 IST)
+
+Shipped together with the auth rate limiting (PR #10):
+
+1. `deploy.ps1` (default TLS stack) — rebuilt backend (rate limiting) +
+   regenerated the Caddyfile with the HSTS header + `caddy reload`.
+2. `gcloud compute firewall-rules update allow-amphive-ports --allow tcp:80`
+   — rule now allows tcp:80 only (was `tcp:80,tcp:8000` from `0.0.0.0/0`).
+
+Verified live immediately after:
+
+- `https://amphive.duckdns.org` 200 with
+  `Strict-Transport-Security: max-age=31536000` in the response.
+- Login rate limit: 12 rapid bad-password logins → exactly 10× 401 then
+  429 + `Retry-After: 51`; a real login returned 200 after the window.
+- `http://8.231.81.12:8000` from the internet: connection timeout (closed);
+  `https://…/api/config` 200 via Caddy; bare-IP `http://8.231.81.12/` 200
+  (serve-mode fallback intact).
+- Both gateways stayed online through the backend restart (real gateway
+  `1cc3abb4fb54` on `1.6.0-direct`, last_seen fresh).
+
+Rollback: re-add the port with
+`gcloud compute firewall-rules update allow-amphive-ports --allow tcp:80,tcp:8000`;
+HSTS/rate limiting roll back by redeploying the previous commit.

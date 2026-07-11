@@ -88,11 +88,16 @@ BFG + force-push) to purge the dead values entirely.
   login; broker + both gateways unaffected. The rollout rode out a real
   **DuckDNS authoritative-nameserver outage** (~1 h; Caddy auto-retried the
   cert in — incident log: `deploy/docs/web_tls_rollout.md`). Rollback:
-  `deploy.ps1 -NoTls`. **Remaining follow-ups:** drop tcp:8000 from
-  `allow-amphive-ports` (the backend's direct plain-HTTP port — the SPA
-  reaches the API via the frontend nginx proxy, so nothing public needs it),
-  add HSTS + flip bare-IP back to a redirect, and replace DuckDNS with a
-  real domain (this outage makes it a proven SPOF — see §6).
+  `deploy.ps1 -NoTls`. **Follow-ups completed 2026-07-11:** tcp:8000 dropped
+  from `allow-amphive-ports` (the backend's direct plain-HTTP port; the SPA
+  reaches the API via the frontend nginx proxy, so nothing public needed it —
+  :8000 stays published for VM-local debugging over SSH), and **HSTS**
+  (`Strict-Transport-Security: max-age=31536000`) added to the generated
+  Caddyfile's domain block. **Still remaining:** replace DuckDNS with a real
+  domain (proven SPOF — see §6), and only *then* flip bare-IP serve-mode to
+  a redirect (flipping while still on DuckDNS would re-create the outage
+  mode the serve fallback was built to survive) and trim the plain-http
+  origins from the CORS/Socket.io allowlists.
 - **MQTT broker** — *largely closed as of 2026-07-10.* It *used* to be
   anonymous and reachable on **1883 from `0.0.0.0/0`** — anyone could
   publish/subscribe, send plug `ON`/`OFF`, and **forge telemetry that
@@ -391,15 +396,23 @@ capture it here:
   2026-07-11 (see §3): a gateway can only report for plugs it actually owns —
   the multi-plug refactor must not weaken that check.
 
-### 8.6 Backend authn hardening — **LOW/MEDIUM, partly resolved**
+### 8.6 Backend authn hardening — **RESOLVED**
 
 - ~~**JWT: 7-day expiry, no revocation/blacklist**~~ **Resolved 2026-07-08**:
   tokens carry a per-user `token_version` epoch re-checked each request;
   logout revokes server-side, and expiry is env-configurable
   (`JWT_EXPIRY_DAYS`) — see §2.
-- [Open] **No rate limiting** on `/api/auth/login` and `/api/auth/register` —
-  brute-force / account-enumeration open. Add rate limiting (login already returns
-  a generic "Invalid email or password").
+- ~~**No rate limiting** on `/api/auth/login` and `/api/auth/register`~~
+  **Resolved 2026-07-11**: both endpoints enforce an in-process
+  sliding-window limit per client IP (`backend/services/rate_limit.py`;
+  429 + `Retry-After`). Defaults 10/min (login) and 10/hour (register),
+  env-tunable via `LOGIN_RATE_LIMIT` / `REGISTER_RATE_LIMIT`. Client IP is
+  the first `X-Forwarded-For` entry — trustworthy behind Caddy with the
+  public :8000 port closed; in the `-NoTls` rollback stack it is forgeable,
+  which only lets an attacker shard their own limit. Single-process by
+  design (one uvicorn container); counters reset on restart. Distributed
+  (multi-IP) attacks are out of scope for this tier. Tests:
+  `backend/tests/test_rate_limiting.py`.
 - ~~**Registration input isn't validated**~~ **Resolved 2026-07-11**:
   `RegisterRequest` uses `EmailStr` and an 8-72 char password rule (72 =
   bcrypt truncation boundary). Login is intentionally unvalidated so accounts
@@ -413,9 +426,11 @@ Status — open items and recently closed:
 - [x] **Web HTTPS front door deployed + verified in prod** (2026-07-11):
       Caddy on 80/443, validated Let's Encrypt cert, http→https redirect.
       See §3 and `deploy/docs/web_tls_rollout.md`.
-- [ ] Drop tcp:8000 from `allow-amphive-ports` (nothing public needs the
-      backend's direct port now that Caddy fronts the web tier); add HSTS;
-      replace DuckDNS with a real domain (proven SPOF — §3/§6).
+- [x] ~~Drop tcp:8000 from `allow-amphive-ports`; add HSTS~~ **Done
+      2026-07-11** (`allow-amphive-ports` is tcp:80-only now; HSTS
+      max-age=31536000 in the generated Caddyfile). Still open: replace
+      DuckDNS with a real domain (proven SPOF — §3/§6), then flip bare-IP
+      serve-mode to a redirect.
 - [x] **Rotate** WireGuard keys, DuckDNS token, Tapo & DB passwords at the source
       (2026-07-06). Dead old values remain in git history — *optional* scrub.
 - [x] **Commit + deploy** the CORS allowlist (2026-07-06) — live in prod.
@@ -453,7 +468,8 @@ Device security (2026-07-06 audit, statuses as of 2026-07-11 — see
       and registration validation (TD#30) in the same change.
 - [x] ~~Consume `+/alarms`~~ **Resolved 2026-07-10** — alarms persist as
       `gateway_events` + CPO events feed (§3, TD#21).
-- [ ] **Auth rate limiting** on login/register (§8.6) — JWT revocation itself
+- [x] ~~Auth rate limiting on login/register~~ **Resolved 2026-07-11** —
+      per-IP sliding window, 429 + Retry-After (§8.6); JWT revocation itself
       shipped 2026-07-08 (§2).
 
 Done (2026-07-05):
