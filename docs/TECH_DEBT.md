@@ -5,6 +5,13 @@
 (what works) and [SECURITY.md](SECURITY.md) (security gaps). Debt is ordered by
 priority within each tier.*
 
+*A follow-up code audit on 2026-07-06 added **TD#20–TD#32** (multi-plug firmware,
+dropped safety alarms, startable offline plugs, logging/audit/observability, and
+device security — the last cross-referenced from
+[SECURITY.md §8](SECURITY.md#8-firmware--gateway-device-security--backend-follow-up-gaps-2026-07-06-audit)).
+Statuses were re-checked 2026-07-11 when the audit merged: TD#21/27/29/32 had
+already been fixed by the 2026-07-08…11 work.*
+
 Legend — **Impact**: how much it costs if left. **Effort**: rough work to fix.
 **Priority**: P0 (do now) → P3 (someday).
 
@@ -20,6 +27,9 @@ Legend — **Impact**: how much it costs if left. **Effort**: rough work to fix.
 | 4 | ✅ ~~**CORS wildcard + credentials**~~ **Done 2026-07-06** | `backend/main.py:187` | Was `allow_origins=["*"]` with `allow_credentials=True`; replaced with an explicit allowlist. | Committed + **deployed**; verified in prod (allowed origin echoed, evil origin gets no ACAO header). | — | ~~P1~~ Done |
 | 5 | ✅ ~~**No DB migration tool**~~ **Done 2026-07-07 (Alembic)** | `backend/migrations/` | Frozen-DDL baseline (`0001_baseline`) captures create_all + all retired in-place upgrades; startup stamps pre-Alembic DBs then upgrades to head; drifted `schema.sql`/`schema_v2.sql` deleted. | CI (`test_migrations.py`) fails if the baseline+revisions ever drift from the models. New changes = `alembic revision --autogenerate` against CI/VM. | — | ~~P1~~ Done |
 | 6 | ✅ ~~**Money stored as `Float`**~~ **Done 2026-07-06** | `models.py` `coin_balance`, `coins_spent`, `amount`, `balance_after` | Migrated to `Numeric(12,2)` (→ Decimal); all wallet math routed through `services/money.to_money` (half-up, 2 dp). In-place guarded `ALTER … TYPE` in `db.py`. | Float drift eliminated. Non-negative-balance CHECK added 2026-07-07 (Alembic `0002_wallet_non_negative`). | — | ~~P1~~ Done |
+| 20 | **ESP32 firmware actuates ONE plug regardless of the command's target** *(2026-07-06 audit)* | `firmware/main/main.c` (`target_plug_ip`, `active_session`) + `firmware/main/tapo_protocol.c` (global `s_sess`, `s_energy_wh`) | Driver + gateway are single-instance: one global KLAP session + energy integrator; ON/OFF always drive `target_plug_ip`; telemetry publishes under the last-commanded `active_plug_id`. | With >1 plug/gateway (the backend allows it), a command for plug B toggles plug A and A's telemetry is billed to the wrong id. **Blocks multi-plug on ESP32** (the software AmpHive Agent already drives multiple plugs per gateway). | 1–2 d (per-plug state table + instance-based KLAP driver) | **P1** |
+| 21 | ✅ ~~**Backend never consumes `+/alarms`**~~ **Done 2026-07-10** *(2026-07-06 audit)* | `backend/services/mqtt_manager.py` | Subscribed only to `+/telemetry` + `+/status`; the firmware's safety alarms matched no handler. Fixed: `+/alarms` subscribed, alarms persist as `gateway_events` + broadcast to the CPO events feed (`GET /api/cpo/events`, ack endpoint). Verified live in prod 2026-07-10. | — | — | ~~P1~~ Done |
+| 22 | **Sessions startable on OFFLINE/MAINTENANCE plugs** *(2026-07-06 audit)* | `backend/routers/sessions.py` `start_charging_session` | Rejects only `OCCUPIED` plug status (the dead-gateway case is separately closed by the `gateway_is_live` 409). | A plug a CPO deliberately took out of service is still usable; pins OCCUPIED and bills 0. | 30 min (require `AVAILABLE`) | **P1** |
 
 ## Tier 2 — Structural / maintainability debt (P1/P2)
 
@@ -31,6 +41,11 @@ Legend — **Impact**: how much it costs if left. **Effort**: rough work to fix.
 | 10 | ✅ ~~**Access-code generation loops with per-try SELECT**~~ **Done 2026-07-07** | `routers/cpo.py` | The 3 inline `while True` copies are one `generate_unique_access_code(db)` helper; tests in `tests/test_access_codes.py`. | Copy-paste drift eliminated. | — | ~~P2~~ Done |
 | 11 | ✅ ~~**Firmware command JSON parsed with `strstr`/`sscanf`**~~ **Done 2026-07-06 (flashed + verified)** | `firmware/main/main.c` | Command path now parses with cJSON (vendored `json` component); buffers widened (topic 256, data 512) with an oversized/fragmented-payload guard, so a `session_id` no longer truncates. | Verified on-device: ON commands carrying `session_id` parsed correctly through E2E sessions #77–79. | — | ~~P2~~ Done |
 | 12 | ✅ ~~**Two live telemetry transports**~~ **Done 2026-07-07** | Socket.io only (`socketio_manager.py`) | The legacy SSE endpoint (`/api/sessions/live/{id}`) and the `sse-starlette` dep are removed; the frontend had zero references (Socket.io since 2026-07-04). | — | — | ~~P2~~ Done |
+| 23 | **Crash-recovery resets the duration watchdog** *(2026-07-06 audit)* | `firmware/main/main.c` (session recovery path) | The recovered session's `start_time_s` is reset to "now" (tick-based, no wall clock). | The max-duration limit restarts from zero on every reboot; a reboot loop can overrun the time cap (energy cap still holds). | 2–4 h (SNTP wall-clock baseline, or persist accumulated elapsed) | **P2** |
+| 24 | 🟡 **Offline-resync telemetry can bill the wrong session** *(2026-07-06 audit; narrowed 2026-07-10)* | `backend/services/mqtt_manager.py`, `firmware/main/offline_log.*` | Live readings are now attributed by the firmware-echoed `session_id`, closing the online plug-reuse case. Ring-buffer entries still carry no `session_id`, so readings buffered across an MQTT outage attach to the plug's *current* ACTIVE session on resync. | Stale energy can overwrite a new session's kWh if the plug was reused across an outage (billing corruption). Narrow window, buffered path only. | 2–3 h (stamp session id in the ring entry, or monotonic guard) | **P2** |
+| 25 | **Unguarded float casts in the telemetry handler** *(2026-07-06 audit)* | `backend/services/mqtt_manager.py` `_handle_gateway_telemetry` | `float(payload.get(...))` with no try/except. The broker now enforces per-gateway auth (the audit's "anonymous broker" framing is stale), but a buggy gateway still kills the message in the paho callback. | A malformed value drops the reading before persistence, silently. | 30 min (validate + try/except) | **P2** |
+| 26 | **No CPO admin audit trail** *(2026-07-06 audit)* | `backend/routers/cpo.py` | Gateway/plug/group create-delete, status changes, and access-code regen are not recorded. | No accountability for admin actions in a multi-tenant billing system. | 3–4 h (`audit_log` table + helper) | **P2** |
+| 27 | ✅ ~~**No gateway staleness sweep / silent-offline detection**~~ **Done 2026-07-06…10** *(2026-07-06 audit)* | backend | Solved read-time instead of via a sweep: `gateway_is_live` (ONLINE **and** `last_seen_at` within the liveness window, refreshed by telemetry) gates session starts, `gateway_online` is exposed in the driver plug API, and the session reaper finalizes sessions on dead gateways. A quiet gateway can no longer look usable. | — | — | ~~P2~~ Done |
 
 ## Tier 3 — Cleanup / hygiene debt (P2/P3)
 
@@ -43,6 +58,11 @@ Legend — **Impact**: how much it costs if left. **Effort**: rough work to fix.
 | 17 | ✅ ~~**Plug geolocation not modeled**~~ **Done 2026-07-06** | `models.py` `Plug` | Added nullable `latitude`/`longitude`; APIs return effective coords (plug's own, else its gateway's); CPOs set them via create/update. `MapComponent` plots only real coords (no more `Math.random()`, which also moved markers each re-render). | — | ~~P3~~ Done |
 | 18 | ✅ ~~**`CpoSetup` calls `navigate()` during render**~~ **Done 2026-07-06** | `frontend/src/pages/cpo/CpoSetup.jsx` | Replaced the render-body `navigate()` with a declarative `<Navigate … replace />`. | — | ~~P3~~ Done |
 | 19 | ✅ ~~**Firmware energy meter resets on reboot**~~ **Done 2026-07-06 (flashed)** | `tapo_protocol.c` `s_energy_wh` | Integrator now persists to NVS (blob) — restored on `tapo_init` and written throttled (once per 50 Wh accrued). Post-reboot the meter and `start_energy_kwh` are on the same scale, so `consumed_kwh` no longer goes negative and the energy watchdog stays armed. | Flashed and running on-device; the cross-reboot restore hasn't been explicitly exercised (needs ≥ 50 Wh accrued to hit the throttled write). | — | ~~P2~~ Done |
+| 28 | **Unstructured, stdout-only logging** *(2026-07-06 audit)* | backend `logging.basicConfig(INFO)`, firmware `ESP_LOGI` (serial), `mosquitto.conf` `log_dest stdout` | f-string logs, no JSON / correlation ids / rotation; firmware logs only to serial; broker log not persisted. | Can't trace an HTTP request → MQTT command → session; no field diagnostics for a deployed gateway. | 2–3 h (structured logging + request/correlation ids; optional firmware log topic) | **P3** |
+| 29 | ✅ ~~**No unified wallet ledger view**~~ **Done 2026-07-10** *(2026-07-06 audit)* | `GET /api/wallet/ledger` + `History.jsx` | History showed only session debits. Fixed: a unified ledger endpoint returns top-up credits **and** session debits, surfaced as a ledger tab in History. | — | — | ~~P3~~ Done |
+| 30 | **Registration lacks validation** *(2026-07-06 audit)* | `backend/schemas.py` (`RegisterRequest.email`) | `email: str` (not `EmailStr`); no password strength/length rule. | Malformed emails accepted; trivially weak passwords allowed. | 30 min (`EmailStr` + a length/complexity check) | **P3** |
+| 31 | **Captive-portal input CSS bug + no reachability test** *(2026-07-06 audit)* | `firmware/main/main.c` `portal_html` | `width:100%%` is sent verbatim (the string isn't printf-formatted) → invalid CSS; the portal never tests Wi-Fi/plug reachability before saving. | Setup inputs render at default width; a wrong `local_ip`/Wi-Fi password only surfaces at charge time (bad onboarding). | 30 min–2 h | **P3** |
+| 32 | ✅ ~~**Shared `asyncio.Event` per plug across telemetry consumers**~~ **Closed 2026-07-07 by TD#12** *(2026-07-06 audit)* | `backend/services/telemetry.py` | One `Event` per plug meant a consumer's `.clear()` could swallow another's wakeup — only bit when SSE and Socket.io coexisted. Retiring SSE (TD#12) left a single consumer. | — | — | ~~P3~~ Done |
 
 ---
 
@@ -56,3 +76,25 @@ Legend — **Impact**: how much it costs if left. **Effort**: rough work to fix.
    split `main.py` into routers, add a GitHub Actions CI pipeline.
 3. **Backlog (P2/P3):** kill N+1s, unify telemetry transport, cJSON on the
    firmware command path, decide TS-or-not, refresh K8s or mark experimental.
+
+### 2026-07-06 follow-up audit — remaining work (TD#20–32, statuses as of 2026-07-11)
+
+- **P1 correctness/safety:** multi-plug ESP32 firmware (TD#20 — design sketch in
+  [SECURITY.md §8.5](SECURITY.md#8-firmware--gateway-device-security--backend-follow-up-gaps-2026-07-06-audit);
+  the software AmpHive Agent already handles multi-plug), reject starts on
+  offline/maintenance plugs (TD#22). ~~Consume `+/alarms` (TD#21)~~ — done
+  2026-07-10 (CPO events feed).
+- **P2 reliability/accountability:** duration-watchdog reboot reset (TD#23),
+  offline-resync mis-billing — buffered path only now (TD#24), telemetry cast
+  guard (TD#25), CPO audit log (TD#26). ~~Gateway staleness (TD#27)~~ — done
+  (read-time `gateway_is_live` + reaper).
+- **P3 polish/onboarding:** structured logging (TD#28), registration validation
+  (TD#30), portal CSS + reachability test (TD#31). ~~Unified ledger view
+  (TD#29)~~ and ~~shared telemetry Event (TD#32)~~ — done.
+- **Device security (P0/P1)** lives in [SECURITY.md §8](SECURITY.md#8-firmware--gateway-device-security--backend-follow-up-gaps-2026-07-06-audit):
+  still open — open provisioning AP + unauthenticated `/save`, no
+  flash-encryption (plaintext NVS secrets), boot-time fallback into the open
+  portal. Resolved since the audit: the reusable-overlay-key + anonymous-broker
+  combination (devices moved to direct MQTT with per-gateway credentials +
+  topic ACLs + TLS, 2026-07-10) and unsigned OTA (ECDSA verify-on-update +
+  HTTPS-only images).
