@@ -83,7 +83,11 @@ export const api = {
   get: (endpoint) => apiRequest(endpoint, { method: 'GET' }),
   post: (endpoint, body) => apiRequest(endpoint, { method: 'POST', body: JSON.stringify(body) }),
   put: (endpoint, body) => apiRequest(endpoint, { method: 'PUT', body: JSON.stringify(body) }),
-  delete: (endpoint) => apiRequest(endpoint, { method: 'DELETE' }),
+  delete: (endpoint, body) =>
+    apiRequest(endpoint, {
+      method: 'DELETE',
+      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+    }),
 };
 
 export default api;

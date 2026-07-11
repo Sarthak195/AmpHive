@@ -222,13 +222,16 @@ def public_config():
 # include order mirrors the original in-file order so OpenAPI stays stable.
 # ===========================================================================
 
-from backend.routers import auth, cpo, direct, groups, payments, plugs, sessions  # noqa: E402
+from backend.routers import (  # noqa: E402
+    auth, cpo, direct, groups, notifications, payments, plugs, sessions,
+)
 
 app.include_router(auth.router)
 app.include_router(groups.router)
 app.include_router(plugs.router)
 app.include_router(sessions.router)
 app.include_router(payments.router)
+app.include_router(notifications.router)
 app.include_router(direct.router)
 app.include_router(cpo.router)
 

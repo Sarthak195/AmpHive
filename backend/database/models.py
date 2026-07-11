@@ -337,3 +337,58 @@ class GatewayEvent(Base):
         Index("idx_gateway_events_tenant_created", "tenant_id", "created_at"),
         Index("idx_gateway_events_gateway_created", "gateway_id", "created_at"),
     )
+
+
+# --- Driver Notifications ---
+
+class Notification(Base):
+    """
+    Per-user notification feed (drivers first; the CPO alarm feed stays on
+    gateway_events). Written by services/notifications.py at the session
+    lifecycle / wallet / safety emit points, delivered live over Socket.io
+    (user room) + Web Push, and listed by GET /api/notifications.
+
+    Design notes mirror GatewayEvent:
+    - type/severity are plain Strings, not PG enums — the set evolves without
+      a schema migration ("session_stopped", "low_balance", "charger_offline",
+      "safety_cutoff", "topup_credited", ...).
+    - plug_id/session_id are nullable SET NULL context refs: deleting a plug
+      or session must not erase a user's notification history.
+    - read (not "acknowledged") — driver-facing wording; flipping it hides the
+      row from the unread badge without deleting the audit trail.
+    """
+    __tablename__ = "notifications"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    type: Mapped[str] = mapped_column(String(32), nullable=False)
+    severity: Mapped[str] = mapped_column(String(16), default="info", nullable=False)
+    title: Mapped[str] = mapped_column(String(120), nullable=False)
+    body: Mapped[str] = mapped_column(String(500), nullable=False)
+    plug_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("plugs.id", ondelete="SET NULL"), nullable=True)
+    session_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("charging_sessions.id", ondelete="SET NULL"), nullable=True)
+    read: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+
+    __table_args__ = (
+        # Feed query: newest N for a user; unread-count query filters read=false.
+        Index("idx_notifications_user_created", "user_id", "created_at"),
+    )
+
+
+class PushSubscription(Base):
+    """
+    A browser Web-Push subscription (one row per browser/device the user
+    enabled push on). endpoint is the push service URL and is globally unique
+    by construction; p256dh/auth are the client keys pywebpush encrypts
+    against. Rows are pruned when the push service reports the subscription
+    gone (404/410) or the user disables push.
+    """
+    __tablename__ = "push_subscriptions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    endpoint: Mapped[str] = mapped_column(String(1024), unique=True, nullable=False)
+    p256dh: Mapped[str] = mapped_column(String(255), nullable=False)
+    auth: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)

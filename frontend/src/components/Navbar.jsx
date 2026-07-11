@@ -9,6 +9,7 @@
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { useWallet } from '../contexts/WalletContext';
+import NotificationBell from './NotificationBell';
 
 const Navbar = () => {
   const { user, logout } = useAuth();
@@ -84,6 +85,7 @@ const Navbar = () => {
               paddingLeft: '1rem',
             }}
           >
+            <NotificationBell />
             <span style={{ fontWeight: 600, color: 'var(--color-accent)', fontSize: '0.9rem' }}>
               🪙 {Number(balance).toFixed(2)}
             </span>

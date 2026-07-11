@@ -99,6 +99,27 @@ Token: HS256 JWT, claims `sub`/`role`/`email`/`iat`/`exp`, **7-day** expiry.
 | POST | `/api/payments/webhook` | none (HMAC-gated) | raw body + `X-Razorpay-Signature` | HMAC verify (400 if bad) → on `payment.captured`, auto-credit coins from the payment's `notes`/`amount` (atomic, row-locked, supporting decimals) → ledger `topup`. Idempotent vs. `/verify` (dedupes on `razorpay_payment_id`). → `{status:"credited"\|"already_credited"\|"ignored"\|"user_not_found"}` |
 | GET | `/api/wallet/ledger` | JWT | `?limit` (default 100, max 500) | Unified wallet ledger for the user — top-up credits **and** session debits, newest first. Returns a list of `{id, amount(signed), transaction_type("topup"\|"session_debit"\|"refund"), direction("credit"\|"debit"), description, balance_after, session_id, razorpay_payment_id, created_at}`. |
 
+## Driver notifications (`routers/notifications.py`, 2026-07-11)
+
+Per-user feed written by `services/notifications.py` at the emit points
+(session stop/auto-stop/reap/safety-cutoff, low balance, charger offline,
+top-up credit); delivered live over the Socket.io `notification` event (the
+user's own room) and optionally by **Web Push** (VAPID; enabled when
+`VAPID_PRIVATE_KEY` is set).
+
+| Method | Path | Auth | Body/Params | Behaviour |
+|--------|------|------|-------------|-----------|
+| GET | `/api/notifications` | JWT | `?unread_only, ?limit` (default 50, max 200) | Newest-first feed → `{notifications:[{id, type, severity, title, body, plug_id, session_id, read, created_at}], unread_count}` (`unread_count` is the user's total, independent of the page) |
+| POST | `/api/notifications/{id}/read` | JWT | — | Mark one read (404 if not the caller's) → `{status:"read"}` |
+| POST | `/api/notifications/read-all` | JWT | — | Mark all read → `{status:"read", count}` |
+| GET | `/api/notifications/push/public-key` | JWT | — | `{enabled, vapid_public_key}` — the browser `applicationServerKey`, derived from `VAPID_PRIVATE_KEY` at runtime (`enabled:false` when push unconfigured) |
+| POST | `/api/notifications/push/subscribe` | JWT | `PushSubscription.toJSON()`: `{endpoint, keys:{p256dh, auth}}` | Upsert by unique `endpoint` (re-subscribes update in place; a subscription re-used by a new login moves to that user) → `{status:"subscribed"}` |
+| DELETE | `/api/notifications/push/subscribe` | JWT | `{endpoint}` | Remove the caller's subscription row → `{status:"unsubscribed"}` |
+
+Socket.io event (server → the user's room only): `notification` with the same
+object shape as the feed entries. Dead push subscriptions (push service
+returns 404/410) are pruned automatically on the next send.
+
 ## Direct Mode — Tapo P110 (dev/test, ESP32 bypass)
 
 All require **JWT** *and* `DIRECT_MODE=true` with an initialized driver (else
@@ -163,3 +184,6 @@ scoped to the caller's `tenant_id`, so operators only ever see their own assets.
 | `TELEMETRY_BUFFER_MAX` | `10000` | Max buffered readings; oldest dropped if the DB is unavailable |
 | `TELEMETRY_RETENTION_DAYS` | `0` | Prune `telemetry_readings` older than N days. `0` = retention disabled (keep all) |
 | `TELEMETRY_PRUNE_EVERY_N_FLUSHES` | `360` | Run the retention prune every N flushes (~hourly at the default interval) |
+| `LOGIN_RATE_LIMIT` / `REGISTER_RATE_LIMIT` | `10/60` / `10/3600` | Auth rate limits, `"<attempts>/<window sec>"` per client IP (429 + Retry-After) |
+| `VAPID_PRIVATE_KEY` / `VAPID_SUBJECT` | `""` / `mailto:admin@amphive.example` | Web Push signing key + contact; empty key = push disabled (feed + Socket.io still work) |
+| `LOW_BALANCE_WARN_FRACTION` | `0.8` | Notify the driver once per session when accrued cost crosses this fraction of the wallet balance (`0` disables) |

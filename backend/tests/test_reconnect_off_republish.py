@@ -54,14 +54,20 @@ async def test_online_republishes_off_only_to_plugs_without_active_session():
 
 @pytest.mark.asyncio
 async def test_offline_status_does_not_republish():
+    offline_sessions = MagicMock()
+    offline_sessions.all.return_value = []   # no ACTIVE sessions on this gateway
     mgr, db = _manager_with_db([
-        _result_scalar_one(MagicMock()),   # gateway row lookup only
+        _result_scalar_one(MagicMock()),   # gateway row lookup
+        offline_sessions,                  # driver-notification query (2026-07-11)
     ])
 
-    await mgr._persist_gateway_status("gw-1", "offline")
+    notify = AsyncMock()
+    import unittest.mock
+    with unittest.mock.patch("backend.services.notifications.notify", notify):
+        await mgr._persist_gateway_status("gw-1", "offline")
 
-    mgr.send_plug_command.assert_not_called()
-    assert db.execute.await_count == 1  # no plug/session queries
+    mgr.send_plug_command.assert_not_called()   # republish is online-only
+    notify.assert_not_awaited()                 # nobody charging → nobody notified
     MQTTManager._instance = None
 
 
