@@ -61,7 +61,7 @@ Legend — **Impact**: how much it costs if left. **Effort**: rough work to fix.
 | 28 | **Unstructured, stdout-only logging** *(2026-07-06 audit)* | backend `logging.basicConfig(INFO)`, firmware `ESP_LOGI` (serial), `mosquitto.conf` `log_dest stdout` | f-string logs, no JSON / correlation ids / rotation; firmware logs only to serial; broker log not persisted. | Can't trace an HTTP request → MQTT command → session; no field diagnostics for a deployed gateway. | 2–3 h (structured logging + request/correlation ids; optional firmware log topic) | **P3** |
 | 29 | ✅ ~~**No unified wallet ledger view**~~ **Done 2026-07-10** *(2026-07-06 audit)* | `GET /api/wallet/ledger` + `History.jsx` | History showed only session debits. Fixed: a unified ledger endpoint returns top-up credits **and** session debits, surfaced as a ledger tab in History. | — | — | ~~P3~~ Done |
 | 30 | ✅ ~~**Registration lacks validation**~~ **Done 2026-07-11** *(2026-07-06 audit)* | `backend/schemas.py` (`RegisterRequest`) | Fixed: `EmailStr` (new `email-validator` dep) + password `Field(min_length=8, max_length=72)` (72 = bcrypt truncation boundary). Login stays unvalidated so pre-rule accounts still sign in; the frontend API client now renders FastAPI 422 detail lists readably. Tests in `test_registration_validation.py`. | — | — | ~~P3~~ Done |
-| 31 | **Captive-portal input CSS bug + no reachability test** *(2026-07-06 audit)* | `firmware/main/main.c` `portal_html` | `width:100%%` is sent verbatim (the string isn't printf-formatted) → invalid CSS; the portal never tests Wi-Fi/plug reachability before saving. | Setup inputs render at default width; a wrong `local_ip`/Wi-Fi password only surfaces at charge time (bad onboarding). | 30 min–2 h | **P3** |
+| 31 | **Captive-portal reachability test** (CSS half done fw 1.6.0) *(2026-07-06 audit)* | `firmware/main/main.c` `portal_html` | The audit's `width:100%%` diagnosis was wrong — the HTML **is** printf-formatted (`snprintf` embeds `gateway_id`), so `%%` already rendered as `%`; the real nit (padding overflow) was fixed with `box-sizing:border-box` in fw 1.6.0. Still open: the portal never tests Wi-Fi/plug reachability before saving. | A wrong `local_ip`/Wi-Fi password only surfaces at charge time (bad onboarding). | 1–2 h | **P3** |
 | 32 | ✅ ~~**Shared `asyncio.Event` per plug across telemetry consumers**~~ **Closed 2026-07-07 by TD#12** *(2026-07-06 audit)* | `backend/services/telemetry.py` | One `Event` per plug meant a consumer's `.clear()` could swallow another's wakeup — only bit when SSE and Socket.io coexisted. Retiring SSE (TD#12) left a single consumer. | — | — | ~~P3~~ Done |
 
 ---
@@ -89,14 +89,15 @@ Legend — **Impact**: how much it costs if left. **Effort**: rough work to fix.
   (TD#26). ~~Gateway staleness (TD#27)~~ — done (read-time `gateway_is_live` +
   reaper). ~~Telemetry cast guard (TD#25)~~ — done 2026-07-11, together with
   the payload plug-ownership check.
-- **P3 polish/onboarding:** structured logging (TD#28), portal CSS +
-  reachability test (TD#31). ~~Unified ledger view (TD#29)~~, ~~shared
-  telemetry Event (TD#32)~~ and ~~registration validation (TD#30, done
-  2026-07-11)~~ — done.
+- **P3 polish/onboarding:** structured logging (TD#28), portal reachability
+  test (TD#31 — the CSS half closed fw 1.6.0). ~~Unified ledger view
+  (TD#29)~~, ~~shared telemetry Event (TD#32)~~ and ~~registration validation
+  (TD#30, done 2026-07-11)~~ — done.
 - **Device security (P0/P1)** lives in [SECURITY.md §8](SECURITY.md#8-firmware--gateway-device-security--backend-follow-up-gaps-2026-07-06-audit):
-  still open — open provisioning AP + unauthenticated `/save`, no
-  flash-encryption (plaintext NVS secrets), boot-time fallback into the open
-  portal. Resolved since the audit: the reusable-overlay-key + anonymous-broker
-  combination (devices moved to direct MQTT with per-gateway credentials +
-  topic ACLs + TLS, 2026-07-10) and unsigned OTA (ECDSA verify-on-update +
-  HTTPS-only images).
+  still open — no flash-encryption (plaintext NVS secrets), boot-time fallback
+  into the portal (now LOW: portal locked + idle timeout since fw 1.6.0).
+  Resolved since the audit: the open-AP + unauthenticated-`/save` portal
+  (WPA2 + per-device setup code + timeout, fw 1.6.0), the
+  reusable-overlay-key + anonymous-broker combination (devices moved to
+  direct MQTT with per-gateway credentials + topic ACLs + TLS, 2026-07-10)
+  and unsigned OTA (ECDSA verify-on-update + HTTPS-only images).

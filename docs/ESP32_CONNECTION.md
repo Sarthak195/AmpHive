@@ -180,23 +180,31 @@ re-apply any board-specific settings afterward (or put them in `sdkconfig.defaul
 
 On a board with no stored config (factory-fresh or after `erase-flash`):
 
-1. The board starts an open SoftAP: **`AmpHive_Setup_XXXX`** (XXXX = last MAC bytes).
-2. Join that Wi-Fi network from a laptop/phone.
+1. The board starts a **WPA2** SoftAP: **`AmpHive_Setup_XXXX`** (XXXX = last MAC
+   bytes). Since fw 1.6.0 the passphrase is the per-device **setup code** —
+   generated on first portal start, persisted in NVS, and printed prominently
+   on the serial console (`idf.py monitor`). **Copy it onto the unit label**;
+   it's needed for every (re-)provisioning. A full NVS erase generates a new
+   code — re-label.
+2. Join that Wi-Fi network from a laptop/phone (password = setup code).
 3. Browse to **`http://192.168.4.1`**.
-4. Fill in the form — **10 fields**:
+4. Fill in the form — the setup code + **6 config fields** (`gateway_id`,
+   device name, and MQTT username are derived from the MAC, not typed; the
+   auto-detected Gateway ID is shown at the top of the form — give it to the
+   AmpHive operator to get the per-gateway MQTT password):
    | Field | Example | Notes |
    |-------|---------|-------|
+   | Setup Code | `x7kq2m9pfw` | from the unit label / serial log; gates `/save` |
    | WiFi SSID | `HomeNet` | 2.4 GHz network the plug is on |
    | WiFi Password | | |
-   | Headscale/Tailscale Auth Key | `mkey:…` / `tskey-…` | overlay join key |
-   | Device Name | `gateway-01` | shown on the control plane |
-   | Gateway MAC/ID | `gw-abc123` | must match the backend's gateway record |
    | Target Plug IP | `192.168.1.5` | the Tapo plug's LAN IP (see tip below) |
    | **Tapo Account Email** | `you@example.com` | Tapo cloud login; used for KLAP auth |
    | **Tapo Account Password** | | stored in NVS (plaintext, prototype) |
-   | MQTT Username *(optional)* | `amphive-gateway` | broker credentials (`MQTT_GW_USERNAME` in `.env`); empty = anonymous until the broker's stage-2 flip |
-   | MQTT Password *(optional)* | | stored in NVS (`mqtt_user`/`mqtt_pwd`) |
-5. Submit → config is written to NVS and the board reboots into normal operation.
+   | MQTT Password | | the per-gateway broker credential (`add_gateway_user.ps1`); username == gateway id |
+5. Submit → config is written to NVS and the board reboots into normal
+   operation. A wrong setup code gets a 403 (1 s throttle per attempt) and
+   nothing is saved. The portal reboots the board after **10 min** with no
+   HTTP activity.
 
 > **Find the plug's IP:** it's DHCP-assigned and can change. In the Tapo app:
 > *Device → Settings → Device Info → IP Address*. Or scan the LAN — the plug answers
@@ -214,8 +222,10 @@ idf.py -p COM3 erase-flash
 # Wipe ONLY the NVS partition (keeps firmware; forces re-provisioning on next boot)
 parttool.py -p COM3 erase_partition --partition-name nvs
 
-# Re-provision without erasing: connect to AmpHive_Setup_XXXX only appears if config is
-# missing/invalid — to force it, erase NVS as above, or change Wi-Fi so STA connect fails.
+# Re-provision without erasing: AmpHive_Setup_XXXX only appears if config is
+# missing/invalid — to force it, erase NVS as above, or change Wi-Fi so STA connect
+# fails. The setup code survives re-provisioning (NVS key `setup_code`); only a
+# full NVS/flash erase regenerates it (watch serial on next portal start, re-label).
 ```
 
 Raw esptool equivalents (when idf.py isn't available, e.g. flashing a prebuilt binary):

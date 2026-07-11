@@ -18,9 +18,10 @@ known security gaps, not a formal audit. Items are roughly ordered by severity.*
 > adds the **firmware/gateway device attack surface** plus a few backend
 > authn/integrity gaps. Statuses re-checked 2026-07-11: the overlay-key +
 > anonymous-broker item (§8.3) and JWT revocation (§8.6) were resolved by the
-> 2026-07-08…10 work; the still-open device items (open provisioning AP, no
-> flash-encryption, boot-time portal fallback) are the highest-severity *open*
-> gaps — read §8 first.
+> 2026-07-08…10 work, and the open provisioning portal (§8.1, was CRITICAL)
+> was locked down in fw 1.6.0 (WPA2 setup AP + setup code on `/save` + idle
+> timeout). The still-open device items (no flash-encryption §8.2, boot-time
+> portal fallback §8.4) are the highest-severity *open* gaps — read §8 first.
 
 ---
 
@@ -324,17 +325,28 @@ still-open device items remain the highest-severity gaps in the project — an
 attacker with brief Wi-Fi proximity or physical access to a gateway can take it
 over or harvest the owner's Tapo account. Ordered by severity.*
 
-### 8.1 Provisioning portal is an open, unauthenticated door — **CRITICAL, open**
+### 8.1 ~~Provisioning portal is an open, unauthenticated door~~ — **RESOLVED (fw 1.6.0)**
 
-- The setup Access Point is `WIFI_AUTH_OPEN` with an empty password and the
-  `/save` handler requires **no authentication** (`firmware/main/main.c`).
-- Anyone within Wi-Fi range during provisioning can (a) **sniff** the submitted
-  Tapo password, Wi-Fi password, and per-gateway MQTT credentials over the open
-  air, and (b) **POST** arbitrary config to overwrite all of them → full device
-  takeover / redirect to attacker infrastructure.
-- **Fix:** WPA2 on the setup AP with a per-device password (derive from the MAC,
-  print on the unit label), a setup PIN/token gating `/save`, and a portal
-  timeout. Serve the portal only on the AP interface.
+- Was: the setup Access Point was `WIFI_AUTH_OPEN` and `/save` required no
+  authentication — anyone in Wi-Fi range during provisioning could sniff the
+  submitted Tapo/Wi-Fi/MQTT secrets over open air or POST arbitrary config
+  (full device takeover).
+- **Fixed in fw 1.6.0** (`firmware/main/main.c`): a per-device **setup code**
+  (10 chars, `esp_random()`, persisted in NVS, printed over serial at every
+  portal start for the unit label) is now (a) the **WPA2 passphrase** of the
+  setup AP — submitted secrets are never on open air — and (b) a required,
+  constant-time-checked token on **`/save`** (wrong code → 1 s throttle + 403,
+  nothing written), guarding against other clients already on the setup AP.
+  The portal runs **AP-only** (no STA interface — reachable exclusively via
+  the setup AP) and the device **reboots after 10 min of portal inactivity**.
+  Note the MAC-derived password suggested in the original fix was rejected:
+  the softAP BSSID broadcasts the MAC, so a random persisted code is used
+  instead.
+- Deployment note: fleet units OTA'd to ≥ 1.6.0 generate their code the first
+  time the portal next runs; it is read over serial (`idf.py monitor`) —
+  label units at reflash/RMA time.
+- Residual: the code is printed on serial and stored in plaintext NVS — both
+  require physical access, which is §8.2's flash-encryption territory.
 
 ### 8.2 No flash encryption — NVS secrets are extractable — **HIGH, open**
 
@@ -365,13 +377,20 @@ over or harvest the owner's Tapo account. Ordered by severity.*
   one gateway* within its own subtree — which is why the backend-side
   `plug.gateway_id` check mattered (shipped 2026-07-11, see §3).
 
-### 8.4 Boot-time fallback into the open portal — **MEDIUM, open**
+### 8.4 Boot-time fallback into the portal — **MEDIUM→LOW, open (exposure reduced fw 1.6.0)**
 
-- On boot with Wi-Fi down, the device drops into the open portal
+- On boot with Wi-Fi down, the device drops into the provisioning portal
   (`firmware/main/main.c`). An attacker who deauths/jams the STA link and
-  forces a reboot lands the gateway in §8.1's unauthenticated portal.
-- **Fix:** require a physical button-hold to enter provisioning instead of
-  auto-opening it on transient Wi-Fi loss; keep retrying STA otherwise.
+  forces a reboot lands the gateway in the portal.
+- **Reduced since fw 1.6.0** (§8.1 fix): the portal an attacker lands the
+  device in is now WPA2-locked + setup-code-gated (nothing to sniff or POST
+  without the label code), and the device **reboots and retries STA after
+  10 min of portal inactivity** instead of sitting in the portal forever —
+  transient Wi-Fi loss now self-heals. Residual: a jamming attacker can still
+  keep the gateway offline (that's inherent to radio) and the setup AP
+  beacons during each 10-min window.
+- **Remaining fix:** require a physical button-hold to enter provisioning
+  instead of auto-opening it on Wi-Fi loss; keep retrying STA otherwise.
 
 ### 8.5 Multi-plug refactor must stay security-safe
 
@@ -439,15 +458,17 @@ Status — open items and recently closed:
 
 Device security (2026-07-06 audit, statuses as of 2026-07-11 — see
 [§8](#8-firmware--gateway-device-security--backend-follow-up-gaps-2026-07-06-audit)):
-- [ ] **Lock down the provisioning portal** — WPA2 setup AP + PIN/token on
-      `/save` + timeout (§8.1, CRITICAL).
+- [x] ~~Lock down the provisioning portal~~ **Resolved fw 1.6.0** — WPA2 setup
+      AP + per-device setup code gating `/save` + 10-min idle timeout +
+      AP-only interface (§8.1).
 - [ ] **Enable flash encryption + Secure Boot v2** so NVS secrets (Tapo account,
-      MQTT credentials) aren't extractable (§8.2, HIGH).
+      MQTT credentials, setup code) aren't extractable (§8.2, HIGH).
 - [x] ~~Ephemeral/tagged overlay keys + broker auth/ACL/TLS~~ **Resolved
       2026-07-10** — devices left the overlay; per-gateway broker credentials +
       topic ACLs + TLS are live (§8.3).
-- [ ] **Require a button-hold for provisioning** instead of auto-opening the open
-      portal on Wi-Fi loss (§8.4, MEDIUM).
+- [ ] **Require a button-hold for provisioning** instead of auto-opening the
+      portal on Wi-Fi loss (§8.4 — now LOW: the portal is locked + idle-times-out
+      since fw 1.6.0).
 - [x] **Validate `plug.gateway_id` against the topic gateway** before billing
       telemetry (2026-07-11; §3, §8.5) — plus guarded ingestion casts (TD#25)
       and registration validation (TD#30) in the same change.

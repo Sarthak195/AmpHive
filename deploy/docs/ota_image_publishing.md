@@ -64,12 +64,34 @@ so a reader gains nothing and a forger is rejected.
    (`marking image valid`) only once it re-reaches the broker, else the
    bootloader rolls back to the previous slot.
 
-## Migration state (as of 2026-07-10)
+## Migration state — ROLLED OUT (2026-07-10, updated 2026-07-11)
 
-- Signed `1.4.0-direct` is built and published at
-  `https://storage.googleapis.com/amphive-fw/amphive-gateway-1.4.0.bin`, but
-  the push to the real gateway (`1cc3abb4fb54`, on 1.3.x) is **pending**.
-  Pre-1.4.0 firmware doesn't verify signatures (the trailer is ignored), so
-  the jump is safe; from 1.4.0 onward only signed images install.
-- The backend https-only validation (`backend/schemas.py`) is committed but
-  **not yet deployed** — ship it with the next `deploy.ps1` run.
+**Current fleet firmware: signed `1.6.0-direct`** (provisioning-portal
+lockdown, SEC §8.1). Rollout log, newest first:
+
+- **2026-07-11 ~21:56 IST — `1.5.0-direct` → signed `1.6.0-direct`** on the
+  real gateway `1cc3abb4fb54`. Image published via
+  `deploy/scripts/publish_firmware.ps1`
+  (`gs://amphive-fw/amphive-gateway-1.6.0-direct.bin`, anonymous-HTTPS-fetch
+  verified), triggered through `POST /api/cpo/gateways/1cc3abb4fb54/ota`.
+  Events feed: `OTA_STARTED` 21:55:39 → `OTA_OK_REBOOTING` 21:56:03 → back
+  online reporting `1.6.0-direct` by 21:56:08; stayed online on subsequent
+  checks (rollback cancelled). **Operational note:** from 1.6.0 the
+  provisioning portal is WPA2-locked by a per-device setup code printed
+  only over serial at portal start — if this gateway ever re-enters the
+  portal (Wi-Fi loss/reprovisioning), the code must be read via
+  `idf.py monitor` (see docs/ESP32_CONNECTION.md §6).
+- **2026-07-10 — `1.3.2-direct` → signed `1.5.0-direct`** end-to-end over
+  direct-MQTT (skipping 1.4.0; `OTA_OK_REBOOTING` → offline → back online
+  on 1.5.0, rollback cancelled). From 1.4.0 onward only signed images
+  install. The backend https-only validation (`backend/schemas.py`) is
+  **deployed**.
+
+**Do not push the older `amphive-gateway-1.4.0.bin`/`-1.5.0.bin` still in
+the bucket — they would downgrade the device** and lose the portal-lockdown
+(1.6.0) and safety-alarm/telemetry (1.5.0) features.
+
+Published images (`gs://amphive-fw`): `amphive-gateway-1.4.0.bin` (historic),
+`amphive-gateway-1.5.0.bin` (historic), `amphive-gateway-1.6.0-direct.bin`
+(current). See [docs/IMPLEMENTATION_STATUS.md](../../docs/IMPLEMENTATION_STATUS.md)
+for the canonical status row.
