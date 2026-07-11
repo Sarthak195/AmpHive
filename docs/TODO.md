@@ -179,6 +179,16 @@ Cross-references [TECH_DEBT.md](TECH_DEBT.md) items as `TD#n` and
       add HSTS + flip bare-IP back to a redirect, and **replace DuckDNS with
       a real domain** (proven SPOF; also needed for Razorpay live-mode
       legal pages). (SEC §3/§6)
+- [~] **Database + config backups** (2026-07-11, running; GCS upload pending
+      one owner approval): nightly `backup_db.sh` cron (21:00 UTC) does
+      `pg_dump -Fc` + ops-config tarball (broker passwd/ACL hashes exist only
+      on the VM) → `gs://amphive-db-backups` (private, 30-day lifecycle),
+      last 3 sets kept locally; daily **disk snapshots** (14-day retention)
+      attached to the VM disk. **Restore tested** into a scratch DB (row
+      counts matched). Remaining: raise the VM scope to `devstorage.read_write`
+      (~2-min stop/start) + bucket IAM so uploads leave the VM — commands in
+      `deploy/docs/db_backup_restore.md`; then verify one uploaded set and
+      schedule a quarterly restore drill.
 
 ## Long term — productionization
 

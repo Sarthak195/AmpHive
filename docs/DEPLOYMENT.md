@@ -182,6 +182,7 @@ Reference repos under the author's GitHub (read-only context, not build inputs):
 | File | Covers |
 |------|--------|
 | `web_tls_rollout.md` | Caddy HTTPS front door — rollout, verification, rollback |
+| `db_backup_restore.md` | Nightly DB/config backups + disk snapshots — setup, restore, restore test |
 | `new_device_setup.md` | Setting up a new dev workstation |
 | `deploy_guide.md` | Cloud hosting, DuckDNS, VPN networking |
 | `deployment_checklist.md` | Step-by-step physical site deployment |
