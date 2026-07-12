@@ -386,3 +386,71 @@ class AuditLog(Base):
     __table_args__ = (
         Index("idx_audit_logs_tenant_created", "tenant_id", "created_at"),
     )
+
+
+# --- Session Disputes / Refunds (coins-only remedy) ---
+
+class DisputeStatus(str, enum.Enum):
+    OPEN = "open"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+
+class SessionDispute(Base):
+    """
+    Driver-initiated dispute against a finished ChargingSession, resolved by
+    the CPO that owns the session's plug (backend/routers/sessions.py POST
+    /api/sessions/{id}/dispute to file; backend/routers/cpo.py GET
+    /api/cpo/disputes + POST /api/cpo/disputes/{id}/resolve to list/resolve).
+
+    Coins-only remedy: there is no Razorpay money-out path. An APPROVED
+    dispute credits the driver's coin wallet via services/wallet.credit_wallet
+    and writes a REFUND LedgerTransaction referencing the session — the same
+    wallet the driver spent from, never a card/UPI reversal (see
+    MARKET_GAP_ANALYSIS.md §3 "Refunds").
+
+    At most one OPEN dispute may exist per session — enforced below by a
+    partial unique index (DB-level backstop, not just app-level
+    check-then-insert), so a double-submit race can't create two. A session
+    can still accumulate several *resolved* disputes over time (e.g. re-filed
+    after a REJECTED one; each APPROVED one carries its own refund_coins) —
+    the resolve endpoint enforces that the sum of a session's APPROVED
+    refund_coins never exceeds that session's coins_spent, row-locking the
+    session so two concurrent approvals on the same session serialize.
+
+    tenant_id is denormalized from the session's plug -> gateway -> tenant
+    chain (mirrors TelemetryReading/GatewayEvent/AuditLog) so the CPO-scoped
+    list/resolve endpoints filter with a single indexed equality, no join.
+    """
+    __tablename__ = "session_disputes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_id: Mapped[int] = mapped_column(Integer, ForeignKey("charging_sessions.id", ondelete="CASCADE"), nullable=False, index=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    driver_user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[DisputeStatus] = mapped_column(SQLEnum(DisputeStatus, name="dispute_status", values_callable=lambda x: [e.value for e in x]), default=DisputeStatus.OPEN, nullable=False)
+    resolution_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Money: NUMERIC(12,2) -> Decimal, same convention as every other coin
+    # amount (services/money.to_money). NULL until resolved, and stays NULL
+    # on REJECTED — only an APPROVED dispute ever carries a refund amount.
+    refund_coins: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolved_by_user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+
+    __table_args__ = (
+        # DB-level backstop for "at most one OPEN dispute per session": a
+        # partial unique index over rows where status = 'open'. Resolved rows
+        # fall outside the predicate, so this never blocks a session from
+        # accumulating multiple resolved disputes over time — only a second
+        # simultaneously-open one collides. The router catches the resulting
+        # IntegrityError on a double-submit race and returns 409 instead of
+        # a raw 500 (same pattern as _credit_topup / cpo_setup).
+        Index(
+            "ix_session_disputes_one_open_per_session",
+            "session_id",
+            unique=True,
+            postgresql_where=text("status = 'open'"),
+        ),
+    )
