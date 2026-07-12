@@ -139,6 +139,7 @@ async def finalize_charging_session(
         gateway_id=plug.gateway_id,
         plug_id=plug.id,
         action="OFF",
+        local_ip=plug.local_ip,
     )
 
     if not success:

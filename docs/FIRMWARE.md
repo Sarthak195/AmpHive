@@ -2,13 +2,17 @@
 
 > Quick setup? See [ESP32_CONNECTION.md](ESP32_CONNECTION.md) for build/flash/monitor commands and common connection issues.
 
-*Verified against `firmware/` on 2026-07-06.*
+*Verified against `firmware/` on 2026-07-06; multi-plug refactor (TD#20) shipped
+in fw **1.7.1-direct** and **verified on-device 2026-07-12** (single-plug
+charging regression on the real gateway — see §3; two-real-plug validation still
+needs a second unit).*
 
 The gateway is an ESP-IDF application targeting **ESP32-S3-N16R8** (16 MB flash /
 8 MB PSRAM). Since fw **1.3.0** it connects **directly to the public broker over
 outbound MQTT/TLS** (`AMPHIVE_DIRECT_MQTT=1`, the default — NAT/CGNAT-immune, no
 overlay; see [MQTT_CONTRACT.md](MQTT_CONTRACT.md) and [SECURITY.md §3](SECURITY.md)),
-receives MQTT commands, drives a local Tapo plug, and enforces edge safety
+receives MQTT commands, drives **one or more** local Tapo plugs (each in its own
+per-plug slot — KLAP session + energy meter, TD#20), and enforces edge safety
 watchdogs. The legacy transport (`AMPHIVE_DIRECT_MQTT=0`) joins a Tailscale-style
 overlay via `microlink` — a substantial, near-complete **from-scratch
 Tailscale-protocol client written in C** — kept compilable for rollback, but
@@ -19,9 +23,9 @@ firmware/
 ├── CMakeLists.txt            # ESP-IDF project "amphive-gateway"
 ├── sdkconfig.defaults        # PSRAM octal, 16MB flash, dual-OTA custom partition
 ├── main/
-│   ├── main.c                # boot, WiFi, captive portal, MQTT loop, watchdogs
-│   ├── tapo_protocol.c/.h    # Tapo P110 driver — real KLAP v2 (mbedTLS + esp_http_client)
-│   ├── session_nvs.c/.h      # NVS session register — persist active session for crash recovery
+│   ├── main.c                # boot, WiFi, captive portal, MQTT loop, per-plug slots + watchdogs
+│   ├── tapo_protocol.c/.h    # Tapo P110 driver — real KLAP v2 (mbedTLS + esp_http_client); per-plug context
+│   ├── session_nvs.c/.h      # NVS session register — persist all active per-plug sessions for crash recovery
 │   ├── offline_log.c/.h      # NVS ring buffer — cache telemetry during MQTT outages
 │   └── CMakeLists.txt
 └── components/
@@ -88,11 +92,33 @@ are used by the KLAP driver's auth hash (see §4).
 - Direct build: MQTT starts right after Wi-Fi (TLS to the public broker). Legacy
   build: lazy MQTT start once the overlay is up. Topics per
   [MQTT_CONTRACT.md](MQTT_CONTRACT.md).
+- **Per-plug slots (multi-plug, TD#20).** A gateway can drive several plugs. Each
+  plug the backend addresses gets a slot in a `MAX_PLUGS`-wide table (guarded by
+  `plugs_mutex`): its DB `plug_id` (from the command topic), LAN IP, a **per-plug
+  KLAP driver context** (`tapo_plug_t` — its own handshake/session + energy meter,
+  so plug B's command can never actuate plug A), and its own session/watchdog
+  state. `ON`/`OFF` carry the target `local_ip` (see [MQTT_CONTRACT.md](MQTT_CONTRACT.md)),
+  so the gateway learns and drives the right plug without a static on-device
+  roster; an empty `local_ip` falls back to the one provisioned `target_plug_ip`
+  (single-plug back-compat). Slots are added, never freed at runtime, so the
+  telemetry task can read them without holding the lock across a KLAP call.
+- **Boot-time provisional slot (fw 1.7.1).** At boot the gateway pre-registers a
+  slot for its provisioned `target_plug_ip` (provisional id `1`) so **idle
+  telemetry flows from boot** — this keeps the backend's session-start liveness
+  gate fresh before any command arrives. Without it a session-less gateway polls
+  nothing, publishes no telemetry, and drops out of the liveness window, so
+  session starts get a 409 "gateway offline" (a real regression the 1.7.0 build
+  shipped and the 2026-07-12 on-device test caught). The backend's **real**
+  `plug_id` is adopted into the same slot by matching IP on the first command for
+  that plug (`slot_get_locked` → `tapo_plug_reassign_id` re-points the NVS energy
+  key), so no duplicate slot is created when the real id differs from the
+  provisional one.
 - Commands parsed with **cJSON** (`"action":"ON"`/`"OFF"`/`"SET_INTERVAL"`, optional
-  `max_duration_seconds` / `max_kwh` / `session_id`, `interval_ms`); topic/data
-  buffers 256/512 B with an oversized/fragmented-payload guard. Defaults: 14400 s,
-  30.0 kWh, 10000 ms.
-- `telemetry_safety` runs at a **configurable interval** (`telemetry_interval_ms`, default **10 s** / 10000 ms) and **always polls the plug regardless of MQTT connectivity**:
+  `max_duration_seconds` / `max_kwh` / `session_id` / `local_ip`, `interval_ms`);
+  topic/data buffers 256/512 B with an oversized/fragmented-payload guard.
+  Defaults: 14400 s, 30.0 kWh, 10000 ms. `SET_INTERVAL` is gateway-wide (one poll
+  cadence for all plugs); `OTA` is refused if **any** plug is mid-session.
+- `telemetry_safety` runs at a **configurable interval** (`telemetry_interval_ms`, default **10 s** / 10000 ms) and, each sweep, **polls every known plug regardless of MQTT connectivity** (with many plugs at a fast session cadence the sweep may exceed one interval, which just stretches the effective cadence — safety still runs every sweep):
   - If a `"SET_INTERVAL"` command with `"interval_ms"` is received, the interval is updated (clamped between 500 ms and 60000 ms).
   - The published telemetry `kwh` is **session-relative** (`meter − start_energy_kwh`,
     clamped ≥ 0; 0 when idle), and the active `session_id` is echoed back — see
@@ -121,11 +147,20 @@ are used by the KLAP driver's auth hash (see §4).
 
 ### 3a. NVS Session Register (`main/session_nvs.c`)
 
-Active session parameters are persisted to a dedicated NVS namespace `"session"`
-(separate from WiFi config in `"storage"`). Stored fields: `active`, `session_id`,
-`start_time_s`, `max_duration_s`, `max_kwh` (as milliWh integer), `start_energy_kwh`
-(as milliWh integer). On boot, `session_nvs_load()` checks for a crash-recovered
-session and restores the watchdog state so limits are enforced immediately.
+The active per-plug sessions are persisted to a dedicated NVS namespace
+`"session"` (separate from WiFi config in `"storage"`). Since the multi-plug
+refactor (TD#20) the whole set is stored as **one blob** (`session_nvs_save_all`
+/ `session_nvs_load_all`) so a save is atomic; each record adds `plug_id` and
+`local_ip` to the prior fields (`active`, `session_id`, `start_time_s`,
+`max_duration_s`, `max_kwh` and `start_energy_kwh` as milliWh integers). Carrying
+`local_ip` is what lets crash recovery re-create the plug's KLAP context and keep
+driving it — the backend ON command that first taught the IP is gone after a
+reboot. On boot, `session_nvs_load_all()` restores **every** recovered session's
+watchdog state so limits are enforced immediately on all plugs. (The blob format
+supersedes the pre-multi-plug single-session keys; after an OTA from that firmware
+`load_all` finds no blob and recovers nothing — safe, because OTA is refused while
+any session is active, so there is never a live session to lose across the
+upgrade.)
 
 ### 3b. Offline Telemetry Buffer (`main/offline_log.c`)
 
@@ -140,14 +175,27 @@ The mock is **replaced by a real KLAP v2 driver** (SHA1/SHA256/AES-128-CBC via
 mbedTLS + `esp_http_client`). The exact protocol was validated against a real
 P110 (fw 1.1.3) before porting — see `tools/klap_probe.py`.
 
-- **Auth:** `auth_hash = SHA256(SHA1(email) || SHA1(password))`. The Tapo account
+Since the multi-plug refactor (TD#20) the driver is **per-plug**: the Tapo
+*account* (`auth_hash`) and nominal voltage stay module-global (one account owns
+every plug), while the KLAP session and energy integrator live in an opaque
+`tapo_plug_t` handle. `main.c` creates one per plug via `tapo_plug_create(plug_id,
+local_ip)` and calls the `tapo_plug_*` operations on it; each handle has its own
+mutex, so a plug's set/get can't race another's, and plug A's session keys can
+never be reused to act on plug B.
+
+- **Auth (shared):** `tapo_init(email, password, nominal_v)` derives
+  `auth_hash = SHA256(SHA1(email) || SHA1(password))` once. The Tapo account
   email+password are collected by the captive portal and stored in NVS (see §2).
-- **Handshake:** `POST /app/handshake1` (verify server hash), `POST /app/handshake2`,
-  then per-request AES-CBC with an incrementing signed seq and a SHA256 signature
-  (`POST /app/request?seq=N`). Session cached with a mutex; re-handshakes on HTTP 403.
-- **`tapo_set_power_state`** → `set_device_info {device_on}`.
-- **`tapo_get_telemetry`** → `get_energy_usage` (real `current_power`, **milliwatts**)
-  + `get_device_info` (`device_on`, `overheat_status`, `overcurrent_status`).
+- **Handshake (per plug):** `POST /app/handshake1` (verify server hash), `POST
+  /app/handshake2`, then per-request AES-CBC with an incrementing signed seq and a
+  SHA256 signature (`POST /app/request?seq=N`). Each plug's session is cached under
+  its own mutex; re-handshakes on HTTP 403.
+- **`tapo_plug_set_power(plug, on)`** → `set_device_info {device_on}`.
+- **`tapo_plug_get_telemetry(plug, out)`** → `get_energy_usage` (real
+  `current_power`, **milliwatts**) + `get_device_info` (`device_on`,
+  `overheat_status`, `overcurrent_status`).
+- **`tapo_plug_set_ip(plug, ip)`** rebinds a plug's IP (new DHCP lease) and
+  invalidates its session so the next call re-handshakes.
 
 **P110 telemetry reality** — the plug exposes power and energy, *not* voltage,
 current, or temperature. So the `tapo_telemetry_t` fields map as:
@@ -155,7 +203,7 @@ current, or temperature. So the `tapo_telemetry_t` fields map as:
 | Field | Source |
 |-------|--------|
 | `power_w` | **real** — `current_power` (mW) ÷ 1000 |
-| `energy_kwh` | **real** — driver-side monotonic **lifetime** Wh integrator (robust vs the plug's daily `today_energy` reset); persisted to NVS across reboots and updated under the driver mutex. Since fw 1.5.0 it integrates with the **trapezoidal rule** (average of consecutive power samples × dt) instead of left-rectangle, reducing error on ramping loads at the 10 s poll cadence; a new module static `s_energy_last_power_w` holds the previous sample |
+| `energy_kwh` | **real** — driver-side monotonic **lifetime** Wh integrator (robust vs the plug's daily `today_energy` reset); **per-plug**, persisted to NVS (key `wh_<plug_id>`) across reboots and updated under that plug's mutex. Since fw 1.5.0 it integrates with the **trapezoidal rule** (average of consecutive power samples × dt) instead of left-rectangle, reducing error on ramping loads at the 10 s poll cadence; the previous sample is held per-plug in the `tapo_plug_t` context |
 | `device_on` / `overheated` / `overcurrent` | **real** — from `get_device_info` status strings |
 | `voltage_v` | **nominal** (configured, default 230 V) |
 | `current_a` | **derived** — `power_w / voltage_v` |
@@ -164,9 +212,9 @@ current, or temperature. So the `tapo_telemetry_t` fields map as:
 > **Lifetime meter vs billed energy:** `tapo_telemetry_t.energy_kwh` is the
 > *lifetime* integrator. `main.c` subtracts the session baseline before publishing,
 > so the MQTT `kwh` the backend bills is session-relative (see §3 and
-> [MQTT_CONTRACT.md](MQTT_CONTRACT.md)). The integrator is mutex-protected because
-> the telemetry task and the `ON`-handler's baseline read can call
-> `tapo_get_telemetry` concurrently.
+> [MQTT_CONTRACT.md](MQTT_CONTRACT.md)). Each plug's integrator is protected by
+> that plug's own mutex because the telemetry task and the `ON`-handler's baseline
+> read can call `tapo_plug_get_telemetry` for the same plug concurrently.
 
 Because there is no real temperature, the thermal watchdog now trips on the plug's
 `overheat_status` flag rather than a 75 °C compare (see §3).

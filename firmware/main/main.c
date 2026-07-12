@@ -5,6 +5,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
+#include "freertos/semphr.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_log.h"
@@ -73,7 +74,6 @@ static uint32_t telemetry_interval_ms = 10000; // Default 10s (10000ms)
 // attached when this is 1. Set back to 1 when restoring the mqtts://8883 URL.
 #define MQTT_USE_TLS        0
 #endif
-#define TARGET_PLUG_ID      1
 
 // Broker CA, embedded via EMBED_TXTFILES (see main/CMakeLists.txt). The
 // linker appends a NUL, so it is a valid PEM C-string for esp-mqtt.
@@ -81,15 +81,6 @@ extern const uint8_t mqtt_ca_crt_start[] asm("_binary_mqtt_ca_crt_start");
 // ─────────────────────────────────────────────────────────────────────────────
 
 static const char *TAG = "amphive_gateway";
-
-// The DB plug id this gateway currently drives. The backend is the source of
-// truth for plug ids (it addresses every command to
-// amphive/gateways/{gw}/plugs/{plug_id}/commands), so we adopt the id from the
-// commands we receive rather than hardcoding it. Until the first command
-// arrives we fall back to TARGET_PLUG_ID; telemetry for an unknown id is simply
-// dropped by the backend, and the id self-corrects the moment a real ON/
-// SET_INTERVAL command (i.e. a session) targets this plug.
-static int active_plug_id = TARGET_PLUG_ID;
 
 // Extract the plug id from a command topic ".../plugs/{id}/commands".
 // Returns the parsed id, or -1 if the segment isn't present.
@@ -110,15 +101,133 @@ static bool mqtt_connected = false;
 static int wifi_retry_count = 0;
 #define MAXIMUM_RETRY  5
 
-// Active session safety watchdog state
-static struct {
-    bool active;
-    char session_id[SESSION_ID_MAX_LEN];
-    uint32_t start_time_s;
-    uint32_t max_duration_s;
-    float start_energy_kwh;
-    float max_kwh;
-} active_session = {0};
+// ─── Per-plug state (multi-plug, TD#20) ──────────────────────────────────────
+// One ESP32 gateway drives several P110s. Each plug the backend addresses (via
+// amphive/gateways/{gw}/plugs/{plug_id}/commands) gets a slot here: its DB
+// plug_id, LAN IP, per-plug KLAP driver context, and its own session/watchdog
+// state. The gateway learns a plug's (id, local_ip) from the ON/OFF command
+// payload (the backend stores plugs.local_ip and now ships it) or from NVS
+// crash recovery — it never carries a static roster.
+//
+// `plugs_mutex` guards the slot table structure and the session fields (both
+// the MQTT command task and the telemetry task touch them). Slots are only ever
+// added (never freed at runtime), and the per-plug KLAP I/O runs under the tapo
+// context's *own* lock, so we never hold plugs_mutex across a network call.
+#define MAX_PLUGS SESSION_NVS_MAX_PLUGS
+
+// Provisional plug id for the boot-time slot on the provisioned target plug (see
+// app_main). It exists only so idle telemetry flows from boot and keeps the
+// backend's liveness gate fresh before any command; the backend's real plug id
+// is adopted into the same slot (by matching IP) on the first command for that
+// plug. Matches the pre-multi-plug default so a single-plug gateway whose plug
+// really is id 1 needs no correction.
+#define PROVISIONAL_PLUG_ID 1
+
+typedef struct {
+    bool         in_use;
+    int          plug_id;
+    char         local_ip[PLUG_IP_MAX_LEN];
+    tapo_plug_t *tapo;
+    // session safety-watchdog state
+    bool         session_active;
+    char         session_id[SESSION_ID_MAX_LEN];
+    uint32_t     start_time_s;
+    uint32_t     max_duration_s;
+    float        start_energy_kwh;
+    float        max_kwh;
+    bool         unauthorized_flagged;   // rising-edge latch for UNAUTHORIZED_ON
+} plug_slot_t;
+
+static plug_slot_t plugs[MAX_PLUGS];
+static SemaphoreHandle_t plugs_mutex;
+
+static inline uint32_t now_seconds(void) {
+    return (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS / 1000);
+}
+
+// Find the slot driving plug_id, or NULL. Caller holds plugs_mutex.
+static plug_slot_t *slot_find_locked(int plug_id) {
+    for (int i = 0; i < MAX_PLUGS; i++) {
+        if (plugs[i].in_use && plugs[i].plug_id == plug_id) return &plugs[i];
+    }
+    return NULL;
+}
+
+// Find or allocate the slot for plug_id, (re)binding its IP. `local_ip` comes
+// from the command payload; when empty we fall back to the provisioned
+// target_plug_ip (single-plug back-compat / an old backend that doesn't ship
+// local_ip yet). Returns NULL if the table is full or no IP is known. Caller
+// holds plugs_mutex.
+static plug_slot_t *slot_get_locked(int plug_id, const char *local_ip) {
+    const char *ip = (local_ip && local_ip[0]) ? local_ip : target_plug_ip;
+
+    plug_slot_t *s = slot_find_locked(plug_id);
+    if (s) {
+        if (ip && ip[0] && strncmp(s->local_ip, ip, sizeof(s->local_ip)) != 0) {
+            strncpy(s->local_ip, ip, sizeof(s->local_ip) - 1);
+            s->local_ip[sizeof(s->local_ip) - 1] = '\0';
+            tapo_plug_set_ip(s->tapo, s->local_ip);
+        }
+        return s;
+    }
+    if (!ip || !ip[0]) {
+        ESP_LOGW(TAG, "No IP for plug %d (not in payload, no provisioned target)", plug_id);
+        return NULL;
+    }
+    // No slot for this id yet. If an idle slot already drives this IP — the
+    // boot-time provisional slot (default id), or the plug previously known
+    // under a different id — adopt the real id into it rather than allocating a
+    // duplicate slot for the same physical plug. A mid-session slot is skipped
+    // (never steal an active session's id).
+    for (int i = 0; i < MAX_PLUGS; i++) {
+        if (plugs[i].in_use && !plugs[i].session_active &&
+            strncmp(plugs[i].local_ip, ip, sizeof(plugs[i].local_ip)) == 0) {
+            ESP_LOGI(TAG, "Adopting plug id %d into slot %d (was id %d @ %s)",
+                     plug_id, i, plugs[i].plug_id, ip);
+            plugs[i].plug_id = plug_id;
+            plugs[i].unauthorized_flagged = false;
+            tapo_plug_reassign_id(plugs[i].tapo, plug_id);
+            return &plugs[i];
+        }
+    }
+    for (int i = 0; i < MAX_PLUGS; i++) {
+        if (plugs[i].in_use) continue;
+        tapo_plug_t *t = tapo_plug_create(plug_id, ip);
+        if (!t) return NULL;
+        plugs[i].plug_id = plug_id;
+        strncpy(plugs[i].local_ip, ip, sizeof(plugs[i].local_ip) - 1);
+        plugs[i].local_ip[sizeof(plugs[i].local_ip) - 1] = '\0';
+        plugs[i].tapo = t;
+        plugs[i].session_active = false;
+        plugs[i].unauthorized_flagged = false;
+        plugs[i].in_use = true;   // publish the slot last (fields are set above)
+        ESP_LOGI(TAG, "Tracking plug %d @ %s (slot %d)", plug_id, ip, i);
+        return &plugs[i];
+    }
+    ESP_LOGW(TAG, "Plug slot table full (%d); ignoring plug %d", MAX_PLUGS, plug_id);
+    return NULL;
+}
+
+// Persist every active session to NVS so a crash recovers them all. Caller
+// holds plugs_mutex.
+static void persist_sessions_locked(void) {
+    session_params_t arr[MAX_PLUGS];
+    int n = 0;
+    for (int i = 0; i < MAX_PLUGS; i++) {
+        if (!plugs[i].in_use || !plugs[i].session_active) continue;
+        session_params_t *sp = &arr[n++];
+        memset(sp, 0, sizeof(*sp));
+        sp->active = true;
+        sp->plug_id = plugs[i].plug_id;
+        strncpy(sp->local_ip, plugs[i].local_ip, sizeof(sp->local_ip) - 1);
+        strncpy(sp->session_id, plugs[i].session_id, sizeof(sp->session_id) - 1);
+        sp->start_time_s = plugs[i].start_time_s;
+        sp->max_duration_s = plugs[i].max_duration_s;
+        sp->max_kwh_mwh = (uint32_t)(plugs[i].max_kwh * 1000.0f);
+        sp->start_energy_mwh = (uint32_t)(plugs[i].start_energy_kwh * 1000.0f);
+    }
+    session_nvs_save_all(arr, n);
+}
 
 // --- Forward Declarations ---
 static void start_mqtt_client(void);
@@ -514,12 +623,12 @@ static void publish_ota_event(const char *event) {
 // the plug id so the backend can attribute them; QoS 1 (best-effort delivery of
 // a one-shot event). Silent when offline — the condition is still enforced
 // locally regardless of the broker link.
-static void publish_alarm(const char *error) {
+static void publish_alarm(const char *error, int plug_id) {
     if (!mqtt_connected || mqtt_client == NULL) return;
     char topic[128];
     char payload[96];
     snprintf(topic, sizeof(topic), "amphive/gateways/%s/alarms", gateway_id);
-    snprintf(payload, sizeof(payload), "{\"error\":\"%s\",\"plug_id\":%d}", error, active_plug_id);
+    snprintf(payload, sizeof(payload), "{\"error\":\"%s\",\"plug_id\":%d}", error, plug_id);
     esp_mqtt_client_publish(mqtt_client, topic, payload, 0, 1, 0);
 }
 
@@ -596,17 +705,24 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
             const cJSON *action_item = cJSON_GetObjectItemCaseSensitive(root, "action");
             const char *action = cJSON_IsString(action_item) ? action_item->valuestring : NULL;
 
-            // Adopt the plug id this command is addressed to, so telemetry we
-            // publish is attributed to the same DB plug the backend is billing.
-            // Gateway-scoped actions (OTA) are excluded: they ride the same
-            // per-plug topic but say nothing about which plug we drive.
+            // Which plug is this command addressed to? (OTA is gateway-scoped
+            // and ignores it, but it still rides a per-plug topic.)
             int cmd_plug_id = parse_plug_id_from_topic(topic);
-            if (cmd_plug_id >= 0 && (!action || strcmp(action, "OTA") != 0)) {
-                active_plug_id = cmd_plug_id;
+
+            // Target plug IP carried in the command payload (the backend ships
+            // plugs.local_ip on ON/OFF). This is how the gateway drives the
+            // *right* plug and learns plugs it hasn't seen yet, without a static
+            // on-device roster (SECURITY.md §8.5). Empty → fall back to the
+            // provisioned target_plug_ip (single-plug / pre-local_ip backend).
+            char cmd_ip[PLUG_IP_MAX_LEN] = {0};
+            const cJSON *ipj = cJSON_GetObjectItemCaseSensitive(root, "local_ip");
+            if (cJSON_IsString(ipj) && ipj->valuestring) {
+                strncpy(cmd_ip, ipj->valuestring, sizeof(cmd_ip) - 1);
+                cmd_ip[sizeof(cmd_ip) - 1] = '\0';
             }
 
-            if (action && strcmp(action, "ON") == 0) {
-                ESP_LOGI(TAG, "Command: Turning Smart Plug ON.");
+            if (action && strcmp(action, "ON") == 0 && cmd_plug_id >= 0) {
+                ESP_LOGI(TAG, "Command: plug %d ON.", cmd_plug_id);
 
                 uint32_t duration = 14400;  // 4 hours default
                 float    kwh_limit = 30.0f;
@@ -615,63 +731,94 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
                 const cJSON *kwh = cJSON_GetObjectItemCaseSensitive(root, "max_kwh");
                 if (cJSON_IsNumber(kwh)) kwh_limit = (float)kwh->valuedouble;
 
-                // Optional backend session_id
-                active_session.session_id[0] = '\0';
-                const cJSON *sid = cJSON_GetObjectItemCaseSensitive(root, "session_id");
-                if (cJSON_IsString(sid) && sid->valuestring) {
-                    strncpy(active_session.session_id, sid->valuestring, SESSION_ID_MAX_LEN - 1);
-                    active_session.session_id[SESSION_ID_MAX_LEN - 1] = '\0';
+                char sid[SESSION_ID_MAX_LEN] = {0};   // optional backend session_id
+                const cJSON *sidj = cJSON_GetObjectItemCaseSensitive(root, "session_id");
+                if (cJSON_IsString(sidj) && sidj->valuestring) {
+                    strncpy(sid, sidj->valuestring, sizeof(sid) - 1);
+                    sid[sizeof(sid) - 1] = '\0';
                 }
 
-                // Call local Tapo Driver
-                if (tapo_set_power_state(target_plug_ip, true) == ESP_OK) {
-                    active_session.active = true;
-                    active_session.start_time_s = xTaskGetTickCount() * portTICK_PERIOD_MS / 1000;
-                    active_session.max_duration_s = duration;
-                    active_session.max_kwh = kwh_limit;
+                // Resolve (or learn) the slot + its per-plug KLAP context.
+                xSemaphoreTake(plugs_mutex, portMAX_DELAY);
+                plug_slot_t *s = slot_get_locked(cmd_plug_id, cmd_ip);
+                tapo_plug_t *t = s ? s->tapo : NULL;
+                xSemaphoreGive(plugs_mutex);
 
-                    tapo_telemetry_t telemetry;
-                    if (tapo_get_telemetry(target_plug_ip, &telemetry) == ESP_OK) {
-                        active_session.start_energy_kwh = telemetry.energy_kwh;
+                if (!t) {
+                    ESP_LOGW(TAG, "ON for plug %d dropped: no slot/IP available.", cmd_plug_id);
+                } else {
+                    // Read the meter BEFORE energising (captures the pre-session
+                    // baseline, so the first telemetry frame doesn't bill the
+                    // meter's whole standing value).
+                    tapo_telemetry_t base;
+                    float baseline = (tapo_plug_get_telemetry(t, &base) == ESP_OK)
+                                     ? base.energy_kwh : 0.0f;
+
+                    // Mark the session active BEFORE the relay energises: a
+                    // concurrent telemetry poll must never see device_on with no
+                    // session, or the unauthorized-on guard would force our own
+                    // just-started session back off.
+                    xSemaphoreTake(plugs_mutex, portMAX_DELAY);
+                    s->session_active = true;
+                    strncpy(s->session_id, sid, sizeof(s->session_id) - 1);
+                    s->session_id[sizeof(s->session_id) - 1] = '\0';
+                    s->start_time_s = now_seconds();
+                    s->max_duration_s = duration;
+                    s->max_kwh = kwh_limit;
+                    s->start_energy_kwh = baseline;
+                    s->unauthorized_flagged = false;
+                    persist_sessions_locked();
+                    xSemaphoreGive(plugs_mutex);
+
+                    if (tapo_plug_set_power(t, true) == ESP_OK) {
+                        ESP_LOGI(TAG, "Plug %d session initialized. Limit: %lu s, %.3f kWh",
+                                 cmd_plug_id, duration, kwh_limit);
                     } else {
-                        active_session.start_energy_kwh = 0.0f;
+                        // Roll back the claim so telemetry/watchdog don't treat a
+                        // plug that never turned on as occupied.
+                        xSemaphoreTake(plugs_mutex, portMAX_DELAY);
+                        s->session_active = false;
+                        persist_sessions_locked();
+                        xSemaphoreGive(plugs_mutex);
+                        ESP_LOGE(TAG, "Plug %d ON failed; session cancelled.", cmd_plug_id);
                     }
-
-                    ESP_LOGI(TAG, "Session initialized. Limit: %lu s, %f kWh", duration, kwh_limit);
-
-                    // Persist session to NVS for crash recovery
-                    session_params_t nvs_params = {
-                        .active = true,
-                        .start_time_s = active_session.start_time_s,
-                        .max_duration_s = active_session.max_duration_s,
-                        .max_kwh_mwh = (uint32_t)(active_session.max_kwh * 1000.0f),
-                        .start_energy_mwh = (uint32_t)(active_session.start_energy_kwh * 1000.0f),
-                    };
-                    strncpy(nvs_params.session_id, active_session.session_id, SESSION_ID_MAX_LEN);
-                    session_nvs_save(&nvs_params);
                 }
-            } else if (action && strcmp(action, "OFF") == 0) {
-                ESP_LOGI(TAG, "Command: Turning Smart Plug OFF.");
-                tapo_set_power_state(target_plug_ip, false);
-                active_session.active = false;
-                session_nvs_clear();
+            } else if (action && strcmp(action, "OFF") == 0 && cmd_plug_id >= 0) {
+                ESP_LOGI(TAG, "Command: plug %d OFF.", cmd_plug_id);
+                // Learn the plug if needed so OFF can actuate even after a reboot
+                // (the backend re-sends OFF to idle plugs on gateway reconnect).
+                xSemaphoreTake(plugs_mutex, portMAX_DELAY);
+                plug_slot_t *s = slot_get_locked(cmd_plug_id, cmd_ip);
+                tapo_plug_t *t = s ? s->tapo : NULL;
+                if (s) {
+                    s->session_active = false;
+                    persist_sessions_locked();
+                }
+                xSemaphoreGive(plugs_mutex);
+                if (t) tapo_plug_set_power(t, false);
             } else if (action && strcmp(action, "SET_INTERVAL") == 0) {
                 uint32_t interval = 10000;
                 const cJSON *iv = cJSON_GetObjectItemCaseSensitive(root, "interval_ms");
                 if (cJSON_IsNumber(iv)) interval = (uint32_t)iv->valuedouble;
                 if (interval < 500) interval = 500;
                 if (interval > 60000) interval = 60000;
-                telemetry_interval_ms = interval;
+                telemetry_interval_ms = interval;   // gateway-wide poll cadence
                 ESP_LOGI(TAG, "Telemetry interval updated to %lu ms", interval);
             } else if (action && strcmp(action, "OTA") == 0) {
                 const cJSON *u = cJSON_GetObjectItemCaseSensitive(root, "url");
                 const char *url = cJSON_IsString(u) ? u->valuestring : NULL;
+                // Gateway-scoped: never reboot away from a charging vehicle, so
+                // refuse if ANY plug on this gateway is mid-session.
+                bool any_active = false;
+                xSemaphoreTake(plugs_mutex, portMAX_DELAY);
+                for (int i = 0; i < MAX_PLUGS; i++) {
+                    if (plugs[i].in_use && plugs[i].session_active) { any_active = true; break; }
+                }
+                xSemaphoreGive(plugs_mutex);
                 if (!url) {
                     ESP_LOGW(TAG, "OTA command missing 'url'; ignoring.");
-                } else if (active_session.active) {
-                    // Never reboot away from a charging vehicle: the OTA
-                    // restart would drop the relay/watchdog mid-session.
-                    ESP_LOGW(TAG, "OTA refused: charging session active.");
+                } else if (any_active) {
+                    ESP_LOGW(TAG, "OTA refused: a charging session is active.");
                     publish_ota_event("OTA_REFUSED_SESSION_ACTIVE");
                 } else {
                     esp_err_t ota_err = ota_update_start(url);
@@ -786,120 +933,128 @@ static void resync_offline_logs(void) {
 }
 
 // ─── Telemetry Polling & Watchdog Safety Loop ────────────────────────────────
+// Polls EVERY known plug each cycle (safety enforcement must not depend on MQTT),
+// publishes per-plug telemetry under the one per-gateway topic (plug_id in the
+// body), and runs each plug's watchdog + unauthorized-on guard independently.
+// With several plugs at a fast (session) cadence the loop can take longer than
+// one interval to sweep them all; that just stretches the effective cadence —
+// safety still runs every sweep.
 static void telemetry_task(void *pvParameters) {
-    tapo_telemetry_t telemetry;
     char telemetry_topic[128];
     snprintf(telemetry_topic, sizeof(telemetry_topic), "amphive/gateways/%s/telemetry", gateway_id);
 
     while (1) {
-        /* ALWAYS poll the plug — safety enforcement must not depend on MQTT */
-        esp_err_t ret = tapo_get_telemetry(target_plug_ip, &telemetry);
-        if (ret == ESP_OK) {
-            /* Report SESSION energy, not the lifetime integrator. telemetry.energy_kwh
-               is a monotonic meter persisted across reboots (never reset); the backend
-               bills this "kwh" field as energy-consumed-this-session (COINS_PER_KWH),
-               and the MQTT contract / TelemetryStore define it that way. Publishing the
-               raw meter re-bills the plug's whole charging history every session.
-               Subtract the session baseline (same value the watchdog uses); clamp against
-               meter/NVS-restore skew; idle (no session) reports 0. */
-            float session_kwh = 0.0f;
-            if (active_session.active) {
-                session_kwh = telemetry.energy_kwh - active_session.start_energy_kwh;
-                if (session_kwh < 0.0f) session_kwh = 0.0f;
-            }
+        for (int i = 0; i < MAX_PLUGS; i++) {
+            /* Snapshot the slot's identity under the lock; never hold plugs_mutex
+               across a KLAP network call. Slots are never freed, so `t` and
+               `&plugs[i]` stay valid after we release. */
+            xSemaphoreTake(plugs_mutex, portMAX_DELAY);
+            bool in_use = plugs[i].in_use;
+            tapo_plug_t *t = plugs[i].tapo;
+            xSemaphoreGive(plugs_mutex);
+            if (!in_use) continue;
 
-            /* Echo the backend session_id (empty when idle) so the backend can
-               attribute this reading to the exact session, not just the plug.
-               "relay" is the plug's ACTUAL reported relay state (device_on),
-               distinct from "status" (which reflects our session state): the
-               backend/UI can flag a relay physically ON with no session. */
+            /* ALWAYS poll the plug — safety enforcement must not depend on MQTT */
+            tapo_telemetry_t telemetry;
+            if (tapo_plug_get_telemetry(t, &telemetry) != ESP_OK) continue;
+
+            /* Decide everything under the lock (reading the live session state),
+               then do the network I/O — publish, force-off, alarm — after
+               releasing it. */
+            int         plug_id;
+            bool        sess_active;                 // pre-watchdog state (for the payload)
+            char        sid[SESSION_ID_MAX_LEN];
+            float       session_kwh = 0.0f;
+            bool        force_off = false, unauth_off = false, unauth_alarm = false;
+            const char *cutoff_alarm = NULL;
+
+            xSemaphoreTake(plugs_mutex, portMAX_DELAY);
+            plug_slot_t *s = &plugs[i];
+            plug_id     = s->plug_id;
+            sess_active = s->session_active;
+            strncpy(sid, s->session_id, sizeof(sid) - 1);
+            sid[sizeof(sid) - 1] = '\0';
+
+            if (s->session_active) {
+                /* Report SESSION energy, not the lifetime integrator. energy_kwh is
+                   a monotonic meter persisted across reboots; the backend bills this
+                   "kwh" as energy-consumed-this-session, so subtract the baseline
+                   captured at ON (clamp against meter/NVS-restore skew). */
+                session_kwh = telemetry.energy_kwh - s->start_energy_kwh;
+                if (session_kwh < 0.0f) session_kwh = 0.0f;
+
+                uint32_t elapsed_s    = now_seconds() - s->start_time_s;
+                float    consumed_kwh = telemetry.energy_kwh - s->start_energy_kwh;
+                if (elapsed_s >= s->max_duration_s) {
+                    ESP_LOGE(TAG, "WATCHDOG plug %d: max duration (%lu s) exceeded — local OFF.", plug_id, s->max_duration_s);
+                    force_off = true; s->session_active = false;
+                } else if (consumed_kwh >= s->max_kwh) {
+                    ESP_LOGE(TAG, "WATCHDOG plug %d: energy limit (%.3f kWh) reached — local OFF.", plug_id, s->max_kwh);
+                    force_off = true; s->session_active = false;
+                } else if (telemetry.overheated) {
+                    ESP_LOGE(TAG, "THERMAL plug %d: overheat_status != normal — local OFF.", plug_id);
+                    force_off = true; cutoff_alarm = "THERMAL_CUTOFF"; s->session_active = false;
+                } else if (telemetry.overcurrent) {
+                    ESP_LOGE(TAG, "OVERCURRENT plug %d: overcurrent_status != normal — local OFF.", plug_id);
+                    force_off = true; cutoff_alarm = "OVERCURRENT_CUTOFF"; s->session_active = false;
+                }
+                if (force_off) persist_sessions_locked();
+            } else {
+                /* Unauthorized-use guard: relay physically ON with no session
+                   (physical button / Tapo app / schedule / stale NVS resume). A
+                   commercial charger must not deliver energy unauthorized: force
+                   OFF every cycle until it stays off, and alarm once per episode
+                   (rising edge, reset when the relay is confirmed off). */
+                if (telemetry.device_on) {
+                    unauth_off = true;
+                    if (!s->unauthorized_flagged) { unauth_alarm = true; s->unauthorized_flagged = true; }
+                } else {
+                    s->unauthorized_flagged = false;
+                }
+            }
+            xSemaphoreGive(plugs_mutex);
+
+            /* Build + ship the telemetry payload (reflecting the pre-watchdog
+               session state, as the single-plug loop did). "relay" is the plug's
+               ACTUAL device_on, distinct from "status" (our session state). */
             char payload[320];
             snprintf(payload, sizeof(payload),
                      "{\"plug_id\":%d,\"watts\":%.1f,\"kwh\":%.4f,\"voltage\":%.1f,\"current\":%.2f,\"relay\":%s,\"status\":\"%s\",\"session_id\":\"%s\"}",
-                     active_plug_id,
+                     plug_id,
                      telemetry.power_w,
                      session_kwh,
                      telemetry.voltage_v,
                      telemetry.current_a,
                      telemetry.device_on ? "true" : "false",
-                     active_session.active ? "occupied" : "available",
-                     active_session.active ? active_session.session_id : "");
+                     sess_active ? "occupied" : "available",
+                     sess_active ? sid : "");
 
             if (mqtt_connected) {
-                /* Online: publish telemetry normally */
                 esp_mqtt_client_publish(mqtt_client, telemetry_topic, payload, 0, 0, 0);
             } else {
-                /* Offline: buffer the reading for later resync */
+                /* Offline: buffer the reading for later resync (session-relative
+                   kwh, matching the online payload). */
                 offline_telemetry_entry_t log_entry = {
-                    .timestamp_s   = xTaskGetTickCount() * portTICK_PERIOD_MS / 1000,
-                    .watts_x10     = (uint16_t)(telemetry.power_w * 10.0f),
-                    /* session-relative energy, matching the online payload above */
-                    .kwh_x1000     = (uint32_t)(session_kwh * 1000.0f),
-                    .voltage_x10   = (uint16_t)(telemetry.voltage_v * 10.0f),
-                    .current_x100  = (uint16_t)(telemetry.current_a * 100.0f),
+                    .timestamp_s     = now_seconds(),
+                    .watts_x10       = (uint16_t)(telemetry.power_w * 10.0f),
+                    .kwh_x1000       = (uint32_t)(session_kwh * 1000.0f),
+                    .voltage_x10     = (uint16_t)(telemetry.voltage_v * 10.0f),
+                    .current_x100    = (uint16_t)(telemetry.current_a * 100.0f),
                     .temperature_x10 = (int16_t)(telemetry.temperature_c * 10.0f),
-                    .plug_id       = (uint8_t)active_plug_id,
-                    .status        = active_session.active ? 1 : 0,
+                    .plug_id         = (uint8_t)plug_id,
+                    .status          = sess_active ? 1 : 0,
                 };
                 offline_log_append(&log_entry);
             }
 
-            /* Check Session Safety Limits (Watchdog) — runs regardless of MQTT */
-            if (active_session.active) {
-                uint32_t current_time_s = xTaskGetTickCount() * portTICK_PERIOD_MS / 1000;
-                uint32_t elapsed_s = current_time_s - active_session.start_time_s;
-                float consumed_kwh = telemetry.energy_kwh - active_session.start_energy_kwh;
-
-                if (elapsed_s >= active_session.max_duration_s) {
-                    ESP_LOGE(TAG, "WATCHDOG: Maximum session duration (%lu s) exceeded. Shutting down plug locally!", active_session.max_duration_s);
-                    tapo_set_power_state(target_plug_ip, false);
-                    active_session.active = false;
-                    session_nvs_clear();
-                }
-                else if (consumed_kwh >= active_session.max_kwh) {
-                    ESP_LOGE(TAG, "WATCHDOG: Session energy consumption limit (%f kWh) reached. Shutting down plug locally!", active_session.max_kwh);
-                    tapo_set_power_state(target_plug_ip, false);
-                    active_session.active = false;
-                    session_nvs_clear();
-                }
-                else if (telemetry.overheated) {
-                    ESP_LOGE(TAG, "THERMAL ALARM: Plug reports overheat_status != normal. Shutting down plug locally!");
-                    tapo_set_power_state(target_plug_ip, false);
-                    active_session.active = false;
-                    session_nvs_clear();
-                    publish_alarm("THERMAL_CUTOFF");
-                }
-                else if (telemetry.overcurrent) {
-                    ESP_LOGE(TAG, "OVERCURRENT ALARM: Plug reports overcurrent_status != normal. Shutting down plug locally!");
-                    tapo_set_power_state(target_plug_ip, false);
-                    active_session.active = false;
-                    session_nvs_clear();
-                    publish_alarm("OVERCURRENT_CUTOFF");
-                }
+            /* Deferred actuation/alarms, outside the lock (a spurious extra OFF is
+               always safe). */
+            if (force_off || unauth_off) {
+                if (unauth_off) ESP_LOGW(TAG, "UNAUTHORIZED ON plug %d: relay on with no session — forcing OFF.", plug_id);
+                tapo_plug_set_power(t, false);
             }
-
-            /* Unauthorized-use guard: relay physically ON with no active session.
-               A commercial charger must not deliver energy without authorization,
-               but a P110 can be switched on out-of-band — its physical button, the
-               Tapo app, a schedule, or NVS crash-recovery resuming a stale session.
-               Whenever we see device_on without a session we command OFF (every
-               cycle until it stays off) and raise UNAUTHORIZED_ON once per episode
-               (rising edge) so the backend can alert the operator without the alarm
-               repeating every poll. The edge resets when the relay is confirmed
-               off, so a genuinely new press re-alarms. */
-            if (!active_session.active) {
-                static bool unauthorized_flagged = false;
-                if (telemetry.device_on) {
-                    ESP_LOGW(TAG, "UNAUTHORIZED ON: relay is ON with no active session — forcing OFF.");
-                    tapo_set_power_state(target_plug_ip, false);
-                    if (!unauthorized_flagged) {
-                        publish_alarm("UNAUTHORIZED_ON");
-                        unauthorized_flagged = true;
-                    }
-                } else {
-                    unauthorized_flagged = false;
-                }
-            }
+            if (cutoff_alarm) publish_alarm(cutoff_alarm, plug_id);
+            if (unauth_alarm) publish_alarm("UNAUTHORIZED_ON", plug_id);
         }
         vTaskDelay(pdMS_TO_TICKS(telemetry_interval_ms));
     }
@@ -988,50 +1143,85 @@ void app_main(void) {
         }
     }
 
-    // 2. Initialize local smart plug driver (Tapo KLAP) with account credentials
+    // 2. Initialize the shared Tapo account driver (KLAP). Per-plug KLAP contexts
+    //    are created lazily as the gateway learns each plug (commands / recovery).
     tapo_init(tapo_email, tapo_password, 230.0f);
 
     // 3. Initialize offline telemetry log
     offline_log_init();
 
-    // 4. Check for crash-recovered session in NVS
-    session_params_t recovered;
-    session_nvs_load(&recovered);
-    if (recovered.active) {
-        ESP_LOGW(TAG, "*** CRASH RECOVERY: Restoring active session from NVS ***");
-        ESP_LOGW(TAG, "    Session ID : %s", recovered.session_id);
-        ESP_LOGW(TAG, "    Max dur    : %lu s", recovered.max_duration_s);
-        ESP_LOGW(TAG, "    Max kWh    : %.3f", (float)recovered.max_kwh_mwh / 1000.0f);
+    // 4. Create the per-plug slot table mutex before any slot is touched. app_main
+    //    is single-threaded here (the telemetry/MQTT tasks start below), but the
+    //    slot helpers take the lock unconditionally.
+    plugs_mutex = xSemaphoreCreateMutex();
 
-        active_session.active = true;
-        strncpy(active_session.session_id, recovered.session_id, SESSION_ID_MAX_LEN);
-        active_session.start_time_s      = recovered.start_time_s;
-        active_session.max_duration_s     = recovered.max_duration_s;
-        active_session.max_kwh            = (float)recovered.max_kwh_mwh / 1000.0f;
-        active_session.start_energy_kwh   = (float)recovered.start_energy_mwh / 1000.0f;
+    // 5. Crash recovery: restore EVERY per-plug session persisted in NVS so each
+    //    plug keeps enforcing its safety watchdog after an unclean reboot. Each
+    //    recovered record carries the plug's local_ip, so we re-create its KLAP
+    //    context and can drive it without waiting for a fresh backend command.
+    session_params_t recovered[SESSION_NVS_MAX_PLUGS];
+    int recovered_count = 0;
+    session_nvs_load_all(recovered, SESSION_NVS_MAX_PLUGS, &recovered_count);
+    for (int i = 0; i < recovered_count; i++) {
+        ESP_LOGW(TAG, "*** CRASH RECOVERY: plug %d session '%s' (max %lu s / %.3f kWh) ***",
+                 recovered[i].plug_id, recovered[i].session_id,
+                 recovered[i].max_duration_s, (float)recovered[i].max_kwh_mwh / 1000.0f);
 
-        /* Note: start_time_s was tick-based and the tick counter restarted
-           at zero on reboot.  We recalibrate by treating the current tick
-           as the new start and reducing max_duration by whatever time
-           *can* be inferred later once telemetry is flowing.  For safety,
-           keep the original limits — worst case the session runs a bit
-           longer than intended, but the energy limit still triggers. */
-        active_session.start_time_s = xTaskGetTickCount() * portTICK_PERIOD_MS / 1000;
+        xSemaphoreTake(plugs_mutex, portMAX_DELAY);
+        plug_slot_t *s = slot_get_locked(recovered[i].plug_id, recovered[i].local_ip);
+        if (s) {
+            s->session_active   = true;
+            strncpy(s->session_id, recovered[i].session_id, sizeof(s->session_id) - 1);
+            s->session_id[sizeof(s->session_id) - 1] = '\0';
+            s->max_duration_s   = recovered[i].max_duration_s;
+            s->max_kwh          = (float)recovered[i].max_kwh_mwh / 1000.0f;
+            s->start_energy_kwh = (float)recovered[i].start_energy_mwh / 1000.0f;
+            s->unauthorized_flagged = false;
+            /* start_time_s was tick-based and the tick counter restarts at zero on
+               reboot, so the duration cap restarts from now (TD#23 — the energy cap
+               still holds). Keep the original limits: worst case the session runs a
+               little long, but the energy watchdog still trips. */
+            s->start_time_s = now_seconds();
+        }
+        xSemaphoreGive(plugs_mutex);
     }
 
-    // 5. Start telemetry and safety watchdog loops
+    // 5b. Pre-register the provisioned target plug so idle telemetry flows from
+    //     boot. Pre-multi-plug firmware always polled its one provisioned plug
+    //     from boot, which kept the backend's session-start liveness gate fresh;
+    //     the slot table only polls plugs learned from a command, so without this
+    //     a session-less gateway would publish no telemetry and drop out of the
+    //     liveness window until its first command. The provisional id is corrected
+    //     to the backend's real id (by matching IP) on the first command. Skipped
+    //     if crash recovery already covers this IP or the provisional id.
+    if (target_plug_ip[0] != '\0') {
+        xSemaphoreTake(plugs_mutex, portMAX_DELAY);
+        bool covered = (slot_find_locked(PROVISIONAL_PLUG_ID) != NULL);
+        for (int i = 0; i < MAX_PLUGS && !covered; i++) {
+            if (plugs[i].in_use &&
+                strncmp(plugs[i].local_ip, target_plug_ip, sizeof(plugs[i].local_ip)) == 0)
+                covered = true;
+        }
+        if (!covered && slot_get_locked(PROVISIONAL_PLUG_ID, target_plug_ip)) {
+            ESP_LOGI(TAG, "Pre-registered provisioned plug @ %s (provisional id %d)",
+                     target_plug_ip, PROVISIONAL_PLUG_ID);
+        }
+        xSemaphoreGive(plugs_mutex);
+    }
+
+    // 6. Start telemetry and safety watchdog loops
     //    Stack raised to 8 KB: the task now performs real KLAP crypto + HTTP each poll.
     xTaskCreate(telemetry_task, "telemetry_safety", 8192, NULL, 5, NULL);
 
 #if AMPHIVE_DIRECT_MQTT
-    // 6. Direct transport: Wi-Fi is up, so dial the public broker over TLS
+    // 7. Direct transport: Wi-Fi is up, so dial the public broker over TLS
     //    right away. esp-mqtt owns reconnection (backoff on the default
     //    reconnect_timeout_ms), and the Wi-Fi netif is never torn down by us,
     //    so no overlay-style teardown hook is needed.
     ESP_LOGI(TAG, "Direct MQTT transport: connecting to " MQTT_BROKER_URL);
     start_mqtt_client();
 #else
-    // 6. Start Tailscale connection client
+    // 7. Start Tailscale connection client
     xTaskCreate(microlink_task, "microlink_vpn", 32768, NULL, 6, NULL);
 #endif
 }
