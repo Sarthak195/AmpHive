@@ -103,6 +103,11 @@ class PlugResponse(BaseModel):
     # tariff -> tenant default -> the global COINS_PER_KWH env fallback).
     # Always populated by the router; Optional only for schema forward-safety.
     price_per_kwh: Optional[float] = None
+    # True when the plug belongs to a non-public group — which, given the
+    # accessibility filter, the requesting user must have joined. Ungrouped
+    # and public-group plugs are False. The driver Home page uses this to
+    # section the charger list into "your chargers" vs "public chargers".
+    is_private: bool = False
 
 
 class GatewayEventResponse(BaseModel):

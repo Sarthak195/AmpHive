@@ -358,6 +358,70 @@ p {
   flex-shrink: 0;
 }
 
+/* Collapsible charger sections (Home page): "Your chargers" (private
+   groups), "Public chargers", and the bottom-of-page map. The header is a
+   full-width <button> (≥48px — a real touch target) with live per-status
+   counts; the chevron flips when open. */
+.plug-section {
+  margin-bottom: 1rem;
+}
+
+.plug-section-header {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  min-height: 48px;
+  padding: 0.75rem 1rem;
+  background: var(--color-surface);
+  backdrop-filter: blur(20px) saturate(1.2);
+  -webkit-backdrop-filter: blur(20px) saturate(1.2);
+  border: 1px solid var(--color-surface-border);
+  border-radius: var(--radius-md);
+  color: var(--color-text-primary);
+  font-family: var(--font-family);
+  font-size: 0.95rem;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.plug-section-header:hover {
+  background: var(--color-surface-hover);
+  border-color: var(--color-surface-border-hover);
+}
+
+.plug-section-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.plug-section-counts {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.75rem;
+  font-size: 0.78rem;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+}
+
+.plug-section-chevron {
+  color: var(--color-text-muted);
+  transition: transform var(--transition-fast);
+}
+
+.plug-section-chevron.open {
+  transform: rotate(180deg);
+}
+
+.plug-section-body {
+  padding-top: 0.75rem;
+}
+
 /* --- Animations --- */
 
 @keyframes pulse {
@@ -654,6 +718,12 @@ p {
   .stat-grid {
     grid-template-columns: 1fr;
     gap: 0.75rem;
+  }
+
+  /* Section title + status counts + chevron can exceed ~320px screens —
+     let the header wrap instead of overflowing. */
+  .plug-section-header {
+    flex-wrap: wrap;
   }
 
   .map-container {
@@ -1185,9 +1255,13 @@ p {
 
   /* Filter bar is shared by the CPO plugs table and the driver Home page
      (availability/group filters) — bump both selects to a real touch
-     target on phones. */
-  .filter-bar select {
+     target on phones. font-size must be ≥16px (1rem): iOS Safari auto-zooms
+     the whole page when a focused input/select is smaller, which reads as
+     "the site zoomed in and got cropped" and doesn't fully zoom back out. */
+  .filter-bar select,
+  .filter-bar .input {
     min-height: 44px;
+    font-size: 1rem;
   }
 }
 

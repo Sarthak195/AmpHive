@@ -1,6 +1,8 @@
 /**
  * Home page tests: QR/deep-link start (`?plug=` prefill, the auth gate that
- * preserves it through login, and the "unknown id" notice) plus the map/list
+ * preserves it through login, and the "unknown id" notice), the sectioned
+ * charger list (private "Your chargers" first, "Public chargers" collapsed
+ * by default when private ones exist, map at the bottom, collapsed), and the
  * availability + group filters with their live legend counts.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -36,12 +38,14 @@ const DRIVER = { email: 'driver@amphive.test', role: 'driver', coin_balance: 500
 // One plug per availability bucket, across two named groups plus one
 // ungrouped: available=1 (id 1 — id 3 is status=available but its gateway
 // is offline, so it lands in the offline bucket), in_use=1 (id 2),
-// offline=2 (id 3 via gateway_online, id 4 via status).
+// offline=2 (id 3 via gateway_online, id 4 via status). Sunrise Apartments
+// is a private (joined) group → ids 1-2 land in "Your chargers"; Downtown
+// Mall is a public group and id 3 is ungrouped → ids 3-4 are public.
 const PLUGS = [
-  { id: 1, name: 'Lobby Plug', status: 'available', current_power_w: 0, plug_model: 'tapo_p110', group_name: 'Sunrise Apartments', latitude: 12.9, longitude: 77.6, gateway_online: true },
-  { id: 2, name: 'Garage Plug', status: 'occupied', current_power_w: 1400, plug_model: 'tapo_p110', group_name: 'Sunrise Apartments', latitude: 12.91, longitude: 77.61, gateway_online: true },
-  { id: 3, name: 'Rooftop Plug', status: 'available', current_power_w: 0, plug_model: 'tapo_p110', group_name: null, latitude: 12.92, longitude: 77.62, gateway_online: false },
-  { id: 4, name: 'Basement Plug', status: 'offline', current_power_w: 0, plug_model: 'tapo_p110', group_name: 'Downtown Mall', latitude: null, longitude: null, gateway_online: true },
+  { id: 1, name: 'Lobby Plug', status: 'available', current_power_w: 0, plug_model: 'tapo_p110', group_name: 'Sunrise Apartments', latitude: 12.9, longitude: 77.6, gateway_online: true, is_private: true },
+  { id: 2, name: 'Garage Plug', status: 'occupied', current_power_w: 1400, plug_model: 'tapo_p110', group_name: 'Sunrise Apartments', latitude: 12.91, longitude: 77.61, gateway_online: true, is_private: true },
+  { id: 3, name: 'Rooftop Plug', status: 'available', current_power_w: 0, plug_model: 'tapo_p110', group_name: null, latitude: 12.92, longitude: 77.62, gateway_online: false, is_private: false },
+  { id: 4, name: 'Basement Plug', status: 'offline', current_power_w: 0, plug_model: 'tapo_p110', group_name: 'Downtown Mall', latitude: null, longitude: null, gateway_online: true, is_private: false },
 ];
 
 const renderHome = (initialEntry = '/') =>
@@ -120,42 +124,85 @@ describe('Home — QR / deep-link start', () => {
   });
 });
 
-describe('Home — map legend + availability/group filters', () => {
+describe('Home — private/public sections + map at the bottom', () => {
   beforeEach(() => {
     useAuth.mockReturnValue({ user: DRIVER });
     api.get.mockResolvedValue(PLUGS);
   });
 
-  it('legend counts match the fixture data', async () => {
+  it('splits plugs into "Your chargers" (open) and "Public chargers" (collapsed when private ones exist)', async () => {
     renderHome('/');
     await screen.findByText('Lobby Plug');
 
-    expect(screen.getByText('Available (1)')).toBeInTheDocument();
-    expect(screen.getByText('In use (1)')).toBeInTheDocument();
+    // Private section open: both Sunrise Apartments plugs visible.
+    expect(screen.getByText('Garage Plug')).toBeInTheDocument();
+    // Public section collapsed by default (this driver has private plugs).
+    expect(screen.queryByText('Rooftop Plug')).not.toBeInTheDocument();
+    expect(screen.queryByText('Basement Plug')).not.toBeInTheDocument();
+
+    const publicHeader = screen.getByRole('button', { name: /Public chargers/ });
+    expect(publicHeader).toHaveAttribute('aria-expanded', 'false');
+    await userEvent.click(publicHeader);
+
+    expect(screen.getByText('Rooftop Plug')).toBeInTheDocument();
+    expect(screen.getByText('Basement Plug')).toBeInTheDocument();
+  });
+
+  it('section headers carry live per-status counts', async () => {
+    renderHome('/');
+    await screen.findByText('Lobby Plug');
+
+    const privateHeader = screen.getByRole('button', { name: /Your chargers/ });
+    // Private: Lobby available + Garage in use (zero-count states hidden).
+    expect(privateHeader).toHaveTextContent('1 available');
+    expect(privateHeader).toHaveTextContent('1 in use');
+    // Public: Rooftop (gateway offline) + Basement (status offline).
+    expect(screen.getByRole('button', { name: /Public chargers/ })).toHaveTextContent('2 offline');
+  });
+
+  it('map section sits collapsed at the bottom and plots public plugs when opened', async () => {
+    renderHome('/');
+    await screen.findByText('Lobby Plug');
+
+    // Collapsed: no map rendered (tiles not fetched), no legend.
+    expect(screen.queryByTestId('map-mock')).not.toBeInTheDocument();
+
+    const mapHeader = screen.getByRole('button', { name: /Map — public chargers/ });
+    await userEvent.click(mapHeader);
+
+    // Public plugs only (ids 3, 4) — private society plugs stay off the map.
+    expect(screen.getByTestId('map-mock')).toHaveTextContent('3,4');
+    // Legend counts cover what the map shows: both public plugs are offline.
+    expect(screen.getByText('Available (0)')).toBeInTheDocument();
+    expect(screen.getByText('In use (0)')).toBeInTheDocument();
     expect(screen.getByText('Offline (2)')).toBeInTheDocument();
   });
 
-  it('the availability filter reduces the rendered plug list and updates the legend', async () => {
+  it('shows a join-a-group hint (and opens the public list) when the driver has no private chargers', async () => {
+    api.get.mockResolvedValue(PLUGS.map((p) => ({ ...p, is_private: false })));
+    renderHome('/');
+    await screen.findByText('Lobby Plug'); // public section auto-opens
+
+    expect(screen.getByText(/join their group with an access code/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Public chargers/ })).toHaveAttribute('aria-expanded', 'true');
+  });
+
+  it('the availability filter reduces the rendered plug list and updates the section counts', async () => {
     renderHome('/');
     await screen.findByText('Lobby Plug');
     expect(screen.getByText('Garage Plug')).toBeInTheDocument();
-    expect(screen.getByText('Rooftop Plug')).toBeInTheDocument();
-    expect(screen.getByText('Basement Plug')).toBeInTheDocument();
 
     await userEvent.selectOptions(screen.getByLabelText('Filter by availability'), 'available');
 
     expect(screen.getByText('Lobby Plug')).toBeInTheDocument();
     expect(screen.queryByText('Garage Plug')).not.toBeInTheDocument();
-    // Rooftop Plug has status=available but its gateway is offline, so the
-    // "available" filter correctly excludes it too.
-    expect(screen.queryByText('Rooftop Plug')).not.toBeInTheDocument();
-    expect(screen.queryByText('Basement Plug')).not.toBeInTheDocument();
     expect(screen.getByText('1 of 4 plugs')).toBeInTheDocument();
 
-    // Legend now reflects the filtered set.
-    expect(screen.getByText('Available (1)')).toBeInTheDocument();
-    expect(screen.getByText('In use (0)')).toBeInTheDocument();
-    expect(screen.getByText('Offline (0)')).toBeInTheDocument();
+    // Rooftop Plug has status=available but its gateway is offline, so the
+    // "available" filter correctly excludes it from the public section too.
+    await userEvent.click(screen.getByRole('button', { name: /Public chargers/ }));
+    expect(screen.queryByText('Rooftop Plug')).not.toBeInTheDocument();
+    expect(screen.getByText('None match the current filters.')).toBeInTheDocument();
   });
 
   it('the group filter reduces the rendered plug list and the map markers', async () => {
@@ -166,7 +213,11 @@ describe('Home — map legend + availability/group filters', () => {
 
     expect(screen.queryByText('Lobby Plug')).not.toBeInTheDocument();
     expect(screen.queryByText('Garage Plug')).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: /Public chargers/ }));
     expect(screen.getByText('Basement Plug')).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: /Map — public chargers/ }));
     expect(screen.getByTestId('map-mock')).toHaveTextContent('4');
   });
 
@@ -175,6 +226,7 @@ describe('Home — map legend + availability/group filters', () => {
     await screen.findByText('Lobby Plug');
 
     await userEvent.selectOptions(screen.getByLabelText('Filter by group'), 'Ungrouped');
+    await userEvent.click(screen.getByRole('button', { name: /Public chargers/ }));
 
     expect(screen.getByText('Rooftop Plug')).toBeInTheDocument();
     expect(screen.queryByText('Lobby Plug')).not.toBeInTheDocument();

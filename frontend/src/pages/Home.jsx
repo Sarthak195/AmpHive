@@ -14,6 +14,14 @@
  * group name, with a small legend showing live counts per state — see
  * utils/plugAvailability.js for the shared 3-state classification also used
  * by MapComponent's marker colors.
+ *
+ * Sectioned charger list (2026-07-12): the flat list is now three collapsible
+ * sections — "Your chargers" (private groups the driver joined: their
+ * society/office plugs, the primary use case) first, then "Public chargers",
+ * then the map at the bottom (public plugs only; collapsed by default — a
+ * society resident already knows where their own charger is). Each section
+ * header carries live per-status counts. The public list starts open only
+ * for drivers with no private chargers.
  */
 
 import { useState, useEffect, useMemo, useRef } from 'react';
@@ -29,6 +37,52 @@ import { AVAILABILITY_CSS_VAR, AVAILABILITY_LABELS, AVAILABILITY_STATES, getPlug
 // Sentinel value for the group filter's "no group assigned" option — distinct
 // from '' (which means "All groups") since group_name itself is never this.
 const UNGROUPED = '__ungrouped__';
+
+// Live per-status counts for a plug list — drives the section-header summary
+// dots and the map legend.
+const countByAvailability = (list) => {
+  const counts = { available: 0, in_use: 0, offline: 0 };
+  for (const p of list) counts[getPlugAvailability(p)] += 1;
+  return counts;
+};
+
+// Collapsible charger section ("dropdown") — the header is a real <button>
+// (keyboard/screen-reader operable, aria-expanded) showing the section name
+// plus live per-status counts; the body holds the plug cards or the map.
+const PlugSection = ({ title, icon, counts, open, onToggle, children }) => (
+  <section className="plug-section">
+    <button
+      type="button"
+      className="plug-section-header"
+      onClick={onToggle}
+      aria-expanded={open}
+    >
+      <span className="plug-section-title">
+        <span aria-hidden="true">{icon}</span>
+        <span>{title}</span>
+      </span>
+      <span className="flex items-center gap-3" style={{ flexShrink: 0 }}>
+        {counts && (
+          <span className="plug-section-counts">
+            {AVAILABILITY_STATES.filter((s) => counts[s] > 0).map((s) => (
+              <span key={s} className="map-legend-item">
+                <span
+                  className="map-legend-dot"
+                  style={{ background: `var(${AVAILABILITY_CSS_VAR[s]})` }}
+                />
+                {counts[s]} {AVAILABILITY_LABELS[s].toLowerCase()}
+              </span>
+            ))}
+          </span>
+        )}
+        <span className={`plug-section-chevron ${open ? 'open' : ''}`} aria-hidden="true">
+          ▾
+        </span>
+      </span>
+    </button>
+    {open && <div className="plug-section-body">{children}</div>}
+  </section>
+);
 
 const Home = () => {
   const { user } = useAuth();
@@ -47,6 +101,15 @@ const Home = () => {
   // markers read from the same filteredPlugs).
   const [availabilityFilter, setAvailabilityFilter] = useState('');
   const [groupFilter, setGroupFilter] = useState('');
+
+  // Collapsible sections. Private starts open (it's the primary use case);
+  // the map starts closed (deprioritized for society/office installs — and
+  // Leaflet tiles aren't fetched at all while collapsed). `publicOpen` is
+  // tri-state: null = auto (open only when the driver has no private
+  // chargers), true/false once the driver toggles it.
+  const [privateOpen, setPrivateOpen] = useState(true);
+  const [publicOpen, setPublicOpen] = useState(null);
+  const [mapOpen, setMapOpen] = useState(false);
 
   // QR / deep-link start
   const plugParam = new URLSearchParams(location.search).get('plug');
@@ -139,14 +202,20 @@ const Home = () => {
     return true;
   }), [plugs, availabilityFilter, groupFilter]);
 
-  // Legend counts reflect the currently filtered set, so they update live
-  // as the driver narrows by availability/group (see Feature spec: "counts
-  // update").
-  const availabilityCounts = useMemo(() => {
-    const counts = { available: 0, in_use: 0, offline: 0 };
-    for (const p of filteredPlugs) counts[getPlugAvailability(p)] += 1;
-    return counts;
-  }, [filteredPlugs]);
+  // Private = plugs from closed groups this driver joined (their society/
+  // office chargers); everything else — public groups and ungrouped/legacy
+  // plugs — is "public". Older API data without is_private lands in public.
+  const privatePlugs = useMemo(() => filteredPlugs.filter((p) => p.is_private), [filteredPlugs]);
+  const publicPlugs = useMemo(() => filteredPlugs.filter((p) => !p.is_private), [filteredPlugs]);
+  // Pre-filter check, so the "join a group" hint only shows when the driver
+  // truly has no private chargers (not merely filtered them all out).
+  const hasAnyPrivate = useMemo(() => plugs.some((p) => p.is_private), [plugs]);
+  const publicIsOpen = publicOpen ?? !hasAnyPrivate;
+
+  // Per-section header counts + the map legend (public plugs are what the
+  // map plots) — all update live as the filters above narrow the set.
+  const privateCounts = useMemo(() => countByAvailability(privatePlugs), [privatePlugs]);
+  const publicCounts = useMemo(() => countByAvailability(publicPlugs), [publicPlugs]);
 
   const handleStartSession = async (e, targetPlugId = null) => {
     if (e) e.preventDefault();
@@ -174,6 +243,68 @@ const Home = () => {
       case 'offline': return 'badge-danger';
       default: return 'badge-primary';
     }
+  };
+
+  // One plug card — shared by the private and public sections. A plug is
+  // startable only if it is available AND its gateway is reachable right
+  // now. gateway_online defaults true for older API data; an unreachable
+  // charger is shown but not clickable so the driver isn't sent into a 409
+  // at start.
+  const renderPlugCard = (plug, index) => {
+    const unreachable = plug.gateway_online === false;
+    const startable = plug.status === 'available' && !unreachable;
+    return (
+      <div
+        key={plug.id}
+        className="glass glass-card flex justify-between items-center animate-slide-up"
+        style={{
+          animationDelay: `${index * 0.06}s`,
+          cursor: startable ? 'pointer' : 'default',
+          opacity: unreachable ? 0.6 : 1,
+          gap: '0.75rem',
+        }}
+        onClick={() => {
+          if (startable) {
+            handleStartSession(null, plug.id);
+          }
+        }}
+      >
+        <div style={{ minWidth: 0 }}>
+          <div className="flex items-center gap-2" style={{ marginBottom: '0.25rem', flexWrap: 'wrap' }}>
+            <span style={{ fontWeight: 600 }}>{plug.name}</span>
+            <span className={`badge ${unreachable ? 'badge-danger' : statusColor(plug.status)}`}>
+              {unreachable ? 'charger offline' : plug.status}
+            </span>
+          </div>
+          <div className="flex items-center gap-3" style={{ fontSize: '0.85rem', color: 'var(--color-text-secondary)', flexWrap: 'wrap' }}>
+            <span>ID: {plug.id}</span>
+            <span>•</span>
+            <span>{plug.plug_model}</span>
+            {plug.group_name && (
+              <>
+                <span>•</span>
+                <span>{plug.group_name}</span>
+              </>
+            )}
+            {plug.price_per_kwh != null && (
+              <>
+                <span>•</span>
+                <span>{plug.price_per_kwh} coins/kWh</span>
+              </>
+            )}
+          </div>
+        </div>
+        {startable ? (
+          <span style={{ color: 'var(--color-primary)', fontWeight: 600, fontSize: '0.9rem', flexShrink: 0 }}>
+            Charge →
+          </span>
+        ) : unreachable ? (
+          <span style={{ color: 'var(--color-text-muted)', fontSize: '0.8rem', flexShrink: 0 }}>
+            Unreachable
+          </span>
+        ) : null}
+      </div>
+    );
   };
 
   // A QR/deep-link visit (`/?plug=<id>`) is still fully auth-gated: an
@@ -323,65 +454,46 @@ const Home = () => {
         </div>
       )}
 
-      {/* Available Chargers */}
+      {/* Chargers — sectioned list: the driver's private (society/office)
+          chargers first, then public ones, with the map at the bottom. */}
       {user && (
         <div className="animate-slide-up" style={{ animationDelay: '0.15s' }}>
           <div className="flex justify-between items-center" style={{ marginBottom: '1rem' }}>
-            <h3 style={{ margin: 0 }}>Available Chargers</h3>
+            <h3 style={{ margin: 0 }}>Chargers</h3>
             <button className="btn btn-ghost btn-sm" onClick={fetchPlugs}>
               Refresh
             </button>
           </div>
 
+          {/* Filters — shared state feeds every section below (both lists
+              and the map markers); there is no power-rating field anywhere
+              in the plug data model, so (per spec) that filter is not
+              offered here. */}
           {plugs.length > 0 && (
-            <>
-              {/* Filters — shared state feeds both the list and the map
-                  markers below; there is no power-rating field anywhere in
-                  the plug data model, so (per spec) that filter is not
-                  offered here. */}
-              <div className="filter-bar">
-                <select
-                  value={availabilityFilter}
-                  onChange={(e) => setAvailabilityFilter(e.target.value)}
-                  aria-label="Filter by availability"
-                >
-                  <option value="">All statuses</option>
-                  <option value="available">Available now</option>
-                  <option value="in_use">In use</option>
-                  <option value="offline">Offline</option>
-                </select>
-                <select
-                  value={groupFilter}
-                  onChange={(e) => setGroupFilter(e.target.value)}
-                  aria-label="Filter by group"
-                >
-                  {groupOptions.map((g) => (
-                    <option key={g.value} value={g.value}>{g.label}</option>
-                  ))}
-                </select>
-                <span style={{ color: 'var(--color-text-muted)', fontSize: '0.85rem' }}>
-                  {filteredPlugs.length} of {plugs.length} plug{plugs.length !== 1 ? 's' : ''}
-                </span>
-              </div>
-
-              {/* Legend — marker/badge color meaning + live counts (update
-                  as the filters above narrow the set). */}
-              <div className="map-legend" aria-label="Plug availability legend">
-                {AVAILABILITY_STATES.map((state) => (
-                  <span key={state} className="map-legend-item">
-                    <span
-                      className="map-legend-dot"
-                      style={{ background: `var(${AVAILABILITY_CSS_VAR[state]})` }}
-                    />
-                    {AVAILABILITY_LABELS[state]} ({availabilityCounts[state]})
-                  </span>
+            <div className="filter-bar">
+              <select
+                value={availabilityFilter}
+                onChange={(e) => setAvailabilityFilter(e.target.value)}
+                aria-label="Filter by availability"
+              >
+                <option value="">All statuses</option>
+                <option value="available">Available now</option>
+                <option value="in_use">In use</option>
+                <option value="offline">Offline</option>
+              </select>
+              <select
+                value={groupFilter}
+                onChange={(e) => setGroupFilter(e.target.value)}
+                aria-label="Filter by group"
+              >
+                {groupOptions.map((g) => (
+                  <option key={g.value} value={g.value}>{g.label}</option>
                 ))}
-              </div>
-
-              {!loadingPlugs && (
-                <MapComponent plugs={filteredPlugs} onPlugSelect={(id) => handleStartSession(null, id)} />
-              )}
-            </>
+              </select>
+              <span style={{ color: 'var(--color-text-muted)', fontSize: '0.85rem' }}>
+                {filteredPlugs.length} of {plugs.length} plug{plugs.length !== 1 ? 's' : ''}
+              </span>
+            </div>
           )}
 
           {loadingPlugs ? (
@@ -416,62 +528,81 @@ const Home = () => {
               </button>
             </div>
           ) : (
-            <div className="flex flex-col gap-3">
-              {filteredPlugs.map((plug, index) => {
-                // A plug is startable only if it is available AND its gateway is
-                // reachable right now. gateway_online defaults true for older
-                // API data; an unreachable charger is shown but not clickable so
-                // the driver isn't sent into a 409 at start.
-                const unreachable = plug.gateway_online === false;
-                const startable = plug.status === 'available' && !unreachable;
-                return (
-                <div
-                  key={plug.id}
-                  className="glass glass-card flex justify-between items-center animate-slide-up"
-                  style={{
-                    animationDelay: `${index * 0.06}s`,
-                    cursor: startable ? 'pointer' : 'default',
-                    opacity: unreachable ? 0.6 : 1,
-                    gap: '0.75rem',
-                  }}
-                  onClick={() => {
-                    if (startable) {
-                      handleStartSession(null, plug.id);
-                    }
-                  }}
-                >
-                  <div style={{ minWidth: 0 }}>
-                    <div className="flex items-center gap-2" style={{ marginBottom: '0.25rem', flexWrap: 'wrap' }}>
-                      <span style={{ fontWeight: 600 }}>{plug.name}</span>
-                      <span className={`badge ${unreachable ? 'badge-danger' : statusColor(plug.status)}`}>
-                        {unreachable ? 'charger offline' : plug.status}
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-3" style={{ fontSize: '0.85rem', color: 'var(--color-text-secondary)', flexWrap: 'wrap' }}>
-                      <span>ID: {plug.id}</span>
-                      <span>•</span>
-                      <span>{plug.plug_model}</span>
-                      {plug.group_name && (
-                        <>
-                          <span>•</span>
-                          <span>{plug.group_name}</span>
-                        </>
-                      )}
-                    </div>
+            <>
+              {/* Private chargers — the driver's own society/office groups. */}
+              <PlugSection
+                title="Your chargers"
+                icon="🏠"
+                counts={privateCounts}
+                open={privateOpen}
+                onToggle={() => setPrivateOpen((o) => !o)}
+              >
+                {privatePlugs.length > 0 ? (
+                  <div className="flex flex-col gap-3">
+                    {privatePlugs.map(renderPlugCard)}
                   </div>
-                  {startable ? (
-                    <span style={{ color: 'var(--color-primary)', fontWeight: 600, fontSize: '0.9rem', flexShrink: 0 }}>
-                      Charge →
+                ) : !hasAnyPrivate ? (
+                  <div className="glass glass-panel text-center" style={{ padding: '1.5rem' }}>
+                    <p style={{ fontSize: '0.9rem' }}>
+                      No private chargers yet. If your society or office runs
+                      AmpHive chargers, join their group with an access code.
+                    </p>
+                    <button
+                      className="btn btn-primary btn-sm mt-4"
+                      onClick={() => navigate('/groups')}
+                    >
+                      Join a group
+                    </button>
+                  </div>
+                ) : (
+                  <p style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>
+                    None match the current filters.
+                  </p>
+                )}
+              </PlugSection>
+
+              {/* Public chargers — public groups + ungrouped/legacy plugs. */}
+              <PlugSection
+                title="Public chargers"
+                icon="🌐"
+                counts={publicCounts}
+                open={publicIsOpen}
+                onToggle={() => setPublicOpen(!publicIsOpen)}
+              >
+                {publicPlugs.length > 0 ? (
+                  <div className="flex flex-col gap-3">
+                    {publicPlugs.map(renderPlugCard)}
+                  </div>
+                ) : (
+                  <p style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>
+                    None match the current filters.
+                  </p>
+                )}
+              </PlugSection>
+
+              {/* Map — bottom of the page by design: society/office drivers
+                  already know where their charger is. Public plugs only;
+                  collapsed by default (tiles aren't fetched until opened). */}
+              <PlugSection
+                title="Map — public chargers"
+                icon="🗺️"
+                open={mapOpen}
+                onToggle={() => setMapOpen((o) => !o)}
+              >
+                <div className="map-legend" aria-label="Plug availability legend">
+                  {AVAILABILITY_STATES.map((state) => (
+                    <span key={state} className="map-legend-item">
+                      <span
+                        className="map-legend-dot"
+                        style={{ background: `var(${AVAILABILITY_CSS_VAR[state]})` }}
+                      />
+                      {AVAILABILITY_LABELS[state]} ({publicCounts[state]})
                     </span>
-                  ) : unreachable ? (
-                    <span style={{ color: 'var(--color-text-muted)', fontSize: '0.8rem', flexShrink: 0 }}>
-                      Unreachable
-                    </span>
-                  ) : null}
+                  ))}
                 </div>
-                );
-              })}
-            </div>
+                <MapComponent plugs={publicPlugs} onPlugSelect={(id) => handleStartSession(null, id)} />
+              </PlugSection>
+            </>
           )}
         </div>
       )}
