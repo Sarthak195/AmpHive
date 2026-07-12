@@ -33,6 +33,16 @@ AUTO_STOP_ON_BALANCE_EXHAUSTED = os.getenv("AUTO_STOP_ON_BALANCE_EXHAUSTED", "tr
 # monitor warning, but reaches drivers who are not watching the app.
 LOW_BALANCE_WARN_FRACTION = float(os.getenv("LOW_BALANCE_WARN_FRACTION", "0.8"))
 
+# Fault console: a hardware SAFETY cutoff (THERMAL_CUTOFF/OVERCURRENT_CUTOFF)
+# has already force-OFF'd the plug locally in firmware — auto-flip it to
+# MAINTENANCE so a new session can't be *started* on it (session-start already
+# 409s any non-AVAILABLE plug) until an operator clears it via
+# POST /api/cpo/plugs/{id}/maintenance. Runs AFTER the safety-cutoff
+# auto-finalize below (same coroutine, sequenced) so it isn't raced/overwritten
+# by finalize_charging_session's own plug.status = AVAILABLE. Env-toggleable;
+# on by default.
+AUTO_MAINTENANCE_ON_CRITICAL_ALARM = os.getenv("AUTO_MAINTENANCE_ON_CRITICAL_ALARM", "true").lower() in ("1", "true", "yes")
+
 
 class MQTTManager:
     _instance: Optional["MQTTManager"] = None
@@ -494,6 +504,22 @@ class MQTTManager:
         if plug_id is not None and event_type in self._SAFETY_CUTOFF_REASONS:
             await self._finalize_session_after_cutoff(plug_id, event_type)
 
+        # Fault console (additive): the same safety cutoffs also auto-enter the
+        # plug into MAINTENANCE so a NEW session can't start until an operator
+        # clears it (session-start already 409s any non-AVAILABLE plug).
+        # Deliberately sequenced AFTER the finalize call above, in this same
+        # coroutine — not an independently scheduled task — so the MAINTENANCE
+        # flip can't be raced/overwritten by finalize_charging_session's own
+        # `plug.status = AVAILABLE`. Runs even when no session was found above
+        # (a cutoff with no active session still needs the plug taken out of
+        # service). Env-gated via AUTO_MAINTENANCE_ON_CRITICAL_ALARM.
+        if (
+            AUTO_MAINTENANCE_ON_CRITICAL_ALARM
+            and plug_id is not None
+            and event_type in self._SAFETY_CUTOFF_REASONS
+        ):
+            await self._auto_enter_maintenance(plug_id, event_type)
+
     _SAFETY_CUTOFF_REASONS = {
         "THERMAL_CUTOFF": "safety cutoff: plug reported overheat",
         "OVERCURRENT_CUTOFF": "safety cutoff: plug reported over-current",
@@ -527,6 +553,54 @@ class MQTTManager:
                 )
         except Exception:
             logger.exception(f"Post-cutoff finalize failed for plug {plug_id} ({event_type})")
+
+    async def _auto_enter_maintenance(self, plug_id: int, event_type: str):
+        """
+        Force a plug into MAINTENANCE after a hardware safety cutoff (called
+        from _persist_gateway_event, right after _finalize_session_after_cutoff
+        — see the ordering note there). The firmware has already force-OFF'd
+        the relay locally — this only stops a *new* session from being started
+        on the plug (session-start 409s any non-AVAILABLE plug) until an
+        operator clears it via POST /api/cpo/plugs/{id}/maintenance. No-op if
+        the plug is unknown or already MAINTENANCE.
+        """
+        from backend.database.models import Plug, PlugStatus
+        from sqlalchemy import select
+
+        try:
+            async with self.db_session_factory() as session:
+                plug = (await session.execute(
+                    select(Plug).where(Plug.id == plug_id)
+                )).scalar_one_or_none()
+                if plug is None:
+                    logger.warning(
+                        "Auto-maintenance: plug not found, skipping",
+                        extra={"plug_id": plug_id},
+                    )
+                    return
+                if plug.status == PlugStatus.MAINTENANCE:
+                    return
+                plug.status = PlugStatus.MAINTENANCE
+                await session.commit()
+        except Exception as e:
+            logger.error(
+                "Auto-maintenance failed",
+                extra={"plug_id": plug_id, "error": str(e)},
+            )
+            return
+
+        logger.warning(
+            "Plug auto-set to MAINTENANCE after safety alarm (operator must clear it)",
+            extra={"plug_id": plug_id, "event_type": event_type},
+        )
+        try:
+            from backend.services.socketio_manager import emit_plug_status
+            await emit_plug_status(plug_id, PlugStatus.MAINTENANCE.value)
+        except Exception as e:
+            logger.error(
+                "Failed to broadcast auto-maintenance plug_status",
+                extra={"plug_id": plug_id, "error": str(e)},
+            )
 
     async def _persist_telemetry(self, gateway_id: str, plug_id: int, watts: float, kwh: float,
                                  session_id: Optional[int] = None,

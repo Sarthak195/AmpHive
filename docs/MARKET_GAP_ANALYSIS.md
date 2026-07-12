@@ -146,8 +146,8 @@ Benchmarked against ChargePoint/Statiq/Kazam operator dashboards.
 | Configurable pricing / tariff UI | ❌ (no price model) | Should-do |
 | Tax / GST configuration | ❌ | Should-do |
 | Payout / earnings withdrawal | 🟡 backend ledger + endpoints (`Payout`, manual settlement); no CPO-portal UI yet | Should-do (UI) |
-| Remote diagnostics / fault console | ❌ (plug has a `maintenance` status enum, no workflow) | Should-do |
-| Maintenance-mode toggle per plug | 🟡 enum exists, unused | Should-do |
+| Remote diagnostics / fault console | ✅ (2026-07-12) `/cpo/faults`: lists `gateway_events` (severity/unacknowledged filters), acknowledge, and a top strip of plugs currently in maintenance | — |
+| Maintenance-mode toggle per plug | ✅ (2026-07-12) `POST /api/cpo/plugs/{id}/maintenance` (`enter`/`clear`, audited); a THERMAL_CUTOFF/OVERCURRENT_CUTOFF alarm now auto-enters MAINTENANCE too | — |
 | Bulk plug provisioning (CSV) | ❌ (specs §4 want it) | Aspirational |
 | Dynamic load balancing across a site | ❌ (specs FL 4.1 want it) | Aspirational |
 | Carbon-offset / green metrics | ❌ (specs FL 1.2 mention it) | Nice-to-have |

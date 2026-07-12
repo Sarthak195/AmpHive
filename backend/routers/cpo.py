@@ -28,11 +28,12 @@ from backend.database.models import (
 from backend.schemas import (
     AuthResponse, CpoGatewayCreateRequest, CpoGatewayOtaRequest,
     CpoGroupCreateRequest, CpoGroupUpdateRequest, CpoPlugCreateRequest,
-    CpoPlugUpdateRequest, CpoSetupRequest, CreateOrderRequest,
-    CreateOrderResponse, DirectPlugRequest, GatewayEventResponse,
-    GatewayRegisterRequest, GroupResponse, JoinGroupRequest, LoginRequest,
-    PlugRegisterRequest, PlugResponse, RegisterRequest, SessionStartRequest,
-    SessionStopRequest, UserResponse, VerifyPaymentRequest,
+    CpoPlugMaintenanceRequest, CpoPlugUpdateRequest, CpoSetupRequest,
+    CreateOrderRequest, CreateOrderResponse, DirectPlugRequest,
+    GatewayEventResponse, GatewayRegisterRequest, GroupResponse,
+    JoinGroupRequest, LoginRequest, PlugRegisterRequest, PlugResponse,
+    RegisterRequest, SessionStartRequest, SessionStopRequest, UserResponse,
+    VerifyPaymentRequest,
 )
 from backend.services import payments as payment_service
 from backend.services.audit import try_record_audit
@@ -538,6 +539,94 @@ async def cpo_update_plug(
         "name": plug.name,
         "plug_status": plug.status.value,
         "group_id": plug.group_id,
+    }
+
+
+@router.post("/api/cpo/plugs/{plug_id}/maintenance")
+async def cpo_plug_maintenance(
+    plug_id: int,
+    req: CpoPlugMaintenanceRequest,
+    user: User = Depends(require_role("cpo", "admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Operator maintenance workflow (fault console): explicitly put a plug into
+    MAINTENANCE or clear it back to AVAILABLE. Distinct from the general
+    status setter on PUT /api/cpo/plugs/{id} — this is the dedicated action
+    the fault console drives, and it always audits (action
+    `plug.maintenance_enter` / `plug.maintenance_clear`).
+
+    `clear` is refused (409) while the plug still has an ACTIVE session —
+    mirrors session-start's own 409 on a non-AVAILABLE plug, just from the
+    other direction: a plug can't be handed back into service out from under
+    a driver mid-charge.
+    """
+    action = (req.action or "").strip().lower()
+    if action not in ("enter", "clear"):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid action. Must be 'enter' or 'clear'.",
+        )
+
+    result = await db.execute(
+        select(Plug)
+        .join(Gateway, Plug.gateway_id == Gateway.id)
+        .where(and_(Plug.id == plug_id, Gateway.tenant_id == user.tenant_id))
+    )
+    plug = result.scalar_one_or_none()
+    if not plug:
+        raise HTTPException(status_code=404, detail="Plug not found or access denied.")
+
+    old_status = plug.status  # captured pre-mutation for the audit diff
+
+    if action == "enter":
+        plug.status = PlugStatus.MAINTENANCE
+    else:  # clear
+        active_result = await db.execute(
+            select(func.count())
+            .select_from(ChargingSession)
+            .where(and_(
+                ChargingSession.plug_id == plug_id,
+                ChargingSession.status == SessionStatus.ACTIVE,
+            ))
+        )
+        if active_result.scalar_one() > 0:
+            raise HTTPException(
+                status_code=409,
+                detail="Cannot clear maintenance: this plug has an active charging session.",
+            )
+        plug.status = PlugStatus.AVAILABLE
+
+    await db.commit()
+    await db.refresh(plug)
+
+    logger.info(
+        f"CPO plug maintenance '{action}': {plug.id} ({plug.name}) "
+        f"{old_status.value} -> {plug.status.value} by {user.email}"
+    )
+
+    detail = f"{old_status.value} -> {plug.status.value}"
+    if req.note:
+        detail += f"; note={req.note}"
+    await try_record_audit(
+        db,
+        tenant_id=user.tenant_id,
+        actor_user_id=user.id,
+        action=f"plug.maintenance_{action}",
+        target_type="plug",
+        target_id=plug.id,
+        detail=detail,
+    )
+
+    if plug.status != old_status:
+        from backend.services.socketio_manager import emit_plug_status
+        await emit_plug_status(plug.id, plug.status.value)
+
+    return {
+        "status": "updated",
+        "plug_id": plug.id,
+        "action": action,
+        "plug_status": plug.status.value,
     }
 
 

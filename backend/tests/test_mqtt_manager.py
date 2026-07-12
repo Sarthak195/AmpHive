@@ -223,6 +223,183 @@ async def test_alarm_missing_type_ignored():
     MQTTManager._instance = None
 
 
+# ---------------------------------------------------------------------------
+# Auto-maintenance on a critical SAFETY alarm (fault console)
+# ---------------------------------------------------------------------------
+
+
+class _AlarmDB:
+    """
+    Minimal fake session for driving _persist_gateway_event directly (the
+    home of the safety-cutoff decisions since the driver-notifications merge
+    — see test_notifications.py's _SeqDB for the sibling pattern that tests
+    _finalize_session_after_cutoff itself). The gateway lookup always
+    succeeds; add()/commit() are no-ops so the function runs past the
+    persist step to reach the finalize/auto-maintenance sequencing below it.
+    """
+    def __init__(self):
+        self.committed = False
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    async def execute(self, *_a, **_k):
+        r = MagicMock()
+        gw = MagicMock()
+        gw.tenant_id = 1
+        r.scalar_one_or_none.return_value = gw
+        return r
+
+    def add(self, row):
+        row.id = 1
+        row.created_at = None
+
+    async def commit(self):
+        self.committed = True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("event_type,plug_id,should_trigger", [
+    ("THERMAL_CUTOFF", 5, True),
+    ("OVERCURRENT_CUTOFF", 5, True),
+    ("UNAUTHORIZED_ON", 5, False),   # accountability signal, not a hardware fault
+    ("OTA_FAILED", 5, False),        # OTA lifecycle notices never trigger it
+    ("OTA_STARTED", 5, False),
+    ("THERMAL_CUTOFF", None, False),  # no plug_id resolved — nothing to act on
+])
+async def test_auto_maintenance_trigger_by_event_type(event_type, plug_id, should_trigger):
+    """
+    Only THERMAL_CUTOFF/OVERCURRENT_CUTOFF with a resolved plug_id call
+    _auto_enter_maintenance — from _persist_gateway_event (sequenced after
+    the safety-cutoff finalize; see _handle_gateway_alarm/_persist_gateway_event
+    for why this can't be an independently-scheduled task). UNAUTHORIZED_ON,
+    OTA_* events, and a missing plug_id must never trigger it.
+    """
+    MQTTManager._instance = None
+    db = _AlarmDB()
+    mgr = MQTTManager(db_session_factory=lambda: db)
+    mgr._finalize_session_after_cutoff = AsyncMock()
+    auto_maint_mock = AsyncMock()
+    mgr._auto_enter_maintenance = auto_maint_mock
+
+    with patch("backend.services.socketio_manager.emit_gateway_alarm", AsyncMock()):
+        await mgr._persist_gateway_event("gw-9", plug_id, event_type, "critical", None)
+
+    assert auto_maint_mock.called is should_trigger
+    if should_trigger:
+        auto_maint_mock.assert_awaited_once_with(plug_id, event_type)
+
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_auto_maintenance_disabled_by_flag(monkeypatch):
+    """With AUTO_MAINTENANCE_ON_CRITICAL_ALARM off, a THERMAL_CUTOFF with a
+    valid plug_id must NOT call _auto_enter_maintenance."""
+    import backend.services.mqtt_manager as mm
+    monkeypatch.setattr(mm, "AUTO_MAINTENANCE_ON_CRITICAL_ALARM", False)
+
+    MQTTManager._instance = None
+    db = _AlarmDB()
+    mgr = MQTTManager(db_session_factory=lambda: db)
+    mgr._finalize_session_after_cutoff = AsyncMock()
+    auto_maint_mock = AsyncMock()
+    mgr._auto_enter_maintenance = auto_maint_mock
+
+    with patch("backend.services.socketio_manager.emit_gateway_alarm", AsyncMock()):
+        await mgr._persist_gateway_event("gw-9", 5, "THERMAL_CUTOFF", "critical", None)
+
+    auto_maint_mock.assert_not_called()
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_finalize_runs_before_auto_maintenance():
+    """
+    Regression test for the ordering fix: auto-maintenance must be sequenced
+    strictly AFTER the safety-cutoff finalize, in the same coroutine — NOT
+    raced as an independently-scheduled task. finalize_charging_session sets
+    the plug back to PlugStatus.AVAILABLE; if auto-maintenance ran first (or
+    concurrently), that AVAILABLE write could land after the MAINTENANCE
+    flip and silently undo it.
+    """
+    MQTTManager._instance = None
+    db = _AlarmDB()
+    mgr = MQTTManager(db_session_factory=lambda: db)
+
+    order = []
+
+    async def fake_finalize(plug_id, event_type):
+        order.append("finalize")
+
+    async def fake_auto_maint(plug_id, event_type):
+        order.append("auto_maintenance")
+
+    mgr._finalize_session_after_cutoff = fake_finalize
+    mgr._auto_enter_maintenance = fake_auto_maint
+
+    with patch("backend.services.socketio_manager.emit_gateway_alarm", AsyncMock()):
+        await mgr._persist_gateway_event("gw-9", 5, "THERMAL_CUTOFF", "critical", None)
+
+    assert order == ["finalize", "auto_maintenance"]
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_auto_enter_maintenance_sets_status_and_broadcasts():
+    """The coroutine itself: flips a non-MAINTENANCE plug to MAINTENANCE,
+    commits, and broadcasts the new status (fw already force-OFF'd it)."""
+    from backend.database.models import PlugStatus
+
+    MQTTManager._instance = None
+    plug = MagicMock()
+    plug.status = PlugStatus.AVAILABLE
+    session = _FakeSession([_FakeResult(scalar=plug)])
+    mgr = MQTTManager(db_session_factory=lambda: session)
+
+    emit_mock = AsyncMock()
+    with patch("backend.services.socketio_manager.emit_plug_status", emit_mock):
+        await mgr._auto_enter_maintenance(5, "THERMAL_CUTOFF")
+
+    assert plug.status == PlugStatus.MAINTENANCE
+    assert session.committed is True
+    emit_mock.assert_awaited_once_with(5, "maintenance")
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_auto_enter_maintenance_noop_if_already_maintenance():
+    """Idempotent: a plug already in MAINTENANCE isn't re-committed."""
+    from backend.database.models import PlugStatus
+
+    MQTTManager._instance = None
+    plug = MagicMock()
+    plug.status = PlugStatus.MAINTENANCE
+    session = _FakeSession([_FakeResult(scalar=plug)])
+    mgr = MQTTManager(db_session_factory=lambda: session)
+
+    await mgr._auto_enter_maintenance(5, "THERMAL_CUTOFF")
+
+    assert session.committed is False
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_auto_enter_maintenance_noop_if_plug_missing():
+    """An unknown plug_id is logged and dropped, not crashed."""
+    MQTTManager._instance = None
+    session = _FakeSession([_FakeResult(scalar=None)])
+    mgr = MQTTManager(db_session_factory=lambda: session)
+
+    await mgr._auto_enter_maintenance(999, "OVERCURRENT_CUTOFF")
+
+    assert session.committed is False
+    MQTTManager._instance = None
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("payload,exp_status,exp_fw", [
     ({"status": "online", "fw": "1.5.0-direct"}, "online", "1.5.0-direct"),

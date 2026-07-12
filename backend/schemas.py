@@ -245,6 +245,17 @@ class CpoPlugUpdateRequest(BaseModel):
     longitude: Optional[float] = Field(default=None, ge=-180, le=180)
 
 
+class CpoPlugMaintenanceRequest(BaseModel):
+    """
+    Body for POST /api/cpo/plugs/{id}/maintenance — the dedicated operator
+    maintenance workflow (fault console), distinct from the general status
+    setter on CpoPlugUpdateRequest: "enter" always succeeds, "clear" is
+    refused (409) while the plug has an ACTIVE session.
+    """
+    action: str  # "enter" | "clear"
+    note: Optional[str] = Field(default=None, max_length=255)
+
+
 class CpoGroupCreateRequest(BaseModel):
     """Create a new charger group."""
     name: str
