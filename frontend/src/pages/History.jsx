@@ -51,7 +51,7 @@ export default function History() {
     <div className="container" style={{ padding: '2rem 1rem' }}>
       <h1 style={{ marginBottom: '1rem', color: 'var(--color-primary)' }}>History</h1>
 
-      <div className="flex gap-2" style={{ marginBottom: '1.5rem' }}>
+      <div className="flex gap-2" style={{ marginBottom: '1.5rem', flexWrap: 'wrap' }}>
         {TABS.map((t) => (
           <button
             key={t.id}
