@@ -460,7 +460,7 @@ audit merged; statuses below are as of 2026-07-11.*
     (`EmailStr` + password rule, 2026-07-11 — TD#30), the portal input CSS
     (`box-sizing:border-box`, fw 1.6.0 — the `width:100%%` diagnosis was
     wrong: the HTML is printf-formatted, so `%%` already rendered as `%`),
-    and **backend structured logging** (2026-07-12 — TD#28, backend half):
+    **backend structured logging** (2026-07-12 — TD#28, backend half):
     `backend/logging_config.py` installs a JSON-lines formatter on the root
     logger (`ts`/`level`/`logger`/`msg`/`correlation_id` + structured `extra`
     fields; env `LOG_LEVEL`/`LOG_FORMAT`), a `correlation_id` ContextVar +
@@ -473,7 +473,14 @@ audit merged; statuses below are as of 2026-07-11.*
     `services/mqtt_manager.py`. The broker log is now also mirrored to a file
     on the previously-unused `mosquitto_log` volume (durable across container
     recreation) with the primary stdout stream size/count-bounded via the
-    compose `logging:` driver. Tests: `backend/tests/test_logging.py`. Still
-    open: firmware `ESP_LOGI` remains serial-only (no log topic — TD#28,
-    firmware half), no CPO admin audit log (TD#26), and the portal Wi-Fi/plug
-    reachability pre-check (TD#31, second half). (TD#26, TD#28, TD#31)
+    compose `logging:` driver. Tests: `backend/tests/test_logging.py`.
+    And the **CPO admin audit log** (2026-07-12 — TD#26): a new `audit_logs`
+    table + `services/audit.py` (`record_audit`/`try_record_audit`, non-fatal
+    — a write failure is logged, never breaks the admin action) records
+    gateway/plug/group create, plug status change, group delete, and
+    access-code regen with actor/tenant/target, readable via
+    `GET /api/cpo/audit`. Gateway/plug **delete** are pre-named in the action
+    taxonomy but have no endpoint yet to hook (no such CPO routes exist).
+    Still open: firmware `ESP_LOGI` remains serial-only (no log topic —
+    TD#28, firmware half), and the portal Wi-Fi/plug reachability pre-check
+    (TD#31, second half). (TD#26, TD#28, TD#31)
