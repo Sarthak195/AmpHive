@@ -59,7 +59,10 @@ MAX_ACTIVE_SESSIONS_PER_USER = int(os.getenv("MAX_ACTIVE_SESSIONS_PER_USER", "2"
 # available_balance()), not the raw wallet balance: a driver with plenty of
 # coins but most of it held by another running session must not be allowed
 # to start a third session past what's actually left to reserve.
-MIN_START_BALANCE_COINS = float(os.getenv("MIN_START_BALANCE_COINS", "50"))
+# `or "50"` (not a getenv default): compose passes the var through with plain
+# ${VAR} interpolation, so an unset .env entry arrives as an EMPTY string —
+# float("") would crash-loop the container (the GST_RATE_PCT lesson).
+MIN_START_BALANCE_COINS = float(os.getenv("MIN_START_BALANCE_COINS") or "50")
 
 # ===========================================================================
 # Charging Session Endpoints
