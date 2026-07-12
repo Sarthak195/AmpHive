@@ -49,11 +49,14 @@ async def test_create_gateway_defaults_vpn_ip_to_gateway_id():
     assert res["status"] == "registered"
     assert res["gateway_id"] == "aabbccddeeff"
 
-    added = db.add.call_args[0][0]
+    # db.add is now called twice: the Gateway, then the audit log row
+    # (routers/cpo.py try_record_audit, TD#26) — the Gateway is the first call.
+    added = db.add.call_args_list[0][0][0]
     assert added.id == "aabbccddeeff"
     assert added.tenant_id == 1
     assert added.vpn_ip == "aabbccddeeff"  # fell back to the (unique) gateway_id
-    db.commit.assert_awaited_once()
+    # Once for the gateway, once for the (best-effort) audit log write.
+    assert db.commit.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -64,7 +67,8 @@ async def test_create_gateway_preserves_explicit_vpn_ip():
         CpoGatewayCreateRequest(gateway_id="gw-legacy", name="Old", vpn_ip="100.87.0.5"),
         _user(), db,
     )
-    assert db.add.call_args[0][0].vpn_ip == "100.87.0.5"
+    # First db.add() call is the Gateway; the second is the audit log row.
+    assert db.add.call_args_list[0][0][0].vpn_ip == "100.87.0.5"
 
 
 @pytest.mark.asyncio

@@ -3,20 +3,32 @@
  * ==============
  * Top navigation bar with glassmorphic styling.
  * Shows nav links, coin balance, and auth state.
- * Responsive: hides desktop nav items on mobile.
+ * Responsive: below 768px the nav links collapse behind a hamburger toggle
+ * that opens a dropdown panel (the same <Link> markup as desktop — no
+ * duplicated nav items, just a CSS-driven layout swap).
  */
 
+import { useState, useEffect } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { useWallet } from '../contexts/WalletContext';
+import NotificationBell from './NotificationBell';
 
 const Navbar = () => {
   const { user, logout } = useAuth();
   const { balance } = useWallet();
   const location = useLocation();
   const navigate = useNavigate();
+  const [menuOpen, setMenuOpen] = useState(false);
+
+  // Close the mobile dropdown whenever the route changes (link tap, back
+  // button, programmatic navigation, etc.) so it never lingers open.
+  useEffect(() => {
+    setMenuOpen(false);
+  }, [location.pathname]);
 
   const handleAuth = () => {
+    setMenuOpen(false);
     if (user) {
       logout();
       navigate('/');
@@ -29,19 +41,16 @@ const Navbar = () => {
     <nav className="glass navbar flex justify-between items-center">
       {/* Logo */}
       <div className="flex items-center gap-4">
-        <Link
-          to="/"
-          className="nav-link"
-          style={{ fontSize: '1.2rem', fontWeight: 700, color: 'var(--color-primary)' }}
-        >
+        <Link to="/" className="nav-link navbar-logo">
           ⚡ AmpHive
         </Link>
       </div>
 
       {/* Navigation Links + Auth */}
-      <div className="flex items-center gap-6">
-        {/* Desktop nav links */}
-        <div className="flex items-center gap-4 nav-desktop">
+      <div className="flex items-center gap-6 navbar-actions">
+        {/* Nav links: a horizontal row on desktop; on mobile this becomes a
+            dropdown panel toggled by the hamburger button below. */}
+        <div className={`flex items-center gap-4 nav-desktop ${menuOpen ? 'open' : ''}`}>
           <Link to="/" className={`nav-link ${location.pathname === '/' ? 'active' : ''}`}>
             Home
           </Link>
@@ -75,19 +84,15 @@ const Navbar = () => {
           )}
         </div>
 
-        {/* User info + balance */}
+        {/* User info + balance (full name/email hides on mobile to save space —
+            the compact balance badge remains visible). */}
         {user && (
-          <div
-            className="flex items-center gap-3"
-            style={{
-              borderLeft: '1px solid var(--color-surface-border)',
-              paddingLeft: '1rem',
-            }}
-          >
+          <div className="flex items-center gap-3 navbar-user">
+            <NotificationBell />
             <span style={{ fontWeight: 600, color: 'var(--color-accent)', fontSize: '0.9rem' }}>
               🪙 {Number(balance).toFixed(2)}
             </span>
-            <span style={{ color: 'var(--color-text-muted)', fontSize: '0.85rem' }}>
+            <span className="navbar-user-name" style={{ color: 'var(--color-text-muted)', fontSize: '0.85rem' }}>
               {user.full_name || user.email}
             </span>
           </div>
@@ -100,7 +105,27 @@ const Navbar = () => {
         >
           {user ? 'Sign Out' : 'Sign In'}
         </button>
+
+        {/* Mobile menu toggle — hidden on desktop via CSS */}
+        <button
+          type="button"
+          className="navbar-toggle"
+          onClick={() => setMenuOpen((open) => !open)}
+          aria-label={menuOpen ? 'Close navigation menu' : 'Open navigation menu'}
+          aria-expanded={menuOpen}
+        >
+          {menuOpen ? '✕' : '☰'}
+        </button>
       </div>
+
+      {/* Tap-outside-to-close overlay for the mobile dropdown */}
+      {menuOpen && (
+        <div
+          className="navbar-mobile-overlay"
+          onClick={() => setMenuOpen(false)}
+          aria-hidden="true"
+        />
+      )}
     </nav>
   );
 };

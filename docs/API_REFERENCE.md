@@ -16,12 +16,14 @@ Interactive docs: `http://<host>:8000/docs`.
   `cpo` or `admin`, enforced by `require_role(...)` (`backend/services/rbac.py`).
 - **CORS:** explicit allowlist (localhost, `amphive.duckdns.org`, VM IP) —
   locked down 2026-07-06.
-- **40 endpoints total**, grouped below: health (1), auth (4), groups (2),
-  plugs (2), sessions (4), payments (3), Direct Mode (5), CPO portal (19).
+- **41 endpoints total**, grouped below: health (1), auth (4), groups (2),
+  plugs (2), sessions (4), payments (3), Direct Mode (5), CPO portal (20).
   (The legacy SSE endpoint `/api/sessions/live/{id}` was retired 2026-07-07 —
   live telemetry is Socket.io only. The CPO gateway OTA-trigger endpoint was
   added 2026-07-07; the `/api/auth/logout` revocation endpoint 2026-07-08; the
-  CPO events feed + ack endpoints 2026-07-10.)
+  CPO events feed + ack endpoints 2026-07-10; the CPO audit-log endpoint
+  2026-07-12. This count predates a few other endpoints added alongside it —
+  not re-audited here.)
 
 ---
 
@@ -99,6 +101,27 @@ Token: HS256 JWT, claims `sub`/`role`/`email`/`iat`/`exp`, **7-day** expiry.
 | POST | `/api/payments/webhook` | none (HMAC-gated) | raw body + `X-Razorpay-Signature` | HMAC verify (400 if bad) → on `payment.captured`, auto-credit coins from the payment's `notes`/`amount` (atomic, row-locked, supporting decimals) → ledger `topup`. Idempotent vs. `/verify` (dedupes on `razorpay_payment_id`). → `{status:"credited"\|"already_credited"\|"ignored"\|"user_not_found"}` |
 | GET | `/api/wallet/ledger` | JWT | `?limit` (default 100, max 500) | Unified wallet ledger for the user — top-up credits **and** session debits, newest first. Returns a list of `{id, amount(signed), transaction_type("topup"\|"session_debit"\|"refund"), direction("credit"\|"debit"), description, balance_after, session_id, razorpay_payment_id, created_at}`. |
 
+## Driver notifications (`routers/notifications.py`, 2026-07-11)
+
+Per-user feed written by `services/notifications.py` at the emit points
+(session stop/auto-stop/reap/safety-cutoff, low balance, charger offline,
+top-up credit); delivered live over the Socket.io `notification` event (the
+user's own room) and optionally by **Web Push** (VAPID; enabled when
+`VAPID_PRIVATE_KEY` is set).
+
+| Method | Path | Auth | Body/Params | Behaviour |
+|--------|------|------|-------------|-----------|
+| GET | `/api/notifications` | JWT | `?unread_only, ?limit` (default 50, max 200) | Newest-first feed → `{notifications:[{id, type, severity, title, body, plug_id, session_id, read, created_at}], unread_count}` (`unread_count` is the user's total, independent of the page) |
+| POST | `/api/notifications/{id}/read` | JWT | — | Mark one read (404 if not the caller's) → `{status:"read"}` |
+| POST | `/api/notifications/read-all` | JWT | — | Mark all read → `{status:"read", count}` |
+| GET | `/api/notifications/push/public-key` | JWT | — | `{enabled, vapid_public_key}` — the browser `applicationServerKey`, derived from `VAPID_PRIVATE_KEY` at runtime (`enabled:false` when push unconfigured) |
+| POST | `/api/notifications/push/subscribe` | JWT | `PushSubscription.toJSON()`: `{endpoint, keys:{p256dh, auth}}` | Upsert by unique `endpoint` (re-subscribes update in place; a subscription re-used by a new login moves to that user) → `{status:"subscribed"}` |
+| DELETE | `/api/notifications/push/subscribe` | JWT | `{endpoint}` | Remove the caller's subscription row → `{status:"unsubscribed"}` |
+
+Socket.io event (server → the user's room only): `notification` with the same
+object shape as the feed entries. Dead push subscriptions (push service
+returns 404/410) are pruned automatically on the next send.
+
 ## Direct Mode — Tapo P110 (dev/test, ESP32 bypass)
 
 All require **JWT** *and* `DIRECT_MODE=true` with an initialized driver (else
@@ -143,6 +166,7 @@ scoped to the caller's `tenant_id`, so operators only ever see their own assets.
 | GET | `/api/cpo/analytics/telemetry` | cpo/admin | query `plug_id?, days=1, bucket=hour` | `date_trunc`-bucketed time-series from `telemetry_readings` (bucket ∈ {minute, hour, day}; 400 otherwise) → `[{timestamp, avg_power_w, max_power_w, energy_kwh, avg_current_a, max_current_a, sample_count}]`. Powers the dashboard load graph (peak W + A). |
 | GET | `/api/cpo/events` | cpo/admin | query `limit=50` (max 200), `unacknowledged_only?` (bool), `severity?` (e.g. `critical`) | Gateway/plug operational events (safety cutoffs, `UNAUTHORIZED_ON` alarms, OTA notices) for the CPO's tenant, newest first → `[{id, gateway_id, plug_id, event_type, severity, detail, acknowledged, created_at}]`. (Added 2026-07-10.) |
 | POST | `/api/cpo/events/{event_id}/ack` | cpo/admin | path `event_id:int` | Acknowledge (clear from the active feed) one event; tenant-scoped. → `{status:"acknowledged", event_id}` |
+| GET | `/api/cpo/audit` | cpo/admin | query `limit=50` (max 200), `offset=0` | Admin action audit trail (TD#26) for the CPO's tenant, newest first → `[{id, actor_user_id, actor_email, action, target_type, target_id, detail, created_at}]`. Covers gateway create, plug create, plug status change, group create/delete, and access-code regen — written non-fatally by `services/audit.py` (a write failure is logged, never breaks the admin action). Gateway/plug delete aren't recorded yet — no such CPO endpoints exist. (Added 2026-07-12.) |
 
 ---
 
@@ -163,3 +187,6 @@ scoped to the caller's `tenant_id`, so operators only ever see their own assets.
 | `TELEMETRY_BUFFER_MAX` | `10000` | Max buffered readings; oldest dropped if the DB is unavailable |
 | `TELEMETRY_RETENTION_DAYS` | `0` | Prune `telemetry_readings` older than N days. `0` = retention disabled (keep all) |
 | `TELEMETRY_PRUNE_EVERY_N_FLUSHES` | `360` | Run the retention prune every N flushes (~hourly at the default interval) |
+| `LOGIN_RATE_LIMIT` / `REGISTER_RATE_LIMIT` | `10/60` / `10/3600` | Auth rate limits, `"<attempts>/<window sec>"` per client IP (429 + Retry-After) |
+| `VAPID_PRIVATE_KEY` / `VAPID_SUBJECT` | `""` / `mailto:admin@amphive.example` | Web Push signing key + contact; empty key = push disabled (feed + Socket.io still work) |
+| `LOW_BALANCE_WARN_FRACTION` | `0.8` | Notify the driver once per session when accrued cost crosses this fraction of the wallet balance (`0` disables) |

@@ -23,14 +23,14 @@ NOTE for the merge orchestrator: this revision is deliberately self-contained
 its down_revision chain to 0006 is preserved standalone or later re-chained
 after sibling migrations (0007/0009/0010) developed in parallel worktrees.
 
-Revision ID: 0008_tariffs
-Revises: 0006_gateway_firmware_version
+Revision ID: 0010_tariffs
+Revises: 0009_payouts
 Create Date: 2026-07-12
 """
 from alembic import op
 
-revision = "0008_tariffs"
-down_revision = "0006_gateway_firmware_version"
+revision = "0010_tariffs"
+down_revision = "0009_payouts"
 branch_labels = None
 depends_on = None
 

@@ -44,6 +44,19 @@ async def emit_plug_status(plug_id: int, status: str) -> None:
         logger.error(f"Failed to emit plug_status for plug {plug_id}: {e}")
 
 
+async def emit_notification(user_id: int, notification: Dict[str, Any]) -> None:
+    """
+    Deliver a driver notification to that user's connected clients only
+    (their per-user room, joined on connect). Unlike plug_status /
+    gateway_alarm this is NOT a broadcast — a notification carries
+    wallet/session details that belong to one user.
+    """
+    try:
+        await sio.emit("notification", notification, room=f"user_{user_id}")
+    except Exception as e:
+        logger.error(f"Failed to emit notification for user {user_id}: {e}")
+
+
 async def emit_gateway_alarm(event: Dict[str, Any]) -> None:
     """
     Broadcast a gateway alarm/event (safety cutoff, unauthorized-on, OTA notice)
@@ -86,6 +99,9 @@ async def connect(sid, environ, auth=None):
         user_id = int(payload.get("sub"))
         # Save user info in connection session
         await sio.save_session(sid, {"user_id": user_id})
+        # Per-user room: lets the backend target one user's live clients
+        # (driver notifications) without tracking sids ourselves.
+        await sio.enter_room(sid, f"user_{user_id}")
         logger.info(f"Socket connected: user {user_id} (sid: {sid})")
         return True
     except Exception as e:
