@@ -148,9 +148,18 @@ been fixed by the 2026-07-08…11 work — see the shipped sections below).*
       live telemetry is session-id-attributed now, but readings buffered across
       an MQTT outage still attach to the plug's current ACTIVE session on
       resync. (TD#24)
-- [ ] **[2026-07-06 audit] Structured logging + correlation ids** across backend
-      (JSON, request ids) and a firmware log topic for field diagnostics;
-      persist the broker log. (TD#28)
+- [x] **[2026-07-06 audit] Structured logging + correlation ids — backend.**
+      Done 2026-07-12 — `backend/logging_config.py` (JSON-lines formatter on
+      the root logger, `correlation_id` ContextVar + `logging.Filter`, env
+      `LOG_LEVEL`/`LOG_FORMAT`); a FastAPI middleware binds/echoes
+      `X-Request-ID` per request so an HTTP request traces through to the
+      MQTT command it triggers. Hot-path f-strings converted in
+      `routers/auth.py`, `routers/sessions.py`,
+      `services/session_lifecycle.py`, `services/mqtt_manager.py`. Broker log
+      now also persists to a file on the `mosquitto_log` volume (durable
+      across container recreation), stdout bounded via the compose
+      `logging:` driver. Tests: `backend/tests/test_logging.py`. Still open:
+      a firmware log topic for field diagnostics (serial-only today). (TD#28)
 - [x] **[2026-07-06 audit] Registration validation.** Done 2026-07-11 —
       `EmailStr` + 8-72 char password rule; login left unvalidated for
       pre-rule accounts. (TD#30)

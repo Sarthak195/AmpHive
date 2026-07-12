@@ -11,8 +11,10 @@ from typing import Callable, Dict, Any, Optional
 
 import paho.mqtt.client as mqtt
 
+# Root logger configuration (JSON formatter, correlation id) is owned by
+# backend.logging_config.configure_logging(), called once from main.py's
+# startup — this module just gets its named logger and propagates to root.
 logger = logging.getLogger("amphive.mqtt")
-logging.basicConfig(level=logging.INFO)
 
 # Telemetry refreshes gateways.last_seen_at (the liveness signal that gates
 # session starts) at most this often per gateway — it arrives every ~1-10 s
@@ -61,16 +63,16 @@ class MQTTManager:
         # Per-gateway monotonic timestamp of the last last_seen_at refresh
         # (see GATEWAY_SEEN_BUMP_INTERVAL_SEC). Only touched on the paho thread.
         self._gateway_seen_bumped: Dict[str, float] = {}
-        
+
         self.client = mqtt.Client(client_id="amphive_backend_server", callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
-        
+
         if self.username and self.password:
             self.client.username_pw_set(self.username, self.password)
-            
+
         self.client.on_connect = self._on_connect
         self.client.on_disconnect = self._on_disconnect
         self.client.on_message = self._on_message
-        
+
         # Regex mappings for topics
         # gateways/{gateway_id}/telemetry
         self.telemetry_pattern = re.compile(r"^amphive/gateways/([^/]+)/telemetry$")
@@ -82,7 +84,10 @@ class MQTTManager:
         self.alarm_pattern = re.compile(r"^amphive/gateways/([^/]+)/alarms$")
 
     def start(self):
-        logger.info(f"Connecting to MQTT broker at {self.broker_host}:{self.broker_port}...")
+        logger.info(
+            "Connecting to MQTT broker",
+            extra={"broker_host": self.broker_host, "broker_port": self.broker_port},
+        )
         self.client.connect_async(self.broker_host, self.broker_port, keepalive=60)
         self.client.loop_start()
 
@@ -93,7 +98,7 @@ class MQTTManager:
 
     def _on_connect(self, client, userdata, flags, rc, properties=None):
         if rc == 0:
-            logger.info("Connected successfully to MQTT Broker.")
+            logger.info("Connected successfully to MQTT broker")
             # Subscribe to all gateway telemetry and status topics
             self.client.subscribe("amphive/gateways/+/telemetry", qos=0)
             self.client.subscribe("amphive/gateways/+/status", qos=1)
@@ -103,19 +108,25 @@ class MQTTManager:
             # lifecycle events — persisted as GatewayEvents and surfaced to CPOs.
             self.client.subscribe("amphive/gateways/+/alarms", qos=1)
         else:
-            logger.error(f"Failed to connect to MQTT broker, return code {rc}")
+            logger.error("Failed to connect to MQTT broker", extra={"rc": rc})
 
     def _on_disconnect(self, client, userdata, rc, properties=None, reason_code=None):
-        logger.warning(f"Disconnected from MQTT broker with code: {rc}")
+        logger.warning("Disconnected from MQTT broker", extra={"rc": rc})
 
     def _on_message(self, client, userdata, msg):
         payload_str = msg.payload.decode("utf-8", errors="ignore")
-        logger.debug(f"Received message on topic {msg.topic}: {payload_str}")
-        
+        logger.debug(
+            "Received MQTT message",
+            extra={"topic": msg.topic, "payload": payload_str},
+        )
+
         try:
             payload = json.loads(payload_str)
         except json.JSONDecodeError:
-            logger.warning(f"Invalid JSON payload on topic {msg.topic}: {payload_str}")
+            logger.warning(
+                "Invalid JSON payload on MQTT topic",
+                extra={"topic": msg.topic, "payload": payload_str},
+            )
             return
 
         # Match status topic
@@ -172,14 +183,17 @@ class MQTTManager:
         """
         plug_id = payload.get("plug_id")
         if plug_id is None:
-            logger.warning(f"Telemetry from gateway {gateway_id} missing plug_id, ignoring.")
+            logger.warning(
+                "Telemetry missing plug_id, ignoring",
+                extra={"gateway_id": gateway_id},
+            )
             return
         try:
             plug_id = int(plug_id)
         except (TypeError, ValueError):
             logger.warning(
-                f"Telemetry from gateway {gateway_id} has non-integer plug_id "
-                f"{payload.get('plug_id')!r}, ignoring."
+                "Telemetry has non-integer plug_id, ignoring",
+                extra={"gateway_id": gateway_id, "raw_plug_id": repr(payload.get("plug_id"))},
             )
             return
 
@@ -195,14 +209,14 @@ class MQTTManager:
             current = float(payload.get("current", 0.0))
         except (TypeError, ValueError):
             logger.warning(
-                f"Telemetry from gateway {gateway_id} plug {plug_id} has "
-                f"non-numeric fields, ignoring: {payload}"
+                "Telemetry has non-numeric fields, ignoring",
+                extra={"gateway_id": gateway_id, "plug_id": plug_id, "payload": payload},
             )
             return
         if not all(math.isfinite(v) for v in (watts, kwh, voltage, current)):
             logger.warning(
-                f"Telemetry from gateway {gateway_id} plug {plug_id} has "
-                f"non-finite values, ignoring: {payload}"
+                "Telemetry has non-finite values, ignoring",
+                extra={"gateway_id": gateway_id, "plug_id": plug_id, "payload": payload},
             )
             return
 
@@ -228,8 +242,17 @@ class MQTTManager:
         telem_status = "charging" if status == "occupied" else "idle"
 
         logger.info(
-            f"Telemetry from gw={gateway_id} plug={plug_id}: "
-            f"{watts:.1f}W, {kwh:.3f}kWh, {current:.1f}A, {voltage:.0f}V [{status}]"
+            "Telemetry received",
+            extra={
+                "gateway_id": gateway_id,
+                "plug_id": plug_id,
+                "session_id": session_id,
+                "watts": round(watts, 1),
+                "kwh": round(kwh, 3),
+                "current_a": round(current, 1),
+                "voltage_v": round(voltage, 0),
+                "status": status,
+            },
         )
 
         # --- 1. Feed the in-memory TelemetryStore (for the live stream) ---
@@ -324,7 +347,10 @@ class MQTTManager:
                     gateway.last_seen_at = datetime.now(timezone.utc)
                     await session.commit()
         except Exception as e:
-            logger.error(f"Failed to refresh last_seen_at for gateway {gateway_id}: {e}")
+            logger.error(
+                "Failed to refresh last_seen_at for gateway",
+                extra={"gateway_id": gateway_id, "error": str(e)},
+            )
 
     # -----------------------------------------------------------------------
     # Inbound alarm handler — persists GatewayEvents + broadcasts to clients
@@ -360,7 +386,10 @@ class MQTTManager:
         """
         event_type = payload.get("error") or payload.get("event")
         if not event_type:
-            logger.warning(f"Alarm from gateway {gateway_id} missing error/event: {payload}")
+            logger.warning(
+                "Alarm missing error/event field",
+                extra={"gateway_id": gateway_id, "payload": payload},
+            )
             return
 
         event_type = str(event_type)[:48]
@@ -374,7 +403,13 @@ class MQTTManager:
             plug_id = None
 
         logger.warning(
-            f"ALARM from gw={gateway_id} plug={plug_id}: {event_type} ({severity})"
+            "Gateway alarm",
+            extra={
+                "gateway_id": gateway_id,
+                "plug_id": plug_id,
+                "event_type": event_type,
+                "severity": severity,
+            },
         )
 
         if self.db_session_factory and self.event_loop:
@@ -396,7 +431,10 @@ class MQTTManager:
                     select(Gateway).where(Gateway.id == gateway_id)
                 )).scalar_one_or_none()
                 if not gw:
-                    logger.warning(f"Alarm for unknown gateway {gateway_id}; dropping event.")
+                    logger.warning(
+                        "Alarm for unknown gateway, dropping event",
+                        extra={"gateway_id": gateway_id},
+                    )
                     return
 
                 event = GatewayEvent(
@@ -412,7 +450,10 @@ class MQTTManager:
                 event_id = event.id
                 created_at = event.created_at
         except Exception as e:
-            logger.error(f"Failed to persist gateway event for {gateway_id}: {e}")
+            logger.error(
+                "Failed to persist gateway event",
+                extra={"gateway_id": gateway_id, "plug_id": plug_id, "error": str(e)},
+            )
             return
 
         # Broadcast to connected clients (best-effort; import late to avoid a
@@ -429,7 +470,10 @@ class MQTTManager:
                 "created_at": created_at.isoformat() if created_at else None,
             })
         except Exception as e:
-            logger.error(f"Failed to broadcast gateway alarm for {gateway_id}: {e}")
+            logger.error(
+                "Failed to broadcast gateway alarm",
+                extra={"gateway_id": gateway_id, "plug_id": plug_id, "error": str(e)},
+            )
 
     async def _persist_telemetry(self, gateway_id: str, plug_id: int, watts: float, kwh: float,
                                  session_id: Optional[int] = None,
@@ -472,10 +516,13 @@ class MQTTManager:
                 )
                 plug = plug_result.scalar_one_or_none()
                 if plug is None or plug.gateway_id != gateway_id:
-                    owner = "does not exist" if plug is None else f"belongs to gateway {plug.gateway_id}"
                     logger.warning(
-                        f"Telemetry from gateway {gateway_id} claims plug {plug_id}, "
-                        f"which {owner} — dropping reading."
+                        "Telemetry plug ownership mismatch, dropping reading",
+                        extra={
+                            "gateway_id": gateway_id,
+                            "plug_id": plug_id,
+                            "actual_owner_gateway_id": plug.gateway_id if plug else None,
+                        },
                     )
                     return
 
@@ -514,7 +561,10 @@ class MQTTManager:
 
                 await session.commit()
         except Exception as e:
-            logger.error(f"Failed to persist telemetry for plug {plug_id}: {e}")
+            logger.error(
+                "Failed to persist telemetry",
+                extra={"gateway_id": gateway_id, "plug_id": plug_id, "error": str(e)},
+            )
             return
 
         # Prepaid protection: if the accrued energy cost has reached the driver's
@@ -556,11 +606,19 @@ class MQTTManager:
                 )
             if outcome is not None:
                 logger.warning(
-                    f"Auto-stopped session {session_id} (user {user_id}): wallet exhausted "
-                    f"at {outcome['energy_kwh']} kWh / {outcome['coins_spent']} coins."
+                    "Auto-stopped session: wallet balance exhausted",
+                    extra={
+                        "session_id": session_id,
+                        "user_id": user_id,
+                        "energy_kwh": outcome["energy_kwh"],
+                        "coins_spent": outcome["coins_spent"],
+                    },
                 )
         except Exception:
-            logger.exception(f"Balance-exhaustion auto-stop failed for session {session_id}")
+            logger.exception(
+                "Balance-exhaustion auto-stop failed",
+                extra={"session_id": session_id, "user_id": user_id},
+            )
 
     # -----------------------------------------------------------------------
     # Inbound status handler — updates gateway online/offline state in DB
@@ -575,7 +633,10 @@ class MQTTManager:
         # Firmware version rides on the `online` status payload ({"fw": "..."}).
         fw = payload.get("fw")
         fw = str(fw)[:32] if fw else None
-        logger.info(f"Gateway {gateway_id} status: {status}" + (f" fw={fw}" if fw else ""))
+        logger.info(
+            "Gateway status update",
+            extra={"gateway_id": gateway_id, "status": status, "fw": fw},
+        )
 
         if self.db_session_factory and self.event_loop:
             asyncio.run_coroutine_threadsafe(
@@ -603,11 +664,20 @@ class MQTTManager:
                     if firmware_version:
                         gateway.firmware_version = firmware_version
                     await session.commit()
-                    logger.info(f"Gateway {gateway_id} DB status updated to {status}")
+                    logger.info(
+                        "Gateway DB status updated",
+                        extra={"gateway_id": gateway_id, "status": status},
+                    )
                 else:
-                    logger.warning(f"Gateway {gateway_id} not found in DB, ignoring status update.")
+                    logger.warning(
+                        "Gateway not found in DB, ignoring status update",
+                        extra={"gateway_id": gateway_id},
+                    )
         except Exception as e:
-            logger.error(f"Failed to persist gateway status for {gateway_id}: {e}")
+            logger.error(
+                "Failed to persist gateway status",
+                extra={"gateway_id": gateway_id, "error": str(e)},
+            )
             return
 
         if status == "online":
@@ -649,11 +719,14 @@ class MQTTManager:
                     # the broker ack for a best-effort cleanup publish.
                     self.send_plug_command(gateway_id, plug_id, "OFF", wait=False)
                     logger.info(
-                        f"Republished OFF to gw={gateway_id} plug={plug_id} "
-                        f"on reconnect (no ACTIVE session)"
+                        "Republished OFF on reconnect (no ACTIVE session)",
+                        extra={"gateway_id": gateway_id, "plug_id": plug_id},
                     )
         except Exception as e:
-            logger.error(f"OFF republish on reconnect failed for gateway {gateway_id}: {e}")
+            logger.error(
+                "OFF republish on reconnect failed",
+                extra={"gateway_id": gateway_id, "error": str(e)},
+            )
 
     # -----------------------------------------------------------------------
     # Inbound plug-discovery handler — auto-populate agent-discovered plugs
@@ -675,7 +748,10 @@ class MQTTManager:
         """
         unique_id = payload.get("unique_id")
         if not unique_id:
-            logger.warning(f"Discovery from gateway {gateway_id} missing unique_id, ignoring.")
+            logger.warning(
+                "Discovery missing unique_id, ignoring",
+                extra={"gateway_id": gateway_id},
+            )
             return
         if self.db_session_factory and self.event_loop:
             asyncio.run_coroutine_threadsafe(
@@ -701,8 +777,8 @@ class MQTTManager:
                 ).scalar_one_or_none()
                 if gateway is None:
                     logger.warning(
-                        f"Discovery for unknown gateway {gateway_id}, ignoring "
-                        f"(claim the gateway first)."
+                        "Discovery for unknown gateway, ignoring (claim the gateway first)",
+                        extra={"gateway_id": gateway_id},
                     )
                     return
 
@@ -719,7 +795,10 @@ class MQTTManager:
                         gateway_id=gateway_id, name=alias, local_ip=local_ip,
                         plug_model=model, unique_id=unique_id,
                     ))
-                    logger.info(f"Auto-populated new plug '{alias}' ({unique_id}) on {gateway_id}")
+                    logger.info(
+                        "Auto-populated new plug from discovery",
+                        extra={"gateway_id": gateway_id, "unique_id": unique_id, "alias": alias},
+                    )
                 else:
                     existing.name = alias
                     existing.plug_model = model
@@ -736,7 +815,10 @@ class MQTTManager:
                 ).all()
                 assignments = {uid: pid for uid, pid in rows}
         except Exception as e:
-            logger.error(f"Failed to persist plug discovery for {gateway_id}: {e}")
+            logger.error(
+                "Failed to persist plug discovery",
+                extra={"gateway_id": gateway_id, "error": str(e)},
+            )
             return
 
         # Hand the authoritative ids back to the agent (retained, so it survives
@@ -745,7 +827,10 @@ class MQTTManager:
             f"amphive/gateways/{gateway_id}/assign",
             json.dumps(assignments), qos=1, retain=True,
         )
-        logger.info(f"Published plug assignments for {gateway_id}: {assignments}")
+        logger.info(
+            "Published plug assignments",
+            extra={"gateway_id": gateway_id, "assignments": assignments},
+        )
 
     # -----------------------------------------------------------------------
     # Outbound command publisher
@@ -779,13 +864,28 @@ class MQTTManager:
             payload_str = json.dumps(payload)
             info = self.client.publish(topic, payload_str, qos=1)
             if not wait:
-                logger.info(f"Published command (no-wait) to {topic}: {payload_str}")
+                logger.info(
+                    "Published plug command (no-wait)",
+                    extra={
+                        "gateway_id": gateway_id, "plug_id": plug_id,
+                        "action": payload["action"], "topic": topic,
+                    },
+                )
                 return info.rc == mqtt.MQTT_ERR_SUCCESS
             info.wait_for_publish(timeout=3.0)
-            logger.info(f"Published command to {topic}: {payload_str}")
+            logger.info(
+                "Published plug command",
+                extra={
+                    "gateway_id": gateway_id, "plug_id": plug_id,
+                    "action": payload["action"], "topic": topic, "session_id": session_id,
+                },
+            )
             return info.is_published()
         except Exception as e:
-            logger.error(f"Failed to publish command to {topic}: {e}")
+            logger.error(
+                "Failed to publish plug command",
+                extra={"gateway_id": gateway_id, "plug_id": plug_id, "topic": topic, "error": str(e)},
+            )
             return False
 
     def send_gateway_ota(self, gateway_id: str, plug_id: int, firmware_url: str) -> bool:
@@ -806,10 +906,19 @@ class MQTTManager:
             payload_str = json.dumps(payload)
             info = self.client.publish(topic, payload_str, qos=1)
             info.wait_for_publish(timeout=3.0)
-            logger.info(f"Published OTA command to {topic}: {payload_str}")
+            logger.info(
+                "Published OTA command",
+                extra={
+                    "gateway_id": gateway_id, "plug_id": plug_id,
+                    "firmware_url": firmware_url, "topic": topic,
+                },
+            )
             return info.is_published()
         except Exception as e:
-            logger.error(f"Failed to publish OTA command to {topic}: {e}")
+            logger.error(
+                "Failed to publish OTA command",
+                extra={"gateway_id": gateway_id, "plug_id": plug_id, "topic": topic, "error": str(e)},
+            )
             return False
 
     def send_plug_interval(self, gateway_id: str, plug_id: int, interval_ms: int) -> bool:
@@ -823,14 +932,22 @@ class MQTTManager:
             "action": "SET_INTERVAL",
             "interval_ms": interval_ms
         }
-        
+
         try:
             payload_str = json.dumps(payload)
             info = self.client.publish(topic, payload_str, qos=1)
             info.wait_for_publish(timeout=3.0)
-            logger.info(f"Published interval command to {topic}: {payload_str}")
+            logger.info(
+                "Published interval command",
+                extra={
+                    "gateway_id": gateway_id, "plug_id": plug_id,
+                    "interval_ms": interval_ms, "topic": topic,
+                },
+            )
             return info.is_published()
         except Exception as e:
-            logger.error(f"Failed to publish interval command to {topic}: {e}")
+            logger.error(
+                "Failed to publish interval command",
+                extra={"gateway_id": gateway_id, "plug_id": plug_id, "topic": topic, "error": str(e)},
+            )
             return False
-

@@ -441,9 +441,23 @@ audit merged; statuses below are as of 2026-07-11.*
     gateway staleness (read-time `gateway_is_live` + `gateway_online` in the
     driver API + session reaper — TD#27), the shared-`Event` latency nit
     (closed by retiring SSE 2026-07-07 — TD#32), registration validation
-    (`EmailStr` + password rule, 2026-07-11 — TD#30), and the portal input CSS
+    (`EmailStr` + password rule, 2026-07-11 — TD#30), the portal input CSS
     (`box-sizing:border-box`, fw 1.6.0 — the `width:100%%` diagnosis was
-    wrong: the HTML is printf-formatted, so `%%` already rendered as `%`).
-    Still open: unstructured stdout-only logging (no correlation ids — TD#28),
-    no CPO admin audit log (TD#26), and the portal Wi-Fi/plug reachability
-    pre-check (TD#31, second half). (TD#26–31)
+    wrong: the HTML is printf-formatted, so `%%` already rendered as `%`),
+    and **backend structured logging** (2026-07-12 — TD#28, backend half):
+    `backend/logging_config.py` installs a JSON-lines formatter on the root
+    logger (`ts`/`level`/`logger`/`msg`/`correlation_id` + structured `extra`
+    fields; env `LOG_LEVEL`/`LOG_FORMAT`), a `correlation_id` ContextVar +
+    `logging.Filter` stamp every record, and a FastAPI middleware
+    (`backend/main.py`) binds it from/echoes it to `X-Request-ID` per
+    request — tracing an HTTP request through to the MQTT command it
+    triggers for same-task calls (the paho callback thread and background
+    services log `-`). Hot-path f-strings converted in `routers/auth.py`,
+    `routers/sessions.py`, `services/session_lifecycle.py`,
+    `services/mqtt_manager.py`. The broker log is now also mirrored to a file
+    on the previously-unused `mosquitto_log` volume (durable across container
+    recreation) with the primary stdout stream size/count-bounded via the
+    compose `logging:` driver. Tests: `backend/tests/test_logging.py`. Still
+    open: firmware `ESP_LOGI` remains serial-only (no log topic — TD#28,
+    firmware half), no CPO admin audit log (TD#26), and the portal Wi-Fi/plug
+    reachability pre-check (TD#31, second half). (TD#26, TD#28, TD#31)

@@ -47,7 +47,10 @@ async def set_plug_telemetry_interval(db: AsyncSession, plug_id: int, interval_m
     result = await db.execute(select(Plug).where(Plug.id == plug_id))
     plug = result.scalar_one_or_none()
     if not plug:
-        logger.warning(f"Plug {plug_id} not found when trying to set telemetry interval.")
+        logger.warning(
+            "Plug not found when trying to set telemetry interval",
+            extra={"plug_id": plug_id},
+        )
         return
 
     state.telemetry_store.set_interval(plug_id, interval_ms)
@@ -139,7 +142,10 @@ async def finalize_charging_session(
     )
 
     if not success:
-        logger.warning(f"Failed to send OFF command for session {session.id}, but proceeding with DB cleanup.")
+        logger.warning(
+            "Failed to send OFF command, proceeding with DB cleanup",
+            extra={"session_id": session.id, "plug_id": plug.id, "gateway_id": plug.gateway_id},
+        )
 
     # 2. Determine final energy, then derive cost from it.
     #    Prefer the live in-memory snapshot, but fall back to the energy
@@ -185,8 +191,12 @@ async def finalize_charging_session(
     if shortfall > 0:
         description += f" (shortfall {shortfall:.2f} coins uncollected)"
         logger.warning(
-            f"Session {session.id}: billed {final_cost:.2f} coins but wallet "
-            f"held only {actual_debit:.2f}; {shortfall:.2f} coins uncollected"
+            "Session billed more than the wallet held; shortfall forgiven",
+            extra={
+                "session_id": session.id, "user_id": session.user_id,
+                "billed_coins": float(final_cost), "collected_coins": float(actual_debit),
+                "shortfall_coins": float(shortfall),
+            },
         )
 
     ledger_entry = LedgerTransaction(
@@ -212,8 +222,12 @@ async def finalize_charging_session(
     await set_plug_telemetry_interval(db, plug.id, 10000)
 
     logger.info(
-        f"Session {session.id} stopped{f' ({reason})' if reason else ''}: "
-        f"{final_energy:.3f} kWh, {actual_debit:.2f} coins"
+        "Session stopped",
+        extra={
+            "session_id": session.id, "user_id": session.user_id, "plug_id": plug.id,
+            "energy_kwh": round(final_energy, 3), "coins_spent": float(actual_debit),
+            "reason": reason,
+        },
     )
 
     # Duration for the receipt (started_at is tz-aware; ended_at was just set).

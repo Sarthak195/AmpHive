@@ -68,6 +68,16 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+    # Bound + rotate the container's stdout log (TD#28) — mosquitto.conf's
+    # `log_dest file` mirror on the mosquitto_log volume is the durable copy
+    # that survives container recreation; this caps the operationally-primary
+    # stdout stream (`docker logs` / `docker-compose logs`) so a busy broker
+    # can't fill the VM's disk.
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
 
   backend:
     build:

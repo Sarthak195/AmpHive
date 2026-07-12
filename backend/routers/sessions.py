@@ -221,7 +221,13 @@ async def start_charging_session(
     state.telemetry_store.start_session(plug.id)
     await set_plug_telemetry_interval(db, plug.id, 1000)
 
-    logger.info(f"Session {session.id} started: user={user.email}, plug={plug.id}")
+    logger.info(
+        "Session started",
+        extra={
+            "session_id": session.id, "user_id": user.id, "email": user.email,
+            "plug_id": plug.id, "gateway_id": plug.gateway_id,
+        },
+    )
 
     return {
         "status": "started",
