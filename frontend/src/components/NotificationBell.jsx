@@ -183,14 +183,11 @@ const NotificationBell = () => {
       </button>
 
       {open && (
-        <div
-          className="glass"
-          style={{
-            position: 'absolute', right: 0, top: 'calc(100% + 8px)',
-            width: 'min(360px, 90vw)', maxHeight: '70vh', overflowY: 'auto',
-            borderRadius: 'var(--radius-md)', padding: '0.75rem', zIndex: 1000,
-          }}
-        >
+        // Positioning lives in .notification-panel (global.css): absolute
+        // under the bell on desktop, viewport-fixed sheet on phones — the
+        // bell isn't at the screen edge, so a right-anchored 360px panel
+        // would overflow the LEFT edge of a 360-430px viewport.
+        <div className="glass notification-panel">
           <div className="flex justify-between items-center" style={{ marginBottom: '0.5rem' }}>
             <strong style={{ fontSize: '0.95rem' }}>Notifications</strong>
             {unread > 0 && (
