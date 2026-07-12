@@ -58,7 +58,7 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 | **Unauthorized physical-on guard (fw ≥ 1.5.0)** | ✅ | The relay ON with no active session (physical button / Tapo app / stale NVS resume) is forced OFF locally every poll and alarmed once per episode (`UNAUTHORIZED_ON`, rising-edge). Uses the plug's real `device_on` (previously read but discarded). **Live on the real gateway 2026-07-10** (OTA'd to `1.5.0-direct`); the backend ingests the alarm end-to-end (verified in prod). The remote out-of-band physical-press trigger itself is unit-tested + by-construction (no LAN path to press the button remotely). |
 | **Richer telemetry: relay state + trapezoidal energy (fw ≥ 1.5.0)** | ✅ | Telemetry now carries the actual `relay` (device_on) state alongside derived `current`/nominal `voltage`; the driver-side kWh integrator switched from left-rectangle to the **trapezoidal rule** (averages consecutive power samples) for lower error on ramping loads at the 10 s cadence. **Verified on the wire 2026-07-10** (real gateway telemetry shows `"relay":false`). |
 | `microlink` Tailscale client (Noise/ts2021, DERP, DISCO, STUN, WG) | 🟡 | **Demoted to legacy transport** (`AMPHIVE_DIRECT_MQTT=0`): works for full-cone NATs, but symmetric NAT defeats DISCO hole-punching (root-caused 2026-07-09) — the reason for the direct-MQTT pivot. Kept compilable for rollback/comparison. |
-| MQTT control loop + topic contract | ✅ | Matches backend topics. **Multi-plug since 2026-07-12** (TD#20, code-complete + builds clean, on-device verification pending): `main.c` now keeps a `plugs_mutex`-guarded per-plug slot table (each slot = DB `plug_id` + LAN IP + per-plug `tapo_plug_t` KLAP context + its own session/watchdog state) and `tapo_protocol.c` moved the KLAP session and energy integrator into that per-plug context, so a command for plug B can no longer actuate plug A and telemetry is published under each plug's own id. The gateway learns each plug's IP from the `local_ip` the backend now ships on ON/OFF (no on-device roster). (§3.50, TD#20, SEC §8.5) |
+| MQTT control loop + topic contract | ✅ | Matches backend topics. **Multi-plug (TD#20), shipped fw 1.7.1-direct, verified on-device 2026-07-12**: `main.c` keeps a `plugs_mutex`-guarded per-plug slot table (each slot = DB `plug_id` + LAN IP + per-plug `tapo_plug_t` KLAP context + its own session/watchdog state) and `tapo_protocol.c` moved the KLAP session and energy integrator into that per-plug context, so a command for plug B can no longer actuate plug A and telemetry is published under each plug's own id. The gateway learns each plug's IP from the `local_ip` the backend ships on ON/OFF (no on-device roster), and pre-registers its provisioned plug at boot so idle telemetry flows immediately (the liveness gate stays fresh — a 1.7.0 regression fixed in 1.7.1). **Single-plug charging regression verified end-to-end on the real gateway** (OTA to 1.7.1, billed session: 0.014 kWh → 0.07 coins, ledger reconciled); two-real-plug validation still needs a second unit. (§3.50, TD#20, SEC §8.5) |
 | Captive portal provisioning | ✅ | `AmpHive_Setup_XXXX` → NVS → reboot. **Locked down fw 1.6.0** (SEC §8.1 closed): WPA2 AP + `/save` gated by a per-device setup code (NVS-persisted, printed over serial for the unit label), AP-only interface, 10-min idle timeout → reboot/STA retry. **Live on the real gateway 2026-07-11** (OTA `1.5.0-direct` → signed `1.6.0-direct`, rollback cancelled); the locked portal itself is verified by construction/build only — exercising it needs physical access to force a Wi-Fi-loss fallback. |
 | Edge watchdogs (duration/energy/thermal/over-current) | ✅ | Thermal + over-current now use the plug's `overheat_status`/`overcurrent_status` flags (the P110 has no °C sensor) |
 | Over-current cutoff | ✅ | Enforced via the plug's `overcurrent_status` flag → local OFF + `OVERCURRENT_CUTOFF` alarm |
@@ -414,9 +414,16 @@ audit merged; statuses below are as of 2026-07-11.*
     plug's IP from the `local_ip` the backend now ships on ON/OFF
     (`send_plug_command(..., local_ip=…)`) — no on-device roster, keeping the
     per-gateway broker ACLs and the backend `plug.gateway_id` check intact
-    (SEC §8.5). The one physical gateway has a single plug, so multi-plug
-    behaviour is verified by construction + a clean ESP-IDF v5.3.3 build only;
-    driving two real plugs needs a second unit. (TD#20, SEC §8.5)
+    (SEC §8.5). **Regression caught + fixed on-device 2026-07-12:** the first
+    build (1.7.0) dropped the pre-multi-plug "poll the provisioned plug from
+    boot" behaviour, so a session-less gateway published no idle telemetry and
+    fell out of the liveness window (session starts 409'd "gateway offline").
+    Fixed in **1.7.1** by pre-registering the provisioned plug at boot
+    (provisional id `1`, corrected to the backend's real id by IP-adoption on the
+    first command). **Single-plug path then verified end-to-end on the real
+    gateway** (OTA `1.7.0`→`1.7.1`, telemetry resumed, billed session 0.014 kWh →
+    0.07 coins, balance reconciled). Two-real-plug behaviour still needs a second
+    unit. (TD#20, SEC §8.5)
 51. **[Resolved 2026-07-11] Sessions startable on OFFLINE/MAINTENANCE plugs.**
     `start_charging_session` now 409s on any non-`AVAILABLE` status (OCCUPIED
     keeps its "in use" message; OFFLINE/MAINTENANCE get "out of service").

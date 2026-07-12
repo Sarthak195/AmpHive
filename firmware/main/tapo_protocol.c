@@ -472,6 +472,23 @@ void tapo_plug_set_ip(tapo_plug_t *plug, const char *local_ip) {
     xSemaphoreGive(plug->mutex);
 }
 
+void tapo_plug_reassign_id(tapo_plug_t *plug, int new_plug_id) {
+    if (!plug || plug->plug_id == new_plug_id) return;
+    xSemaphoreTake(plug->mutex, portMAX_DELAY);
+    plug->plug_id = new_plug_id;
+    snprintf(plug->nvs_key, sizeof(plug->nvs_key), "wh_%d", new_plug_id);
+    /* Re-seat the energy integrator on the new plug's NVS key. Only ever called
+       on an idle provisional slot, so resetting the scale is safe — the next
+       session captures a fresh baseline at ON. */
+    plug->energy_wh = 0.0;
+    plug->energy_persisted_wh = 0.0;
+    plug->energy_last_tick = 0;
+    plug->energy_last_power_w = 0.0f;
+    energy_load_nvs(plug);
+    xSemaphoreGive(plug->mutex);
+    ESP_LOGI(TAG, "plug context reassigned to id %d (energy key %s)", new_plug_id, plug->nvs_key);
+}
+
 esp_err_t tapo_plug_set_power(tapo_plug_t *plug, bool turn_on) {
     if (!plug) return ESP_ERR_INVALID_ARG;
     if (!s_initialized) { ESP_LOGE(TAG, "tapo_init not called"); return ESP_FAIL; }

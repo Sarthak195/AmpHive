@@ -2,8 +2,10 @@
 
 > Quick setup? See [ESP32_CONNECTION.md](ESP32_CONNECTION.md) for build/flash/monitor commands and common connection issues.
 
-*Verified against `firmware/` on 2026-07-06; multi-plug refactor (TD#20)
-code-complete + builds clean 2026-07-12, on-device verification pending.*
+*Verified against `firmware/` on 2026-07-06; multi-plug refactor (TD#20) shipped
+in fw **1.7.1-direct** and **verified on-device 2026-07-12** (single-plug
+charging regression on the real gateway — see §3; two-real-plug validation still
+needs a second unit).*
 
 The gateway is an ESP-IDF application targeting **ESP32-S3-N16R8** (16 MB flash /
 8 MB PSRAM). Since fw **1.3.0** it connects **directly to the public broker over
@@ -100,6 +102,17 @@ are used by the KLAP driver's auth hash (see §4).
   roster; an empty `local_ip` falls back to the one provisioned `target_plug_ip`
   (single-plug back-compat). Slots are added, never freed at runtime, so the
   telemetry task can read them without holding the lock across a KLAP call.
+- **Boot-time provisional slot (fw 1.7.1).** At boot the gateway pre-registers a
+  slot for its provisioned `target_plug_ip` (provisional id `1`) so **idle
+  telemetry flows from boot** — this keeps the backend's session-start liveness
+  gate fresh before any command arrives. Without it a session-less gateway polls
+  nothing, publishes no telemetry, and drops out of the liveness window, so
+  session starts get a 409 "gateway offline" (a real regression the 1.7.0 build
+  shipped and the 2026-07-12 on-device test caught). The backend's **real**
+  `plug_id` is adopted into the same slot by matching IP on the first command for
+  that plug (`slot_get_locked` → `tapo_plug_reassign_id` re-points the NVS energy
+  key), so no duplicate slot is created when the real id differs from the
+  provisional one.
 - Commands parsed with **cJSON** (`"action":"ON"`/`"OFF"`/`"SET_INTERVAL"`, optional
   `max_duration_seconds` / `max_kwh` / `session_id` / `local_ip`, `interval_ms`);
   topic/data buffers 256/512 B with an oversized/fragmented-payload guard.

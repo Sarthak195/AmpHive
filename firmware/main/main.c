@@ -115,6 +115,14 @@ static int wifi_retry_count = 0;
 // context's *own* lock, so we never hold plugs_mutex across a network call.
 #define MAX_PLUGS SESSION_NVS_MAX_PLUGS
 
+// Provisional plug id for the boot-time slot on the provisioned target plug (see
+// app_main). It exists only so idle telemetry flows from boot and keeps the
+// backend's liveness gate fresh before any command; the backend's real plug id
+// is adopted into the same slot (by matching IP) on the first command for that
+// plug. Matches the pre-multi-plug default so a single-plug gateway whose plug
+// really is id 1 needs no correction.
+#define PROVISIONAL_PLUG_ID 1
+
 typedef struct {
     bool         in_use;
     int          plug_id;
@@ -165,6 +173,22 @@ static plug_slot_t *slot_get_locked(int plug_id, const char *local_ip) {
     if (!ip || !ip[0]) {
         ESP_LOGW(TAG, "No IP for plug %d (not in payload, no provisioned target)", plug_id);
         return NULL;
+    }
+    // No slot for this id yet. If an idle slot already drives this IP — the
+    // boot-time provisional slot (default id), or the plug previously known
+    // under a different id — adopt the real id into it rather than allocating a
+    // duplicate slot for the same physical plug. A mid-session slot is skipped
+    // (never steal an active session's id).
+    for (int i = 0; i < MAX_PLUGS; i++) {
+        if (plugs[i].in_use && !plugs[i].session_active &&
+            strncmp(plugs[i].local_ip, ip, sizeof(plugs[i].local_ip)) == 0) {
+            ESP_LOGI(TAG, "Adopting plug id %d into slot %d (was id %d @ %s)",
+                     plug_id, i, plugs[i].plug_id, ip);
+            plugs[i].plug_id = plug_id;
+            plugs[i].unauthorized_flagged = false;
+            tapo_plug_reassign_id(plugs[i].tapo, plug_id);
+            return &plugs[i];
+        }
     }
     for (int i = 0; i < MAX_PLUGS; i++) {
         if (plugs[i].in_use) continue;
@@ -1158,6 +1182,29 @@ void app_main(void) {
                still holds). Keep the original limits: worst case the session runs a
                little long, but the energy watchdog still trips. */
             s->start_time_s = now_seconds();
+        }
+        xSemaphoreGive(plugs_mutex);
+    }
+
+    // 5b. Pre-register the provisioned target plug so idle telemetry flows from
+    //     boot. Pre-multi-plug firmware always polled its one provisioned plug
+    //     from boot, which kept the backend's session-start liveness gate fresh;
+    //     the slot table only polls plugs learned from a command, so without this
+    //     a session-less gateway would publish no telemetry and drop out of the
+    //     liveness window until its first command. The provisional id is corrected
+    //     to the backend's real id (by matching IP) on the first command. Skipped
+    //     if crash recovery already covers this IP or the provisional id.
+    if (target_plug_ip[0] != '\0') {
+        xSemaphoreTake(plugs_mutex, portMAX_DELAY);
+        bool covered = (slot_find_locked(PROVISIONAL_PLUG_ID) != NULL);
+        for (int i = 0; i < MAX_PLUGS && !covered; i++) {
+            if (plugs[i].in_use &&
+                strncmp(plugs[i].local_ip, target_plug_ip, sizeof(plugs[i].local_ip)) == 0)
+                covered = true;
+        }
+        if (!covered && slot_get_locked(PROVISIONAL_PLUG_ID, target_plug_ip)) {
+            ESP_LOGI(TAG, "Pre-registered provisioned plug @ %s (provisional id %d)",
+                     target_plug_ip, PROVISIONAL_PLUG_ID);
         }
         xSemaphoreGive(plugs_mutex);
     }

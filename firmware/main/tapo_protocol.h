@@ -77,6 +77,15 @@ tapo_plug_t *tapo_plug_create(int plug_id, const char *local_ip);
 void tapo_plug_set_ip(tapo_plug_t *plug, const char *local_ip);
 
 /**
+ * @brief Re-key a plug context to a new DB plug id.
+ *
+ * Adopts the backend's real plug id into a boot-time provisional slot (see
+ * main.c) and re-points the NVS energy-meter key (`wh_<plug_id>`). Only call on
+ * an idle (session-less) context — it re-seats the energy integrator.
+ */
+void tapo_plug_reassign_id(tapo_plug_t *plug, int new_plug_id);
+
+/**
  * @brief Turn a plug ON or OFF (KLAP set_device_info).
  * @return ESP_OK on success
  */

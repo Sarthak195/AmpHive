@@ -237,9 +237,10 @@ been fixed by the 2026-07-08…11 work — see the shipped sections below).*
 
 ## Long term — productionization
 
-- [x] **[2026-07-06 audit] Multi-plug ESP32 gateway support** (2026-07-12,
-      **code-complete + builds clean, on-device verify pending**). The firmware
-      no longer drives a single plug: `main.c` keeps a `plugs_mutex`-guarded
+- [x] **[2026-07-06 audit] Multi-plug ESP32 gateway support** (shipped fw
+      **1.7.1-direct**, **verified on-device 2026-07-12** — single-plug charging
+      regression on the real gateway; two-real-plug test still needs a second
+      unit). The firmware no longer drives a single plug: `main.c` keeps a `plugs_mutex`-guarded
       per-plug slot table (each slot = DB `plug_id` + LAN IP + a per-plug
       `tapo_plug_t` KLAP context + its own session/watchdog state), and
       `tapo_protocol.c` moved the KLAP session + energy integrator into that
