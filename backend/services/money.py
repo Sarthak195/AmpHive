@@ -37,3 +37,25 @@ def to_money(value) -> Decimal:
     if not isinstance(value, Decimal):
         value = Decimal(str(value))
     return value.quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
+
+
+def energy_cost(energy_kwh, rate_coins_per_kwh) -> Decimal:
+    """Coins owed for ``energy_kwh`` at ``rate_coins_per_kwh`` (coins/kWh), as
+    money-safe ``Decimal``.
+
+    ``rate_coins_per_kwh`` is typically a ``Decimal`` already (a
+    ``Tariff.price_per_kwh`` / ``ChargingSession.rate_coins_per_kwh``
+    snapshot) but may also be a bare float/str (the legacy ``COINS_PER_KWH``
+    env fallback) — it is normalised via :func:`to_money` first so the
+    multiplication never mixes a raw float with a ``Decimal`` (see module
+    docstring: "energy × rate" is exactly the case that must not skip
+    ``to_money``).
+
+    ``energy_kwh`` is deliberately **not** rounded before the multiply — only
+    the final product is quantized to 2dp. Rounding the energy operand first
+    would throw away precision the final rounding is supposed to see (e.g.
+    0.333 kWh × 5.00 = 1.665 → 1.67, not 0.33 × 5.00 = 1.65).
+    """
+    rate = to_money(rate_coins_per_kwh)
+    energy = Decimal(str(energy_kwh))
+    return to_money(energy * rate)

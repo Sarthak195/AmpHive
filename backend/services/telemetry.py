@@ -17,10 +17,18 @@ import asyncio
 import os
 import time
 from dataclasses import dataclass, field, asdict
-from typing import Dict, Optional, AsyncGenerator
+from decimal import Decimal
+from typing import Dict, Optional, AsyncGenerator, Union
+
+from backend.services.money import energy_cost
 
 # Charging rate: coins deducted per kWh consumed during a session.
 # Default 5.0 means 1 kWh costs 5 coins (= ₹5 at the default 1:1 coin:rupee rate).
+# This is now only the LAST link in the per-plug tariff fallback chain (see
+# services/pricing.py resolve_rate_for_plug) — TelemetryStore.start_session()
+# is passed the resolved+snapshotted per-session rate and only falls back to
+# this env default when no rate was supplied (legacy callers / no tariff
+# configured anywhere in the chain).
 COINS_PER_KWH = float(os.getenv("COINS_PER_KWH", "5.0"))
 
 # A live telemetry snapshot older than this (seconds) is flagged `is_stale` in
@@ -68,6 +76,11 @@ class TelemetryStore:
             cls._instance._session_start_times: Dict[int, float] = {}
             cls._instance._intervals: Dict[int, int] = {}
             cls._instance._active_listeners: Dict[int, int] = {}
+            # Per-plug coins-per-kWh rate for the ACTIVE session's live cost_coins
+            # calc, snapshotted at start_session() (services/pricing.py
+            # resolve_rate_for_plug via routers/sessions.py). Cleared in
+            # end_session() so a reused plug_id can't inherit a stale rate.
+            cls._instance._session_rates: Dict[int, Decimal] = {}
         return cls._instance
 
     def increment_listeners(self, plug_id: int) -> int:
@@ -103,11 +116,14 @@ class TelemetryStore:
         SSE consumers.
 
         If cost_coins is not provided, it is auto-calculated from
-        energy_kwh * COINS_PER_KWH.
+        energy_kwh * this plug's snapshotted per-session rate (see
+        start_session), falling back to the global COINS_PER_KWH env default
+        when no rate was snapshotted for this plug.
         """
         # Auto-calculate cost if not explicitly provided
         if cost_coins is None:
-            cost_coins = round(energy_kwh * COINS_PER_KWH, 2)
+            rate = self._session_rates.get(plug_id, COINS_PER_KWH)
+            cost_coins = float(energy_cost(energy_kwh, rate))
 
         # Calculate session duration from start time
         if plug_id not in self._session_start_times:
@@ -131,9 +147,22 @@ class TelemetryStore:
         if plug_id in self._events:
             self._events[plug_id].set()
 
-    def start_session(self, plug_id: int) -> None:
-        """Mark the start of a new charging session for a plug."""
+    def start_session(self, plug_id: int, rate_coins_per_kwh: Optional[Union[Decimal, float]] = None) -> None:
+        """Mark the start of a new charging session for a plug.
+
+        `rate_coins_per_kwh` is the rate already resolved + snapshotted onto
+        the session row (services/pricing.py resolve_rate_for_plug, called
+        from routers/sessions.py start_charging_session) — stored here so the
+        live cost_coins calc in update() bills at the SAME rate the session
+        will actually be charged at finalize time, not the global default.
+        Omitted (None) falls back to the global COINS_PER_KWH env default,
+        for legacy callers and tests that don't resolve a tariff.
+        """
         self._session_start_times[plug_id] = time.time()
+        if rate_coins_per_kwh is not None:
+            self._session_rates[plug_id] = rate_coins_per_kwh
+        elif plug_id in self._session_rates:
+            del self._session_rates[plug_id]
         self._data[plug_id] = TelemetrySnapshot(
             plug_id=plug_id, status="starting"
         )
@@ -144,6 +173,8 @@ class TelemetryStore:
         """Clean up session tracking when a session ends."""
         if plug_id in self._session_start_times:
             del self._session_start_times[plug_id]
+        if plug_id in self._session_rates:
+            del self._session_rates[plug_id]
         if plug_id in self._data:
             self._data[plug_id].status = "completed"
         if plug_id in self._events:

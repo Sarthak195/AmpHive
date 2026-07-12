@@ -92,6 +92,11 @@ class PlugResponse(BaseModel):
     # driver UI uses this to warn that a plug is unreachable before a start is
     # attempted, instead of only discovering it via a 409 at session start.
     gateway_online: bool = True
+    # The resolved coins-per-kWh rate this plug would bill a session at right
+    # now (services/pricing.py resolve_rate_for_plug: plug tariff -> group
+    # tariff -> tenant default -> the global COINS_PER_KWH env fallback).
+    # Always populated by the router; Optional only for schema forward-safety.
+    price_per_kwh: Optional[float] = None
 
 
 class GatewayEventResponse(BaseModel):
@@ -251,3 +256,31 @@ class CpoGroupUpdateRequest(BaseModel):
     name: Optional[str] = None
     is_public: Optional[bool] = None
     regenerate_access_code: bool = False
+
+
+# --- Tariff (per-CPO/per-site pricing) Schemas ---
+
+class CpoTariffCreateRequest(BaseModel):
+    """Create a new tariff (pricing plan) under the caller's tenant."""
+    name: str = Field(min_length=1, max_length=100)
+    # Coins per kWh. Inbound as float like other money-ish request fields
+    # (e.g. CreateOrderRequest.amount_inr) — the router normalizes it via
+    # services/money.to_money before it ever touches the Numeric(12,2) column.
+    price_per_kwh: float = Field(gt=0, le=1000)
+
+
+class CpoTariffUpdateRequest(BaseModel):
+    """Update an existing tariff's name and/or rate."""
+    name: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    price_per_kwh: Optional[float] = Field(default=None, gt=0, le=1000)
+
+
+class CpoTariffAssignRequest(BaseModel):
+    """
+    Assign or unassign the tariff that bills a plug / charger group / the
+    tenant default — the target is named by the URL path (plug_id, group_id,
+    or the tenant-default endpoint); this body only carries which tariff.
+    `tariff_id=None` clears the assignment (falls back to the next link in
+    the resolution chain — see services/pricing.py resolve_rate_for_plug).
+    """
+    tariff_id: Optional[int] = None

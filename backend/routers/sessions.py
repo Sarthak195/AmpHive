@@ -34,6 +34,7 @@ from backend.services.auth import (
     hash_password, verify_password,
 )
 from backend.services.money import ZERO_MONEY, to_money
+from backend.services.pricing import resolve_rate_for_plug
 from backend.services.rbac import require_role
 from backend.services.session_lifecycle import (
     check_and_speed_up_active_session, finalize_charging_session,
@@ -180,11 +181,19 @@ async def start_charging_session(
             detail="This charger's gateway is offline. Try again once it reconnects.",
         )
 
+    # Resolve the coins-per-kWh rate for this plug (plug's own tariff -> its
+    # group's tariff -> the tenant's default tariff -> the global
+    # COINS_PER_KWH env fallback) and SNAPSHOT it onto the session now, so a
+    # tariff edit or reassignment made mid-session never retroactively
+    # changes what this session bills (see services/pricing.py).
+    rate_coins_per_kwh = await resolve_rate_for_plug(db, plug)
+
     session = ChargingSession(
         tenant_id=gateway.tenant_id,
         user_id=user.id,
         plug_id=plug.id,
         status=SessionStatus.ACTIVE,
+        rate_coins_per_kwh=rate_coins_per_kwh,
     )
     db.add(session)
     plug.status = PlugStatus.OCCUPIED
@@ -218,8 +227,10 @@ async def start_charging_session(
             detail="Failed to publish start command to the gateway. The gateway may be offline.",
         )
 
-    # 5. Initialize the telemetry stream for this plug
-    state.telemetry_store.start_session(plug.id)
+    # 5. Initialize the telemetry stream for this plug, seeded with the same
+    #    snapshotted rate so the live cost_coins preview matches what
+    #    finalize_charging_session will actually bill.
+    state.telemetry_store.start_session(plug.id, rate_coins_per_kwh=rate_coins_per_kwh)
     await set_plug_telemetry_interval(db, plug.id, 1000)
 
     logger.info(
