@@ -55,7 +55,7 @@ const StatBox = ({ label, value, unit, colorVar = '--color-text-primary' }) => (
 const SessionMonitor = () => {
   const {
     sessionData, isActive, stopSession,
-    lastFrameAt, focusedStartedAt, alarms,
+    lastFrameAt, focusedStartedAt, focusedLimits, alarms,
   } = useSession();
   const { coins_per_kwh } = useConfig();
   const { balance } = useWallet();
@@ -126,6 +126,15 @@ const SessionMonitor = () => {
   const recentAlarm = (alarms || []).find(
     (a) => a.plug_id === plugId && (now - (a.received_at || 0)) < 120000
   );
+
+  // Charging-limit progress: this session's stop conditions (max_kwh /
+  // max_duration_seconds — user-chosen or the standard caps), which the
+  // backend auto-stops at. Presented like the low-balance warning above,
+  // but informational — it's an expected, driver-chosen outcome.
+  const limitMaxKwh = focusedLimits?.max_kwh;
+  const limitMaxDurationSec = focusedLimits?.max_duration_seconds;
+  const energyNum = Number(sessionData?.energy_kwh) || 0;
+  const hasLimit = isActive && (limitMaxKwh != null || limitMaxDurationSec != null);
 
   return (
     <div className="glass glass-panel flex flex-col gap-6 animate-fade-in">
@@ -242,6 +251,38 @@ const SessionMonitor = () => {
             Low balance — about <strong>{Math.max(0, remainingCoins).toFixed(1)}</strong> coins
             (≈ {Math.max(0, remainingCoins / rate).toFixed(2)} kWh) left. Charging will stop
             automatically when your wallet is used up.
+          </span>
+        </div>
+      )}
+
+      {/* Charging-limit progress ("0.42 / 1.00 kWh · stops automatically") */}
+      {hasLimit && (
+        <div
+          className="flex items-center gap-2"
+          style={{
+            padding: '0.75rem 1rem',
+            borderRadius: 'var(--radius-md)',
+            background: 'hsla(200, 80%, 50%, 0.10)',
+            border: '1px solid hsla(200, 80%, 50%, 0.35)',
+            color: 'var(--color-text-secondary)',
+            fontSize: '0.9rem',
+          }}
+        >
+          <span style={{ fontSize: '1.1rem' }}>🎯</span>
+          <span>
+            Limit:{' '}
+            {limitMaxKwh != null && (
+              <strong style={{ color: 'var(--color-text-primary)' }}>
+                {energyNum.toFixed(2)} / {Number(limitMaxKwh).toFixed(2)} kWh
+              </strong>
+            )}
+            {limitMaxKwh != null && limitMaxDurationSec != null && ' · '}
+            {limitMaxDurationSec != null && (
+              <strong style={{ color: 'var(--color-text-primary)' }}>
+                {formatTime(elapsedSec)} / {formatTime(limitMaxDurationSec)}
+              </strong>
+            )}
+            {' · stops automatically'}
           </span>
         </div>
       )}

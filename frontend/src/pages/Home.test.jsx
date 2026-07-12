@@ -243,6 +243,120 @@ describe('Home — private/public sections + map at the bottom', () => {
   });
 });
 
+describe('Home — optional charging limit at start', () => {
+  // Lobby Plug (id 1) carries its own resolved tariff, so a ₹/coins limit
+  // typed against it must convert at 10 coins/kWh, not the global 5.
+  const PRICED_PLUGS = PLUGS.map((p) =>
+    p.id === 1 ? { ...p, price_per_kwh: 10 } : p
+  );
+
+  let startSession;
+
+  const renderWithSessionRoute = () =>
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <Routes>
+          <Route path="/" element={<Home />} />
+          <Route path="/session" element={<div>session page</div>} />
+        </Routes>
+      </MemoryRouter>
+    );
+
+  beforeEach(() => {
+    useAuth.mockReturnValue({ user: DRIVER });
+    api.get.mockResolvedValue(PRICED_PLUGS);
+    startSession = vi.fn().mockResolvedValue({ session_id: 9 });
+    useSession.mockReturnValue({
+      startSession,
+      activeSessions: [],
+      switchSession: vi.fn(),
+      error: null,
+      socket: null,
+    });
+  });
+
+  const typeAndStart = async (plugIdText) => {
+    await userEvent.type(screen.getByPlaceholderText('Enter Plug ID (e.g. 1)'), plugIdText);
+    await userEvent.click(screen.getByRole('button', { name: 'Start' }));
+  };
+
+  it('is collapsed by default and sends NO limit when untouched', async () => {
+    renderWithSessionRoute();
+    await screen.findByText('Lobby Plug');
+
+    expect(screen.getByRole('button', { name: /Set a charging limit/ }))
+      .toHaveAttribute('aria-expanded', 'false');
+
+    await typeAndStart('1');
+    expect(startSession).toHaveBeenCalledWith('1', null);
+  });
+
+  it('sends max_kwh for a kWh preset', async () => {
+    renderWithSessionRoute();
+    await screen.findByText('Lobby Plug');
+
+    await userEvent.click(screen.getByRole('button', { name: /Set a charging limit/ }));
+    await userEvent.click(screen.getByRole('button', { name: '1 kWh' }));
+    await typeAndStart('1');
+
+    expect(startSession).toHaveBeenCalledWith('1', { max_kwh: 1 });
+  });
+
+  it('sends max_duration_seconds for a time preset', async () => {
+    renderWithSessionRoute();
+    await screen.findByText('Lobby Plug');
+
+    await userEvent.click(screen.getByRole('button', { name: /Set a charging limit/ }));
+    await userEvent.click(screen.getByRole('button', { name: 'Time' }));
+    await userEvent.click(screen.getByRole('button', { name: '30 min' }));
+    await typeAndStart('1');
+
+    expect(startSession).toHaveBeenCalledWith('1', { max_duration_seconds: 1800 });
+  });
+
+  it("converts a ₹/coins limit at the target plug's own price_per_kwh", async () => {
+    renderWithSessionRoute();
+    await screen.findByText('Lobby Plug');
+
+    await userEvent.click(screen.getByRole('button', { name: /Set a charging limit/ }));
+    await userEvent.click(screen.getByRole('button', { name: '₹ / coins' }));
+    await userEvent.click(screen.getByRole('button', { name: '₹50' }));
+
+    // The derived-kWh preview uses plug 1's 10 coins/kWh tariff…
+    await userEvent.type(screen.getByPlaceholderText('Enter Plug ID (e.g. 1)'), '1');
+    expect(screen.getByText(/≈ 5\.00 kWh at 10 coins\/kWh/)).toBeInTheDocument();
+
+    // …and so does the payload: ₹50 / 10 = 5 kWh, not ₹50 / 5.
+    await userEvent.click(screen.getByRole('button', { name: 'Start' }));
+    expect(startSession).toHaveBeenCalledWith('1', { max_kwh: 5 });
+  });
+
+  it('falls back to the config coins_per_kwh for a plug without a known price', async () => {
+    renderWithSessionRoute();
+    await screen.findByText('Lobby Plug');
+
+    await userEvent.click(screen.getByRole('button', { name: /Set a charging limit/ }));
+    await userEvent.click(screen.getByRole('button', { name: '₹ / coins' }));
+    await userEvent.click(screen.getByRole('button', { name: '₹25' }));
+    // Plug 999 isn't in the list → config rate (5 coins/kWh) → 5 kWh.
+    await typeAndStart('999');
+
+    expect(startSession).toHaveBeenCalledWith('999', { max_kwh: 5 });
+  });
+
+  it('applies the chosen limit to a plug-card click too', async () => {
+    renderWithSessionRoute();
+    await screen.findByText('Lobby Plug');
+
+    await userEvent.click(screen.getByRole('button', { name: /Set a charging limit/ }));
+    await userEvent.click(screen.getByRole('button', { name: '2 kWh' }));
+    // Card click starts Lobby Plug (available + gateway online).
+    await userEvent.click(screen.getByText('Lobby Plug'));
+
+    expect(startSession).toHaveBeenCalledWith(1, { max_kwh: 2 });
+  });
+});
+
 describe('Home — "notify me when free" bell', () => {
   beforeEach(() => {
     useAuth.mockReturnValue({ user: DRIVER });

@@ -33,6 +33,17 @@ AUTO_STOP_ON_BALANCE_EXHAUSTED = os.getenv("AUTO_STOP_ON_BALANCE_EXHAUSTED", "tr
 # monitor warning, but reaches drivers who are not watching the app.
 LOW_BALANCE_WARN_FRACTION = float(os.getenv("LOW_BALANCE_WARN_FRACTION", "0.8"))
 
+# [Session limits] Backend mirror of the per-session stop conditions
+# (ChargingSession.max_kwh / max_duration_seconds, snapshotted from the
+# start request): auto-stop once the persisted energy or the elapsed time
+# reaches the session's own limit. The firmware enforces the same limits
+# locally (relay OFF) but publishes NO alarm on those cutoffs, so without
+# this mirror the session would linger ACTIVE (still holding the plug
+# OCCUPIED) until the staleness reaper. Same shape as
+# AUTO_STOP_ON_BALANCE_EXHAUSTED above; env-toggleable, on by default. The
+# session reaper carries a duration backstop under the same env var.
+AUTO_STOP_ON_LIMITS = os.getenv("AUTO_STOP_ON_LIMITS", "true").lower() in ("1", "true", "yes")
+
 # Fault console: a hardware SAFETY cutoff (THERMAL_CUTOFF/OVERCURRENT_CUTOFF)
 # has already force-OFF'd the plug locally in firmware — auto-flip it to
 # MAINTENANCE so a new session can't be *started* on it (session-start already
@@ -628,11 +639,14 @@ class MQTTManager:
         # Import here to avoid circular imports at module level
         from backend.database.models import Plug, ChargingSession, SessionStatus
 
-        # Captured for the post-commit balance check (see below).
+        # Captured for the post-commit balance/limit checks (see below).
         updated_session_id: Optional[int] = None
         updated_user_id: Optional[int] = None
         updated_rate: Optional[Decimal] = None
         updated_hold_coins: Optional[Decimal] = None
+        updated_max_kwh: Optional[float] = None
+        updated_max_duration: Optional[int] = None
+        updated_started_at: Optional[datetime] = None
 
         try:
             async with self.db_session_factory() as session:
@@ -689,6 +703,9 @@ class MQTTManager:
                     updated_user_id = active_session.user_id
                     updated_rate = active_session.rate_coins_per_kwh
                     updated_hold_coins = active_session.hold_coins
+                    updated_max_kwh = active_session.max_kwh
+                    updated_max_duration = active_session.max_duration_seconds
+                    updated_started_at = active_session.started_at
 
                 await session.commit()
         except Exception as e:
@@ -706,6 +723,18 @@ class MQTTManager:
             await self._maybe_auto_stop_on_exhaustion(
                 updated_session_id, updated_user_id, kwh, updated_rate,
                 updated_hold_coins,
+            )
+            # [Session limits] User-set stop conditions, mirrored backend-side
+            # (see _maybe_auto_stop_on_limits). Sequenced AFTER the exhaustion
+            # check deliberately: if both trip on the same frame the
+            # exhaustion path finalizes first (its reason wins — revenue
+            # protection) and this call's finalize re-check returns None; if
+            # a limit fires here instead, the earlier exhaustion call was a
+            # covered no-op (at most a low-balance warning) — either way the
+            # session settles exactly once via the shared finalize row lock.
+            await self._maybe_auto_stop_on_limits(
+                updated_session_id, updated_user_id, kwh,
+                updated_max_kwh, updated_max_duration, updated_started_at,
             )
 
     async def _maybe_auto_stop_on_exhaustion(self, session_id: int, user_id: int, energy_kwh: float,
@@ -809,6 +838,73 @@ class MQTTManager:
         except Exception:
             logger.exception(
                 "Balance-exhaustion auto-stop failed",
+                extra={"session_id": session_id, "user_id": user_id},
+            )
+
+    async def _maybe_auto_stop_on_limits(self, session_id: int, user_id: int, energy_kwh: float,
+                                          max_kwh: Optional[float] = None,
+                                          max_duration_seconds: Optional[int] = None,
+                                          started_at: Optional[datetime] = None):
+        """[Session limits] Finalize an ACTIVE session once it reaches ITS OWN
+        stop conditions (ChargingSession.max_kwh / max_duration_seconds,
+        snapshotted from the start request — routers/sessions.py
+        start_charging_session).
+
+        Backend mirror of the firmware's local watchdogs: the gateway gets
+        the same limits in the MQTT ON payload and cuts the relay when they
+        trip, but publishes NO alarm for those cutoffs — so without this
+        check the session would sit ACTIVE (plug pinned OCCUPIED, driver
+        unbilled) until the staleness reaper. Telemetry arrives ~every 1 s
+        during an active session, so this stops within ~a second of crossing
+        the limit — usually BEFORE the firmware cutoff even matters.
+
+        Same contract as _maybe_auto_stop_on_exhaustion above: runs in its
+        own txn after the telemetry persist commit, goes through the shared
+        finalize path (row-locked ACTIVE re-check → race-safe against a
+        concurrent user stop / reaper / the exhaustion auto-stop), and is a
+        no-op when disabled or when no limit has been reached. The energy
+        limit is checked first: when both trip on one frame, "energy limit
+        reached" is the truer reason (energy is measured; elapsed time is
+        merely implied by it). NULL limits (legacy sessions predating the
+        columns) disable the corresponding check — matching their pre-limit
+        behavior exactly. A naive legacy started_at is treated as UTC (same
+        convention as gateway_is_live / finalize_charging_session)."""
+        if not AUTO_STOP_ON_LIMITS or not self.db_session_factory:
+            return
+
+        reason: Optional[str] = None
+        if max_kwh is not None and energy_kwh >= max_kwh:
+            reason = "auto-stopped: energy limit reached"
+        elif max_duration_seconds is not None and started_at is not None:
+            started = started_at
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=timezone.utc)
+            elapsed_sec = (datetime.now(timezone.utc) - started).total_seconds()
+            if elapsed_sec >= max_duration_seconds:
+                reason = "auto-stopped: time limit reached"
+        if reason is None:
+            return
+
+        try:
+            from backend.services.session_lifecycle import finalize_charging_session
+            async with self.db_session_factory() as db:
+                outcome = await finalize_charging_session(db, session_id, reason=reason)
+            if outcome is not None:
+                logger.info(
+                    "Auto-stopped session: user-set charging limit reached",
+                    extra={
+                        "session_id": session_id,
+                        "user_id": user_id,
+                        "energy_kwh": outcome["energy_kwh"],
+                        "coins_spent": outcome["coins_spent"],
+                        "max_kwh": max_kwh,
+                        "max_duration_seconds": max_duration_seconds,
+                        "reason": reason,
+                    },
+                )
+        except Exception:
+            logger.exception(
+                "Charging-limit auto-stop failed",
                 extra={"session_id": session_id, "user_id": user_id},
             )
 

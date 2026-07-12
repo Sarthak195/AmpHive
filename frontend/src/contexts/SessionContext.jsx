@@ -46,6 +46,11 @@ export const SessionProvider = ({ children }) => {
   // ISO start time of the focused session, so the elapsed timer ticks smoothly
   // client-side instead of freezing between (or after losing) telemetry frames.
   const [focusedStartedAt, setFocusedStartedAt] = useState(null);
+  // The focused session's stop conditions ({ max_kwh, max_duration_seconds },
+  // both nullable) — the backend auto-stops at these, and the monitor shows
+  // progress toward them ("0.42 / 1.00 kWh · stops automatically"). Comes
+  // from the start response or from /api/sessions/active on restore/switch.
+  const [focusedLimits, setFocusedLimits] = useState(null);
   // Recent gateway alarms (safety cutoff / unauthorized-on / OTA), newest first.
   const [alarms, setAlarms] = useState([]);
   // The final billing summary from the most recent stop, shown as a receipt.
@@ -127,6 +132,14 @@ export const SessionProvider = ({ children }) => {
     setIsActive(true);
     setReceipt(null);
     setFocusedStartedAt(session.started_at || new Date().toISOString());
+    setFocusedLimits(
+      session.max_kwh != null || session.max_duration_seconds != null
+        ? {
+            max_kwh: session.max_kwh ?? null,
+            max_duration_seconds: session.max_duration_seconds ?? null,
+          }
+        : null
+    );
     setLastFrameAt(null);
     setSessionData({
       plug_id: session.plug_id,
@@ -140,18 +153,31 @@ export const SessionProvider = ({ children }) => {
     });
   }, []);
 
-  const startSession = useCallback(async (plugId) => {
+  // Optional `limits`: { max_kwh?, max_duration_seconds? } — a user-chosen
+  // stop condition ("only charge 1 kWh"). Keys are only sent when set, so a
+  // driver who picks no limit gets the backend defaults exactly as before.
+  const startSession = useCallback(async (plugId, limits = null) => {
     setError(null);
     try {
       // Call backend to start session
-      const result = await api.post('/api/sessions/start', { plug_id: parseInt(plugId) });
+      const payload = { plug_id: parseInt(plugId) };
+      if (limits?.max_kwh != null) payload.max_kwh = limits.max_kwh;
+      if (limits?.max_duration_seconds != null) payload.max_duration_seconds = limits.max_duration_seconds;
+      const result = await api.post('/api/sessions/start', payload);
       const startedAt = new Date().toISOString();
+      // The backend echoes the EFFECTIVE limits (user-chosen or defaults);
+      // fall back to what we sent for older backends that don't echo yet.
+      const effectiveLimits = {
+        max_kwh: result.max_kwh ?? limits?.max_kwh ?? null,
+        max_duration_seconds: result.max_duration_seconds ?? limits?.max_duration_seconds ?? null,
+      };
       setActiveSessions(prev => [
         {
           session_id: result.session_id,
           plug_id: result.plug_id,
           plug_name: result.plug_name,
           started_at: startedAt,
+          ...effectiveLimits,
         },
         ...prev,
       ]);
@@ -159,6 +185,11 @@ export const SessionProvider = ({ children }) => {
       setIsActive(true);
       setReceipt(null);
       setFocusedStartedAt(startedAt);
+      setFocusedLimits(
+        effectiveLimits.max_kwh != null || effectiveLimits.max_duration_seconds != null
+          ? effectiveLimits
+          : null
+      );
       setLastFrameAt(null);
       setSessionData(null);
       return result;
@@ -200,6 +231,7 @@ export const SessionProvider = ({ children }) => {
     setSessionId(null);
     setIsActive(false);
     setFocusedStartedAt(null);
+    setFocusedLimits(null);
     setLastFrameAt(null);
     setReceipt(null);
     setError(null);
@@ -233,7 +265,7 @@ export const SessionProvider = ({ children }) => {
     <SessionContext.Provider value={{
       socket,
       activeSessions, sessionData, sessionId, isActive, error,
-      lastFrameAt, focusedStartedAt, alarms, receipt,
+      lastFrameAt, focusedStartedAt, focusedLimits, alarms, receipt,
       startSession, stopSession, clearSession, switchSession, dismissReceipt,
     }}>
       {children}

@@ -296,6 +296,11 @@ async def finalize_charging_session(
         n_title, n_severity = "Charging ended — charger connection lost", "warning"
     elif reason and reason.startswith("safety cutoff"):
         n_title, n_severity = "Charging stopped for safety", "critical"
+    elif reason and "limit reached" in reason:
+        # [Session limits] A user-set stop condition (energy/time) — an
+        # expected, driver-chosen outcome, so informational; the specific
+        # limit type rides into the body via the reason string below.
+        n_title, n_severity = "Charging stopped — your limit was reached", "info"
     else:
         n_title, n_severity = "Charging complete", "info"
     minutes = (duration_sec or 0) // 60
@@ -303,7 +308,7 @@ async def finalize_charging_session(
         f"{plug.name}: {final_energy:.3f} kWh in {minutes} min — "
         f"{actual_debit:.2f} coins charged, {new_balance:.2f} left."
     )
-    if n_severity == "critical" and reason:
+    if reason and (n_severity == "critical" or "limit reached" in reason):
         n_body += f" ({reason})"
     await notify(
         session.user_id,
@@ -334,5 +339,10 @@ async def finalize_charging_session(
         "duration_sec": duration_sec,
         "started_at": session.started_at.isoformat() if session.started_at else None,
         "ended_at": session.ended_at.isoformat() if session.ended_at else None,
+        # [Session limits] The stop conditions this session ran with (NULL
+        # for legacy pre-limit sessions) — surfaced on the receipt so the UI
+        # can say which limit an auto-stop hit, alongside `reason`.
+        "max_kwh": session.max_kwh,
+        "max_duration_seconds": session.max_duration_seconds,
         "reason": reason,
     }

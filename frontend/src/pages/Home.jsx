@@ -40,6 +40,8 @@ import { useSession } from '../contexts/SessionContext';
 import { useConfig } from '../contexts/ConfigContext';
 import api from '../api/client';
 import MapComponent from '../components/MapComponent';
+import ChargeLimitControl from '../components/ChargeLimitControl';
+import { computeChargeLimits } from '../utils/chargeLimits';
 import { AVAILABILITY_CSS_VAR, AVAILABILITY_LABELS, AVAILABILITY_STATES, getPlugAvailability } from '../utils/plugAvailability';
 
 // Sentinel value for the group filter's "no group assigned" option — distinct
@@ -104,6 +106,10 @@ const Home = () => {
   const [loadingPlugs, setLoadingPlugs] = useState(false);
   const [startError, setStartError] = useState('');
   const [starting, setStarting] = useState(false);
+  // Optional charging-limit spec from ChargeLimitControl ({ mode, value } |
+  // null). Kept raw here: the coins→kWh conversion happens at start time
+  // with the rate of the plug actually targeted (see rateForPlug below).
+  const [limitSpec, setLimitSpec] = useState(null);
 
   // Map/list filters (shared state — both the list and MapComponent's
   // markers read from the same filteredPlugs).
@@ -231,6 +237,15 @@ const Home = () => {
   const privateCounts = useMemo(() => countByAvailability(privatePlugs), [privatePlugs]);
   const publicCounts = useMemo(() => countByAvailability(publicPlugs), [publicPlugs]);
 
+  // Coins-per-kWh for a given plug id: the plug's own resolved price when we
+  // know it (shown on its card), else the global config rate. Drives the
+  // ₹/coins → kWh conversion for the charging-limit control.
+  const rateForPlug = (pid) => {
+    const plug = plugs.find((p) => String(p.id) === String(pid));
+    const price = Number(plug?.price_per_kwh);
+    return price > 0 ? price : (coins_per_kwh || 5);
+  };
+
   const handleStartSession = async (e, targetPlugId = null) => {
     if (e) e.preventDefault();
     const pid = targetPlugId || plugId.trim();
@@ -240,7 +255,10 @@ const Home = () => {
     setStarting(true);
 
     try {
-      await startSession(pid);
+      // Optional user-set stop condition — converted here (not in the
+      // control) so a coins cap uses the rate of the plug actually being
+      // started. null → nothing sent → backend defaults apply.
+      await startSession(pid, computeChargeLimits(limitSpec, rateForPlug(pid)));
       navigate('/session');
     } catch (err) {
       setStartError(err.message);
@@ -485,6 +503,14 @@ const Home = () => {
               {starting ? '...' : 'Start'}
             </button>
           </form>
+
+          {/* Optional stop condition — kWh / time / ₹ coins ("only charge
+              1 kWh"). Collapsed by default; enforced backend-side at the
+              limit (mirrored by the firmware's local watchdogs). */}
+          <ChargeLimitControl
+            rate={rateForPlug(plugId.trim())}
+            onChange={setLimitSpec}
+          />
 
           {(startError || sessionError) && (
             <div className="error-text mt-2">{startError || sessionError}</div>
