@@ -1471,20 +1471,26 @@ async def cpo_request_payout(
         f"gross={gross} fee={fee} net={net} by {user.email}"
     )
 
+    # Snapshot the response BEFORE the audit attempt: try_record_audit's
+    # failure path rolls the session back, which expires `payout` — touching
+    # an expired attribute on an AsyncSession afterwards raises
+    # MissingGreenlet (see the session-state caveat on try_record_audit).
+    response = _payout_response(payout)
+
     await try_record_audit(
         db,
         tenant_id=tenant_id,
         actor_user_id=user.id,
         action="payout.request",
         target_type="payout",
-        target_id=payout.id,
+        target_id=response["id"],
         detail=(
             f"window=[{watermark.isoformat()}, {now.isoformat()}), "
             f"gross={gross}, fee={fee}, net={net}"
         ),
     )
 
-    return _payout_response(payout)
+    return response
 
 
 @router.get("/api/cpo/payouts")
@@ -1534,23 +1540,27 @@ async def cpo_mark_payout_paid(
 
     logger.info(f"CPO payout {payout.id} marked PAID by admin {user.email}")
 
+    # Response snapshot BEFORE the audit attempt — a failed audit write rolls
+    # the session back and expires `payout` (see try_record_audit's caveat).
+    response = _payout_response(payout)
+
     # Audited into the PAYOUT's tenant (the admin actor has no tenant of
     # their own), so the CPO sees the settlement of its money in its own
     # GET /api/cpo/audit trail.
     await try_record_audit(
         db,
-        tenant_id=payout.tenant_id,
+        tenant_id=response["tenant_id"],
         actor_user_id=user.id,
         action="payout.mark_paid",
         target_type="payout",
-        target_id=payout.id,
+        target_id=response["id"],
         detail=(
-            f"window=[{payout.period_start.isoformat()}, "
-            f"{payout.period_end.isoformat()}), net={payout.net_coins}"
+            f"window=[{response['period_start']}, "
+            f"{response['period_end']}), net={response['net_coins']:.2f}"
         ),
     )
 
-    return _payout_response(payout)
+    return response
 
 
 @router.post("/api/cpo/payouts/{payout_id}/cancel")
@@ -1586,22 +1596,26 @@ async def cpo_cancel_payout(
 
     logger.info(f"CPO payout {payout.id} cancelled by {user.email}")
 
-    # payout.tenant_id (not user.tenant_id): an admin canceller may have no
-    # tenant — the row must land in the owning CPO's audit trail either way.
+    # Response snapshot BEFORE the audit attempt — a failed audit write rolls
+    # the session back and expires `payout` (see try_record_audit's caveat).
+    response = _payout_response(payout)
+
+    # The payout's tenant_id (not user.tenant_id): an admin canceller may have
+    # no tenant — the row must land in the owning CPO's audit trail either way.
     await try_record_audit(
         db,
-        tenant_id=payout.tenant_id,
+        tenant_id=response["tenant_id"],
         actor_user_id=user.id,
         action="payout.cancel",
         target_type="payout",
-        target_id=payout.id,
+        target_id=response["id"],
         detail=(
-            f"window=[{payout.period_start.isoformat()}, "
-            f"{payout.period_end.isoformat()}), net={payout.net_coins}"
+            f"window=[{response['period_start']}, "
+            f"{response['period_end']}), net={response['net_coins']:.2f}"
         ),
     )
 
-    return _payout_response(payout)
+    return response
 
 
 # ===========================================================================

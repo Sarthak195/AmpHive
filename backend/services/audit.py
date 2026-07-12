@@ -69,11 +69,20 @@ async def try_record_audit(
     (record_audit) and commits it in its own transaction on the same
     session — an audit failure (bad data, a transient DB error) must never
     undo or fail the admin action that already succeeded, so any exception
-    here is caught and the session rolled back rather than propagated.
+    here is caught and the session rolled back rather than propagated (the
+    rollback itself is guarded too — nothing on this path may raise).
 
     Not swallowed silently: a failure is logged at ERROR (with traceback) so
     a broken audit path is visible in the server logs instead of just quietly
     losing accountability records.
+
+    Session-state caveat for callers: the failure-path rollback EXPIRES every
+    ORM instance in the session (SQLAlchemy expires all non-expunged objects
+    on rollback — expire_on_commit=False doesn't apply to rollback), and
+    touching an expired attribute on an AsyncSession raises MissingGreenlet
+    instead of lazily refreshing. Build/snapshot any response data taken from
+    ORM objects BEFORE calling this function (see the payout endpoints in
+    routers/cpo.py), or re-fetch it afterwards.
     """
     try:
         await record_audit(
@@ -87,8 +96,16 @@ async def try_record_audit(
         )
         await db.commit()
     except Exception:
+        # Roll back FIRST: the failed commit leaves the transaction aborted,
+        # and any later use of this session by the caller would error until
+        # it's rolled back. Guarded so even a rollback failure (e.g. the
+        # connection died) can't propagate into — and fail — the admin action
+        # that already committed.
+        try:
+            await db.rollback()
+        except Exception:
+            logger.exception("Audit rollback failed; session may be unusable")
         logger.exception(
             f"Audit log write failed (non-fatal, action not affected): "
             f"action={action} target={target_type}:{target_id} tenant={tenant_id}"
         )
-        await db.rollback()

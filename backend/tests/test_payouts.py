@@ -367,6 +367,28 @@ def _cpo_user(tenant_id, user_id, role=UserRole.CPO):
     return u
 
 
+async def _seed_admin(factory):
+    """A real platform-admin users row (no tenant), returning its id. Audit
+    rows FK actor_user_id -> users.id, so a test actor must actually exist —
+    a fabricated id makes every audit write FK-violate (which is exactly what
+    test_failed_audit_write_never_breaks_the_action_or_session exercises on
+    purpose; every other test should model production, where actors are real
+    authenticated users)."""
+    from backend.database.models import User
+
+    n = next(_seed_counter)
+    async with factory() as db:
+        admin = User(
+            email=f"admin-{n}@example.com",
+            hashed_password="x",
+            full_name="Platform Admin",
+            role=UserRole.ADMIN,
+        )
+        db.add(admin)
+        await db.commit()
+        return admin.id
+
+
 async def _audit_rows(factory, tenant_id, action):
     """Persisted AuditLog rows for one tenant + action (DB-gated tier)."""
     from sqlalchemy import and_, select
@@ -534,7 +556,10 @@ async def test_mark_paid_transitions_then_conflicts_on_replay(factory):
     now = datetime.now(timezone.utc)
     await _seed_session(factory, tenant_id, "30.00", SessionStatus.COMPLETED, ended_at=now - timedelta(hours=1))
     cpo_user = _cpo_user(tenant_id, user_id)
-    admin_user = _cpo_user(None, 999, role=UserRole.ADMIN)
+    # A real users row, not a fabricated id: mark_paid's audit write FKs
+    # actor_user_id -> users.id (see _seed_admin's docstring).
+    admin_id = await _seed_admin(factory)
+    admin_user = _cpo_user(None, admin_id, role=UserRole.ADMIN)
 
     async with factory() as db:
         requested = await cpo_request_payout(user=cpo_user, db=db)
@@ -585,3 +610,51 @@ async def test_cancel_frees_window_for_a_new_request(factory):
     assert sorted(r.target_id for r in request_rows) == sorted(
         [str(first["id"]), str(second["id"])]
     )
+
+
+@requires_db
+@pytest.mark.asyncio
+async def test_failed_audit_write_never_breaks_the_action_or_session(factory):
+    """Regression (PR #27 CI failure): an audit INSERT that blows up at
+    commit — here an actor_user_id FK violation, the shape of any transient
+    audit-path failure — must (a) not fail the money op it documents, and
+    (b) leave the session usable. Previously the route built its response
+    from the Payout AFTER try_record_audit's failure-path rollback had
+    expired it, so touching it raised MissingGreenlet on the AsyncSession;
+    the routes now snapshot the response first, and try_record_audit's
+    rollback is guarded."""
+    from sqlalchemy import select
+
+    from backend.database.models import Payout
+
+    tenant_id, user_id = await _seed_tenant(factory, "AuditFailCo")
+    now = datetime.now(timezone.utc)
+    await _seed_session(factory, tenant_id, "20.00", SessionStatus.COMPLETED, ended_at=now - timedelta(hours=1))
+    cpo = _cpo_user(tenant_id, user_id)
+
+    async with factory() as db:
+        requested = await cpo_request_payout(user=cpo, db=db)
+
+    # Deliberately phantom actor: no users row with this id exists, so the
+    # payout.mark_paid audit INSERT FK-violates inside try_record_audit.
+    phantom_admin = _cpo_user(None, 999_999, role=UserRole.ADMIN)
+
+    async with factory() as db:
+        paid = await cpo_mark_payout_paid(payout_id=requested["id"], user=phantom_admin, db=db)
+
+        # (a) The action itself succeeded, with a complete response.
+        assert paid["status"] == "paid"
+        assert paid["paid_at"] is not None
+        assert paid["net_coins"] == pytest.approx(18.00)
+
+        # (b) The SAME session is still usable after the failed audit write
+        # (its aborted transaction was rolled back, not left poisoned).
+        row = (
+            await db.execute(select(Payout).where(Payout.id == requested["id"]))
+        ).scalar_one()
+        assert row.status == PayoutStatus.PAID
+
+    # The failed audit write persisted nothing (and took nothing else with it).
+    assert await _audit_rows(factory, tenant_id, "payout.mark_paid") == []
+    request_rows = await _audit_rows(factory, tenant_id, "payout.request")
+    assert [r.target_id for r in request_rows] == [str(requested["id"])]
