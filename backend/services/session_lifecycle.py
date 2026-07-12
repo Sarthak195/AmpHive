@@ -239,6 +239,35 @@ async def finalize_charging_session(
             started = started.replace(tzinfo=timezone.utc)
         duration_sec = int((session.ended_at - started).total_seconds())
 
+    # Driver notification — one shot here covers every stop path (user stop,
+    # balance auto-stop, reaper). Best-effort by contract: notify() never
+    # raises into the billing path.
+    from backend.services.notifications import notify
+    if reason and "balance exhausted" in reason:
+        n_title, n_severity = "Charging auto-stopped — balance used up", "warning"
+    elif reason and "telemetry lost" in reason:
+        n_title, n_severity = "Charging ended — charger connection lost", "warning"
+    elif reason and reason.startswith("safety cutoff"):
+        n_title, n_severity = "Charging stopped for safety", "critical"
+    else:
+        n_title, n_severity = "Charging complete", "info"
+    minutes = (duration_sec or 0) // 60
+    n_body = (
+        f"{plug.name}: {final_energy:.3f} kWh in {minutes} min — "
+        f"{actual_debit:.2f} coins charged, {new_balance:.2f} left."
+    )
+    if n_severity == "critical" and reason:
+        n_body += f" ({reason})"
+    await notify(
+        session.user_id,
+        "session_stopped",
+        n_title,
+        n_body,
+        severity=n_severity,
+        plug_id=plug.id,
+        session_id=session.id,
+    )
+
     return {
         "status": "completed",
         "session_id": session.id,

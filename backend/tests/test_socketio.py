@@ -13,11 +13,14 @@ async def test_connect_valid_token():
         
         mock_decode.return_value = {"sub": "42"}
         mock_sio.save_session = AsyncMock()
+        mock_sio.enter_room = AsyncMock()
 
         # Token in the auth payload (CONNECT packet body) — the only accepted path
         res = await connect("sid-123", {}, {"token": "valid-jwt"})
         assert res is True
         mock_sio.save_session.assert_awaited_once_with("sid-123", {"user_id": 42})
+        # Joined the per-user room (driver notification delivery target)
+        mock_sio.enter_room.assert_awaited_once_with("sid-123", "user_42")
 
         # Token in the query string is NOT accepted (removed 2026-07-09: query
         # strings land in proxy/access logs, turning them into bearer creds)

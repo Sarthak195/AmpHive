@@ -102,6 +102,9 @@ services:
       # Auth rate limits ("<attempts>/<window sec>" per IP); empty = code defaults
       - LOGIN_RATE_LIMIT=${LOGIN_RATE_LIMIT}
       - REGISTER_RATE_LIMIT=${REGISTER_RATE_LIMIT}
+      # Web Push (driver notifications); empty = push disabled
+      - VAPID_PRIVATE_KEY=${VAPID_PRIVATE_KEY}
+      - VAPID_SUBJECT=${VAPID_SUBJECT}
       # [Direct Mode] Tapo P110 control via WireGuard tunnel (bypasses ESP32)
       - DIRECT_MODE=${DIRECT_MODE}
       - TAPO_USERNAME=${TAPO_USERNAME}

@@ -21,6 +21,8 @@ razorpay>=1.4.0
 # Socket.io support for real-time bi-directional communications
 python-socketio>=5.11.0
 python-engineio>=4.9.0
+# Web Push delivery for driver notifications (VAPID; keys in .env)
+pywebpush>=2.0.0
 # [Direct Mode] TP-Link Tapo P110 smart plug control library (Rust-backed)
 # Used for development/testing to control the plug directly without ESP32
 tapo
