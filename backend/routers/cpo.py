@@ -1976,4 +1976,40 @@ async def cpo_resolve_dispute(
     return _dispute_response(dispute)
 
 
+# ===========================================================================
+# CPO GST Tax Invoices
+# ===========================================================================
+# Appended at the end of the file (feat/gst-invoices), same rationale as the
+# tariff section above: avoids touching the shared header import block,
+# which a concurrent wallet/hold change also edits. Local imports here are
+# intentional, not an oversight. Issuance itself happens on the driver side
+# (GET /api/sessions/{id}/invoice, routers/sessions.py) — this is the
+# CPO-side read-only list of what's already been issued for the tenant.
+from backend.database.models import Invoice  # noqa: E402
+from backend.services.invoices import invoice_to_dict  # noqa: E402
+
+
+@router.get("/api/cpo/invoices")
+async def cpo_list_invoices(
+    user: User = Depends(require_role("cpo", "admin")),
+    db: AsyncSession = Depends(get_db),
+    limit: int = 50,
+    offset: int = 0,
+):
+    """List the tenant's issued GST invoices, newest first. Tenant-scoped,
+    same pagination shape as GET /api/cpo/audit."""
+    tenant_id = _require_tenant_id(user)
+    limit = max(1, min(limit, 200))
+    offset = max(0, offset)
+
+    result = await db.execute(
+        select(Invoice)
+        .where(Invoice.tenant_id == tenant_id)
+        .order_by(Invoice.issued_at.desc(), Invoice.id.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+    return [invoice_to_dict(inv) for inv in result.scalars().all()]
+
+
 # Wrap FastAPI app with Socket.io ASGI wrapper so they run on the same port

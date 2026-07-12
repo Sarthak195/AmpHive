@@ -267,7 +267,7 @@ BFG + force-push) to purge the dead values entirely.
   past whatever the wallet actually held, with the shortfall simply forgiven
   — a real revenue leak, not just a display nit. `POST /api/sessions/start`
   now sizes a session-scoped authorization hold up front
-  (`ChargingSession.hold_coins`, Alembic `0012_auth_holds`):
+  (`ChargingSession.hold_coins`, Alembic `0013_auth_holds`):
   `min(available_balance, max_kwh × rate)`, where `available_balance`
   (`services/wallet.py`) is `coin_balance` minus what the driver's OTHER
   ACTIVE sessions already hold — computed under the same user-row lock the

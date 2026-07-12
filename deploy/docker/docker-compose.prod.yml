@@ -94,6 +94,7 @@ services:
       - COINS_PER_RUPEE=${COINS_PER_RUPEE}
       - COINS_PER_KWH=${COINS_PER_KWH}
       - PLATFORM_FEE_PCT=${PLATFORM_FEE_PCT}
+      - GST_RATE_PCT=${GST_RATE_PCT}
       - TELEMETRY_RETENTION_DAYS=${TELEMETRY_RETENTION_DAYS}
       # Auth rate limits ("<attempts>/<window sec>" per IP); empty = code defaults
       - LOGIN_RATE_LIMIT=${LOGIN_RATE_LIMIT}

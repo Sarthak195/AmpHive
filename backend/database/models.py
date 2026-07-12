@@ -74,6 +74,30 @@ class Tenant(Base):
                    name="tenants_default_tariff_id_fkey"),
         nullable=True,
     )
+    # [GST Invoices] Optional GST registration identity for this tenant
+    # (CPO) — rendered as the invoice "seller" block and SNAPSHOTTED onto
+    # every Invoice at issue time (services/invoices.py
+    # issue_invoice_for_session), so a later edit here never rewrites an
+    # already-issued invoice. NULL/blank is legal: a CPO not yet
+    # GST-registered can still issue an invoice (the GSTIN line just prints
+    # blank) — deliberately not NOT NULL, since retrofitting GST config onto
+    # existing tenants is an operational rollout step, not a schema
+    # requirement.
+    gstin: Mapped[Optional[str]] = mapped_column(String(15), nullable=True)
+    legal_name: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    # Prefix for this tenant's invoice numbers (e.g. "ACME"); NULL falls
+    # back to a tenant-scoped default ("INV<tenant_id>") at issue time, not
+    # a bare "INV" — invoice_number is globally unique, so two different
+    # unconfigured tenants must not collide on the same fallback (see
+    # services/invoices.py issue_invoice_for_session).
+    invoice_prefix: Mapped[Optional[str]] = mapped_column(String(12), nullable=True)
+    # The next sequential invoice number to allocate for this tenant.
+    # Incremented under a `SELECT ... FOR UPDATE` on this row at issue time
+    # so two concurrent issues for this tenant never mint the same
+    # invoice_number — read/updated as plain columns (not a mapped-entity
+    # mutation) the same way services/wallet.py's debit_wallet_clamped
+    # bypasses the identity map; see that module's docstring for why.
+    next_invoice_seq: Mapped[int] = mapped_column(Integer, default=1, server_default=text("1"), nullable=False)
 
     # Relationships
     users: Mapped[List["User"]] = relationship("User", back_populates="tenant", cascade="all, delete-orphan")
@@ -680,4 +704,92 @@ class SessionDispute(Base):
             unique=True,
             postgresql_where=text("status = 'open'"),
         ),
+    )
+
+
+# --- GST Tax Invoices ---
+
+class Invoice(Base):
+    """
+    A formal numbered GST tax invoice for one finished, billed
+    ChargingSession — the legally-required document Indian commercial
+    charging must issue that the session receipt payload
+    (finalize_charging_session's return dict) has never itself been.
+
+    India intra-state GST ONLY: a single combined rate (env `GST_RATE_PCT`,
+    default 18.0 — services/invoices.py gst_rate_pct()) is charged
+    INCLUSIVE in the coins the driver already paid (1 coin = ₹1); the
+    CGST/SGST (intra-state) vs. IGST (inter-state) split is explicitly OUT
+    OF SCOPE — this app doesn't geo-verify the driver and CPO are in the
+    same state, so it can't determine which applies. The combined-rate
+    total/tax figures are still legally correct, just not itemized into
+    their two intra-state halves on the printed line.
+
+    One invoice per session (UNIQUE session_id) — services/invoices.py
+    issue_invoice_for_session() is idempotent: a repeat call for an
+    already-invoiced session returns the existing row rather than minting a
+    second one, enforced by this UNIQUE constraint (+ an IntegrityError
+    catch for the concurrent-first-issue race), not just a pre-check.
+    invoice_number is allocated sequentially per tenant under a
+    `SELECT ... FOR UPDATE` on Tenant.next_invoice_seq, so two concurrent
+    first-issues for the same tenant never mint the same number.
+
+    Immutable snapshot: seller identity (seller_legal_name/seller_gstin,
+    copied from Tenant.legal_name/gstin) and the billed line
+    (energy_kwh/rate_coins_per_kwh, copied from the session) are frozen onto
+    the invoice at issue time so a later Tenant profile edit — or, in
+    principle, any change to the underlying session — never rewrites an
+    already-issued invoice. Same immutability rationale as
+    ChargingSession.rate_coins_per_kwh.
+
+    FKs all CASCADE (tenant_id/session_id/driver_user_id), mirroring
+    ChargingSession's own FK choices: an Invoice is a child record of a
+    session which itself already cascades away with its tenant/user/plug,
+    and session_id's NOT NULL + UNIQUE pairing (every invoice has exactly
+    one owning session) rules out ON DELETE SET NULL.
+    """
+    __tablename__ = "invoices"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    session_id: Mapped[int] = mapped_column(Integer, ForeignKey("charging_sessions.id", ondelete="CASCADE"), unique=True, nullable=False)
+    driver_user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    # e.g. "ACME-2026-27-00001": {tenant.invoice_prefix, or a tenant-scoped
+    # fallback if unset}-{financial year}-{seq:05d}. UNIQUE is GLOBAL (one
+    # numbering namespace across all tenants) even though `seq` counts per
+    # tenant, so services/invoices.py's fallback prefix folds in the tenant
+    # id rather than a bare constant — see that module's
+    # issue_invoice_for_session for why a shared constant fallback would let
+    # two different unconfigured tenants collide on the same number.
+    invoice_number: Mapped[str] = mapped_column(String(40), unique=True, nullable=False)
+    issued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+
+    # Money: NUMERIC(12,2) → Decimal, via services.money.to_money (see the
+    # money note in that module). amount_coins == total_inr (1 coin = ₹1);
+    # kept as two columns because "coins debited from the wallet" and "the
+    # invoice's face total in rupees" are distinct legal/accounting concepts
+    # even though numerically identical under the current 1:1 peg.
+    amount_coins: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    taxable_value_inr: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    gst_rate_pct: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    gst_amount_inr: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    total_inr: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+
+    # Seller snapshot — immune to a later Tenant.legal_name/gstin edit.
+    seller_legal_name: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    seller_gstin: Mapped[Optional[str]] = mapped_column(String(15), nullable=True)
+
+    # Billed-line snapshot — energy_kwh/rate_coins_per_kwh are already
+    # immutable on the session itself post-completion, but copied here too
+    # so rendering an invoice never needs a join back to charging_sessions.
+    energy_kwh: Mapped[float] = mapped_column(Float, nullable=False)
+    rate_coins_per_kwh: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+
+    # Leading tenant_id also serves plain tenant-scoped lookups (GET
+    # /api/cpo/invoices) — same "one composite covers both" reasoning as
+    # idx_payouts_tenant_status / idx_notifications_user_created.
+    __table_args__ = (
+        Index("idx_invoices_tenant_issued", "tenant_id", "issued_at"),
     )

@@ -30,14 +30,14 @@ Idempotent add (same rationale as 0002 onward): a create_all-built database
 may already have this column from the model, so guard with an
 information_schema check.
 
-Revision ID: 0012_auth_holds
-Revises: 0011_disputes
+Revision ID: 0013_auth_holds
+Revises: 0012_gst_invoices
 Create Date: 2026-07-12
 """
 from alembic import op
 
-revision = "0012_auth_holds"
-down_revision = "0011_disputes"
+revision = "0013_auth_holds"
+down_revision = "0012_gst_invoices"
 branch_labels = None
 depends_on = None
 
