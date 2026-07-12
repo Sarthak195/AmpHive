@@ -295,3 +295,43 @@ class CpoTariffAssignRequest(BaseModel):
     the resolution chain — see services/pricing.py resolve_rate_for_plug).
     """
     tariff_id: Optional[int] = None
+
+# --- Session Dispute / Refund Schemas ---
+
+class DisputeCreateRequest(BaseModel):
+    """Body for POST /api/sessions/{id}/dispute. Length-bounded so a driver
+    gives the CPO enough to act on, without accepting an unbounded blob."""
+    reason: str = Field(min_length=10, max_length=1000)
+
+
+class CpoDisputeResolveRequest(BaseModel):
+    """Body for POST /api/cpo/disputes/{id}/resolve.
+
+    ``action`` is validated in the router (matching the existing
+    CpoPlugUpdateRequest.status convention) rather than via a Literal type,
+    so an invalid value gets the same clean 400 the rest of the CPO router
+    uses instead of a generic 422.
+
+    ``refund_coins`` is optional on "approve" — the router defaults it to the
+    session's coins_spent — and ignored on "reject". When given, must be
+    strictly positive; the router additionally enforces that the cumulative
+    approved refund for a session never exceeds coins_spent.
+    """
+    action: str
+    refund_coins: Optional[float] = Field(default=None, gt=0)
+    note: Optional[str] = Field(default=None, max_length=1000)
+
+
+class DisputeResponse(BaseModel):
+    """A session dispute, driver-filed and CPO-resolved."""
+    id: int
+    session_id: int
+    tenant_id: int
+    driver_user_id: int
+    reason: str
+    status: str
+    resolution_note: Optional[str] = None
+    refund_coins: Optional[float] = None
+    created_at: Optional[str] = None
+    resolved_at: Optional[str] = None
+    resolved_by_user_id: Optional[int] = None

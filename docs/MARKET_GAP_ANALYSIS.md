@@ -51,7 +51,7 @@ Legend: ✅ present · 🟡 partial · ❌ absent.
    CPO spec) treats configurable tariffs as core. See [§3](#3-pricing--billing-depth).
 5. **No tax invoice / receipt — backend now exists, no UI yet.** Indian
    commercial charging must issue a GST invoice; a numbered `Invoice`
-   (Alembic `0011_gst_invoices`, 2026-07-12) is now issued per finished
+   (Alembic `0012_gst_invoices`, 2026-07-12) is now issued per finished
    session — inclusive GST split off `coins_spent` (env `GST_RATE_PCT`,
    default 18%), immutable seller/line snapshots, sequential per-tenant
    numbering under a row lock. `GET /api/sessions/{id}/invoice`
@@ -103,7 +103,7 @@ Legend: ✅ present · 🟡 partial · ❌ absent.
 | Auto-recharge / auto-topup wallet | Statiq, Ather | ❌ | Should-do |
 | Authorization *hold* sized to the session | Tesla, EA (pre-auth) | ❌ — 50-coin floor only; overage is forgiven | Should-do (see [SECURITY.md](SECURITY.md)) |
 | GST tax invoice / downloadable receipt | Indian legal requirement | 🟡 (2026-07-12) backend live: numbered `Invoice` per session (inclusive GST split, immutable seller/line snapshot, sequential per-tenant numbering), `GET /api/sessions/{id}/invoice` (+ `?format=html`), CPO list `GET /api/cpo/invoices`; intra-state only (no CGST/SGST/IGST split); no CPO/driver-portal UI yet | Should-do (UI) |
-| Refunds | all | ❌ (`REFUND` enum exists, no code path) | Should-do |
+| Refunds | all | 🟡 coins-only: a CPO-approved session dispute credits the driver's wallet (`REFUND` ledger type, capped at the session's cost); no Razorpay money-out | — |
 | Promo codes / coupons / referral credit | Statiq, Ather, Kazam | ❌ | Should-do |
 | Loyalty / reward points | Tata, Ather | ❌ | Nice-to-have |
 | Subscription / membership plans | ChargePoint, EA (Pass+) | ❌ | Nice-to-have |
@@ -140,7 +140,7 @@ Legend: ✅ present · 🟡 partial · ❌ absent.
 |----------------|---------|:-------:|---------|
 | In-app support / help / FAQ | all | ❌ | Should-do |
 | "Report a problem with this charger" | ChargePoint, PlugShare | ❌ | Should-do |
-| Dispute / refund request flow | all | ❌ | Should-do |
+| Dispute / refund request flow | all | 🟡 driver files a dispute on a finished session; CPO approves (coins refunded to wallet) or rejects | — |
 | Charger uptime / status transparency | ChargePoint, EA | ❌ | Should-do |
 | Multi-language / localization | Indian apps (Hindi + regional) | ❌ English only | Should-do |
 | Profile management, saved payment methods | all | 🟡 basic account; Razorpay holds cards | — |

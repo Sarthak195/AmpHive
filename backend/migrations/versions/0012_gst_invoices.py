@@ -24,14 +24,14 @@ NOTE for the merge orchestrator: this revision is deliberately self-contained
 whether its down_revision chain to 0010_tariffs is preserved standalone or
 later re-chained after a sibling migration developed in a parallel worktree.
 
-Revision ID: 0011_gst_invoices
-Revises: 0010_tariffs
+Revision ID: 0012_gst_invoices
+Revises: 0011_disputes
 Create Date: 2026-07-12
 """
 from alembic import op
 
-revision = "0011_gst_invoices"
-down_revision = "0010_tariffs"
+revision = "0012_gst_invoices"
+down_revision = "0011_disputes"
 branch_labels = None
 depends_on = None
 

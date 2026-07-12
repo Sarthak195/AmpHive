@@ -15,18 +15,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend import state
 from backend.database.db import async_session_factory, get_db
 from backend.database.models import (
-    ChargerGroup, ChargingSession, Gateway, GatewayStatus, GroupMembership,
-    LedgerTransaction, Plug, PlugStatus, SessionStatus, TelemetryReading,
-    Tenant, TransactionType, User, UserRole,
+    ChargerGroup, ChargingSession, DisputeStatus, Gateway, GatewayStatus,
+    GroupMembership, LedgerTransaction, Plug, PlugStatus, SessionDispute,
+    SessionStatus, TelemetryReading, Tenant, TransactionType, User, UserRole,
 )
 from backend.schemas import (
     AuthResponse, CpoGatewayCreateRequest, CpoGroupCreateRequest,
     CpoGroupUpdateRequest, CpoPlugCreateRequest, CpoPlugUpdateRequest,
     CpoSetupRequest, CreateOrderRequest, CreateOrderResponse,
-    DirectPlugRequest, GatewayRegisterRequest, GroupResponse,
-    JoinGroupRequest, LoginRequest, PlugRegisterRequest, PlugResponse,
-    RegisterRequest, SessionStartRequest, SessionStopRequest, UserResponse,
-    VerifyPaymentRequest,
+    DirectPlugRequest, DisputeCreateRequest, DisputeResponse,
+    GatewayRegisterRequest, GroupResponse, JoinGroupRequest, LoginRequest,
+    PlugRegisterRequest, PlugResponse, RegisterRequest, SessionStartRequest,
+    SessionStopRequest, UserResponse, VerifyPaymentRequest,
 )
 from backend.services import payments as payment_service
 from backend.services.auth import (
@@ -344,6 +344,113 @@ async def get_session_history(
         }
         for s in sessions
     ]
+
+
+# ===========================================================================
+# Session Dispute Endpoint (coins-only refund flow — see SessionDispute /
+# MARKET_GAP_ANALYSIS.md §3 "Refunds". CPO-side review lives in
+# backend/routers/cpo.py: GET /api/cpo/disputes, POST
+# /api/cpo/disputes/{id}/resolve.)
+# ===========================================================================
+
+def _dispute_response(dispute: SessionDispute) -> DisputeResponse:
+    return DisputeResponse(
+        id=dispute.id,
+        session_id=dispute.session_id,
+        tenant_id=dispute.tenant_id,
+        driver_user_id=dispute.driver_user_id,
+        reason=dispute.reason,
+        status=dispute.status.value,
+        resolution_note=dispute.resolution_note,
+        refund_coins=float(dispute.refund_coins) if dispute.refund_coins is not None else None,
+        created_at=dispute.created_at.isoformat() if dispute.created_at else None,
+        resolved_at=dispute.resolved_at.isoformat() if dispute.resolved_at else None,
+        resolved_by_user_id=dispute.resolved_by_user_id,
+    )
+
+
+@router.post("/api/sessions/{session_id}/dispute", response_model=DisputeResponse)
+async def dispute_session(
+    session_id: int,
+    req: DisputeCreateRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    File a dispute against one of the caller's own finished charging
+    sessions. Coins-only remedy: an approved dispute credits the driver's
+    coin wallet — there is no Razorpay money-out path (see
+    MARKET_GAP_ANALYSIS.md §3 "Refunds"). The CPO who owns the session's plug
+    reviews it via GET /api/cpo/disputes and
+    POST /api/cpo/disputes/{id}/resolve.
+
+    Rules:
+    - The session must belong to the caller (404 otherwise — same
+      not-yours-or-doesn't-exist ambiguity /api/sessions/stop uses).
+    - The session must be finished, i.e. not ACTIVE (409): a live session
+      hasn't billed a final amount yet, so there's nothing to dispute.
+    - At most one OPEN dispute per session (409) — also enforced by a
+      partial unique DB index (SessionDispute.__table_args__), so a
+      double-submit race can't slip two past this check-then-insert.
+    """
+    result = await db.execute(
+        select(ChargingSession).where(
+            and_(ChargingSession.id == session_id, ChargingSession.user_id == user.id)
+        )
+    )
+    session = result.scalar_one_or_none()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found.")
+
+    if session.status == SessionStatus.ACTIVE:
+        raise HTTPException(
+            status_code=409,
+            detail="This session is still active. Stop it before filing a dispute.",
+        )
+
+    existing = await db.execute(
+        select(SessionDispute.id).where(
+            and_(
+                SessionDispute.session_id == session_id,
+                SessionDispute.status == DisputeStatus.OPEN,
+            )
+        )
+    )
+    if existing.first() is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="An open dispute already exists for this session.",
+        )
+
+    dispute = SessionDispute(
+        session_id=session.id,
+        tenant_id=session.tenant_id,
+        driver_user_id=user.id,
+        reason=req.reason,
+        status=DisputeStatus.OPEN,
+    )
+    db.add(dispute)
+    try:
+        await db.commit()
+    except IntegrityError:
+        # Lost a double-submit race to the partial unique index — the
+        # pre-check above missed a dispute committed concurrently.
+        await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="An open dispute already exists for this session.",
+        )
+    await db.refresh(dispute)
+
+    logger.info(
+        "Dispute filed",
+        extra={
+            "dispute_id": dispute.id, "session_id": session.id,
+            "user_id": user.id, "email": user.email,
+        },
+    )
+
+    return _dispute_response(dispute)
 
 
 # ===========================================================================
