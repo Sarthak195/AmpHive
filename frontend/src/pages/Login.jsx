@@ -3,16 +3,19 @@
  * ==================
  * Combined login/register form with glassmorphic styling.
  * Toggles between "Sign In" and "Create Account" modes.
- * On success, redirects to the Home page.
+ * On success, redirects back to wherever the driver was headed (ProtectedRoute
+ * and Home's QR/deep-link guard both stash that as router state.from — e.g.
+ * `/?plug=<id>`) or to Home if there's nowhere to return to.
  */
 
 import { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 
 const Login = () => {
   const { login, register } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
 
   const [isRegister, setIsRegister] = useState(false);
   const [email, setEmail] = useState('');
@@ -37,7 +40,11 @@ const Login = () => {
       } else {
         await login(email, password);
       }
-      navigate('/');
+      // Return to the original destination (ProtectedRoute / the Home
+      // QR-deep-link guard) if there is one, otherwise Home.
+      const from = location.state?.from;
+      const target = from ? `${from.pathname}${from.search || ''}${from.hash || ''}` : '/';
+      navigate(target, { replace: true });
     } catch (err) {
       setError(err.message || 'Something went wrong. Please try again.');
     } finally {
