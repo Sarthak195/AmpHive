@@ -400,6 +400,37 @@ async def test_second_concurrent_session_gets_remaining_available_balance(factor
 
 
 @pytest.mark.asyncio
+async def test_small_session_starts_with_hold_below_floor(factory, monkeypatch):
+    """A modest session whose worst-case cost is BELOW the floor must still
+    start when the driver's available balance clears the floor: the floor
+    gates the AVAILABLE balance, never the hold itself. Regression for the
+    2026-07-12 prod find where a fully-funded wallet was 402'd because its
+    5 kWh session only reserved 25 coins (< the 50 floor)."""
+    import backend.services.pricing as pricing_mod
+    from sqlalchemy import select
+
+    from backend.database.models import ChargingSession
+
+    monkeypatch.setattr(pricing_mod, "COINS_PER_KWH", 5.0)
+
+    tenant_id = await _seed_tenant(factory)
+    gw = await _seed_gateway(factory, tenant_id, "gw-hold-small")
+    plug = await _seed_plug(factory, gw, "Plug Small")
+    uid = await _seed_user(factory, "497.72", tenant_id)
+
+    # 5 kWh * 5.00 = 25.00 hold — below the 50 floor, but available (497.72)
+    # clears the floor, so the start must succeed with the small hold.
+    result = await _start_session(factory, monkeypatch, plug_id=plug, user_id=uid, max_kwh=5.0)
+    assert result["status"] == "started"
+
+    async with factory() as db:
+        session = (await db.execute(
+            select(ChargingSession).where(ChargingSession.id == result["session_id"])
+        )).scalar_one()
+    assert session.hold_coins == Decimal("25.00")
+
+
+@pytest.mark.asyncio
 async def test_start_rejected_when_available_balance_below_floor_despite_raw_balance(factory, monkeypatch):
     """A driver with a raw wallet balance well above MIN_START_BALANCE_COINS
     must still get the 402 once another active session already holds enough

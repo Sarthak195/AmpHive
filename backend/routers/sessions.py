@@ -206,18 +206,24 @@ async def start_charging_session(
     # a driver with plenty of coins but most of it held by another running
     # session must not be allowed to reserve past what's actually left.
     available = await available_balance(db, user.id)
-    hold = to_money(min(available, energy_cost(req.max_kwh, rate_coins_per_kwh)))
-    if hold < MIN_START_BALANCE_COINS:
+    # The floor gates the driver's AVAILABLE balance, not the hold: the hold is
+    # capped by the session's own max_kwh, so a small session (e.g. 5 kWh at
+    # 5/kWh = 25 coins) legitimately reserves less than the floor — rejecting
+    # on the hold would block modest sessions for fully-funded wallets (found
+    # live in prod 2026-07-12). The floor's job is only to keep dust wallets
+    # from starting; the hold's job is to bound what this session can bill.
+    if available < MIN_START_BALANCE_COINS:
         raise HTTPException(
             status_code=402,
             detail=(
                 f"Insufficient available balance. You have {available} coins "
-                f"available to reserve for this session (wallet balance "
+                f"available for this session (wallet balance "
                 f"{user.coin_balance} coins; the difference, if any, is held "
                 f"by another active session). Minimum {MIN_START_BALANCE_COINS:g} "
                 "required to start."
             ),
         )
+    hold = to_money(min(available, energy_cost(req.max_kwh, rate_coins_per_kwh)))
 
     session = ChargingSession(
         tenant_id=gateway.tenant_id,
