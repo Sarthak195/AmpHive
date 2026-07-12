@@ -27,12 +27,16 @@ Legend: ✅ present · 🟡 partial · ❌ absent.
 
 ## 1. The headline gaps (highest user-visible impact)
 
-1. **No QR-code start.** Every mainstream Indian network (Statiq, Tata, Ather,
+1. **No QR-code start.** ~~Every mainstream Indian network (Statiq, Tata, Ather,
    ChargeZone) makes *scan-the-QR-on-the-charger* the primary start action.
-   AmpHive is **Plug-ID-typed-by-hand only** — [requirements.md](../requirements.md)
-   explicitly declines QR. That is a real UX disadvantage at a public bay; a QR
-   that deep-links to `/?plug=<id>` (prefilled, still auth-gated) would close it
-   cheaply without changing the security model.
+   AmpHive is **Plug-ID-typed-by-hand only**~~ **Closed 2026-07-12:** the CPO
+   Plugs page renders a printable per-plug QR (`qrcode.react`) encoding
+   `/?plug=<id>`; the phone's own camera resolves it (still no in-app
+   scanner, matching [requirements.md](../requirements.md)'s decision against
+   one) and Home prefills + focuses the Plug ID input, still fully
+   auth-gated — an anonymous scan is sent through `/login` and returned to
+   the same deep link afterward. Closes this cheaply without changing the
+   security model, as originally proposed here.
 2. **No native mobile app.** AmpHive is a React web SPA; the market ships
    iOS/Android apps (with the OS-level push, background session alerts, and
    "add to home screen" polish drivers expect). A PWA is the low-cost bridge.
@@ -64,8 +68,8 @@ Legend: ✅ present · 🟡 partial · ❌ absent.
 | Market feature | Seen in | AmpHive | Verdict |
 |----------------|---------|:-------:|---------|
 | Map of chargers | all | 🟡 Leaflet/OSM markers of available public plugs | — |
-| Real-time availability on map | all | 🟡 status flips to occupied; no free/in-use/offline legend or count | Should-do |
-| Filter by power / price / connector / amenities | ChargePoint, PlugShare, Statiq | ❌ | Should-do |
+| Real-time availability on map | all | ✅ (2026-07-12) markers color-coded Available/In use/Offline with a legend + live counts | — |
+| Filter by power / price / connector / amenities | ChargePoint, PlugShare, Statiq | 🟡 (2026-07-12) availability + group-name filters shipped; power/price/connector remain absent — **there is no power-rating (or price) column anywhere in the plug data model**, so those specific filters aren't buildable without a schema change first | Should-do (power/price columns) |
 | Search / autocomplete by location or Plug ID | most; specs §4 | ❌ (type exact Plug ID) | Should-do |
 | "Find nearest" + hand-off to Google/Apple Maps nav | all | ❌ | Should-do |
 | Favorites / saved chargers | ChargePoint, Tesla, PlugShare | ❌ | Should-do |
@@ -111,7 +115,7 @@ Legend: ✅ present · 🟡 partial · ❌ absent.
 |----------------|---------|:-------:|---------|
 | Remote start / stop from app | all | ✅ | — |
 | Live session telemetry (kW, kWh, cost, time) | all | ✅ Socket.io | — |
-| QR-scan to start | Indian norm | ❌ Plug-ID typed only | Should-do |
+| QR-scan to start | Indian norm | ✅ (2026-07-12) printable per-plug QR (CPO Plugs) deep-links to `/?plug=<id>`, prefilled + auth-gated on Home; Plug-ID typing still works too | — |
 | RFID / tap card to start | ChargePoint, EA | ❌ | By design (app-first) |
 | Reserve / book a charger ahead | Statiq, ChargeZone, Tata | ❌ | Should-do |
 | Scheduled / delayed start (charge off-peak) | Tesla, ChargePoint | ❌ | Aspirational |
