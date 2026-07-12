@@ -23,6 +23,7 @@ const NAV_ITEMS = [
   { path: '/cpo/plugs', label: 'Plugs', icon: '🔌' },
   { path: '/cpo/groups', label: 'Groups', icon: '👥' },
   { path: '/cpo/sessions', label: 'Sessions', icon: '⚡' },
+  { path: '/cpo/faults', label: 'Faults', icon: '🛠️' },
 ];
 
 const CpoLayout = ({ children, tenantName }) => {
