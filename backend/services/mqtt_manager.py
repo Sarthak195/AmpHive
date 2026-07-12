@@ -629,25 +629,27 @@ class MQTTManager:
                 from sqlalchemy import select
 
                 plug_result = await session.execute(
-                    select(Plug.id).where(Plug.gateway_id == gateway_id)
+                    select(Plug.id, Plug.local_ip).where(Plug.gateway_id == gateway_id)
                 )
-                plug_ids = list(plug_result.scalars().all())
-                if not plug_ids:
+                # {plug_id: local_ip} — the OFF carries local_ip so a rebooted
+                # multi-plug gateway can learn the plug and actuate it (TD#20).
+                plug_ips = {pid: ip for pid, ip in plug_result.all()}
+                if not plug_ips:
                     return
 
                 active_result = await session.execute(
                     select(ChargingSession.plug_id).where(
-                        ChargingSession.plug_id.in_(plug_ids),
+                        ChargingSession.plug_id.in_(list(plug_ips.keys())),
                         ChargingSession.status == SessionStatus.ACTIVE,
                     )
                 )
                 active_plug_ids = set(active_result.scalars().all())
 
-            for plug_id in plug_ids:
+            for plug_id, local_ip in plug_ips.items():
                 if plug_id not in active_plug_ids:
                     # wait=False: we're on the event loop — don't block it on
                     # the broker ack for a best-effort cleanup publish.
-                    self.send_plug_command(gateway_id, plug_id, "OFF", wait=False)
+                    self.send_plug_command(gateway_id, plug_id, "OFF", local_ip=local_ip, wait=False)
                     logger.info(
                         f"Republished OFF to gw={gateway_id} plug={plug_id} "
                         f"on reconnect (no ACTIVE session)"
@@ -751,7 +753,7 @@ class MQTTManager:
     # Outbound command publisher
     # -----------------------------------------------------------------------
 
-    def send_plug_command(self, gateway_id: str, plug_id: int, action: str, max_duration: int = 14400, max_kwh: float = 30.0, session_id: Optional[int] = None, wait: bool = True) -> bool:
+    def send_plug_command(self, gateway_id: str, plug_id: int, action: str, max_duration: int = 14400, max_kwh: float = 30.0, session_id: Optional[int] = None, local_ip: Optional[str] = None, wait: bool = True) -> bool:
         """
         Sends an ON/OFF command to a specific plug registered under a gateway.
         Topic: amphive/gateways/{gateway_id}/plugs/{plug_id}/commands
@@ -761,6 +763,13 @@ class MQTTManager:
         The firmware persists it for crash recovery and echoes it back in
         telemetry so the backend can attribute a reading to the exact session
         rather than just "the active session on this plug".
+
+        When `local_ip` is given, it is included so a multi-plug gateway
+        (TD#20) knows which physical plug to actuate — and can learn a plug it
+        hasn't seen before (e.g. after a reboot) without a static on-device
+        roster. The DB is the source of truth for `plugs.local_ip`; pass it on
+        every ON/OFF. Older single-plug firmware ignores the extra field and
+        falls back to its provisioned target plug, so this is backward-safe.
 
         `wait=False` skips the blocking wait for the broker ack — for
         best-effort publishes issued from the event loop (blocking it up to
@@ -774,6 +783,8 @@ class MQTTManager:
         }
         if session_id is not None:
             payload["session_id"] = str(session_id)
+        if local_ip:
+            payload["local_ip"] = local_ip
 
         try:
             payload_str = json.dumps(payload)

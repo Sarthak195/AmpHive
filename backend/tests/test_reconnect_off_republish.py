@@ -26,6 +26,13 @@ def _result_scalars(values):
     return r
 
 
+def _result_rows(rows):
+    """A result whose .all() yields (col, col, ...) tuples (non-scalar select)."""
+    r = MagicMock()
+    r.all.return_value = list(rows)
+    return r
+
+
 def _manager_with_db(execute_results):
     MQTTManager._instance = None
     db = AsyncMock()
@@ -41,14 +48,18 @@ def _manager_with_db(execute_results):
 @pytest.mark.asyncio
 async def test_online_republishes_off_only_to_plugs_without_active_session():
     mgr, db = _manager_with_db([
-        _result_scalar_one(MagicMock()),   # gateway row lookup
-        _result_scalars([1, 2]),           # the gateway's plugs
-        _result_scalars([2]),              # plug 2 has an ACTIVE session
+        _result_scalar_one(MagicMock()),                      # gateway row lookup
+        _result_rows([(1, "10.0.0.11"), (2, "10.0.0.12")]),   # (plug_id, local_ip)
+        _result_scalars([2]),                                 # plug 2 has an ACTIVE session
     ])
 
     await mgr._persist_gateway_status("gw-1", "online")
 
-    mgr.send_plug_command.assert_called_once_with("gw-1", 1, "OFF", wait=False)
+    # OFF carries the plug's local_ip so a rebooted multi-plug gateway can learn
+    # and actuate the plug (TD#20).
+    mgr.send_plug_command.assert_called_once_with(
+        "gw-1", 1, "OFF", local_ip="10.0.0.11", wait=False
+    )
     MQTTManager._instance = None
 
 
@@ -69,7 +80,7 @@ async def test_offline_status_does_not_republish():
 async def test_gateway_with_no_plugs_is_a_no_op():
     mgr, db = _manager_with_db([
         _result_scalar_one(MagicMock()),
-        _result_scalars([]),               # no plugs registered
+        _result_rows([]),                  # no plugs registered
     ])
 
     await mgr._persist_gateway_status("gw-1", "online")
