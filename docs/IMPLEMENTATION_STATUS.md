@@ -27,7 +27,8 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 | Razorpay create-order + verify | ✅ | HMAC-verified; credits coins + ledger. Supports decimal INR amounts and coin balances (money columns are `Numeric(12,2)`/Decimal as of 2026-07-06). **2026-07-05:** `/verify` now credits the **Razorpay-confirmed** amount fetched server-side (the client-sent `amount_inr` is deprecated/ignored — it was previously trusted, allowing arbitrary wallet inflation). |
 | Razorpay webhook auto-credit | ✅ | Credits coins on `payment.captured`; atomic + idempotent vs. `/verify` (dedupes on the UNIQUE `razorpay_payment_id` via `IntegrityError`). Money columns are `Numeric(12,2)`/Decimal (2026-07-06). |
 | Wallet debit on stop + ledger | ✅ | Row-locked (`SELECT ... FOR UPDATE`) in stop/verify/webhook paths |
-| Prepaid protection: auto-stop on balance exhaustion | ✅ | On each telemetry write, if the accrued energy cost (`kwh × COINS_PER_KWH`) reaches the driver's wallet balance, the session is auto-stopped via the shared `finalize_charging_session` path (own txn, row-locked, race-safe with a user stop / the reaper). Caps free charging past a drained wallet to ≤ one telemetry interval. Env-toggle `AUTO_STOP_ON_BALANCE_EXHAUSTED` (default on). Tests in `test_mqtt_manager.py`. |
+| Prepaid protection: auto-stop on balance exhaustion | ✅ | On each telemetry write, if the accrued energy cost (`kwh × rate`) reaches the session's exhaustion threshold, the session is auto-stopped via the shared `finalize_charging_session` path (own txn, row-locked, race-safe with a user stop / the reaper). Caps free charging past a drained wallet to ≤ one telemetry interval. **2026-07-12:** the threshold is now the session's own authorization hold (`ChargingSession.hold_coins`) when set, not the driver's whole wallet balance — a concurrent second session may be holding the rest of it (see the "Authorization hold" row below). Legacy `hold_coins IS NULL` sessions keep the old live-wallet-balance threshold. Env-toggle `AUTO_STOP_ON_BALANCE_EXHAUSTED` (default on). Tests in `test_mqtt_manager.py`, `test_auth_holds.py`. |
+| Session-sized authorization hold (MARKET_GAP_ANALYSIS.md §3) | ✅ | **2026-07-12:** `POST /api/sessions/start` reserves `min(available_balance, max_kwh × rate)` onto `ChargingSession.hold_coins` (Alembic `0012_auth_holds`, nullable — NULL = legacy pre-hold session), replacing the old flat `MIN_START_BALANCE_COINS` floor. `available_balance` (`services/wallet.py`, a single aggregate query) is `coin_balance` minus the SUM of `hold_coins` across the user's OTHER ACTIVE sessions — computed under the same user-row lock the start path already takes, so concurrent starts can't double-reserve the same coins; a hold never touches `coin_balance` itself (logical reservation only, so the non-negative CHECK and every credit/debit path are unchanged). `finalize_charging_session` now debits `min(final_cost, hold_coins)`, closing the old forgiven-overage revenue leak (SECURITY.md §5) for every held session — unspent hold is simply released, no money moves. `/api/auth/me` and `GET /api/wallet/ledger` additionally expose `available_balance` alongside `coin_balance`. Legacy sessions (`hold_coins IS NULL`) finalize with the exact pre-hold behavior. Tests: `backend/tests/test_auth_holds.py`. |
 | Driver notifications (feed + Socket.io + Web Push) | ✅ | 2026-07-11: `notifications`/`push_subscriptions` tables (Alembic `0007`), `services/notifications.py` (persist → Socket.io user room → VAPID Web Push via `pywebpush`, dead subscriptions pruned on 404/410). Emit points: every session stop (user/auto-stop/reaper/safety cutoff), low balance once per session (`LOW_BALANCE_WARN_FRACTION`, default 0.8), gateway-offline mid-session, top-up credit. Endpoints `/api/notifications*` (feed + read + push-subscription CRUD). **Behavior change:** `THERMAL_CUTOFF`/`OVERCURRENT_CUTOFF` alarms now finalize the plug's ACTIVE session immediately (bills recorded energy, frees the plug) instead of leaving it for the reaper. Tests in `test_notifications.py`. **Verified live in prod 2026-07-11** (migration `0007` applied at startup; billed fake-plug session #24 → `session_stopped` notification with the exact receipt figures (0.234 kWh / 1.17 coins / 497.79 left), unread_count 1 → read → 0; push public-key endpoint `enabled:true`). Browser-side push delivery needs a manual browser opt-in — not yet exercised. |
 | Per-CPO/per-site tariff model (pricing foundation) | 🟡 | New `Tariff` model (`tenant_id`, `name`, `price_per_kwh` `Numeric(12,2)`; Alembic `0010_tariffs`), resolved plug → its charger group → the tenant's default tariff → the legacy global `COINS_PER_KWH` env var (`services/pricing.py resolve_rate_for_plug`), SNAPSHOTTED onto `ChargingSession.rate_coins_per_kwh` at session start so a later tariff edit never changes an in-flight/already-billed session. Every billing path (`finalize_charging_session`, the balance-exhaustion auto-stop, the live `TelemetryStore` cost calc) now reads that snapshot. CPO CRUD + assign/unassign at `/api/cpo/tariffs*` (tenant-scoped; cross-tenant assignment rejected); `price_per_kwh` exposed on the plug list/detail API and the session receipt. 🟡 not ✅: no CPO-portal UI to manage tariffs yet, and `GET /api/config` still reports only the global default — both queued as frontend follow-ups. Tests in `backend/tests/test_pricing.py`. |
 
@@ -493,3 +494,26 @@ audit merged; statuses below are as of 2026-07-11.*
     Still open: firmware `ESP_LOGI` remains serial-only (no log topic —
     TD#28, firmware half), and the portal Wi-Fi/plug reachability pre-check
     (TD#31, second half). (TD#26, TD#28, TD#31)
+56. **[Resolved 2026-07-12] No session-sized authorization hold — overage
+    forgiven past the wallet.** `/api/sessions/start` only checked a flat
+    `MIN_START_BALANCE_COINS` floor, and `finalize_charging_session` billed
+    `min(final_cost, live balance)` — so a session could start on ₹50 and
+    rack up an arbitrarily larger bill, with everything past the wallet
+    silently forgiven (MARKET_GAP_ANALYSIS.md §3; SECURITY.md §5). Fixed:
+    the start path now reserves `min(available_balance, max_kwh × rate)`
+    onto the new nullable `ChargingSession.hold_coins` (Alembic
+    `0012_auth_holds`, chained onto `0011_disputes` — the actual head by the
+    time this branch was cut, re-chaining the orchestrator's own note that a
+    sibling "0011" migration was still in flight when this feature's task
+    brief was written), and `finalize_charging_session` caps the debit at
+    `min(final_cost, hold_coins)` — the revenue leak is closed for every
+    held session. `available_balance` (`services/wallet.py`) — coin_balance
+    minus what the user's OTHER active sessions already hold — is computed
+    under the existing user-row lock, so two concurrent starts can't
+    double-reserve the same coins; a hold is purely a read-time reservation
+    and never touches `coin_balance` or its non-negative CHECK. The
+    mqtt_manager balance-exhaustion auto-stop threshold switched from the
+    whole wallet balance to the session's own hold for the same reason (a
+    sibling session's balance isn't this session's to spend past). Legacy
+    sessions (`hold_coins IS NULL`) keep the old behavior exactly — this is
+    forward-only. Tests: `backend/tests/test_auth_holds.py`.

@@ -90,7 +90,7 @@ Legend: ✅ present · 🟡 partial · ❌ absent.
 | Prepaid wallet top-up (UPI/cards/netbanking) | Indian norm | ✅ Razorpay | — |
 | Pay-per-use *without* pre-funding a wallet | ChargePoint, Tata (post-paid/direct) | ❌ (must pre-load coins) | Should-do |
 | Auto-recharge / auto-topup wallet | Statiq, Ather | ❌ | Should-do |
-| Authorization *hold* sized to the session | Tesla, EA (pre-auth) | ❌ — 50-coin floor only; overage is forgiven | Should-do (see [SECURITY.md](SECURITY.md)) |
+| Authorization *hold* sized to the session | Tesla, EA (pre-auth) | ✅ (2026-07-12) `ChargingSession.hold_coins` reserves `min(available_balance, max_kwh × rate)` at start (`services/wallet.py available_balance`, net of what the driver's OTHER active sessions already hold); `finalize_charging_session` caps the debit at the hold and releases any unspent remainder — closes the old forgiven-overage leak (see [SECURITY.md](SECURITY.md) §5) for every held session. Legacy pre-migration sessions (`hold_coins IS NULL`) keep the old floor-only/forgiven-overage behavior. | — |
 | GST tax invoice / downloadable receipt | Indian legal requirement | ❌ | Should-do |
 | Refunds | all | 🟡 coins-only: a CPO-approved session dispute credits the driver's wallet (`REFUND` ledger type, capped at the session's cost); no Razorpay money-out | — |
 | Promo codes / coupons / referral credit | Statiq, Ather, Kazam | ❌ | Should-do |
@@ -198,8 +198,9 @@ low-balance notifications (email/push/PWA) · per-CPO price model + tax invoice 
 CSV export · basic map availability legend/filters.
 
 **Do next (revenue/trust):** CPO payout ledger · refund + dispute flow ·
-authorization hold · reservations · auto-topup · maintenance-mode + fault console
-(pairs with ingesting the firmware `/alarms` topic).
+~~authorization hold~~ (done 2026-07-12 — §3) · reservations · auto-topup ·
+maintenance-mode + fault console (pairs with ingesting the firmware `/alarms`
+topic).
 
 **Strategic (larger bets):** PWA/native app · dynamic/ToU pricing + idle fees ·
 promo/referral/loyalty · localization · dynamic load balancing.

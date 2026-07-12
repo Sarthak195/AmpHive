@@ -632,6 +632,7 @@ class MQTTManager:
         updated_session_id: Optional[int] = None
         updated_user_id: Optional[int] = None
         updated_rate: Optional[Decimal] = None
+        updated_hold_coins: Optional[Decimal] = None
 
         try:
             async with self.db_session_factory() as session:
@@ -687,6 +688,7 @@ class MQTTManager:
                     updated_session_id = active_session.id
                     updated_user_id = active_session.user_id
                     updated_rate = active_session.rate_coins_per_kwh
+                    updated_hold_coins = active_session.hold_coins
 
                 await session.commit()
         except Exception as e:
@@ -702,13 +704,15 @@ class MQTTManager:
         # stop the session). Done in a separate txn after the persist commit.
         if updated_session_id is not None and updated_user_id is not None:
             await self._maybe_auto_stop_on_exhaustion(
-                updated_session_id, updated_user_id, kwh, updated_rate
+                updated_session_id, updated_user_id, kwh, updated_rate,
+                updated_hold_coins,
             )
 
     async def _maybe_auto_stop_on_exhaustion(self, session_id: int, user_id: int, energy_kwh: float,
-                                              rate_coins_per_kwh: Optional[Decimal] = None):
-        """Finalize an ACTIVE session once its accrued cost meets/exceeds the
-        user's wallet balance. No-op when disabled, when the wallet still
+                                              rate_coins_per_kwh: Optional[Decimal] = None,
+                                              hold_coins: Optional[Decimal] = None):
+        """Finalize an ACTIVE session once its accrued cost meets/exceeds its
+        exhaustion threshold. No-op when disabled, when the threshold still
         covers the energy, or when the session is already gone (finalize
         re-checks ACTIVE under a row lock, so this is race-safe).
 
@@ -717,39 +721,54 @@ class MQTTManager:
         ChargingSession.rate_coins_per_kwh) — the accrued cost must use the
         same rate this session will actually be billed at, not the global
         default, or a tariff'd session could auto-stop too early/late. NULL
-        (legacy sessions with no snapshot) falls back to the env default."""
+        (legacy sessions with no snapshot) falls back to the env default.
+
+        [Auth holds] `hold_coins` is the session's own authorization-hold
+        reservation (ChargingSession.hold_coins, snapshotted at start — see
+        routers/sessions.py start_charging_session / services/wallet.py
+        available_balance). When set, THIS — not the driver's whole wallet
+        balance — is the exhaustion threshold: a concurrent second session
+        may be holding the rest of that balance, so this session must only
+        auto-stop when it exhausts its OWN reservation, never a figure a
+        sibling session is also counting on. No DB read is needed in that
+        case (the threshold is already in hand). NULL (legacy sessions
+        predating this column) falls back to the live wallet balance,
+        matching the pre-hold behavior exactly."""
         if not AUTO_STOP_ON_BALANCE_EXHAUSTED or not self.db_session_factory:
             return
-        from backend.database.models import User
         from backend.services.money import energy_cost, to_money
         from backend.services.telemetry import COINS_PER_KWH
-        from sqlalchemy import select
 
         try:
             rate = rate_coins_per_kwh if rate_coins_per_kwh is not None else COINS_PER_KWH
             accrued_cost = energy_cost(energy_kwh, rate)
             if accrued_cost <= 0:
                 return
-            async with self.db_session_factory() as db:
-                user = (await db.execute(
-                    select(User).where(User.id == user_id)
-                )).scalar_one_or_none()
-                if user is None:
-                    return
-                balance = user.coin_balance
-            if accrued_cost < balance:
+            if hold_coins is not None:
+                threshold = hold_coins
+            else:
+                from backend.database.models import User
+                from sqlalchemy import select
+                async with self.db_session_factory() as db:
+                    user = (await db.execute(
+                        select(User).where(User.id == user_id)
+                    )).scalar_one_or_none()
+                    if user is None:
+                        return
+                    threshold = user.coin_balance
+            if accrued_cost < threshold:
                 # Still covered — maybe warn (once per session) as the cost
-                # approaches the balance, so the driver sees the auto-stop
+                # approaches the threshold, so the driver sees the auto-stop
                 # coming even with the app closed.
                 if (
                     LOW_BALANCE_WARN_FRACTION > 0
-                    and float(accrued_cost) >= float(balance) * LOW_BALANCE_WARN_FRACTION
+                    and float(accrued_cost) >= float(threshold) * LOW_BALANCE_WARN_FRACTION
                     and session_id not in self._low_balance_warned
                 ):
                     if len(self._low_balance_warned) > 1000:
                         self._low_balance_warned.clear()
                     self._low_balance_warned.add(session_id)
-                    remaining = to_money(balance - accrued_cost)
+                    remaining = to_money(threshold - accrued_cost)
                     kwh_left = float(remaining) / COINS_PER_KWH if COINS_PER_KWH else 0.0
                     from backend.services.notifications import notify
                     await notify(
@@ -763,23 +782,28 @@ class MQTTManager:
                         session_id=session_id,
                     )
                 return
-            # Wallet is exhausted — stop through the shared finalize path
+            # Threshold exhausted — stop through the shared finalize path
             # (own txn; row-locks + re-checks ACTIVE so a concurrent user stop
             # or the reaper settles this exactly once).
             from backend.services.session_lifecycle import finalize_charging_session
+            reason = (
+                "auto-stopped: session hold exhausted" if hold_coins is not None
+                else "auto-stopped: wallet balance exhausted"
+            )
             async with self.db_session_factory() as db:
                 outcome = await finalize_charging_session(
-                    db, session_id, reason="auto-stopped: wallet balance exhausted"
+                    db, session_id, reason=reason
                 )
             self._low_balance_warned.discard(session_id)
             if outcome is not None:
                 logger.warning(
-                    "Auto-stopped session: wallet balance exhausted",
+                    "Auto-stopped session: exhaustion threshold reached",
                     extra={
                         "session_id": session_id,
                         "user_id": user_id,
                         "energy_kwh": outcome["energy_kwh"],
                         "coins_spent": outcome["coins_spent"],
+                        "reason": reason,
                     },
                 )
         except Exception:

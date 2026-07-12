@@ -43,6 +43,7 @@ from backend.services.session_lifecycle import (
     gateway_is_live, set_plug_telemetry_interval,
 )
 from backend.services.telemetry import COINS_PER_KWH
+from backend.services.wallet import available_balance
 
 logger = logging.getLogger("amphive.api")
 router = APIRouter()
@@ -152,6 +153,11 @@ async def get_me(
         full_name=user.full_name,
         role=user.role.value,
         coin_balance=user.coin_balance,
+        # [Auth holds] coin_balance minus what this user's OTHER active
+        # sessions already hold (services/wallet.py available_balance) — the
+        # figure a NEW session-start would actually be sized against.
+        # Additive field: coin_balance is untouched for existing clients.
+        available_balance=float(await available_balance(db, user.id)),
     )
 
 

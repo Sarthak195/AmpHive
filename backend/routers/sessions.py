@@ -33,7 +33,7 @@ from backend.services.auth import (
     create_access_token, decode_access_token, get_current_user,
     hash_password, verify_password,
 )
-from backend.services.money import ZERO_MONEY, to_money
+from backend.services.money import ZERO_MONEY, energy_cost, to_money
 from backend.services.pricing import resolve_rate_for_plug
 from backend.services.rbac import require_role
 from backend.services.session_lifecycle import (
@@ -41,6 +41,7 @@ from backend.services.session_lifecycle import (
     gateway_is_live, set_plug_telemetry_interval,
 )
 from backend.services.telemetry import COINS_PER_KWH
+from backend.services.wallet import available_balance
 
 logger = logging.getLogger("amphive.api")
 router = APIRouter()
@@ -53,6 +54,11 @@ MAX_ACTIVE_SESSIONS_PER_USER = int(os.getenv("MAX_ACTIVE_SESSIONS_PER_USER", "2"
 # Minimum wallet balance (coins) required to START a session — a float so a
 # session can't begin with too little credit to cover meaningful charging. Also
 # exposed via GET /api/config so the UI shows the same number it enforces.
+# [Auth holds] Checked against the session's AVAILABLE balance (coin_balance
+# minus what other ACTIVE sessions already hold — services/wallet.py
+# available_balance()), not the raw wallet balance: a driver with plenty of
+# coins but most of it held by another running session must not be allowed
+# to start a third session past what's actually left to reserve.
 MIN_START_BALANCE_COINS = float(os.getenv("MIN_START_BALANCE_COINS", "50"))
 
 # ===========================================================================
@@ -69,8 +75,16 @@ async def start_charging_session(
     Start a charging session on a specific plug.
     0. Lock the user row and enforce the concurrent-session cap.
     1. Verify user has access to the plug (group check).
-    2. Check user has sufficient wallet balance (minimum ₹50).
-    3. Lock the plug row and claim it (avoids two concurrent starts on one plug).
+    2. Lock the plug row and claim it (avoids two concurrent starts on one
+       plug); confirm its gateway is live; resolve the billing rate.
+    3. Size and check the session's authorization hold — min(available
+       balance, max_kwh * rate) must clear MIN_START_BALANCE_COINS (402
+       otherwise). Replaces the old flat wallet-balance floor: available
+       balance nets out coins already held by this user's OTHER active
+       sessions (MARKET_GAP_ANALYSIS.md §3 "Authorization hold"; the hold
+       itself closes the old finalize-time forgiven-overage leak — see
+       SECURITY.md §5). Must come AFTER the rate is resolved above, since
+       sizing the hold needs it.
     4. Commit the session + OCCUPIED status FIRST, then publish MQTT ON.
        (Publishing first could leave the plug live with no session billing it
        if the DB write then fails. If the publish fails we roll the claim back.)
@@ -140,16 +154,6 @@ async def start_charging_session(
                     detail="You don't have access to this plug. Join the group first.",
                 )
 
-    # 2. Check wallet balance (minimum coins to start; env-configurable)
-    if user.coin_balance < MIN_START_BALANCE_COINS:
-        raise HTTPException(
-            status_code=402,
-            detail=(
-                f"Insufficient balance. You have {user.coin_balance} coins. "
-                f"Minimum {MIN_START_BALANCE_COINS:g} required."
-            ),
-        )
-
     # 3. Claim the plug (still holding the row lock). Anything but AVAILABLE
     #    blocks the start (TD#22): OCCUPIED means in use, and OFFLINE /
     #    MAINTENANCE mean the CPO took the plug out of service (or it was
@@ -188,12 +192,40 @@ async def start_charging_session(
     # changes what this session bills (see services/pricing.py).
     rate_coins_per_kwh = await resolve_rate_for_plug(db, plug)
 
+    # Size the session's authorization hold (MARKET_GAP_ANALYSIS.md §3): the
+    # old flat MIN_START_BALANCE_COINS floor let a session start with just
+    # enough to *begin*, then finalize forgave any overage past the wallet
+    # (min(final_cost, balance) — the revenue leak SECURITY.md §5 flags).
+    # Instead, reserve this session's worst-case cost up front: the smaller
+    # of (a) what's actually left to spend right now — coin_balance net of
+    # whatever this user's OTHER active sessions already hold, so two
+    # concurrent starts (serialized on the user-row lock taken in step 0)
+    # can never double-reserve the same coins — and (b) the most this
+    # session could possibly bill, its own max_kwh cap at the resolved rate.
+    # The 402 floor now gates on this AVAILABLE figure, not the raw balance:
+    # a driver with plenty of coins but most of it held by another running
+    # session must not be allowed to reserve past what's actually left.
+    available = await available_balance(db, user.id)
+    hold = to_money(min(available, energy_cost(req.max_kwh, rate_coins_per_kwh)))
+    if hold < MIN_START_BALANCE_COINS:
+        raise HTTPException(
+            status_code=402,
+            detail=(
+                f"Insufficient available balance. You have {available} coins "
+                f"available to reserve for this session (wallet balance "
+                f"{user.coin_balance} coins; the difference, if any, is held "
+                f"by another active session). Minimum {MIN_START_BALANCE_COINS:g} "
+                "required to start."
+            ),
+        )
+
     session = ChargingSession(
         tenant_id=gateway.tenant_id,
         user_id=user.id,
         plug_id=plug.id,
         status=SessionStatus.ACTIVE,
         rate_coins_per_kwh=rate_coins_per_kwh,
+        hold_coins=hold,
     )
     db.add(session)
     plug.status = PlugStatus.OCCUPIED

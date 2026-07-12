@@ -180,14 +180,35 @@ async def finalize_charging_session(
     #    from the DB — an entity re-select here (even with_for_update) would
     #    return the request session's identity-mapped User loaded at auth
     #    time, whose stale balance silently undoes writes committed since
-    #    (e.g. a webhook top-up landing mid-request). It also debits only
-    #    what the wallet actually holds: a ledger row whose `amount`
-    #    disagrees with the real balance delta (as `max(0, ...)` used to,
-    #    while still recording -final_cost) breaks reconciliation. If the
-    #    bill exceeds the balance, the shortfall is forgiven but recorded
-    #    for observability.
+    #    (e.g. a webhook top-up landing mid-request).
+    #
+    #    [Auth holds] With an authorization hold (session.hold_coins,
+    #    reserved at start — see routers/sessions.py start_charging_session /
+    #    services/wallet.py available_balance), the amount REQUESTED from
+    #    debit_wallet_clamped is capped to min(final_cost, hold_coins): the
+    #    hold already reserved this session's worst-case cost (available
+    #    balance at start, itself capped by max_kwh * rate), so a debit
+    #    bounded by it can never exceed what was actually reserved — closing
+    #    the old forgiven-overage revenue leak (SECURITY.md §5) for every
+    #    held session. Any unspent remainder (final_cost < hold_coins, e.g.
+    #    the session stopped before using its full reservation) is simply
+    #    released: no money ever moved for the hold itself, so there is
+    #    nothing to move back — the reservation just stops counting the
+    #    moment this session leaves ACTIVE (available_balance's SUM only
+    #    includes ACTIVE sessions). debit_wallet_clamped still independently
+    #    clamps to whatever the DB balance actually holds right now, so the
+    #    hold cap here is defense-in-depth, not a replacement for that clamp.
+    #    Legacy sessions (hold_coins IS NULL, started before this column
+    #    existed) keep the exact pre-hold behavior: request the full
+    #    final_cost, clamped only by the live wallet balance — a ledger row
+    #    whose `amount` disagrees with the real balance delta (as `max(0,
+    #    ...)` used to, while still recording -final_cost) breaks
+    #    reconciliation, so any forgiven shortfall is logged for
+    #    observability in exactly (and only) this legacy path.
+    has_hold = session.hold_coins is not None
+    requested_debit = min(final_cost, session.hold_coins) if has_hold else final_cost
     actual_debit, new_balance = await debit_wallet_clamped(
-        db, session.user_id, final_cost
+        db, session.user_id, requested_debit
     )
     shortfall = final_cost - actual_debit
     session.coins_spent = actual_debit  # what was actually collected from the wallet
@@ -196,15 +217,26 @@ async def finalize_charging_session(
     if reason:
         description += f" [{reason}]"
     if shortfall > 0:
-        description += f" (shortfall {shortfall:.2f} coins uncollected)"
-        logger.warning(
-            "Session billed more than the wallet held; shortfall forgiven",
-            extra={
-                "session_id": session.id, "user_id": session.user_id,
-                "billed_coins": float(final_cost), "collected_coins": float(actual_debit),
-                "shortfall_coins": float(shortfall),
-            },
-        )
+        if has_hold:
+            # Capped by this session's OWN hold, not by an empty wallet — by
+            # design (see above). Deliberately no wallet-exhaustion warning
+            # here; that stays scoped to the legacy NULL-hold path below,
+            # where it signals the real forgiven-overage bug the hold
+            # mechanism exists to close.
+            description += (
+                f" (capped at the {session.hold_coins:.2f}-coin hold; "
+                f"{shortfall:.2f} coins beyond it not collected)"
+            )
+        else:
+            description += f" (shortfall {shortfall:.2f} coins uncollected)"
+            logger.warning(
+                "Session billed more than the wallet held; shortfall forgiven",
+                extra={
+                    "session_id": session.id, "user_id": session.user_id,
+                    "billed_coins": float(final_cost), "collected_coins": float(actual_debit),
+                    "shortfall_coins": float(shortfall),
+                },
+            )
 
     ledger_entry = LedgerTransaction(
         user_id=session.user_id,
