@@ -142,4 +142,64 @@ describe('SessionMonitor', () => {
     render(<SessionMonitor />);
     expect(screen.queryByText('other plug')).not.toBeInTheDocument();
   });
+
+  it('shows energy-limit progress toward the session max_kwh', () => {
+    useSession.mockReturnValue({
+      sessionData: { ...baseData, energy_kwh: 0.42, is_stale: false },
+      isActive: true,
+      stopSession: vi.fn(),
+      lastFrameAt: Date.now(),
+      focusedStartedAt: new Date().toISOString(),
+      focusedLimits: { max_kwh: 1.0, max_duration_seconds: null },
+      alarms: [],
+    });
+    render(<SessionMonitor />);
+    expect(screen.getByText('0.42 / 1.00 kWh')).toBeInTheDocument();
+    expect(screen.getByText(/stops automatically/)).toBeInTheDocument();
+  });
+
+  it('shows elapsed-vs-limit time when a duration limit is set', () => {
+    useSession.mockReturnValue({
+      sessionData: { ...baseData, is_stale: false },
+      isActive: true,
+      stopSession: vi.fn(),
+      lastFrameAt: Date.now(),
+      focusedStartedAt: new Date().toISOString(),
+      focusedLimits: { max_kwh: null, max_duration_seconds: 14400 },
+      alarms: [],
+    });
+    render(<SessionMonitor />);
+    // Elapsed ticks from ~0; the limit side is the fixed 4 h cap.
+    expect(screen.getByText(/\/ 04:00:00/)).toBeInTheDocument();
+    expect(screen.getByText(/stops automatically/)).toBeInTheDocument();
+  });
+
+  it('shows both limits when both are set', () => {
+    useSession.mockReturnValue({
+      sessionData: { ...baseData, energy_kwh: 0.42, is_stale: false },
+      isActive: true,
+      stopSession: vi.fn(),
+      lastFrameAt: Date.now(),
+      focusedStartedAt: new Date().toISOString(),
+      focusedLimits: { max_kwh: 1.0, max_duration_seconds: 1800 },
+      alarms: [],
+    });
+    render(<SessionMonitor />);
+    expect(screen.getByText('0.42 / 1.00 kWh')).toBeInTheDocument();
+    expect(screen.getByText(/\/ 00:30:00/)).toBeInTheDocument();
+  });
+
+  it('renders no limit banner for a legacy session without limits', () => {
+    useSession.mockReturnValue({
+      sessionData: { ...baseData, is_stale: false },
+      isActive: true,
+      stopSession: vi.fn(),
+      lastFrameAt: Date.now(),
+      focusedStartedAt: new Date().toISOString(),
+      focusedLimits: null,
+      alarms: [],
+    });
+    render(<SessionMonitor />);
+    expect(screen.queryByText(/stops automatically/)).not.toBeInTheDocument();
+  });
 });

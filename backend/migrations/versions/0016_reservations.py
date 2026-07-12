@@ -18,25 +18,26 @@ SELECT ... FOR UPDATE on the plug row in the booking path) — deliberately
 no tstzrange EXCLUDE constraint here, which would drag in btree_gist for a
 race the plug lock already closes.
 
-NOTE on revision chaining: authored against the 0013_auth_holds head.
-Sibling feature branches in this parallel batch are also minting "0014"
-revisions chained on 0013 — expected; the merge coordinator renumbers/
-re-chains at merge time (the 0011_disputes/0013_auth_holds precedent). This
-revision only creates the self-contained `reservations` table + enum, so it
-is trivially reorderable.
+NOTE on revision chaining: authored as 0014 chained on 0013_auth_holds, on
+a parallel branch alongside the sibling features that landed on main first
+as 0014_plug_watches and 0015_session_limits — renumbered to 0016 and
+re-chained onto 0015_session_limits at merge time (the established
+parallel-agent protocol; the 0011_disputes/0013_auth_holds precedent). This
+revision only creates the self-contained `reservations` table + enum, so
+the reorder is content-neutral.
 
 Idempotent create (same rationale as 0005/0011): a create_all-built database
 (init_db() stamps a pre-Alembic DB at the baseline, then upgrades to head)
 already has this type/table from the current models.py.
 
-Revision ID: 0014_reservations
-Revises: 0013_auth_holds
+Revision ID: 0016_reservations
+Revises: 0015_session_limits
 Create Date: 2026-07-12
 """
 from alembic import op
 
-revision = "0014_reservations"
-down_revision = "0013_auth_holds"
+revision = "0016_reservations"
+down_revision = "0015_session_limits"
 branch_labels = None
 depends_on = None
 

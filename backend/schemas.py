@@ -129,6 +129,11 @@ class PlugResponse(BaseModel):
     reserved_now_by_me: bool = False
     reserved_until: Optional[str] = None
     next_reservation: Optional[ReservationWindow] = None
+    # [Plug watches] True when the CURRENT user has an armed one-shot
+    # "notify me when free" watch on this plug (POST/DELETE
+    # /api/plugs/{id}/watch). Drives the Home card's bell toggle; cleared
+    # server-side when the watch fires (services/plug_watch.py).
+    watching: bool = False
 
 
 class GatewayEventResponse(BaseModel):

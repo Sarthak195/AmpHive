@@ -29,6 +29,14 @@
  * covers right now (distinct from occupied; the holder sees "Reserved for
  * you" instead and can still start). A "Your reservations" strip lists the
  * driver's upcoming bookings with a cancel button.
+ *
+ * Notify-when-free bell (2026-07-12): any plug card that is NOT currently
+ * startable (in use / offline / maintenance, per the shared plugAvailability
+ * classification) shows a small bell toggle. It arms a one-shot server-side
+ * watch (POST/DELETE /api/plugs/{id}/watch, optimistic UI via the API's
+ * `watching` field); when the plug frees up, the driver is pinged through
+ * the existing notification pipeline (bell feed + Socket.io + Web Push) and
+ * the watch clears itself.
  */
 
 import { useState, useEffect, useMemo, useRef } from 'react';
@@ -40,6 +48,8 @@ import { useConfig } from '../contexts/ConfigContext';
 import api from '../api/client';
 import MapComponent from '../components/MapComponent';
 import ReserveModal from '../components/ReserveModal';
+import ChargeLimitControl from '../components/ChargeLimitControl';
+import { computeChargeLimits } from '../utils/chargeLimits';
 import { AVAILABILITY_CSS_VAR, AVAILABILITY_LABELS, AVAILABILITY_STATES, getPlugAvailability } from '../utils/plugAvailability';
 import { fmtTime, fmtWindow } from '../utils/reservationTime';
 
@@ -105,6 +115,10 @@ const Home = () => {
   const [loadingPlugs, setLoadingPlugs] = useState(false);
   const [startError, setStartError] = useState('');
   const [starting, setStarting] = useState(false);
+  // Optional charging-limit spec from ChargeLimitControl ({ mode, value } |
+  // null). Kept raw here: the coins→kWh conversion happens at start time
+  // with the rate of the plug actually targeted (see rateForPlug below).
+  const [limitSpec, setLimitSpec] = useState(null);
 
   // Reservations: the driver's upcoming bookings (the strip), the plug being
   // reserved (modal open when non-null), and cancel-in-flight/error state.
@@ -179,12 +193,18 @@ const Home = () => {
 
   // Live plug-availability: when any plug flips OCCUPIED/AVAILABLE (someone
   // else started/stopped a session), update its badge in place so the list
-  // stays current without a manual refresh.
+  // stays current without a manual refresh. A flip to 'available' also fired
+  // and cleared any armed one-shot watch server-side, so clear the local
+  // bell state along with it.
   useEffect(() => {
     if (!socket) return;
     const handlePlugStatus = ({ plug_id, status }) => {
       setPlugs((prev) =>
-        prev.map((p) => (p.id === plug_id ? { ...p, status } : p))
+        prev.map((p) =>
+          p.id === plug_id
+            ? { ...p, status, ...(status === 'available' ? { watching: false } : {}) }
+            : p
+        )
       );
     };
     socket.on('plug_status', handlePlugStatus);
@@ -259,6 +279,15 @@ const Home = () => {
   const privateCounts = useMemo(() => countByAvailability(privatePlugs), [privatePlugs]);
   const publicCounts = useMemo(() => countByAvailability(publicPlugs), [publicPlugs]);
 
+  // Coins-per-kWh for a given plug id: the plug's own resolved price when we
+  // know it (shown on its card), else the global config rate. Drives the
+  // ₹/coins → kWh conversion for the charging-limit control.
+  const rateForPlug = (pid) => {
+    const plug = plugs.find((p) => String(p.id) === String(pid));
+    const price = Number(plug?.price_per_kwh);
+    return price > 0 ? price : (coins_per_kwh || 5);
+  };
+
   const handleStartSession = async (e, targetPlugId = null) => {
     if (e) e.preventDefault();
     const pid = targetPlugId || plugId.trim();
@@ -268,12 +297,34 @@ const Home = () => {
     setStarting(true);
 
     try {
-      await startSession(pid);
+      // Optional user-set stop condition — converted here (not in the
+      // control) so a coins cap uses the rate of the plug actually being
+      // started. null → nothing sent → backend defaults apply.
+      await startSession(pid, computeChargeLimits(limitSpec, rateForPlug(pid)));
       navigate('/session');
     } catch (err) {
       setStartError(err.message);
     } finally {
       setStarting(false);
+    }
+  };
+
+  // "Notify me when free" (one-shot watch) bell toggle — optimistic: flip
+  // the local state immediately, reconcile with the server, revert on
+  // failure. Delivery of the actual notification is the existing pipeline
+  // (NotificationBell + Web Push); nothing more to do client-side.
+  const toggleWatch = async (plug) => {
+    const next = !plug.watching;
+    setPlugs((prev) => prev.map((p) => (p.id === plug.id ? { ...p, watching: next } : p)));
+    try {
+      if (next) {
+        await api.post(`/api/plugs/${plug.id}/watch`);
+      } else {
+        await api.delete(`/api/plugs/${plug.id}/watch`);
+      }
+    } catch (err) {
+      console.error('Failed to toggle plug watch:', err);
+      setPlugs((prev) => prev.map((p) => (p.id === plug.id ? { ...p, watching: !next } : p)));
     }
   };
 
@@ -289,14 +340,18 @@ const Home = () => {
 
   // One plug card — shared by the private and public sections. A plug is
   // startable only if it is available AND its gateway is reachable right
-  // now AND it isn't inside someone else's reserved window (the server
-  // would 409 the start anyway; the card just doesn't invite the click).
-  // gateway_online defaults true for older API data; an unreachable charger
-  // is shown but not clickable so the driver isn't sent into a 409 at start.
+  // now (the shared plugAvailability classification) AND it isn't inside
+  // someone else's reserved window (the server would 409 the start anyway;
+  // the card just doesn't invite the click). gateway_online defaults true
+  // for older API data; an unreachable charger is shown but not clickable
+  // so the driver isn't sent into a 409 at start. Any hardware-unavailable
+  // plug (in use / offline / maintenance) gets a "Notify when free" bell —
+  // a one-shot watch that pings the driver (feed + push) when it frees up.
   const renderPlugCard = (plug, index) => {
     const unreachable = plug.gateway_online === false;
     const reservedByOther = plug.reserved_now === true && plug.reserved_now_by_me !== true;
-    const startable = plug.status === 'available' && !unreachable && !reservedByOther;
+    const hardwareAvailable = getPlugAvailability(plug) === 'available';
+    const startable = hardwareAvailable && !reservedByOther;
     return (
       <div
         key={plug.id}
@@ -355,11 +410,47 @@ const Home = () => {
             <span style={{ color: 'var(--color-primary)', fontWeight: 600, fontSize: '0.9rem' }}>
               Charge →
             </span>
-          ) : unreachable ? (
-            <span style={{ color: 'var(--color-text-muted)', fontSize: '0.8rem' }}>
-              Unreachable
-            </span>
-          ) : null}
+          ) : (
+            <div className="flex items-center gap-2">
+              {unreachable && (
+                <span style={{ color: 'var(--color-text-muted)', fontSize: '0.8rem' }}>
+                  Unreachable
+                </span>
+              )}
+              {/* Bell only when the plug is hardware-unavailable (in use /
+                  offline / maintenance): the watch endpoint 409s a plug that
+                  is startable right now, and a merely-reserved plug frees
+                  itself when the window ends — nothing to watch. */}
+              {!hardwareAvailable && (
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm"
+                  aria-pressed={!!plug.watching}
+                  aria-label={
+                    plug.watching
+                      ? `Stop watching ${plug.name}`
+                      : `Notify me when ${plug.name} is free`
+                  }
+                  title={
+                    plug.watching
+                      ? "Watching — you'll be notified when it's free"
+                      : 'Notify me when this plug is free'
+                  }
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    toggleWatch(plug);
+                  }}
+                  style={{
+                    whiteSpace: 'nowrap',
+                    fontSize: '0.8rem',
+                    color: plug.watching ? 'var(--color-primary)' : 'var(--color-text-muted)',
+                  }}
+                >
+                  {plug.watching ? '🔔 Watching' : '🔔 Notify me'}
+                </button>
+              )}
+            </div>
+          )}
           {/* Book a future slot — any accessible plug except one an operator
               took out of service (the server 409s MAINTENANCE bookings). */}
           {plug.status !== 'maintenance' && (
@@ -491,6 +582,14 @@ const Home = () => {
               {starting ? '...' : 'Start'}
             </button>
           </form>
+
+          {/* Optional stop condition — kWh / time / ₹ coins ("only charge
+              1 kWh"). Collapsed by default; enforced backend-side at the
+              limit (mirrored by the firmware's local watchdogs). */}
+          <ChargeLimitControl
+            rate={rateForPlug(plugId.trim())}
+            onChange={setLimitSpec}
+          />
 
           {(startError || sessionError) && (
             <div className="error-text mt-2">{startError || sessionError}</div>

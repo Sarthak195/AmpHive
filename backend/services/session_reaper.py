@@ -38,6 +38,18 @@ STALE_TIMEOUT_SEC = float(os.getenv("SESSION_STALE_TIMEOUT_SEC", "300"))
 
 REAP_REASON = "auto-stopped: telemetry lost"
 
+# [Session limits] Duration backstop: an ACTIVE session that has outlived its
+# own max_duration_seconds (snapshotted at start — see ChargingSession) is
+# finalized with the same reason the telemetry-path mirror uses
+# (MQTTManager._maybe_auto_stop_on_limits). Normally that mirror fires within
+# ~1 s of the limit; this sweep only matters when telemetry still flows but
+# the mirror was skipped (e.g. the backend restarted mid-frame) — a stale
+# feed is already covered by REAP_REASON above. Governed by the same env
+# toggle as the telemetry-path mirror (read independently here to keep this
+# module import-light; same name, same default).
+TIME_LIMIT_REAP_REASON = "auto-stopped: time limit reached"
+AUTO_STOP_ON_LIMITS = os.getenv("AUTO_STOP_ON_LIMITS", "true").lower() in ("1", "true", "yes")
+
 
 class SessionReaperService:
     """Owns a background task (started/stopped by the app lifespan) that
@@ -86,6 +98,10 @@ class SessionReaperService:
             except Exception:
                 # The janitor must survive transient DB errors.
                 logger.exception("Session reaper sweep failed")
+            try:
+                await self.reap_time_limited_once()
+            except Exception:
+                logger.exception("Session reaper time-limit sweep failed")
 
     def _stale_session_ids_query(self, cutoff: datetime):
         from backend.database.models import ChargingSession, SessionStatus
@@ -126,4 +142,66 @@ class SessionReaperService:
                     )
             except Exception:
                 logger.exception(f"Failed to reap session {session_id}")
+        return reaped
+
+    def _time_limited_sessions_query(self):
+        """ACTIVE sessions that carry a duration limit — the elapsed-time
+        comparison happens in Python (see reap_time_limited_once) so this
+        stays a plain portable SELECT, and the ACTIVE set is small by
+        construction (MAX_ACTIVE_SESSIONS_PER_USER caps it per user)."""
+        from backend.database.models import ChargingSession, SessionStatus
+
+        return select(
+            ChargingSession.id,
+            ChargingSession.started_at,
+            ChargingSession.max_duration_seconds,
+        ).where(
+            and_(
+                ChargingSession.status == SessionStatus.ACTIVE,
+                ChargingSession.max_duration_seconds.isnot(None),
+            )
+        )
+
+    async def reap_time_limited_once(self) -> int:
+        """[Session limits] Duration backstop sweep: finalize every ACTIVE
+        session whose elapsed time has passed its own max_duration_seconds
+        (NULL-limit legacy sessions are excluded by the query). Same
+        one-txn-per-session / race-safe-finalize contract as reap_once —
+        losing the row-lock re-check to a user stop or the telemetry-path
+        limit mirror is not counted. Returns the count actually reaped."""
+        if not AUTO_STOP_ON_LIMITS:
+            return 0
+        now = datetime.now(timezone.utc)
+
+        async with self.db_session_factory() as db:
+            result = await db.execute(self._time_limited_sessions_query())
+            rows = list(result.all())
+
+        overdue_ids = []
+        for session_id, started_at, max_duration_seconds in rows:
+            if started_at is None:
+                continue
+            if started_at.tzinfo is None:
+                # Legacy rows written by the old naive-datetime hooks — same
+                # treat-as-UTC convention as gateway_is_live/finalize.
+                started_at = started_at.replace(tzinfo=timezone.utc)
+            if (now - started_at).total_seconds() >= max_duration_seconds:
+                overdue_ids.append(session_id)
+
+        reaped = 0
+        for session_id in overdue_ids:
+            try:
+                async with self.db_session_factory() as db:
+                    outcome = await self.finalize(
+                        db, session_id, reason=TIME_LIMIT_REAP_REASON
+                    )
+                if outcome is not None:
+                    reaped += 1
+                    logger.warning(
+                        f"Reaped time-limited session {session_id}: "
+                        f"{outcome['energy_kwh']} kWh, {outcome['coins_spent']} coins "
+                        f"(outlived its own duration limit)"
+                    )
+            except Exception:
+                logger.exception(f"Failed to reap time-limited session {session_id}")
         return reaped

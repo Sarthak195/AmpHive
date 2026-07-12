@@ -3,12 +3,15 @@
  * preserves it through login, and the "unknown id" notice), the sectioned
  * charger list (private "Your chargers" first, "Public chargers" collapsed
  * by default when private ones exist, map at the bottom, collapsed), the
- * availability + group filters with their live legend counts, and the
+ * availability + group filters with their live legend counts, the
  * reservations surface (the "Reserved until" badge, the Reserve action
- * opening the modal, and the "Your reservations" strip with cancel).
+ * opening the modal, and the "Your reservations" strip with cancel), and the
+ * "notify me when free" bell toggle on non-startable plug cards (optimistic
+ * POST/DELETE against /api/plugs/{id}/watch, revert on failure, cleared by
+ * a live plug_status→available flip).
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 
@@ -335,5 +338,231 @@ describe('Home — reservations', () => {
     renderHome('/');
     await screen.findByText('Lobby Plug');
     expect(screen.queryByText('Your reservations')).not.toBeInTheDocument();
+  });
+});
+
+describe('Home — optional charging limit at start', () => {
+  // Lobby Plug (id 1) carries its own resolved tariff, so a ₹/coins limit
+  // typed against it must convert at 10 coins/kWh, not the global 5.
+  const PRICED_PLUGS = PLUGS.map((p) =>
+    p.id === 1 ? { ...p, price_per_kwh: 10 } : p
+  );
+
+  let startSession;
+
+  const renderWithSessionRoute = () =>
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <Routes>
+          <Route path="/" element={<Home />} />
+          <Route path="/session" element={<div>session page</div>} />
+        </Routes>
+      </MemoryRouter>
+    );
+
+  beforeEach(() => {
+    useAuth.mockReturnValue({ user: DRIVER });
+    api.get.mockResolvedValue(PRICED_PLUGS);
+    startSession = vi.fn().mockResolvedValue({ session_id: 9 });
+    useSession.mockReturnValue({
+      startSession,
+      activeSessions: [],
+      switchSession: vi.fn(),
+      error: null,
+      socket: null,
+    });
+  });
+
+  const typeAndStart = async (plugIdText) => {
+    await userEvent.type(screen.getByPlaceholderText('Enter Plug ID (e.g. 1)'), plugIdText);
+    await userEvent.click(screen.getByRole('button', { name: 'Start' }));
+  };
+
+  it('is collapsed by default and sends NO limit when untouched', async () => {
+    renderWithSessionRoute();
+    await screen.findByText('Lobby Plug');
+
+    expect(screen.getByRole('button', { name: /Set a charging limit/ }))
+      .toHaveAttribute('aria-expanded', 'false');
+
+    await typeAndStart('1');
+    expect(startSession).toHaveBeenCalledWith('1', null);
+  });
+
+  it('sends max_kwh for a kWh preset', async () => {
+    renderWithSessionRoute();
+    await screen.findByText('Lobby Plug');
+
+    await userEvent.click(screen.getByRole('button', { name: /Set a charging limit/ }));
+    await userEvent.click(screen.getByRole('button', { name: '1 kWh' }));
+    await typeAndStart('1');
+
+    expect(startSession).toHaveBeenCalledWith('1', { max_kwh: 1 });
+  });
+
+  it('sends max_duration_seconds for a time preset', async () => {
+    renderWithSessionRoute();
+    await screen.findByText('Lobby Plug');
+
+    await userEvent.click(screen.getByRole('button', { name: /Set a charging limit/ }));
+    await userEvent.click(screen.getByRole('button', { name: 'Time' }));
+    await userEvent.click(screen.getByRole('button', { name: '30 min' }));
+    await typeAndStart('1');
+
+    expect(startSession).toHaveBeenCalledWith('1', { max_duration_seconds: 1800 });
+  });
+
+  it("converts a ₹/coins limit at the target plug's own price_per_kwh", async () => {
+    renderWithSessionRoute();
+    await screen.findByText('Lobby Plug');
+
+    await userEvent.click(screen.getByRole('button', { name: /Set a charging limit/ }));
+    await userEvent.click(screen.getByRole('button', { name: '₹ / coins' }));
+    await userEvent.click(screen.getByRole('button', { name: '₹50' }));
+
+    // The derived-kWh preview uses plug 1's 10 coins/kWh tariff…
+    await userEvent.type(screen.getByPlaceholderText('Enter Plug ID (e.g. 1)'), '1');
+    expect(screen.getByText(/≈ 5\.00 kWh at 10 coins\/kWh/)).toBeInTheDocument();
+
+    // …and so does the payload: ₹50 / 10 = 5 kWh, not ₹50 / 5.
+    await userEvent.click(screen.getByRole('button', { name: 'Start' }));
+    expect(startSession).toHaveBeenCalledWith('1', { max_kwh: 5 });
+  });
+
+  it('falls back to the config coins_per_kwh for a plug without a known price', async () => {
+    renderWithSessionRoute();
+    await screen.findByText('Lobby Plug');
+
+    await userEvent.click(screen.getByRole('button', { name: /Set a charging limit/ }));
+    await userEvent.click(screen.getByRole('button', { name: '₹ / coins' }));
+    await userEvent.click(screen.getByRole('button', { name: '₹25' }));
+    // Plug 999 isn't in the list → config rate (5 coins/kWh) → 5 kWh.
+    await typeAndStart('999');
+
+    expect(startSession).toHaveBeenCalledWith('999', { max_kwh: 5 });
+  });
+
+  it('applies the chosen limit to a plug-card click too', async () => {
+    renderWithSessionRoute();
+    await screen.findByText('Lobby Plug');
+
+    await userEvent.click(screen.getByRole('button', { name: /Set a charging limit/ }));
+    await userEvent.click(screen.getByRole('button', { name: '2 kWh' }));
+    // Card click starts Lobby Plug (available + gateway online).
+    await userEvent.click(screen.getByText('Lobby Plug'));
+
+    expect(startSession).toHaveBeenCalledWith(1, { max_kwh: 2 });
+  });
+});
+
+describe('Home — "notify me when free" bell', () => {
+  beforeEach(() => {
+    useAuth.mockReturnValue({ user: DRIVER });
+    api.get.mockResolvedValue(PLUGS);
+  });
+
+  it('shows the bell only on non-startable plugs', async () => {
+    renderHome('/');
+    await screen.findByText('Lobby Plug');
+    // Open the public section so all four cards are rendered.
+    await userEvent.click(screen.getByRole('button', { name: /Public chargers/ }));
+
+    // Startable (id 1, available + gateway online): no bell, "Charge →".
+    expect(
+      screen.queryByRole('button', { name: /Notify me when Lobby Plug is free/ })
+    ).not.toBeInTheDocument();
+    // Occupied (id 2), gateway-offline (id 3), and status-offline (id 4): bells.
+    expect(
+      screen.getByRole('button', { name: /Notify me when Garage Plug is free/ })
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: /Notify me when Rooftop Plug is free/ })
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: /Notify me when Basement Plug is free/ })
+    ).toBeInTheDocument();
+  });
+
+  it('arms a watch optimistically: POSTs and flips the bell to Watching', async () => {
+    api.post.mockResolvedValue({ status: 'watching', plug_id: 2, watching: true });
+    renderHome('/');
+    await screen.findByText('Garage Plug');
+
+    await userEvent.click(
+      screen.getByRole('button', { name: /Notify me when Garage Plug is free/ })
+    );
+
+    expect(api.post).toHaveBeenCalledWith('/api/plugs/2/watch');
+    const watching = screen.getByRole('button', { name: /Stop watching Garage Plug/ });
+    expect(watching).toHaveAttribute('aria-pressed', 'true');
+    expect(watching).toHaveTextContent('Watching');
+  });
+
+  it('disarms a watching plug: DELETEs and flips the bell back', async () => {
+    api.get.mockResolvedValue(
+      PLUGS.map((p) => (p.id === 2 ? { ...p, watching: true } : p))
+    );
+    api.delete.mockResolvedValue({ status: 'not_watching', plug_id: 2, watching: false });
+    renderHome('/');
+    await screen.findByText('Garage Plug');
+
+    await userEvent.click(
+      screen.getByRole('button', { name: /Stop watching Garage Plug/ })
+    );
+
+    expect(api.delete).toHaveBeenCalledWith('/api/plugs/2/watch');
+    expect(
+      screen.getByRole('button', { name: /Notify me when Garage Plug is free/ })
+    ).toHaveAttribute('aria-pressed', 'false');
+  });
+
+  it('reverts the optimistic flip when the API call fails', async () => {
+    api.post.mockRejectedValue(new Error('This plug is available right now'));
+    renderHome('/');
+    await screen.findByText('Garage Plug');
+
+    await userEvent.click(
+      screen.getByRole('button', { name: /Notify me when Garage Plug is free/ })
+    );
+
+    // Reverted: back to the unarmed bell, no Watching state left behind.
+    expect(
+      await screen.findByRole('button', { name: /Notify me when Garage Plug is free/ })
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: /Stop watching Garage Plug/ })
+    ).not.toBeInTheDocument();
+  });
+
+  it('clears the bell when the plug flips available live (one-shot fired server-side)', async () => {
+    const handlers = {};
+    const socket = {
+      on: (event, fn) => { handlers[event] = fn; },
+      off: vi.fn(),
+    };
+    useSession.mockReturnValue({
+      startSession: vi.fn(),
+      activeSessions: [],
+      switchSession: vi.fn(),
+      error: null,
+      socket,
+    });
+    api.get.mockResolvedValue(
+      PLUGS.map((p) => (p.id === 2 ? { ...p, watching: true } : p))
+    );
+    renderHome('/');
+    await screen.findByText('Garage Plug');
+    expect(
+      screen.getByRole('button', { name: /Stop watching Garage Plug/ })
+    ).toBeInTheDocument();
+
+    // The server fired + deleted the watch when the plug freed; the same
+    // plug_status broadcast clears the local bell (and makes it startable).
+    act(() => handlers.plug_status({ plug_id: 2, status: 'available' }));
+
+    expect(
+      screen.queryByRole('button', { name: /Stop watching Garage Plug/ })
+    ).not.toBeInTheDocument();
+    expect(screen.getAllByText('Charge →').length).toBeGreaterThan(1);
   });
 });

@@ -15,7 +15,7 @@ import enum
 from datetime import datetime
 from typing import List, Optional
 from decimal import Decimal
-from sqlalchemy import CheckConstraint, Column, Integer, BigInteger, String, Float, Numeric, Boolean, ForeignKey, DateTime, Enum as SQLEnum, Index, Text, text
+from sqlalchemy import CheckConstraint, Column, Integer, BigInteger, String, Float, Numeric, Boolean, ForeignKey, DateTime, Enum as SQLEnum, Index, Text, UniqueConstraint, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 class Base(DeclarativeBase):
@@ -262,6 +262,26 @@ class ChargingSession(Base):
     plug: Mapped[Plug] = relationship("Plug", back_populates="sessions")
     ledger_transactions: Mapped[List["LedgerTransaction"]] = relationship("LedgerTransaction", back_populates="session")
 
+    # [Session limits] The stop conditions this session was STARTED with,
+    # snapshotted verbatim from SessionStartRequest (max_kwh /
+    # max_duration_seconds — the same values forwarded to the gateway in the
+    # MQTT ON payload, where the firmware enforces them locally as watchdogs).
+    # Persisted so the BACKEND can mirror that enforcement on the telemetry
+    # path (the firmware cuts the relay but publishes no alarm on these
+    # cutoffs, so without this mirror the session would linger ACTIVE until
+    # the reaper): MQTTManager._maybe_auto_stop_on_limits finalizes with
+    # "auto-stopped: energy limit reached" / "auto-stopped: time limit
+    # reached" (env toggle AUTO_STOP_ON_LIMITS), and the session reaper
+    # sweeps a duration backstop. Always set at start (including the schema
+    # defaults, 30 kWh / 4 h) since 2026-07-12; NULL only for legacy sessions
+    # predating the columns — those are never limit-auto-stopped (staleness
+    # reaping and balance exhaustion still apply). max_kwh is Float, not
+    # Numeric: it's an energy measurement threshold, not money (matches
+    # energy_kwh). Alembic revision 0015_session_limits. Appended at the
+    # class tail (after the relationships) to ease parallel-branch merges.
+    max_kwh: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    max_duration_seconds: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
 
 class LedgerTransaction(Base):
     __tablename__ = "ledger_transactions"
@@ -459,9 +479,11 @@ class AuditLog(Base):
     tenant_id: Mapped[int] = mapped_column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
     actor_user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     # e.g. "gateway.create", "gateway.delete", "plug.create", "plug.delete",
-    # "plug.status_change", "group.create", "group.delete", "access_code.regen"
+    # "plug.status_change", "plug.maintenance_enter"/"..._clear",
+    # "group.create", "group.delete", "access_code.regen", and the payout
+    # money ops "payout.request", "payout.mark_paid", "payout.cancel"
     action: Mapped[str] = mapped_column(String(64), nullable=False)
-    # e.g. "gateway", "plug", "group"
+    # e.g. "gateway", "plug", "group", "payout"
     target_type: Mapped[str] = mapped_column(String(32), nullable=False)
     target_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     detail: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -856,4 +878,43 @@ class Reservation(Base):
         # session-start gate, the overlap check, and the per-plug schedule
         # all filter on plug_id + a start_at range.
         Index("idx_reservations_plug_start", "plug_id", "start_at"),
+    )
+
+
+# --- Plug Watches ("notify me when free") ---
+
+class PlugWatch(Base):
+    """
+    A one-shot "notify me when this plug is free" subscription: a driver
+    looking at an occupied/offline plug arms it via
+    POST /api/plugs/{id}/watch, and when the plug next flips back to
+    AVAILABLE (finalize_charging_session, or the CPO maintenance-clear path)
+    services/plug_watch.py notifies every watcher through the existing
+    notification pipeline (feed + Socket.io + Web Push) and DELETES their
+    rows — no standing subscription, no re-ping on every later flip unless
+    the driver re-arms the bell.
+
+    Design notes:
+    - UNIQUE(user_id, plug_id): arming twice is idempotent (the router
+      catches the IntegrityError on a double-tap race); the leading user_id
+      also serves the "which plugs is this user watching" lookup the plug
+      list/detail responses make (their `watching` field).
+    - idx_plug_watches_plug: the fan-out reads all watchers of one plug.
+    - FKs CASCADE both ways: a watch is meaningless without its user or its
+      plug, and (unlike notifications) it is transient state, not history —
+      nothing to audit after either side is gone.
+    - No relationship() back-refs on User/Plug: transient rows that should
+      never be a lazy-loadable collection (same rationale as
+      TelemetryReading/GatewayEvent).
+    """
+    __tablename__ = "plug_watches"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    plug_id: Mapped[int] = mapped_column(Integer, ForeignKey("plugs.id", ondelete="CASCADE"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "plug_id", name="uq_plug_watches_user_plug"),
+        Index("idx_plug_watches_plug", "plug_id"),
     )

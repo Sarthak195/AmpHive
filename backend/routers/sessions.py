@@ -273,6 +273,16 @@ async def start_charging_session(
         status=SessionStatus.ACTIVE,
         rate_coins_per_kwh=rate_coins_per_kwh,
         hold_coins=hold,
+        # [Session limits] Snapshot the request's stop conditions (always,
+        # including the schema defaults) — the firmware enforces these
+        # locally from the MQTT ON payload below but publishes no alarm on
+        # the cutoff, so the backend mirrors the enforcement from these
+        # persisted values (MQTTManager._maybe_auto_stop_on_limits + the
+        # reaper's duration backstop). Note the hold sizing above already
+        # uses req.max_kwh, so a smaller user limit automatically shrinks
+        # the auth hold too.
+        max_kwh=req.max_kwh,
+        max_duration_seconds=req.max_duration_seconds,
     )
     db.add(session)
     if covering_reservation is not None:
@@ -338,6 +348,10 @@ async def start_charging_session(
         "session_id": session.id,
         "plug_id": plug.id,
         "plug_name": plug.name,
+        # [Session limits] Echo the effective stop conditions so the UI can
+        # show progress toward them without a second fetch.
+        "max_kwh": session.max_kwh,
+        "max_duration_seconds": session.max_duration_seconds,
         "message": f"Charging started on {plug.name}.",
     }
 
@@ -401,6 +415,11 @@ async def get_active_session(
             "plug_id": session.plug_id,
             "plug_name": plug_name,
             "started_at": session.started_at.isoformat() if session.started_at else None,
+            # [Session limits] The stop conditions this session was started
+            # with (NULL for legacy pre-limit sessions) — the monitor shows
+            # progress toward them ("0.42 / 1.00 kWh · stops automatically").
+            "max_kwh": session.max_kwh,
+            "max_duration_seconds": session.max_duration_seconds,
         }
         for session, plug_name in result.all()
     ]

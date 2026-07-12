@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy import Date, and_, cast, func, or_, select
+from sqlalchemy import Date, and_, cast, delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,8 +16,8 @@ from backend import state
 from backend.database.db import async_session_factory, get_db
 from backend.database.models import (
     ChargerGroup, ChargingSession, Gateway, GatewayStatus, GroupMembership,
-    LedgerTransaction, Plug, PlugStatus, SessionStatus, TelemetryReading,
-    Tenant, TransactionType, User, UserRole,
+    LedgerTransaction, Plug, PlugStatus, PlugWatch, SessionStatus,
+    TelemetryReading, Tenant, TransactionType, User, UserRole,
 )
 from backend.schemas import (
     AuthResponse, CpoGatewayCreateRequest, CpoGroupCreateRequest,
@@ -104,6 +104,45 @@ async def _reservation_fields_for_plugs(db, plug_ids, user_id, now):
 # Plug Endpoints
 # ===========================================================================
 
+async def ensure_plug_group_access(
+    db: AsyncSession, plug: Plug, user: User
+) -> tuple[Optional[str], bool]:
+    """
+    The single-plug access rule, shared by GET /api/plugs/{id} and the
+    watch endpoints below: a plug in a private (non-public) group is only
+    visible to members of that group.
+
+    Returns (group_name, is_private); raises 403 when the plug belongs to a
+    private group the user hasn't joined.
+    """
+    group_name = None
+    is_private = False
+    if plug.group_id:
+        group_result = await db.execute(
+            select(ChargerGroup).where(ChargerGroup.id == plug.group_id)
+        )
+        group = group_result.scalar_one_or_none()
+        group_name = group.name if group else None
+        is_private = bool(group and not group.is_public)
+
+        if group and not group.is_public:
+            # Private group — check membership
+            membership_result = await db.execute(
+                select(GroupMembership).where(
+                    and_(
+                        GroupMembership.user_id == user.id,
+                        GroupMembership.group_id == group.id,
+                    )
+                )
+            )
+            if not membership_result.scalar_one_or_none():
+                raise HTTPException(
+                    status_code=403,
+                    detail="This plug belongs to a private group. Join the group first using an access code.",
+                )
+    return group_name, is_private
+
+
 @router.get("/api/plugs/available", response_model=List[PlugResponse])
 async def get_available_plugs(
     user: User = Depends(get_current_user),
@@ -142,6 +181,15 @@ async def get_available_plugs(
         )
     )
 
+    # [Plug watches] The current user's armed "notify me when free" watches —
+    # ONE extra query for the whole list (keeps this endpoint's deliberate
+    # N+1-free shape; served by the UNIQUE(user_id, plug_id)'s leading column).
+    watched_plug_ids = set(
+        (await db.execute(
+            select(PlugWatch.plug_id).where(PlugWatch.user_id == user.id)
+        )).scalars().all()
+    )
+
     now = datetime.now(timezone.utc)
     all_rows = rows.all()
 
@@ -173,6 +221,7 @@ async def get_available_plugs(
                 # group_is_public is None for ungrouped plugs (outer join) —
                 # only an explicit False marks a private group.
                 is_private=group_is_public is False,
+                watching=plug.id in watched_plug_ids,
                 **reservation_fields.get(plug.id, {}),
             )
         )
@@ -195,32 +244,9 @@ async def get_plug(
     if not plug:
         raise HTTPException(status_code=404, detail=f"Plug with ID {plug_id} not found.")
 
-    # Access check: verify user can see this plug
-    group_name = None
-    is_private = False
-    if plug.group_id:
-        group_result = await db.execute(
-            select(ChargerGroup).where(ChargerGroup.id == plug.group_id)
-        )
-        group = group_result.scalar_one_or_none()
-        group_name = group.name if group else None
-        is_private = bool(group and not group.is_public)
-
-        if group and not group.is_public:
-            # Private group — check membership
-            membership_result = await db.execute(
-                select(GroupMembership).where(
-                    and_(
-                        GroupMembership.user_id == user.id,
-                        GroupMembership.group_id == group.id,
-                    )
-                )
-            )
-            if not membership_result.scalar_one_or_none():
-                raise HTTPException(
-                    status_code=403,
-                    detail="This plug belongs to a private group. Join the group first using an access code.",
-                )
+    # Access check: verify user can see this plug (403 for a private group
+    # the user hasn't joined — shared with the watch endpoints below).
+    group_name, is_private = await ensure_plug_group_access(db, plug, user)
 
     # Effective coords: the plug's own, else its gateway's site location.
     # Also load the gateway to report live reachability to the driver.
@@ -241,6 +267,14 @@ async def get_plug(
         db, [plug.id], user.id, now
     )
 
+    # [Plug watches] Whether THIS user has an armed "notify me when free"
+    # watch on the plug (drives the Home card's bell toggle).
+    watching = (await db.execute(
+        select(PlugWatch.id).where(
+            and_(PlugWatch.user_id == user.id, PlugWatch.plug_id == plug.id)
+        )
+    )).scalar_one_or_none() is not None
+
     return PlugResponse(
         id=plug.id,
         name=plug.name,
@@ -253,8 +287,90 @@ async def get_plug(
         gateway_online=gateway_is_live(gateway) if gateway else False,
         price_per_kwh=float(price_per_kwh),
         is_private=is_private,
+        watching=watching,
         **reservation_fields.get(plug.id, {}),
     )
+
+
+# ===========================================================================
+# Plug Watches — "notify me when free"
+# ===========================================================================
+
+@router.post("/api/plugs/{plug_id}/watch")
+async def watch_plug(
+    plug_id: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Arm a one-shot "notify me when free" watch on a plug: when it next flips
+    back to AVAILABLE (session end / maintenance clear), the driver gets a
+    `plug_available` notification through the existing pipeline (feed +
+    Socket.io + Web Push) and the watch clears itself
+    (services/plug_watch.py).
+
+    Idempotent — watching an already-watched plug returns the same 200.
+    Access follows GET /api/plugs/{id}: 403 for a private-group plug the
+    user hasn't joined. Deliberately permissive about plug state (occupied,
+    offline, and maintenance are all legitimately watchable); the single
+    rejected case is a plug that is startable RIGHT NOW (AVAILABLE with a
+    live gateway) — there is nothing to wait for.
+    """
+    result = await db.execute(select(Plug).where(Plug.id == plug_id))
+    plug = result.scalar_one_or_none()
+    if not plug:
+        raise HTTPException(status_code=404, detail=f"Plug with ID {plug_id} not found.")
+
+    await ensure_plug_group_access(db, plug, user)
+
+    if plug.status == PlugStatus.AVAILABLE:
+        gw_row = await db.execute(
+            select(Gateway).where(Gateway.id == plug.gateway_id)
+        )
+        gateway = gw_row.scalar_one_or_none()
+        if gateway and gateway_is_live(gateway):
+            raise HTTPException(
+                status_code=409,
+                detail="This plug is available right now — no need to watch it.",
+            )
+
+    existing = (await db.execute(
+        select(PlugWatch).where(
+            and_(PlugWatch.user_id == user.id, PlugWatch.plug_id == plug_id)
+        )
+    )).scalar_one_or_none()
+    if not existing:
+        db.add(PlugWatch(user_id=user.id, plug_id=plug_id))
+        try:
+            await db.commit()
+        except IntegrityError:
+            # Double-tap race: the UNIQUE(user_id, plug_id) row landed between
+            # the check and this insert — already watching, same outcome.
+            await db.rollback()
+
+    return {"status": "watching", "plug_id": plug_id, "watching": True}
+
+
+@router.delete("/api/plugs/{plug_id}/watch")
+async def unwatch_plug(
+    plug_id: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Disarm a "notify me when free" watch. Idempotent — deleting a watch that
+    doesn't exist (never armed, already fired, or the plug is gone) is a
+    no-op 200. No access check on purpose: the row is the user's own, and a
+    driver who has since left the plug's private group must still be able to
+    clear their watch.
+    """
+    await db.execute(
+        delete(PlugWatch).where(
+            and_(PlugWatch.user_id == user.id, PlugWatch.plug_id == plug_id)
+        )
+    )
+    await db.commit()
+    return {"status": "not_watching", "plug_id": plug_id, "watching": False}
 
 
 
