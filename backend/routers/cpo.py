@@ -20,9 +20,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend import state
 from backend.database.db import async_session_factory, get_db
 from backend.database.models import (
-    ChargerGroup, ChargingSession, Gateway, GatewayEvent, GatewayStatus,
-    GroupMembership, LedgerTransaction, Plug, PlugStatus, SessionStatus,
-    TelemetryReading, Tenant, TransactionType, User, UserRole,
+    AuditLog, ChargerGroup, ChargingSession, Gateway, GatewayEvent,
+    GatewayStatus, GroupMembership, LedgerTransaction, Plug, PlugStatus,
+    SessionStatus, TelemetryReading, Tenant, TransactionType, User, UserRole,
 )
 from backend.schemas import (
     AuthResponse, CpoGatewayCreateRequest, CpoGatewayOtaRequest,
@@ -34,6 +34,7 @@ from backend.schemas import (
     SessionStopRequest, UserResponse, VerifyPaymentRequest,
 )
 from backend.services import payments as payment_service
+from backend.services.audit import try_record_audit
 from backend.services.auth import (
     create_access_token, decode_access_token, get_current_user,
     hash_password, verify_password,
@@ -268,6 +269,16 @@ async def cpo_create_gateway(
 
     logger.info(f"CPO gateway registered: {gateway.id} ({gateway.name}) by {user.email}")
 
+    await try_record_audit(
+        db,
+        tenant_id=user.tenant_id,
+        actor_user_id=user.id,
+        action="gateway.create",
+        target_type="gateway",
+        target_id=gateway.id,
+        detail=f"name={gateway.name}, vpn_ip={gateway.vpn_ip}",
+    )
+
     return {
         "status": "registered",
         "gateway_id": gateway.id,
@@ -432,6 +443,16 @@ async def cpo_create_plug(
 
     logger.info(f"CPO plug registered: {plug.id} ({plug.name}) by {user.email}")
 
+    await try_record_audit(
+        db,
+        tenant_id=user.tenant_id,
+        actor_user_id=user.id,
+        action="plug.create",
+        target_type="plug",
+        target_id=plug.id,
+        detail=f"name={plug.name}, gateway_id={plug.gateway_id}",
+    )
+
     return {
         "status": "registered",
         "plug_id": plug.id,
@@ -460,6 +481,8 @@ async def cpo_update_plug(
     plug = result.scalar_one_or_none()
     if not plug:
         raise HTTPException(status_code=404, detail="Plug not found or access denied.")
+
+    old_status = plug.status  # captured pre-mutation for the status_change audit diff
 
     # Apply updates
     if req.name is not None:
@@ -494,6 +517,17 @@ async def cpo_update_plug(
     await db.refresh(plug)
 
     logger.info(f"CPO plug updated: {plug.id} ({plug.name}) by {user.email}")
+
+    if req.status is not None and plug.status != old_status:
+        await try_record_audit(
+            db,
+            tenant_id=user.tenant_id,
+            actor_user_id=user.id,
+            action="plug.status_change",
+            target_type="plug",
+            target_id=plug.id,
+            detail=f"{old_status.value} -> {plug.status.value}",
+        )
 
     return {
         "status": "updated",
@@ -570,6 +604,16 @@ async def cpo_create_group(
 
     logger.info(f"CPO group created: '{group.name}' (id={group.id}, public={group.is_public}) by {user.email}")
 
+    await try_record_audit(
+        db,
+        tenant_id=user.tenant_id,
+        actor_user_id=user.id,
+        action="group.create",
+        target_type="group",
+        target_id=group.id,
+        detail=f"name={group.name}, is_public={group.is_public}",
+    )
+
     return {
         "status": "created",
         "group_id": group.id,
@@ -596,6 +640,8 @@ async def cpo_update_group(
     if not group:
         raise HTTPException(status_code=404, detail="Group not found or access denied.")
 
+    old_access_code = group.access_code  # captured pre-mutation for the access_code.regen audit
+
     if req.name is not None:
         group.name = req.name
 
@@ -615,6 +661,20 @@ async def cpo_update_group(
     await db.refresh(group)
 
     logger.info(f"CPO group updated: '{group.name}' (id={group.id}) by {user.email}")
+
+    # Only a genuine rotation to a NEW code counts as access_code.regen — not
+    # the is_public:true path above, which clears the code to None (that's a
+    # removal, not a regen, and isn't part of the audited action taxonomy).
+    if group.access_code is not None and group.access_code != old_access_code:
+        await try_record_audit(
+            db,
+            tenant_id=user.tenant_id,
+            actor_user_id=user.id,
+            action="access_code.regen",
+            target_type="group",
+            target_id=group.id,
+            detail=f"name={group.name}",
+        )
 
     return {
         "status": "updated",
@@ -664,6 +724,16 @@ async def cpo_delete_group(
     await db.commit()
 
     logger.info(f"CPO group deleted: '{group_name}' (id={group_id}) by {user.email}")
+
+    await try_record_audit(
+        db,
+        tenant_id=user.tenant_id,
+        actor_user_id=user.id,
+        action="group.delete",
+        target_type="group",
+        target_id=group_id,
+        detail=f"name={group_name}",
+    )
 
     return {"status": "deleted", "group_id": group_id, "group_name": group_name}
 
@@ -1121,6 +1191,47 @@ async def cpo_acknowledge_event(
     event.acknowledged = True
     await db.commit()
     return {"status": "acknowledged", "event_id": event_id}
+
+
+# --- CPO Admin Audit Trail ---
+
+@router.get("/api/cpo/audit")
+async def cpo_list_audit_log(
+    user: User = Depends(require_role("cpo", "admin")),
+    db: AsyncSession = Depends(get_db),
+    limit: int = 50,
+    offset: int = 0,
+):
+    """
+    CPO admin action audit trail (TD#26) — gateway/plug/group create-delete,
+    status changes, and access-code regeneration for the CPO's tenant, newest
+    first. `limit` capped at 200 per page; `offset` paginates past it.
+    """
+    limit = max(1, min(limit, 200))
+    offset = max(0, offset)
+
+    result = await db.execute(
+        select(AuditLog, User.email)
+        .outerjoin(User, User.id == AuditLog.actor_user_id)
+        .where(AuditLog.tenant_id == user.tenant_id)
+        .order_by(AuditLog.created_at.desc(), AuditLog.id.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+
+    return [
+        {
+            "id": entry.id,
+            "actor_user_id": entry.actor_user_id,
+            "actor_email": actor_email,
+            "action": entry.action,
+            "target_type": entry.target_type,
+            "target_id": entry.target_id,
+            "detail": entry.detail,
+            "created_at": entry.created_at.isoformat() if entry.created_at else None,
+        }
+        for entry, actor_email in result.all()
+    ]
 
 
 # Wrap FastAPI app with Socket.io ASGI wrapper so they run on the same port

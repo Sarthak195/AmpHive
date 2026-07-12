@@ -110,12 +110,14 @@ const Home = () => {
             marginBottom: '1rem',
             display: 'flex',
             justifyContent: 'space-between',
-            alignItems: 'center'
+            alignItems: 'center',
+            flexWrap: 'wrap',
+            gap: '0.75rem',
           }}
         >
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', minWidth: 0 }}>
             <span style={{ fontSize: '1.25rem' }}>⚡</span>
-            <div>
+            <div style={{ minWidth: 0 }}>
               <div style={{ fontWeight: 600 }}>Active charging session in progress</div>
               <div style={{ fontSize: '0.85rem', color: 'var(--color-text-secondary)' }}>
                 Plug: {session.plug_name}
@@ -124,7 +126,7 @@ const Home = () => {
           </div>
           <button
             className="btn btn-accent btn-sm"
-            style={{ whiteSpace: 'nowrap' }}
+            style={{ whiteSpace: 'nowrap', flexShrink: 0 }}
             onClick={() => {
               switchSession(session);
               navigate('/session');
@@ -250,6 +252,7 @@ const Home = () => {
                     animationDelay: `${index * 0.06}s`,
                     cursor: startable ? 'pointer' : 'default',
                     opacity: unreachable ? 0.6 : 1,
+                    gap: '0.75rem',
                   }}
                   onClick={() => {
                     if (startable) {
@@ -257,14 +260,14 @@ const Home = () => {
                     }
                   }}
                 >
-                  <div>
-                    <div className="flex items-center gap-2" style={{ marginBottom: '0.25rem' }}>
+                  <div style={{ minWidth: 0 }}>
+                    <div className="flex items-center gap-2" style={{ marginBottom: '0.25rem', flexWrap: 'wrap' }}>
                       <span style={{ fontWeight: 600 }}>{plug.name}</span>
                       <span className={`badge ${unreachable ? 'badge-danger' : statusColor(plug.status)}`}>
                         {unreachable ? 'charger offline' : plug.status}
                       </span>
                     </div>
-                    <div className="flex items-center gap-3" style={{ fontSize: '0.85rem', color: 'var(--color-text-secondary)' }}>
+                    <div className="flex items-center gap-3" style={{ fontSize: '0.85rem', color: 'var(--color-text-secondary)', flexWrap: 'wrap' }}>
                       <span>ID: {plug.id}</span>
                       <span>•</span>
                       <span>{plug.plug_model}</span>
@@ -277,11 +280,11 @@ const Home = () => {
                     </div>
                   </div>
                   {startable ? (
-                    <span style={{ color: 'var(--color-primary)', fontWeight: 600, fontSize: '0.9rem' }}>
+                    <span style={{ color: 'var(--color-primary)', fontWeight: 600, fontSize: '0.9rem', flexShrink: 0 }}>
                       Charge →
                     </span>
                   ) : unreachable ? (
-                    <span style={{ color: 'var(--color-text-muted)', fontSize: '0.8rem' }}>
+                    <span style={{ color: 'var(--color-text-muted)', fontSize: '0.8rem', flexShrink: 0 }}>
                       Unreachable
                     </span>
                   ) : null}

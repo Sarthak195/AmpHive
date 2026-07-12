@@ -124,6 +124,25 @@ VARCHAR(48) · `severity` VARCHAR(16) (default `warning`;
 indexes on `(tenant_id, created_at)` and `(gateway_id, created_at)`. Added by
 Alembic revision `0005_gateway_events` (2026-07-10).
 
+### `audit_logs`
+CPO admin action audit trail (TD#26) — gateway/plug/group create-delete,
+status changes, and access-code regeneration, previously unrecorded. Written
+by `services/audit.py` (`record_audit` stages the row; `try_record_audit`
+commits it non-fatally — a write failure is caught, logged, and rolled back
+without breaking the admin action it documents), called from
+`routers/cpo.py` after each action's own commit has landed. Read via
+`GET /api/cpo/audit`. `id` **BIGINT PK** · `tenant_id` → tenants (CASCADE,
+**not null**) · `actor_user_id` → users (**SET NULL**, nullable — the acting
+user's account must stay deletable without erasing the audit trail) ·
+`action` VARCHAR(64) (e.g. `gateway.create`, `plug.status_change`,
+`access_code.regen`) · `target_type` VARCHAR(32) (e.g. `gateway`, `plug`,
+`group`) · `target_id` VARCHAR(64) (nullable; stringified so one column fits
+both string gateway ids and integer plug/group ids) · `detail` TEXT
+(nullable, free-form) · `created_at` TIMESTAMPTZ. Index on
+`(tenant_id, created_at)`. Added by Alembic revision `0007_audit_log`
+(2026-07-12). Gateway/plug **delete** are pre-named in the action taxonomy
+but have no CPO endpoint yet to hook — nothing to audit until they exist.
+
 ### `notifications`
 Per-user driver notification feed (session stopped/auto-stopped/reaped/safety
 cutoff, low balance, charger offline, top-up credited), written by
@@ -133,8 +152,8 @@ string, not a PG enum — the set evolves) · `severity` VARCHAR(16) (default
 `info`) · `title` VARCHAR(120) · `body` VARCHAR(500) · `plug_id` → plugs
 (SET NULL, nullable) · `session_id` → charging_sessions (SET NULL, nullable)
 · `read` bool (default false) · `created_at` TIMESTAMPTZ. Composite index on
-`(user_id, created_at)`. Added by Alembic revision `0007_notifications`
-(2026-07-11).
+`(user_id, created_at)`. Added by Alembic revision `0008_notifications`
+(2026-07-11, renumbered from 0007 at merge — `0007_audit_log` landed first).
 
 ### `push_subscriptions`
 Web-Push subscriptions, one row per browser/device that enabled push. `id`
@@ -142,7 +161,7 @@ SERIAL PK · `user_id` → users (CASCADE, indexed) · `endpoint` VARCHAR(1024)
 **UNIQUE** (the push-service URL) · `p256dh` VARCHAR(255) · `auth`
 VARCHAR(64) (client encryption keys) · `created_at` TIMESTAMPTZ. Pruned when
 the push service reports the subscription gone (404/410) or the user
-disables push. Added by `0007_notifications` (2026-07-11).
+disables push. Added by `0008_notifications` (2026-07-11).
 
 ## 3. Relationships
 
@@ -156,6 +175,7 @@ tenants ─┬─< users ─┬─< charging_sessions >─┬─ plugs >── g
          ├─< charging_sessions               │
          ├─< telemetry_readings >── plugs / charging_sessions (nullable)
          ├─< gateway_events >── gateways / plugs (nullable)
+         ├─< audit_logs >── users (actor, nullable)
          └─< charger_groups ─┬─< plugs       │
                              └─< group_memberships
 ```
@@ -169,9 +189,10 @@ joined via `access_code`.
 - **`backend/migrations/versions/0001_baseline.py`** — frozen PostgreSQL DDL
   snapshot of the full 9-table schema at adoption (includes everything the
   retired `_INPLACE_UPGRADES` produced). Never edit or regenerate it. (The
-  live schema is now **12 tables** — `gateway_events` arrived via
-  `0005_gateway_events` 2026-07-10, and `notifications` +
-  `push_subscriptions` via `0007_notifications` 2026-07-11.)
+  live schema is now **13 tables** — `gateway_events` arrived via
+  `0005_gateway_events` (2026-07-10), `audit_logs` via `0007_audit_log`
+  (2026-07-12), and `notifications` + `push_subscriptions` via
+  `0008_notifications` (2026-07-11, renumbered from 0007 at merge).)
 - **New schema change** = new revision: `alembic -c backend/alembic.ini
   revision --autogenerate -m "..."` (autogenerate needs a reachable database —
   use the CI postgres or the VM; dev boxes run no DB by policy).

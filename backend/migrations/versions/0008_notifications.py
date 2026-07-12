@@ -9,14 +9,14 @@ browser's subscription; pruned on 404/410 from the push service).
 Idempotent create (same rationale as 0002..0005): a create_all-built database
 may already have the tables from the models, so guard with IF NOT EXISTS.
 
-Revision ID: 0007_notifications
-Revises: 0006_gateway_firmware_version
+Revision ID: 0008_notifications
+Revises: 0007_audit_log
 Create Date: 2026-07-11
 """
 from alembic import op
 
-revision = "0007_notifications"
-down_revision = "0006_gateway_firmware_version"
+revision = "0008_notifications"
+down_revision = "0007_audit_log"
 branch_labels = None
 depends_on = None
 

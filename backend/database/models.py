@@ -15,7 +15,7 @@ import enum
 from datetime import datetime
 from typing import List, Optional
 from decimal import Decimal
-from sqlalchemy import CheckConstraint, Column, Integer, BigInteger, String, Float, Numeric, Boolean, ForeignKey, DateTime, Enum as SQLEnum, Index, text
+from sqlalchemy import CheckConstraint, Column, Integer, BigInteger, String, Float, Numeric, Boolean, ForeignKey, DateTime, Enum as SQLEnum, Index, Text, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 class Base(DeclarativeBase):
@@ -336,6 +336,55 @@ class GatewayEvent(Base):
     __table_args__ = (
         Index("idx_gateway_events_tenant_created", "tenant_id", "created_at"),
         Index("idx_gateway_events_gateway_created", "gateway_id", "created_at"),
+    )
+
+
+# --- CPO Admin Audit Trail ---
+
+class AuditLog(Base):
+    """
+    Record of CPO admin actions in this multi-tenant billing system: gateway/
+    plug/group create-delete, status changes, and access-code regeneration
+    (TD#26 — there was previously no accountability trail for admin actions).
+    Written by services/audit.py (record_audit / try_record_audit), called
+    from routers/cpo.py after each mutating admin action's own commit has
+    already landed. Read via GET /api/cpo/audit.
+
+    Design notes mirror GatewayEvent:
+    - action / target_type are plain Strings, not PG enums: the action
+      taxonomy (e.g. "gateway.create", "plug.status_change",
+      "access_code.regen") is expected to grow without a schema migration.
+    - tenant_id is NOT NULL + CASCADE, matching Gateway/ChargingSession/
+      ChargerGroup/GatewayEvent — deleting a tenant deletes its audit trail
+      along with everything else it owns.
+    - actor_user_id is nullable + SET NULL: the acting user's account must
+      stay deletable without erasing the audit trail (same rationale as
+      LedgerTransaction.session_id's nullable-on-delete).
+    - target_id is a String even though gateway ids are natively strings and
+      plug/group ids are ints — one column that fits either FK'd resource
+      without a polymorphic-FK setup.
+    - detail is free-form Text, not a fixed-shape column: different actions
+      carry different context (e.g. an old -> new status transition).
+    - No relationship() back-refs on Tenant/User: like TelemetryReading and
+      GatewayEvent, this is a high-cardinality append-only log that should
+      never be a lazy-loadable collection.
+    """
+    __tablename__ = "audit_logs"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    actor_user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    # e.g. "gateway.create", "gateway.delete", "plug.create", "plug.delete",
+    # "plug.status_change", "group.create", "group.delete", "access_code.regen"
+    action: Mapped[str] = mapped_column(String(64), nullable=False)
+    # e.g. "gateway", "plug", "group"
+    target_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    target_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    detail: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+
+    __table_args__ = (
+        Index("idx_audit_logs_tenant_created", "tenant_id", "created_at"),
     )
 
 

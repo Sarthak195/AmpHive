@@ -6,7 +6,7 @@ export default function MapComponent({ plugs, onPlugSelect }) {
   const zoom = 4;
 
   return (
-    <div style={{ height: '300px', width: '100%', marginBottom: '1.5rem', borderRadius: '12px', overflow: 'hidden' }}>
+    <div className="map-container">
       <MapContainer center={center} zoom={zoom} style={{ height: '100%', width: '100%' }}>
         <TileLayer
           attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'

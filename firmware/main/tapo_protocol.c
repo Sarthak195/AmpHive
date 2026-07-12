@@ -18,11 +18,18 @@
  *               ct = AES-128-CBC(PKCS7(plaintext), key, full_iv)
  *               body = SHA256(sig||be32(seq)||ct) || ct   -> POST /app/request?seq=N
  *               resp = signature(32) || ct ; decrypt with key + full_iv(same seq)
+ *
+ * Multi-plug (TD#20): the account (auth_hash) and nominal voltage are shared and
+ * stay module-global; the KLAP session and the energy integrator are per-plug,
+ * held in a `tapo_plug_t` allocated by tapo_plug_create(). A per-plug mutex
+ * serialises that plug's set/get so its energy read-modify-write and KLAP seq
+ * counter can't be raced by the telemetry task vs. the command handler.
  */
 #include "tapo_protocol.h"
 #include <string.h>
 #include <strings.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -44,57 +51,18 @@ static const char *TAG = "tapo_klap";
 #define KLAP_SESSION_TTL_MS   (60 * 60 * 1000)  /* re-handshake hourly (plug TIMEOUT is 24h) */
 #define KLAP_RESP_CAP         2048
 
-/* ── module state ─────────────────────────────────────────────────────────── */
+/* ── shared account state (one Tapo account owns every plug) ──────────────── */
 static bool             s_initialized = false;
 static char             s_email[64];
 static char             s_password[64];
 static float            s_nominal_voltage = 230.0f;
 static uint8_t          s_auth_hash[32];
-static SemaphoreHandle_t s_mutex = NULL;
-
-/* driver-side monotonic energy meter (session watchdog needs a monotonic kWh).
- * Persisted to NVS so a mid-session reboot doesn't reset the meter to 0 while
- * active_session.start_energy_kwh is restored to its pre-reboot value — that
- * made consumed_kwh (= meter - start) go negative and disarmed the energy
- * watchdog until the meter re-accrued. Restoring the meter on init keeps both
- * on the same scale, so the watchdog stays armed across a crash. */
-static double     s_energy_wh = 0.0;
-static TickType_t s_energy_last_tick = 0;
-static double     s_energy_persisted_wh = 0.0;
-/* last power sample, for trapezoidal integration (see tapo_get_telemetry) */
-static float      s_energy_last_power_w = 0.0f;
 
 #define ENERGY_NVS_NAMESPACE         "energy"
-#define ENERGY_NVS_KEY               "wh"
 /* Persist at most once per this many Wh accrued. Writes therefore only happen
  * while actually charging (idle power ~0 never crosses the threshold), which
  * bounds NVS wear while capping the worst-case crash energy loss to <threshold. */
 #define ENERGY_PERSIST_THRESHOLD_WH  50.0
-
-/* Restore the integrator from NVS (blob = the exact double, so no overflow or
- * precision loss). No-op when nothing is stored (fresh device). */
-static void energy_load_nvs(void) {
-    nvs_handle_t h;
-    if (nvs_open(ENERGY_NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) return;
-    double wh = 0.0;
-    size_t sz = sizeof(wh);
-    if (nvs_get_blob(h, ENERGY_NVS_KEY, &wh, &sz) == ESP_OK && sz == sizeof(wh)) {
-        s_energy_wh = wh;
-        s_energy_persisted_wh = wh;
-        ESP_LOGI(TAG, "Restored energy integrator from NVS: %.1f Wh", wh);
-    }
-    nvs_close(h);
-}
-
-static void energy_persist_nvs(void) {
-    nvs_handle_t h;
-    if (nvs_open(ENERGY_NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) return;
-    if (nvs_set_blob(h, ENERGY_NVS_KEY, &s_energy_wh, sizeof(s_energy_wh)) == ESP_OK &&
-        nvs_commit(h) == ESP_OK) {
-        s_energy_persisted_wh = s_energy_wh;
-    }
-    nvs_close(h);
-}
 
 typedef struct {
     bool       valid;
@@ -105,9 +73,52 @@ typedef struct {
     char       cookie[80];   /* "TP_SESSIONID=...." */
     TickType_t expiry;
 } klap_session_t;
-static klap_session_t s_sess;
 
-/* ── crypto helpers ───────────────────────────────────────────────────────── */
+/* ── per-plug driver context ──────────────────────────────────────────────── */
+struct tapo_plug_s {
+    char             ip[16];
+    int              plug_id;
+    SemaphoreHandle_t mutex;
+    klap_session_t   sess;
+    /* driver-side monotonic energy meter (the session watchdog needs a monotonic
+     * kWh). Persisted to NVS (key "wh_<plug_id>") so a mid-session reboot doesn't
+     * reset the meter to 0 while the session's start_energy_kwh is restored to its
+     * pre-reboot value — that made consumed_kwh (= meter - start) go negative and
+     * disarmed the energy watchdog until the meter re-accrued. Restoring the meter
+     * keeps both on the same scale, so the watchdog stays armed across a crash. */
+    double     energy_wh;
+    TickType_t energy_last_tick;
+    double     energy_persisted_wh;
+    float      energy_last_power_w;   /* last power sample, for trapezoidal integration */
+    char       nvs_key[16];           /* "wh_<plug_id>" */
+};
+
+/* Restore the integrator from NVS (blob = the exact double, so no overflow or
+ * precision loss). No-op when nothing is stored (fresh plug). */
+static void energy_load_nvs(tapo_plug_t *p) {
+    nvs_handle_t h;
+    if (nvs_open(ENERGY_NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) return;
+    double wh = 0.0;
+    size_t sz = sizeof(wh);
+    if (nvs_get_blob(h, p->nvs_key, &wh, &sz) == ESP_OK && sz == sizeof(wh)) {
+        p->energy_wh = wh;
+        p->energy_persisted_wh = wh;
+        ESP_LOGI(TAG, "plug %d: restored energy integrator from NVS: %.1f Wh", p->plug_id, wh);
+    }
+    nvs_close(h);
+}
+
+static void energy_persist_nvs(tapo_plug_t *p) {
+    nvs_handle_t h;
+    if (nvs_open(ENERGY_NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) return;
+    if (nvs_set_blob(h, p->nvs_key, &p->energy_wh, sizeof(p->energy_wh)) == ESP_OK &&
+        nvs_commit(h) == ESP_OK) {
+        p->energy_persisted_wh = p->energy_wh;
+    }
+    nvs_close(h);
+}
+
+/* ── crypto helpers (stateless) ───────────────────────────────────────────── */
 typedef struct { const uint8_t *p; size_t n; } seg_t;
 
 static void sha256_segs(const seg_t *segs, int count, uint8_t out[32]) {
@@ -144,7 +155,7 @@ static void be32(int32_t v, uint8_t out[4]) {
     out[2] = (uint8_t)(v >> 8);  out[3] = (uint8_t)(v);
 }
 
-/* ── HTTP layer (esp_http_client) ─────────────────────────────────────────── */
+/* ── HTTP layer (esp_http_client, stateless) ──────────────────────────────── */
 typedef struct {
     uint8_t *body;
     int      body_len;
@@ -215,8 +226,8 @@ static void extract_session_cookie(const char *setcookie, char *out, int out_cap
     out[i] = '\0';
 }
 
-/* ── KLAP handshake ───────────────────────────────────────────────────────── */
-static esp_err_t klap_handshake(const char *ip) {
+/* ── KLAP handshake (operates on a per-plug session) ──────────────────────── */
+static esp_err_t klap_handshake(const char *ip, klap_session_t *sess) {
     uint8_t local_seed[16];
     esp_fill_random(local_seed, sizeof(local_seed));
 
@@ -273,30 +284,30 @@ static esp_err_t klap_handshake(const char *ip) {
 
     base[0] = (seg_t){ (const uint8_t *)"lsk", 3 };
     sha256_segs(base, 4, tmp);
-    memcpy(s_sess.key, tmp, 16);
+    memcpy(sess->key, tmp, 16);
 
     base[0] = (seg_t){ (const uint8_t *)"iv", 2 };
     sha256_segs(base, 4, tmp);
-    memcpy(s_sess.iv, tmp, 12);
+    memcpy(sess->iv, tmp, 12);
     uint32_t seq0 = ((uint32_t)tmp[28] << 24) | ((uint32_t)tmp[29] << 16) |
                     ((uint32_t)tmp[30] << 8)  |  (uint32_t)tmp[31];
-    s_sess.seq = (int32_t)seq0;
+    sess->seq = (int32_t)seq0;
 
     base[0] = (seg_t){ (const uint8_t *)"ldk", 3 };
     sha256_segs(base, 4, tmp);
-    memcpy(s_sess.sig, tmp, 28);
+    memcpy(sess->sig, tmp, 28);
 
-    strncpy(s_sess.cookie, cookie, sizeof(s_sess.cookie) - 1);
-    s_sess.cookie[sizeof(s_sess.cookie) - 1] = '\0';
-    s_sess.expiry = xTaskGetTickCount() + pdMS_TO_TICKS(KLAP_SESSION_TTL_MS);
-    s_sess.valid = true;
+    strncpy(sess->cookie, cookie, sizeof(sess->cookie) - 1);
+    sess->cookie[sizeof(sess->cookie) - 1] = '\0';
+    sess->expiry = xTaskGetTickCount() + pdMS_TO_TICKS(KLAP_SESSION_TTL_MS);
+    sess->valid = true;
     ESP_LOGI(TAG, "KLAP session established with %s", ip);
     return ESP_OK;
 }
 
 /* Perform one encrypted request. Returns ESP_ERR_INVALID_STATE on HTTP 403
  * (session expired) so the caller can re-handshake and retry. */
-static esp_err_t klap_request_once(const char *ip, const char *inner_json,
+static esp_err_t klap_request_once(const char *ip, klap_session_t *sess, const char *inner_json,
                                    uint8_t *out_plain, int out_cap, int *out_len) {
     size_t pt_len = strlen(inner_json);
     size_t padded = ((pt_len / 16) + 1) * 16;          /* PKCS7 always adds 1..16 */
@@ -312,16 +323,16 @@ static esp_err_t klap_request_once(const char *ip, const char *inner_json,
     memcpy(pt, inner_json, pt_len);
     memset(pt + pt_len, pad, pad);
 
-    int32_t seq = ++s_sess.seq;
+    int32_t seq = ++sess->seq;
     uint8_t full_iv[16];
-    memcpy(full_iv, s_sess.iv, 12);
+    memcpy(full_iv, sess->iv, 12);
     be32(seq, full_iv + 12);
 
-    if (aes_cbc_crypt(MBEDTLS_AES_ENCRYPT, s_sess.key, full_iv, pt, ct, padded) != 0) goto done;
+    if (aes_cbc_crypt(MBEDTLS_AES_ENCRYPT, sess->key, full_iv, pt, ct, padded) != 0) goto done;
 
     uint8_t seqb[4]; be32(seq, seqb);
     uint8_t sig[32];
-    seg_t ss[3] = { {s_sess.sig, 28}, {seqb, 4}, {ct, padded} };
+    seg_t ss[3] = { {sess->sig, 28}, {seqb, 4}, {ct, padded} };
     sha256_segs(ss, 3, sig);
 
     memcpy(body, sig, 32);
@@ -331,7 +342,7 @@ static esp_err_t klap_request_once(const char *ip, const char *inner_json,
     snprintf(url, sizeof(url), "http://%s/app/request?seq=%ld", ip, (long)seq);
 
     int resp_len = 0, status = 0;
-    esp_err_t err = klap_http_post(url, s_sess.cookie, body, 32 + padded,
+    esp_err_t err = klap_http_post(url, sess->cookie, body, 32 + padded,
                                    resp, KLAP_RESP_CAP, &resp_len, NULL, 0, &status);
     if (err != ESP_OK) { ESP_LOGE(TAG, "request transport: %s", esp_err_to_name(err)); result = ESP_FAIL; goto done; }
     if (status == 403) { result = ESP_ERR_INVALID_STATE; goto done; }
@@ -339,7 +350,7 @@ static esp_err_t klap_request_once(const char *ip, const char *inner_json,
 
     size_t ct_len = resp_len - 32;
     if (ct_len % 16 != 0 || (int)ct_len >= out_cap) { ESP_LOGE(TAG, "resp ct_len %d invalid", (int)ct_len); result = ESP_FAIL; goto done; }
-    if (aes_cbc_crypt(MBEDTLS_AES_DECRYPT, s_sess.key, full_iv, resp + 32, out_plain, ct_len) != 0) goto done;
+    if (aes_cbc_crypt(MBEDTLS_AES_DECRYPT, sess->key, full_iv, resp + 32, out_plain, ct_len) != 0) goto done;
 
     int plen = (int)ct_len;
     uint8_t padv = out_plain[plen - 1];
@@ -354,17 +365,17 @@ done:
 }
 
 /* Ensure a live session, run the request, re-handshake once on 403. */
-static esp_err_t klap_request(const char *ip, const char *inner_json,
+static esp_err_t klap_request(const char *ip, klap_session_t *sess, const char *inner_json,
                               uint8_t *out_plain, int out_cap, int *out_len) {
-    if (!s_sess.valid || (int32_t)(xTaskGetTickCount() - s_sess.expiry) >= 0) {
-        if (klap_handshake(ip) != ESP_OK) return ESP_FAIL;
+    if (!sess->valid || (int32_t)(xTaskGetTickCount() - sess->expiry) >= 0) {
+        if (klap_handshake(ip, sess) != ESP_OK) return ESP_FAIL;
     }
-    esp_err_t rc = klap_request_once(ip, inner_json, out_plain, out_cap, out_len);
+    esp_err_t rc = klap_request_once(ip, sess, inner_json, out_plain, out_cap, out_len);
     if (rc == ESP_ERR_INVALID_STATE) {
         ESP_LOGW(TAG, "session rejected (403) — re-handshaking");
-        s_sess.valid = false;
-        if (klap_handshake(ip) != ESP_OK) return ESP_FAIL;
-        rc = klap_request_once(ip, inner_json, out_plain, out_cap, out_len);
+        sess->valid = false;
+        if (klap_handshake(ip, sess) != ESP_OK) return ESP_FAIL;
+        rc = klap_request_once(ip, sess, inner_json, out_plain, out_cap, out_len);
     }
     return rc;
 }
@@ -424,17 +435,62 @@ esp_err_t tapo_init(const char *tapo_email, const char *tapo_password, float nom
     seg_t ah[2] = { {su, 20}, {sp, 20} };
     sha256_segs(ah, 2, s_auth_hash);
 
-    if (!s_mutex) s_mutex = xSemaphoreCreateMutex();
-    s_sess.valid = false;
-    s_energy_wh = 0.0;
-    s_energy_last_tick = 0;
-    energy_load_nvs();  /* resume the cross-reboot integrator so the watchdog stays armed */
     s_initialized = true;
     ESP_LOGI(TAG, "Tapo KLAP driver initialized (account %s, nominal %.0f V)", s_email, s_nominal_voltage);
     return ESP_OK;
 }
 
-esp_err_t tapo_set_power_state(const char *plug_ip, bool turn_on) {
+tapo_plug_t *tapo_plug_create(int plug_id, const char *local_ip) {
+    if (!s_initialized) { ESP_LOGE(TAG, "tapo_plug_create before tapo_init"); return NULL; }
+    if (!local_ip || !local_ip[0]) { ESP_LOGE(TAG, "tapo_plug_create: missing ip"); return NULL; }
+
+    tapo_plug_t *p = calloc(1, sizeof(*p));
+    if (!p) { ESP_LOGE(TAG, "tapo_plug_create: OOM"); return NULL; }
+    p->mutex = xSemaphoreCreateMutex();
+    if (!p->mutex) { free(p); ESP_LOGE(TAG, "tapo_plug_create: mutex OOM"); return NULL; }
+
+    p->plug_id = plug_id;
+    strncpy(p->ip, local_ip, sizeof(p->ip) - 1);
+    p->ip[sizeof(p->ip) - 1] = '\0';
+    /* NVS key max is 15 chars; "wh_" + plug_id digits fits realistic ids. */
+    snprintf(p->nvs_key, sizeof(p->nvs_key), "wh_%d", plug_id);
+
+    energy_load_nvs(p);  /* resume the cross-reboot integrator so the watchdog stays armed */
+    ESP_LOGI(TAG, "Tapo plug context created (id=%d, ip=%s)", plug_id, p->ip);
+    return p;
+}
+
+void tapo_plug_set_ip(tapo_plug_t *plug, const char *local_ip) {
+    if (!plug || !local_ip || !local_ip[0]) return;
+    xSemaphoreTake(plug->mutex, portMAX_DELAY);
+    if (strncmp(plug->ip, local_ip, sizeof(plug->ip)) != 0) {
+        strncpy(plug->ip, local_ip, sizeof(plug->ip) - 1);
+        plug->ip[sizeof(plug->ip) - 1] = '\0';
+        plug->sess.valid = false;   /* IP changed — force a fresh handshake */
+        ESP_LOGI(TAG, "plug %d: IP updated to %s (session invalidated)", plug->plug_id, plug->ip);
+    }
+    xSemaphoreGive(plug->mutex);
+}
+
+void tapo_plug_reassign_id(tapo_plug_t *plug, int new_plug_id) {
+    if (!plug || plug->plug_id == new_plug_id) return;
+    xSemaphoreTake(plug->mutex, portMAX_DELAY);
+    plug->plug_id = new_plug_id;
+    snprintf(plug->nvs_key, sizeof(plug->nvs_key), "wh_%d", new_plug_id);
+    /* Re-seat the energy integrator on the new plug's NVS key. Only ever called
+       on an idle provisional slot, so resetting the scale is safe — the next
+       session captures a fresh baseline at ON. */
+    plug->energy_wh = 0.0;
+    plug->energy_persisted_wh = 0.0;
+    plug->energy_last_tick = 0;
+    plug->energy_last_power_w = 0.0f;
+    energy_load_nvs(plug);
+    xSemaphoreGive(plug->mutex);
+    ESP_LOGI(TAG, "plug context reassigned to id %d (energy key %s)", new_plug_id, plug->nvs_key);
+}
+
+esp_err_t tapo_plug_set_power(tapo_plug_t *plug, bool turn_on) {
+    if (!plug) return ESP_ERR_INVALID_ARG;
     if (!s_initialized) { ESP_LOGE(TAG, "tapo_init not called"); return ESP_FAIL; }
 
     char json[96];
@@ -444,19 +500,19 @@ esp_err_t tapo_set_power_state(const char *plug_ip, bool turn_on) {
 
     uint8_t plain[256];
     int plen = 0;
-    xSemaphoreTake(s_mutex, portMAX_DELAY);
-    esp_err_t rc = klap_request(plug_ip, json, plain, sizeof(plain), &plen);
-    xSemaphoreGive(s_mutex);
-    if (rc != ESP_OK) { ESP_LOGE(TAG, "set_power_state %s failed", turn_on ? "ON" : "OFF"); return rc; }
+    xSemaphoreTake(plug->mutex, portMAX_DELAY);
+    esp_err_t rc = klap_request(plug->ip, &plug->sess, json, plain, sizeof(plain), &plen);
+    xSemaphoreGive(plug->mutex);
+    if (rc != ESP_OK) { ESP_LOGE(TAG, "plug %d: set_power %s failed", plug->plug_id, turn_on ? "ON" : "OFF"); return rc; }
 
     int ec = response_error_code((const char *)plain);
     if (ec != 0) { ESP_LOGE(TAG, "set_device_info error_code=%d", ec); return ESP_FAIL; }
-    ESP_LOGI(TAG, "Plug %s turned %s", plug_ip, turn_on ? "ON" : "OFF");
+    ESP_LOGI(TAG, "Plug %s (id=%d) turned %s", plug->ip, plug->plug_id, turn_on ? "ON" : "OFF");
     return ESP_OK;
 }
 
-esp_err_t tapo_get_telemetry(const char *plug_ip, tapo_telemetry_t *out) {
-    if (!out) return ESP_ERR_INVALID_ARG;
+esp_err_t tapo_plug_get_telemetry(tapo_plug_t *plug, tapo_telemetry_t *out) {
+    if (!plug || !out) return ESP_ERR_INVALID_ARG;
     if (!s_initialized) { ESP_LOGE(TAG, "tapo_init not called"); return ESP_FAIL; }
 
     memset(out, 0, sizeof(*out));
@@ -468,18 +524,18 @@ esp_err_t tapo_get_telemetry(const char *plug_ip, tapo_telemetry_t *out) {
     int plen = 0;
     float power_w = 0.0f;
 
-    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    xSemaphoreTake(plug->mutex, portMAX_DELAY);
 
     /* 1) power (+ energy source) */
-    esp_err_t rc = klap_request(plug_ip, "{\"method\":\"get_energy_usage\"}", plain, KLAP_RESP_CAP, &plen);
-    if (rc != ESP_OK) { xSemaphoreGive(s_mutex); free(plain); return rc; }
+    esp_err_t rc = klap_request(plug->ip, &plug->sess, "{\"method\":\"get_energy_usage\"}", plain, KLAP_RESP_CAP, &plen);
+    if (rc != ESP_OK) { xSemaphoreGive(plug->mutex); free(plain); return rc; }
     {
         long mw = 0;   /* get_energy_usage.current_power is in milliwatts */
         if (json_int((const char *)plain, "\"current_power\":", &mw)) power_w = (float)mw / 1000.0f;
     }
 
     /* 2) state + safety statuses */
-    rc = klap_request(plug_ip, "{\"method\":\"get_device_info\"}", plain, KLAP_RESP_CAP, &plen);
+    rc = klap_request(plug->ip, &plug->sess, "{\"method\":\"get_device_info\"}", plain, KLAP_RESP_CAP, &plen);
     if (rc == ESP_OK) {
         out->device_on   = json_true((const char *)plain, "\"device_on\":");
         out->overheated  = json_status_abnormal((const char *)plain, "\"overheat_status\":");
@@ -487,36 +543,36 @@ esp_err_t tapo_get_telemetry(const char *plug_ip, tapo_telemetry_t *out) {
     }
 
     /* monotonic energy integrator (Wh) — robust vs the plug's daily today_energy
-     * reset. Updated INSIDE s_mutex: the telemetry task and the ON-handler's
-     * baseline read both call tapo_get_telemetry and can overlap, so an unlocked
-     * read-modify-write of s_energy_last_tick / s_energy_wh could double-count or
-     * drop an integration slice. */
+     * reset. Updated INSIDE the per-plug mutex: the telemetry task and the
+     * ON-handler's baseline read both call tapo_plug_get_telemetry for the same
+     * plug and can overlap, so an unlocked read-modify-write of
+     * energy_last_tick / energy_wh could double-count or drop an integration slice. */
     TickType_t now = xTaskGetTickCount();
-    if (s_energy_last_tick != 0) {
-        float dt_h = (float)(now - s_energy_last_tick) * portTICK_PERIOD_MS / 3600000.0f;
+    if (plug->energy_last_tick != 0) {
+        float dt_h = (float)(now - plug->energy_last_tick) * portTICK_PERIOD_MS / 3600000.0f;
         /* Trapezoidal rule: average the previous and current power samples over
          * the interval instead of holding the last sample constant (left
          * rectangle). For a load that ramps between polls — the norm for EV
          * charging at the default 10 s cadence — the rectangle rule systematically
          * over/under-counts each ramp; the trapezoid halves that error for the
          * same samples. First sample after boot has no predecessor, so it seeds
-         * s_energy_last_power_w without accruing. */
-        s_energy_wh += ((double)s_energy_last_power_w + (double)power_w) * 0.5 * dt_h;
+         * energy_last_power_w without accruing. */
+        plug->energy_wh += ((double)plug->energy_last_power_w + (double)power_w) * 0.5 * dt_h;
     }
-    s_energy_last_tick = now;
-    s_energy_last_power_w = power_w;
-    double energy_wh_snapshot = s_energy_wh;
+    plug->energy_last_tick = now;
+    plug->energy_last_power_w = power_w;
+    double energy_wh_snapshot = plug->energy_wh;
 
     /* Persist across reboots (throttled by accrual threshold) so a mid-session
      * crash doesn't disarm the energy watchdog. Kept under the lock so the NVS
-     * write and the s_energy_persisted_wh update stay consistent; it is rare
+     * write and the energy_persisted_wh update stay consistent; it is rare
      * (only every ENERGY_PERSIST_THRESHOLD_WH) and cheap next to the KLAP HTTP
      * calls already made above under the same lock. */
-    if (s_energy_wh - s_energy_persisted_wh >= ENERGY_PERSIST_THRESHOLD_WH) {
-        energy_persist_nvs();
+    if (plug->energy_wh - plug->energy_persisted_wh >= ENERGY_PERSIST_THRESHOLD_WH) {
+        energy_persist_nvs(plug);
     }
 
-    xSemaphoreGive(s_mutex);
+    xSemaphoreGive(plug->mutex);
     free(plain);
 
     out->power_w   = power_w;

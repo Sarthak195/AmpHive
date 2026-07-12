@@ -18,6 +18,7 @@ import asyncio
 import json
 import logging
 import os
+import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
@@ -36,6 +37,7 @@ from backend.database.models import (
     ChargingSession, SessionStatus, LedgerTransaction, TransactionType,
     ChargerGroup, GroupMembership, TelemetryReading,
 )
+from backend.logging_config import configure_logging, set_correlation_id
 from backend.services.auth import (
     hash_password, verify_password, create_access_token, get_current_user, decode_access_token
 )
@@ -52,8 +54,10 @@ from backend.services import payments as payment_service
 # Load environment variables from .env file (for local development)
 load_dotenv()
 
+# Structured JSON logging + correlation ids (TD#28) — replaces the old
+# logging.basicConfig(level=logging.INFO). See backend/logging_config.py.
+configure_logging()
 logger = logging.getLogger("amphive.api")
-logging.basicConfig(level=logging.INFO)
 
 # --- MQTT Configuration ---
 MQTT_BROKER_HOST = os.getenv("MQTT_BROKER_HOST", "localhost")
@@ -172,6 +176,23 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+# --- Correlation ID middleware (TD#28) ---
+# Every request gets a correlation id — the caller's X-Request-ID if one was
+# sent, else a short generated one — bound to a contextvars.ContextVar for the
+# lifetime of the request's asyncio task. Every log line emitted while
+# handling the request (including a synchronous MQTT publish made directly
+# from a route handler, e.g. sessions.start_charging_session -> send_plug_
+# command) picks it up via logging_config.CorrelationIdFilter, and it's
+# echoed back on the response so a client or operator can grep logs for one
+# request end-to-end (HTTP request -> MQTT command -> session).
+@app.middleware("http")
+async def correlation_id_middleware(request: Request, call_next):
+    correlation_id = request.headers.get("X-Request-ID") or uuid.uuid4().hex[:12]
+    set_correlation_id(correlation_id)
+    response = await call_next(request)
+    response.headers["X-Request-ID"] = correlation_id
+    return response
 
 
 # ===========================================================================

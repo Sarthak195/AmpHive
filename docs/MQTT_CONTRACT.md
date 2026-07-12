@@ -34,7 +34,7 @@
 
 | Direction | Topic | QoS | Retained | Payload |
 |-----------|-------|-----|----------|---------|
-| backend → gateway | `amphive/gateways/{gateway_id}/plugs/{plug_id}/commands` | 1 | no | `{"action":"ON"\|"OFF","max_duration_seconds":<int>,"max_kwh":<float>,"session_id":"<str>"}` OR `{"action":"SET_INTERVAL","interval_ms":<int>}` OR `{"action":"OTA","url":"<http(s)>"}` |
+| backend → gateway | `amphive/gateways/{gateway_id}/plugs/{plug_id}/commands` | 1 | no | `{"action":"ON"\|"OFF","max_duration_seconds":<int>,"max_kwh":<float>,"session_id":"<str>","local_ip":"<str>"}` OR `{"action":"SET_INTERVAL","interval_ms":<int>}` OR `{"action":"OTA","url":"<http(s)>"}` |
 | gateway → backend | `amphive/gateways/{gateway_id}/telemetry` | 0 | no | `{"plug_id":<int>,"watts":<f>,"kwh":<f>,"voltage":<f>,"current":<f>,"relay":<bool>,"status":"occupied"\|"available","session_id":"<str>"}` |
 | gateway → backend | `amphive/gateways/{gateway_id}/status` | 1 | yes | `{"status":"online","fw":"<ver>"}` (on connect) / `{"status":"offline"}` (LWT) |
 | gateway → backend | `amphive/gateways/{gateway_id}/alarms` | 1 | no | `{"error":"THERMAL_CUTOFF"\|"OVERCURRENT_CUTOFF"\|"UNAUTHORIZED_ON","plug_id":<int>}` or `{"event":"OTA_STARTED"\|"OTA_OK_REBOOTING"\|"OTA_FAILED"\|"OTA_REFUSED_SESSION_ACTIVE"\|...}` |
@@ -88,6 +88,21 @@ Tapo app / stale NVS resume) is forced OFF locally and alarmed.
 > `session_id` (the compact NVS ring-buffer entry has no room), so replayed
 > readings still attribute by `plug_id`.
 
+> **`local_ip` targets the plug (multi-plug, TD#20).** One ESP32 gateway can
+> drive several P110s, so ON/OFF carry the target plug's LAN IP (the backend
+> stores it as `plugs.local_ip` and now ships it on every ON/OFF —
+> `send_plug_command(..., local_ip=…)`). The firmware keeps a **per-plug** slot
+> (its own KLAP session + energy meter) keyed by the topic's `plug_id`, binding
+> that slot's IP from the payload — so a command for plug B can no longer actuate
+> plug A, and telemetry is published under each plug's own id. The device learns
+> a plug it hasn't seen (e.g. after a reboot) from the command itself, so no
+> static plug roster is shipped on-device (SECURITY.md §8.5). `local_ip` is
+> **absent** on `SET_INTERVAL` (the poll cadence is gateway-wide) and `OTA`
+> (gateway-scoped). Older single-plug firmware ignores the field and falls back
+> to its one provisioned target plug, so adding it is backward-safe. On gateway
+> reconnect the backend re-sends OFF (now with `local_ip`) to every idle plug,
+> which is also how a freshly-booted gateway re-learns all its plugs.
+
 > **Note on topic shape:** telemetry is published **per-gateway**
 > (`.../{gateway_id}/telemetry`) with `plug_id` inside the JSON body — *not* the
 > per-plug `.../plugs/{plug_id}/telemetry` shape some product docs describe.
@@ -98,11 +113,14 @@ Tapo app / stale NVS resume) is forced OFF locally and alarmed.
 
 ## Command publishing (backend)
 
-- `MQTTManager.send_plug_command(gateway_id, plug_id, action, max_duration=14400, max_kwh=30.0, session_id=None)`
+- `MQTTManager.send_plug_command(gateway_id, plug_id, action, max_duration=14400, max_kwh=30.0, session_id=None, local_ip=None, wait=True)`
   publishes to the command topic at QoS 1 and `wait_for_publish(timeout=3.0)`,
   returning `is_published()`. `/api/sessions/start` passes `session_id=session.id`
-  on `ON` and returns HTTP 500 if the publish fails; `/api/sessions/stop` omits
-  `session_id` and ignores the result (best-effort OFF).
+  and `local_ip=plug.local_ip` on `ON` and returns HTTP 500 if the publish fails;
+  `/api/sessions/stop` (via `finalize_charging_session`) omits `session_id`,
+  passes `local_ip=plug.local_ip`, and ignores the result (best-effort OFF).
+  `wait=False` (event-loop callers, e.g. the reconnect OFF republish) skips the
+  blocking broker-ack wait.
 - `MQTTManager.send_plug_interval(gateway_id, plug_id, interval_ms)`
   publishes the `SET_INTERVAL` command at QoS 1 to configure the gateway's telemetry reporting interval.
 - `MQTTManager.send_gateway_ota(gateway_id, plug_id, firmware_url)`
