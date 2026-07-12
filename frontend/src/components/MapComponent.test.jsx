@@ -14,7 +14,16 @@ import { render, screen } from '@testing-library/react';
 import MapComponent from './MapComponent';
 
 vi.mock('react-leaflet', () => ({
-  MapContainer: ({ children }) => <div data-testid="map-container">{children}</div>,
+  MapContainer: ({ children, bounds, center, zoom }) => (
+    <div
+      data-testid="map-container"
+      data-has-bounds={bounds ? 'true' : 'false'}
+      data-center={center ? center.join(',') : ''}
+      data-zoom={zoom ?? ''}
+    >
+      {children}
+    </div>
+  ),
   TileLayer: () => null,
   Marker: ({ position, icon, children }) => (
     <div data-testid="marker" data-position={position.join(',')} data-icon-html={icon?.options?.html}>
@@ -62,5 +71,17 @@ describe('MapComponent marker colors', () => {
     render(<MapComponent plugs={PLUGS} onPlugSelect={vi.fn()} />);
     // 5 fixtures, 1 has no location → 4 markers.
     expect(screen.getAllByTestId('marker')).toHaveLength(4);
+  });
+
+  it('fits the initial view to the plotted plugs instead of the country-wide default', () => {
+    render(<MapComponent plugs={PLUGS} onPlugSelect={vi.fn()} />);
+    expect(screen.getByTestId('map-container').dataset.hasBounds).toBe('true');
+  });
+
+  it('falls back to the country-wide center/zoom when no plug has coordinates', () => {
+    render(<MapComponent plugs={[PLUGS[4]]} onPlugSelect={vi.fn()} />);
+    const container = screen.getByTestId('map-container');
+    expect(container.dataset.hasBounds).toBe('false');
+    expect(container.dataset.zoom).toBe('4');
   });
 });

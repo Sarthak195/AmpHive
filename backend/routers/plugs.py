@@ -75,7 +75,7 @@ async def get_available_plugs(
     )
 
     rows = await db.execute(
-        select(Plug, ChargerGroup.name, Gateway)
+        select(Plug, ChargerGroup.name, ChargerGroup.is_public, Gateway)
         .join(Gateway, Gateway.id == Plug.gateway_id)
         .outerjoin(ChargerGroup, ChargerGroup.id == Plug.group_id)
         .where(
@@ -89,7 +89,7 @@ async def get_available_plugs(
 
     now = datetime.now(timezone.utc)
     responses = []
-    for plug, group_name, gateway in rows.all():
+    for plug, group_name, group_is_public, gateway in rows.all():
         # Resolved effective rate (plug tariff -> group tariff -> tenant
         # default -> env fallback; services/pricing.py). One lookup per plug
         # — tolerable N+1 for typical per-site plug counts; batch this if the
@@ -107,6 +107,9 @@ async def get_available_plugs(
                 longitude=plug.longitude if plug.longitude is not None else gateway.longitude,
                 gateway_online=gateway_is_live(gateway, now),
                 price_per_kwh=float(price_per_kwh),
+                # group_is_public is None for ungrouped plugs (outer join) —
+                # only an explicit False marks a private group.
+                is_private=group_is_public is False,
             )
         )
     return responses
@@ -129,11 +132,15 @@ async def get_plug(
         raise HTTPException(status_code=404, detail=f"Plug with ID {plug_id} not found.")
 
     # Access check: verify user can see this plug
+    group_name = None
+    is_private = False
     if plug.group_id:
         group_result = await db.execute(
             select(ChargerGroup).where(ChargerGroup.id == plug.group_id)
         )
         group = group_result.scalar_one_or_none()
+        group_name = group.name if group else None
+        is_private = bool(group and not group.is_public)
 
         if group and not group.is_public:
             # Private group — check membership
@@ -150,15 +157,6 @@ async def get_plug(
                     status_code=403,
                     detail="This plug belongs to a private group. Join the group first using an access code.",
                 )
-
-    # Get group name
-    group_name = None
-    if plug.group_id:
-        gn_result = await db.execute(
-            select(ChargerGroup.name).where(ChargerGroup.id == plug.group_id)
-        )
-        row = gn_result.first()
-        group_name = row[0] if row else None
 
     # Effective coords: the plug's own, else its gateway's site location.
     # Also load the gateway to report live reachability to the driver.
@@ -184,6 +182,7 @@ async def get_plug(
         longitude=plug.longitude if plug.longitude is not None else gw_lng,
         gateway_online=gateway_is_live(gateway) if gateway else False,
         price_per_kwh=float(price_per_kwh),
+        is_private=is_private,
     )
 
 
