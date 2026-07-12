@@ -28,6 +28,7 @@ import CpoPlugs from './pages/cpo/CpoPlugs';
 import CpoGroups from './pages/cpo/CpoGroups';
 import CpoSessions from './pages/cpo/CpoSessions';
 import CpoFaults from './pages/cpo/CpoFaults';
+import CpoEarnings from './pages/cpo/CpoEarnings';
 
 function App() {
   return (
@@ -76,6 +77,9 @@ function App() {
           } />
           <Route path="/cpo/faults" element={
             <CpoProtectedRoute><CpoFaults /></CpoProtectedRoute>
+          } />
+          <Route path="/cpo/earnings" element={
+            <CpoProtectedRoute><CpoEarnings /></CpoProtectedRoute>
           } />
 
           {/* Catch-all — redirect to home */}

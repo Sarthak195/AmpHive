@@ -1298,8 +1298,9 @@ async def cpo_list_audit_log(
 ):
     """
     CPO admin action audit trail (TD#26) — gateway/plug/group create-delete,
-    status changes, and access-code regeneration for the CPO's tenant, newest
-    first. `limit` capped at 200 per page; `offset` paginates past it.
+    status changes, access-code regeneration, and payout money ops
+    (request / mark_paid / cancel) for the CPO's tenant, newest first.
+    `limit` capped at 200 per page; `offset` paginates past it.
     """
     limit = max(1, min(limit, 200))
     offset = max(0, offset)
@@ -1469,6 +1470,20 @@ async def cpo_request_payout(
         f"window=[{watermark.isoformat()}, {now.isoformat()}) "
         f"gross={gross} fee={fee} net={net} by {user.email}"
     )
+
+    await try_record_audit(
+        db,
+        tenant_id=tenant_id,
+        actor_user_id=user.id,
+        action="payout.request",
+        target_type="payout",
+        target_id=payout.id,
+        detail=(
+            f"window=[{watermark.isoformat()}, {now.isoformat()}), "
+            f"gross={gross}, fee={fee}, net={net}"
+        ),
+    )
+
     return _payout_response(payout)
 
 
@@ -1518,6 +1533,23 @@ async def cpo_mark_payout_paid(
     await db.refresh(payout)
 
     logger.info(f"CPO payout {payout.id} marked PAID by admin {user.email}")
+
+    # Audited into the PAYOUT's tenant (the admin actor has no tenant of
+    # their own), so the CPO sees the settlement of its money in its own
+    # GET /api/cpo/audit trail.
+    await try_record_audit(
+        db,
+        tenant_id=payout.tenant_id,
+        actor_user_id=user.id,
+        action="payout.mark_paid",
+        target_type="payout",
+        target_id=payout.id,
+        detail=(
+            f"window=[{payout.period_start.isoformat()}, "
+            f"{payout.period_end.isoformat()}), net={payout.net_coins}"
+        ),
+    )
+
     return _payout_response(payout)
 
 
@@ -1553,6 +1585,22 @@ async def cpo_cancel_payout(
     await db.refresh(payout)
 
     logger.info(f"CPO payout {payout.id} cancelled by {user.email}")
+
+    # payout.tenant_id (not user.tenant_id): an admin canceller may have no
+    # tenant — the row must land in the owning CPO's audit trail either way.
+    await try_record_audit(
+        db,
+        tenant_id=payout.tenant_id,
+        actor_user_id=user.id,
+        action="payout.cancel",
+        target_type="payout",
+        target_id=payout.id,
+        detail=(
+            f"window=[{payout.period_start.isoformat()}, "
+            f"{payout.period_end.isoformat()}), net={payout.net_coins}"
+        ),
+    )
+
     return _payout_response(payout)
 
 

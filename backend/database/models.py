@@ -459,9 +459,11 @@ class AuditLog(Base):
     tenant_id: Mapped[int] = mapped_column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
     actor_user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     # e.g. "gateway.create", "gateway.delete", "plug.create", "plug.delete",
-    # "plug.status_change", "group.create", "group.delete", "access_code.regen"
+    # "plug.status_change", "plug.maintenance_enter"/"..._clear",
+    # "group.create", "group.delete", "access_code.regen", and the payout
+    # money ops "payout.request", "payout.mark_paid", "payout.cancel"
     action: Mapped[str] = mapped_column(String(64), nullable=False)
-    # e.g. "gateway", "plug", "group"
+    # e.g. "gateway", "plug", "group", "payout"
     target_type: Mapped[str] = mapped_column(String(32), nullable=False)
     target_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     detail: Mapped[Optional[str]] = mapped_column(Text, nullable=True)

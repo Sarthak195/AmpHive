@@ -9,7 +9,10 @@ Two tiers, mirroring the rest of this suite:
    (services.payouts.compute_fee_and_net) and the RBAC/ownership branches
    that don't need real data — mark_paid's admin-only gate, cancel's
    cross-tenant block, and the "already settled" 409s. Same style as
-   test_gateway_ota.py / test_max_active_sessions.py.
+   test_gateway_ota.py / test_max_active_sessions.py. Also the audit-trail
+   shape: mark_paid/cancel stage a payout.* AuditLog row into the PAYOUT's
+   tenant (not the admin actor's, which may be None), and the 409 paths
+   stage none.
 2. DB-gated tests (need a real PostgreSQL — CI's postgres:15 service,
    exported as TEST_DATABASE_URL; skipped locally, same as test_wallet.py /
    test_migrations.py): the earnings SQL aggregate itself (window + status
@@ -17,7 +20,9 @@ Two tiers, mirroring the rest of this suite:
    double-request 409, and — the one that actually needs a real database —
    concurrent-request serialization via the tenant row lock, proving two
    simultaneous payout requests for the same tenant can't double-settle the
-   same window.
+   same window. The lifecycle tests also assert the persisted audit trail:
+   exactly one payout.request / payout.mark_paid / payout.cancel AuditLog
+   row per successful transition (409 replays add none).
 """
 import asyncio
 import itertools
@@ -116,7 +121,18 @@ def _result(value):
 def _db(*results):
     db = AsyncMock()
     db.execute = AsyncMock(side_effect=list(results))
+    # Session.add is synchronous — a bare AsyncMock attribute would mint an
+    # un-awaited coroutine per call (RuntimeWarning noise in the audit tests).
+    db.add = MagicMock()
     return db
+
+
+def _added_audit_rows(db):
+    """AuditLog instances staged on the mocked session via db.add — what
+    try_record_audit would persist (its commit is a separate transaction,
+    so the staged row IS the audit write from the route's point of view)."""
+    from backend.database.models import AuditLog
+    return [c.args[0] for c in db.add.call_args_list if isinstance(c.args[0], AuditLog)]
 
 
 @pytest.mark.asyncio
@@ -160,7 +176,57 @@ async def test_cancel_allows_admin_across_tenants():
     result = await cpo_cancel_payout(payout_id=payout.id, user=admin, db=db)
 
     assert result["status"] == "cancelled"
-    db.commit.assert_awaited_once()
+    # Two commits: the cancel itself, then the payout.cancel audit row
+    # (try_record_audit commits in its own transaction so an audit failure
+    # can never undo the already-committed action).
+    assert db.commit.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_cancel_audits_into_the_payouts_tenant_not_the_admins():
+    """The payout.cancel audit row must land in the PAYOUT's tenant so the
+    owning CPO sees it in GET /api/cpo/audit — the admin actor may have no
+    tenant_id at all (AuditLog.tenant_id is NOT NULL, so using the actor's
+    would also just break)."""
+    payout = _payout_mock(id=7, tenant_id=2, status=PayoutStatus.REQUESTED)
+    db = _db(_result(payout))
+    admin = _stub_user(tenant_id=None, role=UserRole.ADMIN, user_id=42)
+
+    await cpo_cancel_payout(payout_id=payout.id, user=admin, db=db)
+
+    rows = _added_audit_rows(db)
+    assert len(rows) == 1
+    entry = rows[0]
+    assert entry.action == "payout.cancel"
+    assert entry.target_type == "payout"
+    assert entry.target_id == "7"
+    assert entry.tenant_id == 2  # the payout's tenant, not the admin's (None)
+    assert entry.actor_user_id == 42
+    # Detail carries the settlement window + net, per the key=value convention.
+    assert payout.period_start.isoformat() in entry.detail
+    assert payout.period_end.isoformat() in entry.detail
+    assert "net=9.00" in entry.detail
+
+
+@pytest.mark.asyncio
+async def test_mark_paid_audits_payout_mark_paid():
+    payout = _payout_mock(id=11, tenant_id=3, status=PayoutStatus.REQUESTED)
+    db = _db(_result(payout))
+    admin = _stub_user(tenant_id=None, role=UserRole.ADMIN, user_id=99)
+
+    result = await cpo_mark_payout_paid(payout_id=payout.id, user=admin, db=db)
+    assert result["status"] == "paid"
+
+    rows = _added_audit_rows(db)
+    assert len(rows) == 1
+    entry = rows[0]
+    assert entry.action == "payout.mark_paid"
+    assert entry.target_type == "payout"
+    assert entry.target_id == "11"
+    assert entry.tenant_id == 3
+    assert entry.actor_user_id == 99
+    assert payout.period_start.isoformat() in entry.detail
+    assert "net=9.00" in entry.detail
 
 
 @pytest.mark.asyncio
@@ -172,6 +238,7 @@ async def test_mark_paid_409_when_already_paid():
     with pytest.raises(HTTPException) as exc:
         await cpo_mark_payout_paid(payout_id=payout.id, user=admin, db=db)
     assert exc.value.status_code == 409
+    assert _added_audit_rows(db) == []  # a rejected replay is not audited
 
 
 @pytest.mark.asyncio
@@ -183,6 +250,7 @@ async def test_cancel_409_when_already_cancelled():
     with pytest.raises(HTTPException) as exc:
         await cpo_cancel_payout(payout_id=payout.id, user=owner, db=db)
     assert exc.value.status_code == 409
+    assert _added_audit_rows(db) == []  # a rejected replay is not audited
 
 
 @pytest.mark.asyncio
@@ -299,6 +367,21 @@ def _cpo_user(tenant_id, user_id, role=UserRole.CPO):
     return u
 
 
+async def _audit_rows(factory, tenant_id, action):
+    """Persisted AuditLog rows for one tenant + action (DB-gated tier)."""
+    from sqlalchemy import and_, select
+
+    from backend.database.models import AuditLog
+
+    async with factory() as db:
+        result = await db.execute(
+            select(AuditLog).where(
+                and_(AuditLog.tenant_id == tenant_id, AuditLog.action == action)
+            )
+        )
+        return result.scalars().all()
+
+
 @requires_db
 @pytest.mark.asyncio
 async def test_gross_earnings_sums_only_completed_sessions_in_window(factory):
@@ -394,6 +477,16 @@ async def test_second_payout_request_conflicts_while_first_pending(factory):
             await cpo_request_payout(user=user, db=db)
     assert exc.value.status_code == 409
 
+    # Exactly one payout.request audit row: the successful request wrote it
+    # (window + money in the detail), the 409 replay did not.
+    rows = await _audit_rows(factory, tenant_id, "payout.request")
+    assert len(rows) == 1
+    assert rows[0].target_type == "payout"
+    assert rows[0].target_id == str(first["id"])
+    assert rows[0].actor_user_id == user_id
+    assert "gross=20.00" in rows[0].detail
+    assert "net=18.00" in rows[0].detail
+
 
 @requires_db
 @pytest.mark.asyncio
@@ -456,6 +549,13 @@ async def test_mark_paid_transitions_then_conflicts_on_replay(factory):
             await cpo_mark_payout_paid(payout_id=requested["id"], user=admin_user, db=db)
     assert exc.value.status_code == 409
 
+    # Exactly one payout.mark_paid audit row — the 409 replay added none.
+    rows = await _audit_rows(factory, tenant_id, "payout.mark_paid")
+    assert len(rows) == 1
+    assert rows[0].target_id == str(requested["id"])
+    assert rows[0].actor_user_id == admin_user.id
+    assert "net=" in rows[0].detail
+
 
 @requires_db
 @pytest.mark.asyncio
@@ -477,3 +577,11 @@ async def test_cancel_frees_window_for_a_new_request(factory):
         second = await cpo_request_payout(user=user, db=db)
     assert second["status"] == "requested"
     assert second["net_coins"] == pytest.approx(first["net_coins"])
+
+    # Full audit trail of the lifecycle: two requests, one cancel.
+    cancel_rows = await _audit_rows(factory, tenant_id, "payout.cancel")
+    assert [r.target_id for r in cancel_rows] == [str(first["id"])]
+    request_rows = await _audit_rows(factory, tenant_id, "payout.request")
+    assert sorted(r.target_id for r in request_rows) == sorted(
+        [str(first["id"]), str(second["id"])]
+    )
