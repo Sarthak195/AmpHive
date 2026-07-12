@@ -63,7 +63,17 @@ class Tenant(Base):
     # configured yet -> resolution falls through to the global COINS_PER_KWH
     # env var. ON DELETE SET NULL: deleting the referenced Tariff must not
     # break the tenant row, just drop back a link in the resolution chain.
-    default_tariff_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("tariffs.id", ondelete="SET NULL"), nullable=True)
+    # use_alter breaks the tariffs<->tenants FK cycle for DDL sorting (tariffs
+    # already references tenants via tariffs.tenant_id): the back-reference is
+    # added via ALTER after both tables exist, otherwise create_all/drop_all
+    # (the DB-gated test fixtures) raise CircularDependencyError. Named to match
+    # the auto-generated name from the migration's inline REFERENCES clause.
+    default_tariff_id: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        ForeignKey("tariffs.id", ondelete="SET NULL", use_alter=True,
+                   name="tenants_default_tariff_id_fkey"),
+        nullable=True,
+    )
 
     # Relationships
     users: Mapped[List["User"]] = relationship("User", back_populates="tenant", cascade="all, delete-orphan")
