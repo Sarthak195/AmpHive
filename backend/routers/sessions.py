@@ -453,3 +453,62 @@ async def dispute_session(
     return _dispute_response(dispute)
 
 
+# ===========================================================================
+# GST Tax Invoice (appended — feat/gst-invoices; local imports here are
+# intentional, not an oversight, to avoid touching the shared header import
+# block above, which a concurrent wallet/hold change also edits.)
+# ===========================================================================
+from fastapi.responses import HTMLResponse  # noqa: E402
+
+from backend.services.invoices import (  # noqa: E402
+    SessionNotInvoiceableError, invoice_to_dict, issue_invoice_for_session,
+    render_invoice_html,
+)
+
+
+@router.get("/api/sessions/{session_id}/invoice")
+async def get_session_invoice(
+    session_id: int,
+    format: Optional[str] = None,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Fetch the GST tax invoice for a finished, billed session — issuing it on
+    the first call (services/invoices.py issue_invoice_for_session is
+    idempotent, so every later call just returns the same invoice_number).
+
+    Access: the driver who owns the session, or a cpo/admin of the owning
+    tenant. Anyone else gets 404 — existence isn't leaked by a 403, same
+    convention as stop_charging_session's ownership check and
+    cpo_cancel_payout's cross-tenant guard. `?format=html` returns a
+    minimal printable invoice (inline CSS, no PDF dependency — meant to be
+    saved/printed via the browser's own print dialog) instead of JSON.
+    """
+    session_result = await db.execute(
+        select(ChargingSession).where(ChargingSession.id == session_id)
+    )
+    session = session_result.scalar_one_or_none()
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session not found.")
+
+    if user.role == UserRole.DRIVER:
+        if session.user_id != user.id:
+            raise HTTPException(status_code=404, detail="Session not found.")
+    elif user.role == UserRole.CPO:
+        if session.tenant_id != user.tenant_id:
+            raise HTTPException(status_code=404, detail="Session not found.")
+    elif user.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Access denied.")
+
+    try:
+        invoice = await issue_invoice_for_session(db, session_id)
+    except SessionNotInvoiceableError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    if format == "html":
+        return HTMLResponse(content=await render_invoice_html(db, invoice))
+
+    return invoice_to_dict(invoice)
+
+
