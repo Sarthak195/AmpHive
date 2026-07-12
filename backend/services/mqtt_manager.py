@@ -7,6 +7,7 @@ import os
 import re
 import time
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Callable, Dict, Any, Optional
 
 import paho.mqtt.client as mqtt
@@ -238,7 +239,8 @@ class MQTTManager:
         # asyncio.Event.set() is NOT thread-safe when called from another thread —
         # it can fail to wake stream() waiters or corrupt loop state. Marshal the
         # update onto the loop so the whole store stays single-threaded.
-        # (cost_coins is left to TelemetryStore to auto-calc via COINS_PER_KWH.)
+        # (cost_coins is left to TelemetryStore to auto-calc from this plug's
+        # snapshotted per-session rate, falling back to COINS_PER_KWH.)
         if self.telemetry_store and self.event_loop:
             self.event_loop.call_soon_threadsafe(
                 functools.partial(
@@ -460,6 +462,7 @@ class MQTTManager:
         # Captured for the post-commit balance check (see below).
         updated_session_id: Optional[int] = None
         updated_user_id: Optional[int] = None
+        updated_rate: Optional[Decimal] = None
 
         try:
             async with self.db_session_factory() as session:
@@ -511,6 +514,7 @@ class MQTTManager:
                     active_session.last_telemetry_at = datetime.now(timezone.utc)
                     updated_session_id = active_session.id
                     updated_user_id = active_session.user_id
+                    updated_rate = active_session.rate_coins_per_kwh
 
                 await session.commit()
         except Exception as e:
@@ -522,22 +526,33 @@ class MQTTManager:
         # drained wallet (the finalize path only clamps the debit — it doesn't
         # stop the session). Done in a separate txn after the persist commit.
         if updated_session_id is not None and updated_user_id is not None:
-            await self._maybe_auto_stop_on_exhaustion(updated_session_id, updated_user_id, kwh)
+            await self._maybe_auto_stop_on_exhaustion(
+                updated_session_id, updated_user_id, kwh, updated_rate
+            )
 
-    async def _maybe_auto_stop_on_exhaustion(self, session_id: int, user_id: int, energy_kwh: float):
+    async def _maybe_auto_stop_on_exhaustion(self, session_id: int, user_id: int, energy_kwh: float,
+                                              rate_coins_per_kwh: Optional[Decimal] = None):
         """Finalize an ACTIVE session once its accrued cost meets/exceeds the
         user's wallet balance. No-op when disabled, when the wallet still
         covers the energy, or when the session is already gone (finalize
-        re-checks ACTIVE under a row lock, so this is race-safe)."""
+        re-checks ACTIVE under a row lock, so this is race-safe).
+
+        `rate_coins_per_kwh` is the session's SNAPSHOTTED rate (see
+        services/pricing.py resolve_rate_for_plug / models.py
+        ChargingSession.rate_coins_per_kwh) — the accrued cost must use the
+        same rate this session will actually be billed at, not the global
+        default, or a tariff'd session could auto-stop too early/late. NULL
+        (legacy sessions with no snapshot) falls back to the env default."""
         if not AUTO_STOP_ON_BALANCE_EXHAUSTED or not self.db_session_factory:
             return
         from backend.database.models import User
-        from backend.services.money import to_money
+        from backend.services.money import energy_cost
         from backend.services.telemetry import COINS_PER_KWH
         from sqlalchemy import select
 
         try:
-            accrued_cost = to_money(energy_kwh * COINS_PER_KWH)
+            rate = rate_coins_per_kwh if rate_coins_per_kwh is not None else COINS_PER_KWH
+            accrued_cost = energy_cost(energy_kwh, rate)
             if accrued_cost <= 0:
                 return
             async with self.db_session_factory() as db:

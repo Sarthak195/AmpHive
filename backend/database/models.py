@@ -57,6 +57,13 @@ class Tenant(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+    # [Tariffs] The tenant-wide fallback tariff, used by services/pricing.py's
+    # resolve_rate_for_plug() when a plug has no tariff of its own and (if
+    # grouped) its charger group has none either. NULL = no tenant default
+    # configured yet -> resolution falls through to the global COINS_PER_KWH
+    # env var. ON DELETE SET NULL: deleting the referenced Tariff must not
+    # break the tenant row, just drop back a link in the resolution chain.
+    default_tariff_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("tariffs.id", ondelete="SET NULL"), nullable=True)
 
     # Relationships
     users: Mapped[List["User"]] = relationship("User", back_populates="tenant", cascade="all, delete-orphan")
@@ -150,6 +157,11 @@ class Plug(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
     # [P2] Link each plug to a charger group. NULL = ungrouped/legacy (visible to all users).
     group_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("charger_groups.id", ondelete="SET NULL"), nullable=True)
+    # [Tariffs] Per-plug pricing override. NULL = fall back to the plug's
+    # group tariff, then the tenant default, then the global COINS_PER_KWH env
+    # var — see services/pricing.py resolve_rate_for_plug(). ON DELETE SET
+    # NULL so deleting a Tariff just drops this plug back a link in the chain.
+    tariff_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("tariffs.id", ondelete="SET NULL"), nullable=True)
 
     # Relationships
     gateway: Mapped[Gateway] = relationship("Gateway", back_populates="plugs")
@@ -175,6 +187,15 @@ class ChargingSession(Base):
     last_telemetry_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     # Money: NUMERIC(12,2) → Decimal (energy_kwh/peak_power_w stay Float — measurements).
     coins_spent: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal("0.00"), nullable=False)
+    # [Tariffs] The coins-per-kWh rate resolved (services/pricing.py
+    # resolve_rate_for_plug) and SNAPSHOTTED at session start. Every billing
+    # path (finalize_charging_session, the mqtt_manager balance-exhaustion
+    # auto-stop, the live TelemetryStore cost calc) must read this instead of
+    # re-resolving, so a tariff edit or reassignment mid-session never
+    # retroactively changes what an in-flight or already-billed session is
+    # charged. NULL only for legacy sessions started before this column
+    # existed — those fall back to the global COINS_PER_KWH env var.
+    rate_coins_per_kwh: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
     status: Mapped[SessionStatus] = mapped_column(SQLEnum(SessionStatus, name="session_status", values_callable=lambda x: [e.value for e in x]), default=SessionStatus.ACTIVE, nullable=False)
 
     # Relationships
@@ -226,6 +247,11 @@ class ChargerGroup(Base):
     # access_code: shareable code for private groups (e.g. "SUNRISE2024").
     # NULL for public groups. Must be unique across the platform.
     access_code: Mapped[Optional[str]] = mapped_column(String(20), unique=True, nullable=True)
+    # [Tariffs] Group-level pricing override, used for any plug in this group
+    # that has no tariff of its own. NULL = fall back to the tenant default,
+    # then the global COINS_PER_KWH env var — see services/pricing.py
+    # resolve_rate_for_plug(). ON DELETE SET NULL, same rationale as Plug.tariff_id.
+    tariff_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("tariffs.id", ondelete="SET NULL"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
 
     # Relationships
@@ -337,3 +363,45 @@ class GatewayEvent(Base):
         Index("idx_gateway_events_tenant_created", "tenant_id", "created_at"),
         Index("idx_gateway_events_gateway_created", "gateway_id", "created_at"),
     )
+
+
+# --- Tariffs (per-CPO/per-site pricing) ---
+
+class Tariff(Base):
+    """
+    A named coins-per-kWh pricing plan a tenant (CPO) defines and assigns to
+    a plug, a charger group, or as the tenant's default — replacing the old
+    single global COINS_PER_KWH env var with per-CPO/per-site rates.
+
+    Resolution (services/pricing.py resolve_rate_for_plug), first match wins:
+        plug.tariff_id -> plug.group.tariff_id -> tenant.default_tariff_id
+        -> the global COINS_PER_KWH env var (legacy fallback)
+
+    The resolved rate is SNAPSHOTTED onto ChargingSession.rate_coins_per_kwh
+    at session start and never re-resolved for that session: editing a
+    Tariff's price_per_kwh, or reassigning a plug/group/tenant to a different
+    tariff, must not retroactively change the bill for a session already in
+    flight or already completed. All billing paths (finalize_charging_session,
+    the mqtt_manager balance-exhaustion auto-stop, the live TelemetryStore
+    cost calc) read the session's snapshot, not this table, directly.
+
+    No relationship() back-refs to Plug/ChargerGroup/Tenant: those tables also
+    hold a Tenant<->Tariff-style FK pair in the opposite direction
+    (Tenant.default_tariff_id -> Tariff.id vs. Tariff.tenant_id ->
+    Tenant.id), which SQLAlchemy can't auto-disambiguate into a relationship()
+    without explicit foreign_keys= wiring on both sides. Every call site
+    resolves via explicit `select(Tariff)...` queries instead (matching how
+    the rest of this codebase already reads Plug.group_id / ChargerGroup
+    without relying on lazy relationship attributes across the async
+    boundary).
+    """
+    __tablename__ = "tariffs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    # Money: NUMERIC(12,2) → Decimal, same convention as the wallet columns
+    # (services/money.to_money). Coins charged per kWh consumed under this plan.
+    price_per_kwh: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), onupdate=text("CURRENT_TIMESTAMP"), nullable=False)

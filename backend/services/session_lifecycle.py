@@ -21,7 +21,7 @@ from backend.database.models import (
     ChargingSession, Gateway, GatewayStatus, LedgerTransaction, Plug,
     PlugStatus, SessionStatus, TransactionType,
 )
-from backend.services.money import to_money
+from backend.services.money import energy_cost
 from backend.services.telemetry import COINS_PER_KWH
 from backend.services.wallet import debit_wallet_clamped
 
@@ -149,13 +149,19 @@ async def finalize_charging_session(
     #    mid-session — so the old `latest.cost_coins if latest else
     #    session.coins_spent` billed 0 for any session that outlived a restart.
     #    Take the max so a stale/empty store can't bill LESS than what was
-    #    already recorded, and always compute cost from energy * COINS_PER_KWH
-    #    (the same formula TelemetryStore uses) for a single source of truth.
+    #    already recorded, and always compute cost from energy * rate (the
+    #    same formula TelemetryStore uses) for a single source of truth.
+    #    The rate is the one SNAPSHOTTED on the session at start (services/
+    #    pricing.py resolve_rate_for_plug, via routers/sessions.py) — a
+    #    tariff edit or reassignment made mid-session must not change what
+    #    this session bills. Only a legacy session (started before the
+    #    rate_coins_per_kwh column existed) falls back to the env default.
     latest = state.telemetry_store.get_latest(plug.id)
     persisted_energy = session.energy_kwh or 0.0
     live_energy = latest.energy_kwh if latest else 0.0
     final_energy = max(live_energy, persisted_energy)
-    final_cost = to_money(final_energy * COINS_PER_KWH)  # Decimal, 2 dp
+    rate = session.rate_coins_per_kwh if session.rate_coins_per_kwh is not None else COINS_PER_KWH
+    final_cost = energy_cost(final_energy, rate)  # Decimal, 2 dp
 
     # 3. Finalize session
     session.status = SessionStatus.COMPLETED
@@ -231,6 +237,10 @@ async def finalize_charging_session(
         "plug_name": plug.name,
         "energy_kwh": round(final_energy, 3),
         "peak_power_w": round(session.peak_power_w or 0.0, 1),
+        # The coins-per-kWh rate this session was actually billed at (its
+        # snapshot, or the env default for a legacy pre-snapshot session) —
+        # surfaced on the receipt so a driver can see what they paid per kWh.
+        "price_per_kwh": float(rate),
         "coins_spent": round(actual_debit, 2),
         "shortfall_coins": round(shortfall, 2),
         # debit_wallet_clamped guarantees new_balance = prev_balance - actual_debit

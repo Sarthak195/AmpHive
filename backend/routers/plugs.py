@@ -34,6 +34,7 @@ from backend.services.auth import (
     hash_password, verify_password,
 )
 from backend.services.money import ZERO_MONEY, to_money
+from backend.services.pricing import resolve_rate_for_plug
 from backend.services.rbac import require_role
 from backend.services.session_lifecycle import (
     check_and_speed_up_active_session, finalize_charging_session,
@@ -87,20 +88,28 @@ async def get_available_plugs(
     )
 
     now = datetime.now(timezone.utc)
-    return [
-        PlugResponse(
-            id=plug.id,
-            name=plug.name,
-            status=plug.status.value,
-            current_power_w=plug.current_power_w,
-            plug_model=plug.plug_model,
-            group_name=group_name,
-            latitude=plug.latitude if plug.latitude is not None else gateway.latitude,
-            longitude=plug.longitude if plug.longitude is not None else gateway.longitude,
-            gateway_online=gateway_is_live(gateway, now),
+    responses = []
+    for plug, group_name, gateway in rows.all():
+        # Resolved effective rate (plug tariff -> group tariff -> tenant
+        # default -> env fallback; services/pricing.py). One lookup per plug
+        # — tolerable N+1 for typical per-site plug counts; batch this if the
+        # cross-tenant available-plugs list ever grows large enough to matter.
+        price_per_kwh = await resolve_rate_for_plug(db, plug)
+        responses.append(
+            PlugResponse(
+                id=plug.id,
+                name=plug.name,
+                status=plug.status.value,
+                current_power_w=plug.current_power_w,
+                plug_model=plug.plug_model,
+                group_name=group_name,
+                latitude=plug.latitude if plug.latitude is not None else gateway.latitude,
+                longitude=plug.longitude if plug.longitude is not None else gateway.longitude,
+                gateway_online=gateway_is_live(gateway, now),
+                price_per_kwh=float(price_per_kwh),
+            )
         )
-        for plug, group_name, gateway in rows.all()
-    ]
+    return responses
 
 
 @router.get("/api/plugs/{plug_id}", response_model=PlugResponse)
@@ -160,6 +169,10 @@ async def get_plug(
     gw_lat = gateway.latitude if gateway else None
     gw_lng = gateway.longitude if gateway else None
 
+    # Resolved effective rate: plug tariff -> group tariff -> tenant default
+    # -> env fallback (services/pricing.py resolve_rate_for_plug).
+    price_per_kwh = await resolve_rate_for_plug(db, plug)
+
     return PlugResponse(
         id=plug.id,
         name=plug.name,
@@ -170,6 +183,7 @@ async def get_plug(
         latitude=plug.latitude if plug.latitude is not None else gw_lat,
         longitude=plug.longitude if plug.longitude is not None else gw_lng,
         gateway_online=gateway_is_live(gateway) if gateway else False,
+        price_per_kwh=float(price_per_kwh),
     )
 
 

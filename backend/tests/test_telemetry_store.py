@@ -5,6 +5,7 @@ drops instead of freezing on stale values.
 """
 import asyncio
 import time
+from decimal import Decimal
 
 import pytest
 
@@ -61,3 +62,49 @@ async def test_stream_fresh_snapshot_not_stale():
 
     assert frame["is_stale"] is False
     assert frame["relay_on"] is True
+
+
+# --- Per-session tariff rate snapshot (feat/tariff-pricing) -------------------
+
+def test_update_uses_snapshotted_rate_not_global_default(monkeypatch):
+    """start_session(plug_id, rate_coins_per_kwh=...) must make the live
+    cost_coins calc bill at THAT rate, not the global COINS_PER_KWH default."""
+    monkeypatch.setattr(telemetry_mod, "COINS_PER_KWH", 5.0)
+    store = TelemetryStore()
+
+    store.start_session(4, rate_coins_per_kwh=Decimal("8.00"))
+    store.update(plug_id=4, power_w=1000.0, current_a=4.0, energy_kwh=2.0,
+                 status="charging")
+
+    snap = store.get_latest(4)
+    assert snap.cost_coins == 16.0  # 2.0 kWh * 8.00, NOT 2.0 * 5.00 = 10.00
+
+
+def test_update_falls_back_to_env_default_when_no_rate_snapshotted():
+    """start_session with no rate (legacy caller / no tariff resolved) keeps
+    the old global-default behavior."""
+    store = TelemetryStore()
+
+    store.start_session(5)  # no rate_coins_per_kwh
+    store.update(plug_id=5, power_w=1000.0, current_a=4.0, energy_kwh=2.0,
+                 status="charging")
+
+    snap = store.get_latest(5)
+    assert snap.cost_coins == 2.0 * telemetry_mod.COINS_PER_KWH
+
+
+def test_end_session_clears_the_snapshotted_rate():
+    """A plug reused for a new session with no explicit rate must not
+    silently inherit the previous session's snapshotted rate."""
+    store = TelemetryStore()
+
+    store.start_session(6, rate_coins_per_kwh=Decimal("8.00"))
+    store.end_session(6)
+    assert 6 not in store._session_rates
+
+    store.start_session(6)  # next session on the same plug, no rate resolved
+    store.update(plug_id=6, power_w=500.0, current_a=2.0, energy_kwh=1.0,
+                 status="charging")
+
+    snap = store.get_latest(6)
+    assert snap.cost_coins == 1.0 * telemetry_mod.COINS_PER_KWH

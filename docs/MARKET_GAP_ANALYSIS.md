@@ -75,7 +75,7 @@ Legend: ✅ present · 🟡 partial · ❌ absent.
 
 | Market feature | Seen in | AmpHive | Verdict |
 |----------------|---------|:-------:|---------|
-| Configurable per-kWh tariff per site/CPO | all networks; specs §5.1, FL 1.2 | ❌ one global env rate | Should-do |
+| Configurable per-kWh tariff per site/CPO | all networks; specs §5.1, FL 1.2 | 🟡 backend live: `Tariff` model + resolution chain (plug → group → tenant default → env) snapshotted per session, CPO CRUD/assign API; no CPO-portal UI yet | Should-do |
 | Time-of-day / peak / off-peak pricing | ChargePoint, Tata, Statiq | ❌ | Aspirational |
 | Per-minute billing | ChargePoint, EA | ❌ | Aspirational |
 | Idle / occupancy fee (car parked, not charging) | Tesla, ChargePoint, EA; FL 1.2 | ❌ | Aspirational |

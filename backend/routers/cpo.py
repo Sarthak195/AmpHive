@@ -1123,4 +1123,226 @@ async def cpo_acknowledge_event(
     return {"status": "acknowledged", "event_id": event_id}
 
 
+# ===========================================================================
+# CPO Tariff (per-CPO/per-site pricing) Management
+# ===========================================================================
+# Appended at the end of the file (feat/tariff-pricing) to avoid touching the
+# shared header import block above, which another concurrent change also
+# edits. Local imports here are intentional, not an oversight.
+from backend.database.models import Tariff  # noqa: E402
+from backend.schemas import (  # noqa: E402
+    CpoTariffAssignRequest, CpoTariffCreateRequest, CpoTariffUpdateRequest,
+)
+
+
+async def _load_tenant_tariff(db: AsyncSession, tariff_id: int, tenant_id: int) -> Tariff:
+    """Fetch a tariff, enforcing it belongs to `tenant_id`. Shared by the
+    three assignment endpoints below so cross-tenant assignment (attaching
+    another tenant's tariff to your plug/group/tenant-default) is rejected
+    the same way everywhere."""
+    result = await db.execute(
+        select(Tariff).where(and_(Tariff.id == tariff_id, Tariff.tenant_id == tenant_id))
+    )
+    tariff = result.scalar_one_or_none()
+    if not tariff:
+        raise HTTPException(
+            status_code=404,
+            detail="Tariff not found or does not belong to your organization.",
+        )
+    return tariff
+
+
+@router.get("/api/cpo/tariffs")
+async def cpo_list_tariffs(
+    user: User = Depends(require_role("cpo", "admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """List all tariffs (pricing plans) owned by the CPO's tenant."""
+    result = await db.execute(
+        select(Tariff).where(Tariff.tenant_id == user.tenant_id).order_by(Tariff.name)
+    )
+    tariffs = list(result.scalars().all())
+
+    return [
+        {
+            "id": t.id,
+            "name": t.name,
+            "price_per_kwh": float(t.price_per_kwh),
+            "created_at": t.created_at.isoformat() if t.created_at else None,
+            "updated_at": t.updated_at.isoformat() if t.updated_at else None,
+        }
+        for t in tariffs
+    ]
+
+
+@router.post("/api/cpo/tariffs")
+async def cpo_create_tariff(
+    req: CpoTariffCreateRequest,
+    user: User = Depends(require_role("cpo", "admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Create a new tariff under the CPO's tenant."""
+    tariff = Tariff(
+        tenant_id=user.tenant_id,
+        name=req.name,
+        price_per_kwh=to_money(req.price_per_kwh),
+    )
+    db.add(tariff)
+    await db.commit()
+    await db.refresh(tariff)
+
+    logger.info(
+        f"CPO tariff created: '{tariff.name}' (id={tariff.id}, "
+        f"{tariff.price_per_kwh}/kWh) by {user.email}"
+    )
+
+    return {
+        "status": "created",
+        "tariff_id": tariff.id,
+        "name": tariff.name,
+        "price_per_kwh": float(tariff.price_per_kwh),
+    }
+
+
+@router.put("/api/cpo/tariffs/{tariff_id}")
+async def cpo_update_tariff(
+    tariff_id: int,
+    req: CpoTariffUpdateRequest,
+    user: User = Depends(require_role("cpo", "admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update a tariff's name and/or rate. Tenant-scoped — a CPO can only
+    edit their own tenant's tariffs."""
+    tariff = await _load_tenant_tariff(db, tariff_id, user.tenant_id)
+
+    if req.name is not None:
+        tariff.name = req.name
+    if req.price_per_kwh is not None:
+        tariff.price_per_kwh = to_money(req.price_per_kwh)
+
+    await db.commit()
+    await db.refresh(tariff)
+
+    logger.info(f"CPO tariff updated: '{tariff.name}' (id={tariff.id}) by {user.email}")
+
+    return {
+        "status": "updated",
+        "tariff_id": tariff.id,
+        "name": tariff.name,
+        "price_per_kwh": float(tariff.price_per_kwh),
+    }
+
+
+@router.delete("/api/cpo/tariffs/{tariff_id}")
+async def cpo_delete_tariff(
+    tariff_id: int,
+    user: User = Depends(require_role("cpo", "admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Delete a tariff. Any plug / charger group / tenant-default currently
+    pointing at it falls back to the next link in the resolution chain (each
+    FK is ON DELETE SET NULL — see models.py) rather than being left dangling.
+    """
+    tariff = await _load_tenant_tariff(db, tariff_id, user.tenant_id)
+
+    tariff_name = tariff.name
+    await db.delete(tariff)
+    await db.commit()
+
+    logger.info(f"CPO tariff deleted: '{tariff_name}' (id={tariff_id}) by {user.email}")
+
+    return {"status": "deleted", "tariff_id": tariff_id, "name": tariff_name}
+
+
+@router.put("/api/cpo/plugs/{plug_id}/tariff")
+async def cpo_assign_plug_tariff(
+    plug_id: int,
+    req: CpoTariffAssignRequest,
+    user: User = Depends(require_role("cpo", "admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Assign (tariff_id set) or unassign (tariff_id null) the tariff a specific
+    plug bills at. Both the plug and the tariff must belong to the caller's
+    tenant — a CPO cannot attach another tenant's tariff to their own plug,
+    nor reach a plug they don't own.
+    """
+    plug_result = await db.execute(
+        select(Plug)
+        .join(Gateway, Plug.gateway_id == Gateway.id)
+        .where(and_(Plug.id == plug_id, Gateway.tenant_id == user.tenant_id))
+    )
+    plug = plug_result.scalar_one_or_none()
+    if not plug:
+        raise HTTPException(status_code=404, detail="Plug not found or access denied.")
+
+    if req.tariff_id is not None:
+        await _load_tenant_tariff(db, req.tariff_id, user.tenant_id)
+
+    plug.tariff_id = req.tariff_id
+    await db.commit()
+
+    logger.info(f"CPO plug tariff assignment: plug={plug_id} tariff={req.tariff_id} by {user.email}")
+
+    return {"status": "updated", "plug_id": plug_id, "tariff_id": req.tariff_id}
+
+
+@router.put("/api/cpo/groups/{group_id}/tariff")
+async def cpo_assign_group_tariff(
+    group_id: int,
+    req: CpoTariffAssignRequest,
+    user: User = Depends(require_role("cpo", "admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Assign/unassign the tariff a charger group's plugs fall back to when
+    they have no tariff of their own. Tenant-scoped on both the group and the
+    tariff, same cross-tenant protection as the plug endpoint above."""
+    group_result = await db.execute(
+        select(ChargerGroup).where(
+            and_(ChargerGroup.id == group_id, ChargerGroup.tenant_id == user.tenant_id)
+        )
+    )
+    group = group_result.scalar_one_or_none()
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found or access denied.")
+
+    if req.tariff_id is not None:
+        await _load_tenant_tariff(db, req.tariff_id, user.tenant_id)
+
+    group.tariff_id = req.tariff_id
+    await db.commit()
+
+    logger.info(f"CPO group tariff assignment: group={group_id} tariff={req.tariff_id} by {user.email}")
+
+    return {"status": "updated", "group_id": group_id, "tariff_id": req.tariff_id}
+
+
+@router.put("/api/cpo/tenant/default-tariff")
+async def cpo_assign_tenant_default_tariff(
+    req: CpoTariffAssignRequest,
+    user: User = Depends(require_role("cpo", "admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Assign/unassign the CPO's tenant-wide default tariff — the last link
+    in the resolution chain before the global COINS_PER_KWH env fallback."""
+    tenant_result = await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))
+    tenant = tenant_result.scalar_one_or_none()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found.")
+
+    if req.tariff_id is not None:
+        await _load_tenant_tariff(db, req.tariff_id, user.tenant_id)
+
+    tenant.default_tariff_id = req.tariff_id
+    await db.commit()
+
+    logger.info(
+        f"CPO tenant default tariff assignment: tenant={user.tenant_id} "
+        f"tariff={req.tariff_id} by {user.email}"
+    )
+
+    return {"status": "updated", "tenant_id": user.tenant_id, "tariff_id": req.tariff_id}
+
+
 # Wrap FastAPI app with Socket.io ASGI wrapper so they run on the same port
