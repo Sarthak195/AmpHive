@@ -320,7 +320,7 @@ const Home = () => {
     <div className="page-container animate-fade-in">
       {/* Header */}
       <header className="text-center" style={{ marginBottom: '2rem' }}>
-        <h1 style={{ color: 'var(--color-primary)', fontSize: '2.2rem', marginBottom: '0.25rem' }}>
+        <h1 style={{ color: 'var(--color-primary)', fontSize: 'clamp(1.6rem, 6vw, 2.2rem)', marginBottom: '0.25rem' }}>
           ⚡ AmpHive
         </h1>
         <p style={{ fontSize: '1.05rem' }}>Shared EV Charging Network</p>

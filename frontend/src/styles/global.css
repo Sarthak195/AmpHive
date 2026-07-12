@@ -468,6 +468,16 @@ p {
 .animate-delay-3 { animation-delay: 0.3s; }
 .animate-delay-4 { animation-delay: 0.4s; }
 
+/* Respect the OS-level reduced-motion setting: the app animates liberally
+   (fades, slide-ups, pulses, hover lifts) — collapse them all to instant. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
 /* --- Navigation --- */
 
 .navbar {
@@ -546,6 +556,23 @@ p {
 
 .navbar-mobile-overlay {
   display: none;
+}
+
+/* Notification dropdown (NotificationBell). Desktop: anchored under the
+   bell. The bell is NOT at the screen edge (balance + Sign Out + hamburger
+   sit to its right), so `right: 0` alone would push a wide panel past the
+   LEFT viewport edge on phones — the ≤768px override below re-anchors it
+   to the viewport instead (fixed, below the navbar). */
+.notification-panel {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 8px);
+  width: min(360px, 90vw);
+  max-height: 70vh;
+  overflow-y: auto;
+  border-radius: var(--radius-md);
+  padding: 0.75rem;
+  z-index: 1000;
 }
 
 /* --- Badges --- */
@@ -692,6 +719,18 @@ p {
     border-bottom: none;
   }
 
+  /* Re-anchor the notification dropdown to the viewport: full-width sheet
+     just below the navbar, instead of hanging off the bell (which would
+     overflow the left screen edge — see the base rule above). */
+  .notification-panel {
+    position: fixed;
+    left: 0.75rem;
+    right: 0.75rem;
+    top: 64px;
+    width: auto;
+    max-height: calc(100vh - 80px);
+  }
+
   .glass-panel {
     padding: 1.25rem;
   }
@@ -724,6 +763,12 @@ p {
      let the header wrap instead of overflowing. */
   .plug-section-header {
     flex-wrap: wrap;
+  }
+
+  /* Keep the logo + bell + balance + auth button on one 360px line. */
+  .navbar .btn-sm {
+    padding: 0.5rem 0.75rem;
+    font-size: 0.8rem;
   }
 
   .map-container {
@@ -854,6 +899,11 @@ p {
 
 .cpo-content {
   flex: 1;
+  /* min-width: 0 is load-bearing: as a flex child its min-width would
+     otherwise default to `auto`, so one nowrap .data-table forces the whole
+     layout wider than a phone screen (html's overflow-x:hidden then CROPS
+     the page instead of letting .data-table-container scroll). */
+  min-width: 0;
   padding: 2rem;
   max-width: 1400px;
   animation: fadeIn 0.3s ease both;
@@ -1277,6 +1327,18 @@ p {
 
   .map-legend {
     gap: 0.35rem 0.85rem;
+  }
+
+  .cpo-page-header h1 {
+    font-size: 1.35rem;
+  }
+
+  .cpo-content {
+    padding: 1rem 0.75rem;
+  }
+
+  .chart-container {
+    padding: 1rem 0.75rem;
   }
 }
 
