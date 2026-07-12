@@ -21,8 +21,9 @@ from backend import state
 from backend.database.db import async_session_factory, get_db
 from backend.database.models import (
     ChargerGroup, ChargingSession, Gateway, GatewayEvent, GatewayStatus,
-    GroupMembership, LedgerTransaction, Plug, PlugStatus, SessionStatus,
-    TelemetryReading, Tenant, TransactionType, User, UserRole,
+    GroupMembership, LedgerTransaction, Payout, PayoutStatus, Plug,
+    PlugStatus, SessionStatus, TelemetryReading, Tenant, TransactionType,
+    User, UserRole,
 )
 from backend.schemas import (
     AuthResponse, CpoGatewayCreateRequest, CpoGatewayOtaRequest,
@@ -34,6 +35,7 @@ from backend.schemas import (
     SessionStopRequest, UserResponse, VerifyPaymentRequest,
 )
 from backend.services import payments as payment_service
+from backend.services import payouts as payout_service
 from backend.services.auth import (
     create_access_token, decode_access_token, get_current_user,
     hash_password, verify_password,
@@ -1121,6 +1123,235 @@ async def cpo_acknowledge_event(
     event.acknowledged = True
     await db.commit()
     return {"status": "acknowledged", "event_id": event_id}
+
+
+# ===========================================================================
+# CPO Payout / Settlement Ledger
+# ===========================================================================
+# Manual settlement — RECORD-KEEPING ONLY. There is no bank/UPI/payment-
+# gateway integration: a CPO snapshots its unsettled coin earnings into a
+# REQUESTED payout, and the platform operator (admin) marks it PAID once the
+# transfer has happened out-of-band. See services/payouts.py for the
+# earnings/watermark math (requirements.md §5.1's "withdraw earnings" promise
+# — MARKET_GAP_ANALYSIS.md §1.6 / §7).
+# ===========================================================================
+
+
+def _require_tenant_id(user: User) -> int:
+    """Every /api/cpo/payouts* and /api/cpo/earnings route is tenant-scoped.
+    A 'cpo' always has a tenant_id (set by cpo_setup); a bare 'admin' with no
+    tenant attached hits this — same shape as cpo_setup's own checks."""
+    if user.tenant_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail="You are not associated with a tenant.",
+        )
+    return user.tenant_id
+
+
+def _payout_response(payout: Payout) -> dict:
+    return {
+        "id": payout.id,
+        "tenant_id": payout.tenant_id,
+        "period_start": payout.period_start.isoformat() if payout.period_start else None,
+        "period_end": payout.period_end.isoformat() if payout.period_end else None,
+        "gross_coins": float(payout.gross_coins),
+        "platform_fee_coins": float(payout.platform_fee_coins),
+        "net_coins": float(payout.net_coins),
+        "status": payout.status.value,
+        "requested_by_user_id": payout.requested_by_user_id,
+        "requested_at": payout.requested_at.isoformat() if payout.requested_at else None,
+        "paid_at": payout.paid_at.isoformat() if payout.paid_at else None,
+        "note": payout.note,
+    }
+
+
+@router.get("/api/cpo/earnings")
+async def cpo_earnings(
+    user: User = Depends(require_role("cpo", "admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Lifetime + unsettled earnings for the CPO's tenant: gross coins collected
+    from COMPLETED sessions, the platform's cut, and the net owed to the CPO
+    — plus the settlement watermark (unsettled = watermark -> now). This is
+    the read-only dashboard view; POST /api/cpo/payouts snapshots the
+    unsettled leg into a payout request.
+    """
+    tenant_id = _require_tenant_id(user)
+    summary = await payout_service.tenant_earnings_summary(db, tenant_id)
+
+    return {
+        "watermark": summary["watermark"].isoformat(),
+        "as_of": summary["now"].isoformat(),
+        "platform_fee_pct": float(payout_service.platform_fee_pct()),
+        "lifetime": {
+            "gross_coins": float(summary["lifetime_gross_coins"]),
+            "platform_fee_coins": float(summary["lifetime_platform_fee_coins"]),
+            "net_coins": float(summary["lifetime_net_coins"]),
+        },
+        "unsettled": {
+            "period_start": summary["watermark"].isoformat(),
+            "period_end": summary["now"].isoformat(),
+            "gross_coins": float(summary["unsettled_gross_coins"]),
+            "platform_fee_coins": float(summary["unsettled_platform_fee_coins"]),
+            "net_coins": float(summary["unsettled_net_coins"]),
+        },
+    }
+
+
+@router.post("/api/cpo/payouts")
+async def cpo_request_payout(
+    user: User = Depends(require_role("cpo", "admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Snapshot the tenant's unsettled earnings (watermark -> now) into a new
+    REQUESTED payout. 400 if there's nothing to settle (unsettled net <= 0),
+    409 if a payout is already REQUESTED for this tenant (only one pending
+    settlement at a time).
+
+    Race-safe: row-locks the tenant for the duration of this transaction, so
+    two concurrent requests serialize — the loser re-reads the watermark
+    (and the now-committed REQUESTED row) after the winner commits, and gets
+    the 409 instead of snapshotting an overlapping window. See
+    services/payouts.py for the watermark definition.
+    """
+    tenant_id = _require_tenant_id(user)
+
+    lock_result = await db.execute(
+        select(Tenant.id).where(Tenant.id == tenant_id).with_for_update()
+    )
+    if lock_result.scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail="Tenant not found.")
+
+    existing = await db.execute(
+        select(Payout.id).where(
+            and_(Payout.tenant_id == tenant_id, Payout.status == PayoutStatus.REQUESTED)
+        )
+    )
+    if existing.scalar_one_or_none() is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="A payout request is already pending for this tenant.",
+        )
+
+    watermark = await payout_service.tenant_settlement_watermark(db, tenant_id)
+    now = datetime.now(timezone.utc)
+    gross = await payout_service.sum_completed_session_coins(
+        db, tenant_id, window_start=watermark, window_end=now
+    )
+    fee, net = payout_service.compute_fee_and_net(gross)
+    if net <= ZERO_MONEY:
+        raise HTTPException(
+            status_code=400,
+            detail="No unsettled earnings to pay out.",
+        )
+
+    payout = Payout(
+        tenant_id=tenant_id,
+        period_start=watermark,
+        period_end=now,
+        gross_coins=gross,
+        platform_fee_coins=fee,
+        net_coins=net,
+        status=PayoutStatus.REQUESTED,
+        requested_by_user_id=user.id,
+    )
+    db.add(payout)
+    await db.commit()
+    await db.refresh(payout)
+
+    logger.info(
+        f"CPO payout requested: tenant={tenant_id} payout={payout.id} "
+        f"window=[{watermark.isoformat()}, {now.isoformat()}) "
+        f"gross={gross} fee={fee} net={net} by {user.email}"
+    )
+    return _payout_response(payout)
+
+
+@router.get("/api/cpo/payouts")
+async def cpo_list_payouts(
+    user: User = Depends(require_role("cpo", "admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """List the tenant's payouts, newest request first."""
+    tenant_id = _require_tenant_id(user)
+    result = await db.execute(
+        select(Payout)
+        .where(Payout.tenant_id == tenant_id)
+        .order_by(Payout.requested_at.desc(), Payout.id.desc())
+    )
+    return [_payout_response(p) for p in result.scalars().all()]
+
+
+@router.post("/api/cpo/payouts/{payout_id}/mark_paid")
+async def cpo_mark_payout_paid(
+    payout_id: int,
+    user: User = Depends(require_role("admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Platform operator marks a payout PAID after settling it manually
+    out-of-band (bank transfer / UPI outside this app). Admin-only — a CPO
+    cannot mark its own payout paid. 409 if the payout isn't REQUESTED
+    (already PAID/CANCELLED, or a concurrent mark_paid/cancel got there
+    first — the row lock below makes the state check itself race-safe).
+    """
+    result = await db.execute(
+        select(Payout).where(Payout.id == payout_id).with_for_update()
+    )
+    payout = result.scalar_one_or_none()
+    if not payout:
+        raise HTTPException(status_code=404, detail="Payout not found.")
+    if payout.status != PayoutStatus.REQUESTED:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Payout is '{payout.status.value}', not 'requested'.",
+        )
+
+    payout.status = PayoutStatus.PAID
+    payout.paid_at = datetime.now(timezone.utc)
+    await db.commit()
+    await db.refresh(payout)
+
+    logger.info(f"CPO payout {payout.id} marked PAID by admin {user.email}")
+    return _payout_response(payout)
+
+
+@router.post("/api/cpo/payouts/{payout_id}/cancel")
+async def cpo_cancel_payout(
+    payout_id: int,
+    user: User = Depends(require_role("cpo", "admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Cancel a REQUESTED payout, freeing its window for a future request (the
+    watermark excludes CANCELLED payouts). The owning CPO or an admin may
+    cancel; any other tenant's CPO gets 404 (not "403", so a cross-tenant
+    caller can't distinguish "not yours" from "doesn't exist"). 409 if the
+    payout isn't REQUESTED — same race-safe row-lock as mark_paid.
+    """
+    result = await db.execute(
+        select(Payout).where(Payout.id == payout_id).with_for_update()
+    )
+    payout = result.scalar_one_or_none()
+    if not payout:
+        raise HTTPException(status_code=404, detail="Payout not found.")
+    if user.role != UserRole.ADMIN and payout.tenant_id != user.tenant_id:
+        raise HTTPException(status_code=404, detail="Payout not found.")
+    if payout.status != PayoutStatus.REQUESTED:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Payout is '{payout.status.value}', not 'requested'.",
+        )
+
+    payout.status = PayoutStatus.CANCELLED
+    await db.commit()
+    await db.refresh(payout)
+
+    logger.info(f"CPO payout {payout.id} cancelled by {user.email}")
+    return _payout_response(payout)
 
 
 # Wrap FastAPI app with Socket.io ASGI wrapper so they run on the same port
