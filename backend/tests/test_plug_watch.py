@@ -555,14 +555,24 @@ async def test_available_plugs_carry_watching_via_one_extra_query():
     watched_result = MagicMock()
     watched_result.scalars.return_value.all.return_value = [2]  # watching plug B
 
-    db = _db(rows_result, watched_result)
+    # [Reservations] The list endpoint also runs its grouped reservation
+    # lookup: one lazy-expiry UPDATE (rowcount=0 → nothing flipped → no
+    # commit) + one grouped SELECT — a constant 2 more queries for any list
+    # size, so the endpoint stays N+1-free overall.
+    expire_result = MagicMock(rowcount=0)
+    reservations_result = MagicMock()
+    reservations_result.scalars.return_value = []
+
+    db = _db(rows_result, watched_result, expire_result, reservations_result)
 
     with patch("backend.routers.plugs.gateway_is_live", return_value=True), \
          patch("backend.routers.plugs.resolve_rate_for_plug",
                AsyncMock(return_value=Decimal("5.00"))):
         responses = await get_available_plugs(user, db)
 
-    assert db.execute.await_count == 2  # plugs+joins, then the watches — no N+1
+    # plugs+joins, the watches, then the reservation expiry+grouped pair —
+    # constant query count regardless of list size (no N+1).
+    assert db.execute.await_count == 4
     by_id = {r.id: r for r in responses}
     assert by_id[1].watching is False
     assert by_id[2].watching is True
@@ -572,9 +582,18 @@ async def test_available_plugs_carry_watching_via_one_extra_query():
 async def test_get_plug_reports_watching_true():
     user = _user(42)
     plug = _plug(plug_id=7, status=PlugStatus.OCCUPIED)  # ungrouped
+
+    # [Reservations] The detail endpoint runs the same expiry UPDATE +
+    # grouped SELECT the list does, before the watching lookup.
+    expire_result = MagicMock(rowcount=0)
+    reservations_result = MagicMock()
+    reservations_result.scalars.return_value = []
+
     db = _db(
         _scalar_one_or_none(plug),        # plug lookup
         _scalar_one_or_none(None),        # gateway lookup (none — offline)
+        expire_result,                    # reservation lazy-expiry UPDATE
+        reservations_result,              # grouped reservation SELECT
         _scalar_one_or_none(101),         # a watch row id exists
     )
 

@@ -2082,4 +2082,84 @@ async def cpo_list_invoices(
     return [invoice_to_dict(inv) for inv in result.scalars().all()]
 
 
+# ===========================================================================
+# CPO Plug Reservations
+# ===========================================================================
+# Appended at the end of the file (feat/reservations), same rationale as the
+# invoice/tariff sections above: avoids touching the shared header import
+# block, which the parallel feature branches also edit. Local imports here
+# are intentional, not an oversight. Booking/cancelling happens on the
+# driver side (routers/reservations.py) — this is the CPO's tenant-scoped
+# view of the schedule (plus cancel via the shared
+# POST /api/reservations/{id}/cancel, which admits the owning tenant's
+# cpo/admin).
+from backend.database.models import Reservation, ReservationStatus  # noqa: E402
+from backend.services.reservations import expire_lapsed_reservations  # noqa: E402
+
+
+@router.get("/api/cpo/reservations")
+async def cpo_list_reservations(
+    user: User = Depends(require_role("cpo", "admin")),
+    db: AsyncSession = Depends(get_db),
+    status: Optional[str] = None,
+    upcoming_only: bool = False,
+    limit: int = 50,
+    offset: int = 0,
+):
+    """List the tenant's plug reservations, newest window first. Tenant-
+    scoped, same pagination shape as GET /api/cpo/audit; optional `status`
+    filter (booked/cancelled/fulfilled/expired — 400 otherwise, matching the
+    CpoPlugUpdateRequest.status validation convention) and `upcoming_only`
+    (BOOKED with end_at in the future). Lazily expires lapsed holds first so
+    the operator never sees a no-show still shown as BOOKED."""
+    tenant_id = _require_tenant_id(user)
+    limit = max(1, min(limit, 200))
+    offset = max(0, offset)
+    now = datetime.now(timezone.utc)
+
+    expired = await expire_lapsed_reservations(db, tenant_id=tenant_id, now=now)
+    if expired:
+        await db.commit()  # read path — persist the lazy flip
+
+    conditions = [Reservation.tenant_id == tenant_id]
+    if status is not None:
+        try:
+            conditions.append(Reservation.status == ReservationStatus(status))
+        except ValueError:
+            valid = ", ".join(s.value for s in ReservationStatus)
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid status '{status}'. Must be one of: {valid}.",
+            )
+    if upcoming_only:
+        conditions.append(Reservation.status == ReservationStatus.BOOKED)
+        conditions.append(Reservation.end_at > now)
+
+    rows = await db.execute(
+        select(Reservation, Plug.name, User.email, User.full_name)
+        .join(Plug, Plug.id == Reservation.plug_id)
+        .join(User, User.id == Reservation.user_id)
+        .where(and_(*conditions))
+        .order_by(Reservation.start_at.desc(), Reservation.id.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+    return [
+        {
+            "id": r.id,
+            "plug_id": r.plug_id,
+            "plug_name": plug_name,
+            "user_id": r.user_id,
+            "user_email": user_email,
+            "user_name": user_name,
+            "start_at": r.start_at.isoformat(),
+            "end_at": r.end_at.isoformat(),
+            "status": r.status.value,
+            "session_id": r.session_id,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+        }
+        for r, plug_name, user_email, user_name in rows.all()
+    ]
+
+
 # Wrap FastAPI app with Socket.io ASGI wrapper so they run on the same port

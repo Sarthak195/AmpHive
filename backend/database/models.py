@@ -817,6 +817,70 @@ class Invoice(Base):
     )
 
 
+# --- Plug Reservations (book a time slot) ---
+
+class ReservationStatus(str, enum.Enum):
+    BOOKED = "booked"          # future/current hold; blocks other bookings + starts
+    CANCELLED = "cancelled"    # withdrawn by the owner or the tenant's cpo/admin
+    FULFILLED = "fulfilled"    # the holder started a session inside the window
+    EXPIRED = "expired"        # no-show: grace after start_at lapsed unfulfilled
+
+
+class Reservation(Base):
+    """
+    A driver's booked time window on a plug (feat/reservations, 2026-07-12 —
+    the private society/office use case: group members book a slot on their
+    shared charger; during [start_at, end_at) only the holder may start a
+    session, enforced under the plug row lock in
+    routers/sessions.py start_charging_session).
+
+    FREE in v1: no coin hold, no money movement anywhere in the lifecycle —
+    the hold is purely on the plug's time.
+
+    Lifecycle: BOOKED -> CANCELLED | FULFILLED (session_id set, linking the
+    session that consumed the window) | EXPIRED. Expiry is LAZY — there is no
+    background sweep; services/reservations.py expire_lapsed_reservations
+    flips lapsed BOOKED rows (past start_at + RESERVATION_NO_SHOW_GRACE_MIN,
+    or past end_at) wherever reservations are read (the session-start gate,
+    the booking overlap check, every list endpoint), so a stale hold never
+    blocks anyone.
+
+    Design notes:
+    - tenant_id is denormalized from plug -> gateway -> tenant (mirrors
+      ChargingSession/SessionDispute) so CPO-scoped queries filter with one
+      indexed equality, no join.
+    - session_id is nullable / SET NULL: only FULFILLED rows carry one, and
+      deleting a session must not erase the booking history row.
+    - Overlap exclusion among BOOKED rows is app-level only, serialized by a
+      SELECT ... FOR UPDATE on the plug row in the booking path (a DB-level
+      exclusion constraint over tstzrange would also need btree_gist; the
+      plug-lock serialization makes the app check race-free without it).
+    - No relationship() back-refs on Plug/User/Tenant — call sites resolve
+      via explicit select()s, matching Tariff/SessionDispute/Invoice.
+    """
+    __tablename__ = "reservations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    plug_id: Mapped[int] = mapped_column(Integer, ForeignKey("plugs.id", ondelete="CASCADE"), nullable=False)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    # Half-open window [start_at, end_at) — same boundary convention as
+    # Payout's settlement window, so back-to-back bookings can share an edge
+    # timestamp without "overlapping".
+    start_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    end_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    status: Mapped[ReservationStatus] = mapped_column(SQLEnum(ReservationStatus, name="reservation_status", values_callable=lambda x: [e.value for e in x]), default=ReservationStatus.BOOKED, nullable=False)
+    session_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("charging_sessions.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+
+    __table_args__ = (
+        # The hot shape: "reservations on this plug around time T" — the
+        # session-start gate, the overlap check, and the per-plug schedule
+        # all filter on plug_id + a start_at range.
+        Index("idx_reservations_plug_start", "plug_id", "start_at"),
+    )
+
+
 # --- Plug Watches ("notify me when free") ---
 
 class PlugWatch(Base):

@@ -131,8 +131,8 @@ Legend: ✅ present · 🟡 partial · ❌ absent.
 | Live session telemetry (kW, kWh, cost, time) | all | ✅ Socket.io | — |
 | QR-scan to start | Indian norm | ✅ (2026-07-12) printable per-plug QR (CPO Plugs) deep-links to `/?plug=<id>`, prefilled + auth-gated on Home; Plug-ID typing still works too | — |
 | RFID / tap card to start | ChargePoint, EA | ❌ | By design (app-first) |
-| Reserve / book a charger ahead | Statiq, ChargeZone, Tata | ❌ | Should-do |
-| Scheduled / delayed start (charge off-peak) | Tesla, ChargePoint | ❌ | Aspirational |
+| Reserve / book a charger ahead | Statiq, ChargeZone, Tata | ✅ (2026-07-12) free bookable time slots (`reservations` table, `0016_reservations`): during the window only the holder can start (409 for anyone else, enforced under the plug row lock at session start); lazy no-show expiry (`RESERVATION_NO_SHOW_GRACE_MIN`, default 15 min); driver books/cancels + sees the plug schedule in-app; tenant-scoped CPO list. No coin hold in v1 | — |
+| Scheduled / delayed start (charge off-peak) | Tesla, ChargePoint | ❌ (reservations ≠ scheduled start: a booking holds the window, it never switches the plug on by itself) | Aspirational |
 | Stop at target kWh / % SoC | Tesla, EA | 🟡 (2026-07-12) user-set "stop at X" **shipped** for kWh, time, and ₹/coins (a coins cap converts to kWh client-side at the plug's own rate): optional collapsed-by-default limit control at session start, limits persisted on the session (Alembic `0015_session_limits`) and enforced by a backend auto-stop on the telemetry path (env `AUTO_STOP_ON_LIMITS`, ~1 s latency) + a reaper duration backstop, with live progress in the session monitor ("0.42 / 1.00 kWh · stops automatically"). **% SoC remains impossible by construction** — a metering smart plug cannot read the vehicle's state of charge (no ISO 15118 link; see "Plug & Charge" below), so the 🟡 is permanent unless the hardware class changes | — |
 | Plug & Charge / ISO 15118 autocharge | Tesla, EA, Ionity | ❌ | By design (smart plug, not ISO 15118 EVSE) |
 | Vehicle profile (make/model/connector) | ChargePoint, PlugShare | ❌ | Nice-to-have |
@@ -212,7 +212,8 @@ low-balance notifications (email/push/PWA) · per-CPO price model + tax invoice 
 CSV export · basic map availability legend/filters.
 
 **Do next (revenue/trust):** ~~CPO payout ledger~~ (done 2026-07-12 — §1.6, incl. portal UI) · refund + dispute flow ·
-~~authorization hold~~ (done 2026-07-12 — §3) · reservations · auto-topup ·
+~~authorization hold~~ (done 2026-07-12 — §3) ·
+~~reservations~~ (done 2026-07-12 — §5) · auto-topup ·
 maintenance-mode + fault console (pairs with ingesting the firmware `/alarms`
 topic).
 

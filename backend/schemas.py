@@ -5,9 +5,10 @@ Extracted verbatim from main.py (2026-07-07, TD#7 split). One module for all
 routers — schemas are cross-cutting (e.g. PlugResponse is returned by both the
 driver and CPO plug routes).
 """
+from datetime import datetime, timezone
 from typing import Optional
 
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
 
 
 # --- Auth Schemas ---
@@ -84,6 +85,14 @@ class GroupResponse(BaseModel):
     is_public: bool
     plug_count: int
 
+class ReservationWindow(BaseModel):
+    """A [start_at, end_at) booking window, ISO-8601 UTC strings — the shape
+    PlugResponse.next_reservation carries (see routers/reservations.py for
+    the full reservation objects)."""
+    start_at: str
+    end_at: str
+
+
 class PlugResponse(BaseModel):
     id: int
     name: str
@@ -108,6 +117,18 @@ class PlugResponse(BaseModel):
     # and public-group plugs are False. The driver Home page uses this to
     # section the charger list into "your chargers" vs "public chargers".
     is_private: bool = False
+    # [Reservations] Whether a BOOKED reservation covers right now (after
+    # lazy no-show expiry — services/reservations.py), whether the CALLER
+    # holds it (the Home card shows "Reserved for you" instead of warning
+    # the holder off their own slot), when the covering window ends (ISO
+    # UTC; null unless reserved_now), and the next FUTURE window (strictly
+    # start_at > now — the covering one is described by reserved_until).
+    # Populated on both the detail and list endpoints (the list computes
+    # them in one grouped query, no N+1).
+    reserved_now: bool = False
+    reserved_now_by_me: bool = False
+    reserved_until: Optional[str] = None
+    next_reservation: Optional[ReservationWindow] = None
     # [Plug watches] True when the CURRENT user has an armed one-shot
     # "notify me when free" watch on this plug (POST/DELETE
     # /api/plugs/{id}/watch). Drives the Home card's bell toggle; cleared
@@ -357,3 +378,51 @@ class DisputeResponse(BaseModel):
     created_at: Optional[str] = None
     resolved_at: Optional[str] = None
     resolved_by_user_id: Optional[int] = None
+
+
+# --- Plug Reservation Schemas (feat/reservations) ---
+
+class ReservationCreateRequest(BaseModel):
+    """Body for POST /api/reservations. Window rules (min/max duration,
+    advance horizon, past-start grace) are enforced in the router against
+    services/reservations.py policy so the 400s carry precise messages
+    instead of generic 422s."""
+    plug_id: int
+    start_at: datetime
+    end_at: datetime
+
+    @field_validator("start_at", "end_at")
+    @classmethod
+    def _coerce_utc(cls, v: datetime) -> datetime:
+        # All timestamps are stored tz-aware UTC. The frontend sends ISO
+        # strings with an offset (Date.toISOString() => "...Z"); a naive
+        # datetime from an older/naive client is interpreted as UTC rather
+        # than rejected.
+        if v.tzinfo is None:
+            return v.replace(tzinfo=timezone.utc)
+        return v.astimezone(timezone.utc)
+
+
+class ReservationResponse(BaseModel):
+    """One reservation. `user_name`/`is_mine` are populated on the per-plug
+    schedule (group members see who holds each slot — the private-society
+    use case); `plug_name` on the owner/CPO lists."""
+    id: int
+    plug_id: int
+    user_id: int
+    tenant_id: int
+    start_at: str
+    end_at: str
+    status: str
+    session_id: Optional[int] = None
+    created_at: Optional[str] = None
+    plug_name: Optional[str] = None
+    user_name: Optional[str] = None
+    is_mine: Optional[bool] = None
+
+
+class MyReservationsResponse(BaseModel):
+    """GET /api/reservations/my: upcoming BOOKED windows (soonest first) +
+    recent history (everything else, newest first, capped)."""
+    upcoming: list[ReservationResponse]
+    history: list[ReservationResponse]

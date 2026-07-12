@@ -3,7 +3,9 @@
  * preserves it through login, and the "unknown id" notice), the sectioned
  * charger list (private "Your chargers" first, "Public chargers" collapsed
  * by default when private ones exist, map at the bottom, collapsed), the
- * availability + group filters with their live legend counts, and the
+ * availability + group filters with their live legend counts, the
+ * reservations surface (the "Reserved until" badge, the Reserve action
+ * opening the modal, and the "Your reservations" strip with cancel), and the
  * "notify me when free" bell toggle on non-startable plug cards (optimistic
  * POST/DELETE against /api/plugs/{id}/watch, revert on failure, cleared by
  * a live plug_status→available flip).
@@ -18,6 +20,7 @@ import api from '../api/client';
 import { useAuth } from '../contexts/AuthContext';
 import { useSession } from '../contexts/SessionContext';
 import { useConfig } from '../contexts/ConfigContext';
+import { fmtTime, fmtWindow } from '../utils/reservationTime';
 
 vi.mock('../api/client', () => ({
   default: { get: vi.fn(), post: vi.fn(), put: vi.fn(), delete: vi.fn() },
@@ -240,6 +243,101 @@ describe('Home — private/public sections + map at the bottom', () => {
     renderHome('/');
     expect(await screen.findByText('No chargers available yet.')).toBeInTheDocument();
     expect(screen.queryByLabelText('Filter by availability')).not.toBeInTheDocument();
+  });
+});
+
+describe('Home — reservations', () => {
+  const RESERVED_UNTIL = '2030-01-01T15:30:00+00:00';
+  const MY_RESERVATION = {
+    id: 11,
+    plug_id: 1,
+    plug_name: 'Lobby Plug',
+    start_at: '2030-01-02T10:00:00+00:00',
+    end_at: '2030-01-02T11:00:00+00:00',
+    status: 'booked',
+  };
+
+  // Route-aware GET mock: Home fetches both the plug list and the
+  // reservations strip; ReserveModal additionally fetches a plug schedule.
+  const mockGets = ({ plugs = PLUGS, upcoming = [] } = {}) => {
+    api.get.mockImplementation((url) => {
+      if (url === '/api/plugs/available') return Promise.resolve(plugs);
+      if (url === '/api/reservations/my') return Promise.resolve({ upcoming, history: [] });
+      if (/^\/api\/plugs\/\d+\/reservations$/.test(url)) return Promise.resolve([]);
+      return Promise.resolve([]);
+    });
+  };
+
+  beforeEach(() => {
+    useAuth.mockReturnValue({ user: DRIVER });
+  });
+
+  it('shows a "Reserved until HH:MM" badge (distinct from occupied) and blocks the start click', async () => {
+    mockGets({
+      plugs: PLUGS.map((p) =>
+        p.id === 1
+          ? { ...p, reserved_now: true, reserved_now_by_me: false, reserved_until: RESERVED_UNTIL }
+          : p
+      ),
+    });
+    renderHome('/');
+    await screen.findByText('Lobby Plug');
+
+    expect(screen.getByText(`Reserved until ${fmtTime(RESERVED_UNTIL)}`)).toBeInTheDocument();
+    // Still shows its plain hardware status alongside — reserved ≠ occupied.
+    expect(screen.getByText('available')).toBeInTheDocument();
+    // The only otherwise-startable plug is inside someone else's window, so
+    // no card invites a "Charge →" click.
+    expect(screen.queryByText('Charge →')).not.toBeInTheDocument();
+  });
+
+  it('shows "Reserved for you" to the holder and keeps the card startable', async () => {
+    mockGets({
+      plugs: PLUGS.map((p) =>
+        p.id === 1
+          ? { ...p, reserved_now: true, reserved_now_by_me: true, reserved_until: RESERVED_UNTIL }
+          : p
+      ),
+    });
+    renderHome('/');
+    await screen.findByText('Lobby Plug');
+
+    expect(screen.getByText('Reserved for you')).toBeInTheDocument();
+    expect(screen.getByText('Charge →')).toBeInTheDocument();
+  });
+
+  it('opens the reserve modal from a plug card "Reserve" action', async () => {
+    mockGets();
+    renderHome('/');
+    await screen.findByText('Lobby Plug');
+
+    // One Reserve button per visible card; the private section lists
+    // Lobby (id 1) first.
+    await userEvent.click(screen.getAllByRole('button', { name: 'Reserve' })[0]);
+
+    expect(await screen.findByRole('heading', { name: /Reserve Lobby Plug/ })).toBeInTheDocument();
+    expect(api.get).toHaveBeenCalledWith('/api/plugs/1/reservations');
+  });
+
+  it('renders the "Your reservations" strip and cancels via its button', async () => {
+    mockGets({ upcoming: [MY_RESERVATION] });
+    api.post.mockResolvedValue({ status: 'cancelled' });
+    renderHome('/');
+
+    expect(await screen.findByText('Your reservations')).toBeInTheDocument();
+    expect(
+      screen.getByText(fmtWindow(MY_RESERVATION.start_at, MY_RESERVATION.end_at))
+    ).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(api.post).toHaveBeenCalledWith('/api/reservations/11/cancel');
+  });
+
+  it('hides the strip when there are no upcoming reservations', async () => {
+    mockGets({ upcoming: [] });
+    renderHome('/');
+    await screen.findByText('Lobby Plug');
+    expect(screen.queryByText('Your reservations')).not.toBeInTheDocument();
   });
 });
 

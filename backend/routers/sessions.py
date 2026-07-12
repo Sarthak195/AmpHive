@@ -175,6 +175,44 @@ async def start_charging_session(
             ),
         )
 
+    # [Reservations] Booking gate — still under the plug row lock, so a
+    # concurrent booking/start on this plug serializes with us. Lazy no-show
+    # expiry runs FIRST (services/reservations.py, shared with the booking
+    # overlap check and every list endpoint), so a hold whose grace lapsed
+    # never blocks a walk-up start even with no background sweep. If a
+    # BOOKED window covers now: someone else's -> 409; the caller's own ->
+    # remembered here and marked FULFILLED (with the session linked) in the
+    # same commit as the plug claim below. Local imports on purpose — this
+    # router's shared header import block is a merge hot-spot across the
+    # parallel feature branches (same rationale as the GST section below).
+    from backend.database.models import Reservation, ReservationStatus
+    from backend.services.reservations import expire_lapsed_reservations
+
+    now_utc = datetime.now(timezone.utc)
+    await expire_lapsed_reservations(db, plug_id=plug.id, now=now_utc)
+    reservation_result = await db.execute(
+        select(Reservation)
+        .where(
+            and_(
+                Reservation.plug_id == plug.id,
+                Reservation.status == ReservationStatus.BOOKED,
+                Reservation.start_at <= now_utc,
+                Reservation.end_at > now_utc,
+            )
+        )
+        .order_by(Reservation.start_at)
+        .limit(1)
+    )
+    covering_reservation = reservation_result.scalar_one_or_none()
+    if covering_reservation is not None and covering_reservation.user_id != user.id:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Plug is reserved until "
+                f"{covering_reservation.end_at.astimezone(timezone.utc):%H:%M} UTC."
+            ),
+        )
+
     gw_result = await db.execute(select(Gateway).where(Gateway.id == plug.gateway_id))
     gateway = gw_result.scalar_one()
 
@@ -247,6 +285,14 @@ async def start_charging_session(
         max_duration_seconds=req.max_duration_seconds,
     )
     db.add(session)
+    if covering_reservation is not None:
+        # [Reservations] The holder is starting inside their own window:
+        # fulfil the booking and link the session (flush first so session.id
+        # exists). Same transaction as the plug claim, so a crash can never
+        # leave a FULFILLED reservation pointing at no session.
+        await db.flush()
+        covering_reservation.status = ReservationStatus.FULFILLED
+        covering_reservation.session_id = session.id
     plug.status = PlugStatus.OCCUPIED
     # Commit the claim + session BEFORE touching hardware, releasing the lock.
     await db.commit()
@@ -271,6 +317,11 @@ async def start_charging_session(
         session.status = SessionStatus.CANCELLED
         session.ended_at = datetime.now(timezone.utc)
         plug.status = PlugStatus.AVAILABLE
+        if covering_reservation is not None:
+            # [Reservations] The start never actually happened — give the
+            # holder their window back instead of burning it as FULFILLED.
+            covering_reservation.status = ReservationStatus.BOOKED
+            covering_reservation.session_id = None
         await db.commit()
         await emit_plug_status(plug.id, PlugStatus.AVAILABLE.value)
         raise HTTPException(
