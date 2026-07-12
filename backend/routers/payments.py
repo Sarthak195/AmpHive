@@ -103,6 +103,17 @@ async def _credit_topup(
         # Another request (webhook vs verify) already inserted this payment_id.
         await db.rollback()
         return None
+
+    # Driver notification — matters most on the webhook path, where the credit
+    # can land while the app is closed. Idempotent with the credit itself: the
+    # duplicate-payment loser returned above and never reaches this.
+    from backend.services.notifications import notify
+    await notify(
+        user_id,
+        "topup_credited",
+        "Wallet topped up",
+        f"{credit:.2f} coins credited — balance is now {new_balance:.2f}.",
+    )
     return new_balance
 
 

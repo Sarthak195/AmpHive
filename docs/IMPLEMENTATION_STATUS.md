@@ -27,8 +27,9 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 | Razorpay webhook auto-credit | ✅ | Credits coins on `payment.captured`; atomic + idempotent vs. `/verify` (dedupes on the UNIQUE `razorpay_payment_id` via `IntegrityError`). Money columns are `Numeric(12,2)`/Decimal (2026-07-06). |
 | Wallet debit on stop + ledger | ✅ | Row-locked (`SELECT ... FOR UPDATE`) in stop/verify/webhook paths |
 | Prepaid protection: auto-stop on balance exhaustion | ✅ | On each telemetry write, if the accrued energy cost (`kwh × COINS_PER_KWH`) reaches the driver's wallet balance, the session is auto-stopped via the shared `finalize_charging_session` path (own txn, row-locked, race-safe with a user stop / the reaper). Caps free charging past a drained wallet to ≤ one telemetry interval. Env-toggle `AUTO_STOP_ON_BALANCE_EXHAUSTED` (default on). Tests in `test_mqtt_manager.py`. |
+| Driver notifications (feed + Socket.io + Web Push) | ✅ | 2026-07-11: `notifications`/`push_subscriptions` tables (Alembic `0007`), `services/notifications.py` (persist → Socket.io user room → VAPID Web Push via `pywebpush`, dead subscriptions pruned on 404/410). Emit points: every session stop (user/auto-stop/reaper/safety cutoff), low balance once per session (`LOW_BALANCE_WARN_FRACTION`, default 0.8), gateway-offline mid-session, top-up credit. Endpoints `/api/notifications*` (feed + read + push-subscription CRUD). **Behavior change:** `THERMAL_CUTOFF`/`OVERCURRENT_CUTOFF` alarms now finalize the plug's ACTIVE session immediately (bills recorded energy, frees the plug) instead of leaving it for the reaper. Tests in `test_notifications.py`. **Verified live in prod 2026-07-11** (migration `0007` applied at startup; billed fake-plug session #24 → `session_stopped` notification with the exact receipt figures (0.234 kWh / 1.17 coins / 497.79 left), unread_count 1 → read → 0; push public-key endpoint `enabled:true`). Browser-side push delivery needs a manual browser opt-in — not yet exercised. |
 | Direct Mode Tapo endpoints | ✅ | Gated by `DIRECT_MODE`; lib or relay mode |
-| CPO payout / settlement ledger | 🟡 | **Record-keeping only — no bank/UPI/payment-gateway integration.** `Payout` model (Alembic `0010_payouts`) + `services/payouts.py` compute a tenant's gross/fee/net earnings (`SUM(coins_spent)` of its COMPLETED sessions, single aggregate query on the already-denormalized `charging_sessions.tenant_id`) and a rolling settlement watermark (`MAX(period_end)` over non-CANCELLED payouts). `GET /api/cpo/earnings` (lifetime + unsettled), `POST`/`GET /api/cpo/payouts` (request/list; 400 if nothing unsettled, 409 if a request is already pending, race-safe via a `SELECT ... FOR UPDATE` tenant-row lock so concurrent requests can't double-settle the same window), admin-only `POST .../mark_paid`, and owner-or-admin `POST .../cancel` (frees the window). No CPO-portal UI yet (backend/API only) — closes [requirements.md §5.1](../requirements.md)'s "withdraw earnings" promise at the record-keeping level; see [MARKET_GAP_ANALYSIS.md](MARKET_GAP_ANALYSIS.md) §1.6/§7. |
+| CPO payout / settlement ledger | 🟡 | **Record-keeping only — no bank/UPI/payment-gateway integration.** `Payout` model (Alembic `0009_payouts`) + `services/payouts.py` compute a tenant's gross/fee/net earnings (`SUM(coins_spent)` of its COMPLETED sessions, single aggregate query on the already-denormalized `charging_sessions.tenant_id`) and a rolling settlement watermark (`MAX(period_end)` over non-CANCELLED payouts). `GET /api/cpo/earnings` (lifetime + unsettled), `POST`/`GET /api/cpo/payouts` (request/list; 400 if nothing unsettled, 409 if a request is already pending, race-safe via a `SELECT ... FOR UPDATE` tenant-row lock so concurrent requests can't double-settle the same window), admin-only `POST .../mark_paid`, and owner-or-admin `POST .../cancel` (frees the window). No CPO-portal UI yet (backend/API only) — closes [requirements.md §5.1](../requirements.md)'s "withdraw earnings" promise at the record-keeping level; see [MARKET_GAP_ANALYSIS.md](MARKET_GAP_ANALYSIS.md) §1.6/§7. |
 
 ### Frontend
 | Capability | Status | Notes |
@@ -43,6 +44,7 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 | Razorpay top-up flow | ✅ | CDN script + `window.Razorpay`; key comes from backend order. Formats and displays decimal coin balances. |
 | Pricing clarity | ✅ | `GET /api/config` (public) feeds a `ConfigProvider`; Home shows the tariff (`coins_per_kwh`) + what the driver's balance covers (≈ kWh) with a top-up nudge below the minimum, and the session monitor reads the rate from config instead of hardcoding it. The session-start minimum is now env-driven (`MIN_START_BALANCE_COINS`) and the 402 message matches the displayed number (2026-07-10). |
 | Low-balance live warning | ✅ | The session monitor warns (with remaining coins ≈ kWh) as accrued cost nears the wallet balance, pairing with the backend auto-stop so the driver sees it coming. Tests in `SessionMonitor.test.jsx`. |
+| Driver notification bell + Web Push opt-in | ✅ | 2026-07-11: navbar `NotificationBell` — unread badge, dropdown feed (`GET /api/notifications`), live prepend from the Socket.io `notification` user-room event, mark-read/mark-all, and an enable-push flow (permission → `sw.js` service worker → `pushManager.subscribe` with the backend-derived VAPID key). `frontend/public/sw.js` is push-only (no fetch interception). Tests in `NotificationBell.test.jsx`. |
 | Post-session receipt | ✅ | `finalize_charging_session` now returns a full receipt (plug name, energy, peak power, duration, coins charged + any forgiven shortfall, balance before → after, timestamps, stop reason); the Session page shows a `SessionReceipt` card on stop (with an auto-stop notice when applicable) and refreshes the wallet. **Verified live end-to-end 2026-07-10** — a real billed session on the fake plug (0.101 kWh → 0.51 coins, balance 499.47 → 498.96, reconciled in the ledger). Tests in `SessionReceipt.test.jsx`. |
 | Charger groups (join/list) | ✅ | |
 | CPO operator portal (setup, dashboard, plugs, groups, sessions) | ✅ | `pages/cpo/*` behind `CpoProtectedRoute`; charts via `recharts` |
@@ -461,7 +463,7 @@ audit merged; statuses below are as of 2026-07-11.*
     (`EmailStr` + password rule, 2026-07-11 — TD#30), the portal input CSS
     (`box-sizing:border-box`, fw 1.6.0 — the `width:100%%` diagnosis was
     wrong: the HTML is printf-formatted, so `%%` already rendered as `%`),
-    and **backend structured logging** (2026-07-12 — TD#28, backend half):
+    **backend structured logging** (2026-07-12 — TD#28, backend half):
     `backend/logging_config.py` installs a JSON-lines formatter on the root
     logger (`ts`/`level`/`logger`/`msg`/`correlation_id` + structured `extra`
     fields; env `LOG_LEVEL`/`LOG_FORMAT`), a `correlation_id` ContextVar +
@@ -474,7 +476,14 @@ audit merged; statuses below are as of 2026-07-11.*
     `services/mqtt_manager.py`. The broker log is now also mirrored to a file
     on the previously-unused `mosquitto_log` volume (durable across container
     recreation) with the primary stdout stream size/count-bounded via the
-    compose `logging:` driver. Tests: `backend/tests/test_logging.py`. Still
-    open: firmware `ESP_LOGI` remains serial-only (no log topic — TD#28,
-    firmware half), no CPO admin audit log (TD#26), and the portal Wi-Fi/plug
-    reachability pre-check (TD#31, second half). (TD#26, TD#28, TD#31)
+    compose `logging:` driver. Tests: `backend/tests/test_logging.py`.
+    And the **CPO admin audit log** (2026-07-12 — TD#26): a new `audit_logs`
+    table + `services/audit.py` (`record_audit`/`try_record_audit`, non-fatal
+    — a write failure is logged, never breaks the admin action) records
+    gateway/plug/group create, plug status change, group delete, and
+    access-code regen with actor/tenant/target, readable via
+    `GET /api/cpo/audit`. Gateway/plug **delete** are pre-named in the action
+    taxonomy but have no endpoint yet to hook (no such CPO routes exist).
+    Still open: firmware `ESP_LOGI` remains serial-only (no log topic —
+    TD#28, firmware half), and the portal Wi-Fi/plug reachability pre-check
+    (TD#31, second half). (TD#26, TD#28, TD#31)

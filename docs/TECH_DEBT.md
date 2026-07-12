@@ -44,7 +44,7 @@ Legend — **Impact**: how much it costs if left. **Effort**: rough work to fix.
 | 23 | **Crash-recovery resets the duration watchdog** *(2026-07-06 audit)* | `firmware/main/main.c` (session recovery path) | The recovered session's `start_time_s` is reset to "now" (tick-based, no wall clock). | The max-duration limit restarts from zero on every reboot; a reboot loop can overrun the time cap (energy cap still holds). | 2–4 h (SNTP wall-clock baseline, or persist accumulated elapsed) | **P2** |
 | 24 | 🟡 **Offline-resync telemetry can bill the wrong session** *(2026-07-06 audit; narrowed 2026-07-10)* | `backend/services/mqtt_manager.py`, `firmware/main/offline_log.*` | Live readings are now attributed by the firmware-echoed `session_id`, closing the online plug-reuse case. Ring-buffer entries still carry no `session_id`, so readings buffered across an MQTT outage attach to the plug's *current* ACTIVE session on resync. | Stale energy can overwrite a new session's kWh if the plug was reused across an outage (billing corruption). Narrow window, buffered path only. | 2–3 h (stamp session id in the ring entry, or monotonic guard) | **P2** |
 | 25 | ✅ ~~**Unguarded float casts in the telemetry handler**~~ **Done 2026-07-11** *(2026-07-06 audit)* | `backend/services/mqtt_manager.py` `_handle_gateway_telemetry` | Fixed: `plug_id` is int-coerced and all numeric casts are try/except-guarded with a warn-and-drop path; non-finite values (NaN/inf) are rejected too. Done together with the payload plug-ownership check (`plug.gateway_id == <topic gateway>` in `_persist_telemetry`, which also gates the raw-sample enqueue) — see IMPLEMENTATION_STATUS §3.48. Tests in `test_mqtt_manager.py`. | — | — | ~~P2~~ Done |
-| 26 | **No CPO admin audit trail** *(2026-07-06 audit)* | `backend/routers/cpo.py` | Gateway/plug/group create-delete, status changes, and access-code regen are not recorded. | No accountability for admin actions in a multi-tenant billing system. | 3–4 h (`audit_log` table + helper) | **P2** |
+| 26 | ✅ ~~**No CPO admin audit trail**~~ **Done 2026-07-12** *(2026-07-06 audit)* | `backend/routers/cpo.py`, `backend/services/audit.py`, `backend/database/models.py` | Gateway/plug/group create-delete, status changes, and access-code regen were not recorded. | Fixed: new `audit_logs` table (Alembic `0007_audit_log`, indexed on `(tenant_id, created_at)`) + `services/audit.py` (`record_audit` stages the row; `try_record_audit` commits it non-fatally — a write failure is caught, logged at ERROR, and rolled back, never breaking the admin action it documents). Wired into gateway create, plug create, plug status change, group create/delete, and access-code regen in `routers/cpo.py`. Gateway/plug **delete** are pre-named in the action taxonomy but have no endpoint to hook yet — no such CPO routes exist in this codebase, so there's nothing to audit until they're added. Read path: `GET /api/cpo/audit` (tenant-scoped, paginated, newest-first). Tests in `test_audit_log.py`. | — | — | ~~P2~~ Done |
 | 27 | ✅ ~~**No gateway staleness sweep / silent-offline detection**~~ **Done 2026-07-06…10** *(2026-07-06 audit)* | backend | Solved read-time instead of via a sweep: `gateway_is_live` (ONLINE **and** `last_seen_at` within the liveness window, refreshed by telemetry) gates session starts, `gateway_online` is exposed in the driver plug API, and the session reaper finalizes sessions on dead gateways. A quiet gateway can no longer look usable. | — | — | ~~P2~~ Done |
 
 ## Tier 3 — Cleanup / hygiene debt (P2/P3)
@@ -87,10 +87,13 @@ Legend — **Impact**: how much it costs if left. **Effort**: rough work to fix.
   ~~Consume `+/alarms` (TD#21)~~ — done 2026-07-10 (CPO events feed). ~~Reject
   starts on offline/maintenance plugs (TD#22)~~ — done 2026-07-11.
 - **P2 reliability/accountability:** duration-watchdog reboot reset (TD#23),
-  offline-resync mis-billing — buffered path only now (TD#24), CPO audit log
-  (TD#26). ~~Gateway staleness (TD#27)~~ — done (read-time `gateway_is_live` +
-  reaper). ~~Telemetry cast guard (TD#25)~~ — done 2026-07-11, together with
-  the payload plug-ownership check.
+  offline-resync mis-billing — buffered path only now (TD#24). ~~CPO audit
+  log (TD#26)~~ — done 2026-07-12 (`audit_logs` table + `services/audit.py`,
+  wired into gateway/plug/group create, plug status change, group delete,
+  and access-code regen; `GET /api/cpo/audit` read path). ~~Gateway
+  staleness (TD#27)~~ — done (read-time `gateway_is_live` + reaper).
+  ~~Telemetry cast guard (TD#25)~~ — done 2026-07-11, together with the
+  payload plug-ownership check.
 - **P3 polish/onboarding:** ~~structured logging — backend (TD#28)~~ — done
   2026-07-12 (JSON logs + correlation ids + broker log persistence; firmware
   log topic still open, see TD#28), portal reachability test (TD#31 — the CSS

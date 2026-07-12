@@ -19,14 +19,14 @@ tables were already built by create_all() against a models.py that includes
 Payout would hit "already exists" on a bare CREATE — guard both the enum
 (via pg_type) and the table/index (via IF NOT EXISTS).
 
-Revision ID: 0010_payouts
-Revises: 0006_gateway_firmware_version
+Revision ID: 0009_payouts
+Revises: 0008_notifications
 Create Date: 2026-07-12
 """
 from alembic import op
 
-revision = "0010_payouts"
-down_revision = "0006_gateway_firmware_version"
+revision = "0009_payouts"
+down_revision = "0008_notifications"
 branch_labels = None
 depends_on = None
 

@@ -140,6 +140,42 @@ class VerifyPaymentRequest(BaseModel):
     amount_inr: Optional[float] = None
 
 
+# --- Notification Schemas ---
+
+class NotificationResponse(BaseModel):
+    """One driver notification (session stop, low balance, charger offline,
+    safety cutoff, top-up credit)."""
+    id: int
+    type: str
+    severity: str                 # "info" | "warning" | "critical"
+    title: str
+    body: str
+    plug_id: Optional[int] = None
+    session_id: Optional[int] = None
+    read: bool
+    created_at: Optional[str] = None
+
+
+class NotificationListResponse(BaseModel):
+    notifications: list[NotificationResponse]
+    unread_count: int
+
+
+class PushSubscriptionKeys(BaseModel):
+    p256dh: str = Field(min_length=1, max_length=255)
+    auth: str = Field(min_length=1, max_length=64)
+
+
+class PushSubscribeRequest(BaseModel):
+    """The browser PushSubscription.toJSON() shape."""
+    endpoint: str = Field(min_length=1, max_length=1024)
+    keys: PushSubscriptionKeys
+
+
+class PushUnsubscribeRequest(BaseModel):
+    endpoint: str = Field(min_length=1, max_length=1024)
+
+
 # --- Direct Mode Schemas ---
 
 class DirectPlugRequest(BaseModel):
