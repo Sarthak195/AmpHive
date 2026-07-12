@@ -58,7 +58,7 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 | **Unauthorized physical-on guard (fw ≥ 1.5.0)** | ✅ | The relay ON with no active session (physical button / Tapo app / stale NVS resume) is forced OFF locally every poll and alarmed once per episode (`UNAUTHORIZED_ON`, rising-edge). Uses the plug's real `device_on` (previously read but discarded). **Live on the real gateway 2026-07-10** (OTA'd to `1.5.0-direct`); the backend ingests the alarm end-to-end (verified in prod). The remote out-of-band physical-press trigger itself is unit-tested + by-construction (no LAN path to press the button remotely). |
 | **Richer telemetry: relay state + trapezoidal energy (fw ≥ 1.5.0)** | ✅ | Telemetry now carries the actual `relay` (device_on) state alongside derived `current`/nominal `voltage`; the driver-side kWh integrator switched from left-rectangle to the **trapezoidal rule** (averages consecutive power samples) for lower error on ramping loads at the 10 s cadence. **Verified on the wire 2026-07-10** (real gateway telemetry shows `"relay":false`). |
 | `microlink` Tailscale client (Noise/ts2021, DERP, DISCO, STUN, WG) | 🟡 | **Demoted to legacy transport** (`AMPHIVE_DIRECT_MQTT=0`): works for full-cone NATs, but symmetric NAT defeats DISCO hole-punching (root-caused 2026-07-09) — the reason for the direct-MQTT pivot. Kept compilable for rollback/comparison. |
-| MQTT control loop + topic contract | 🟡 | Matches backend topics. **2026-07-06 audit: single-plug only** — `main.c` has one `target_plug_ip`/`active_session` and `tapo_protocol.c` one global KLAP session + energy integrator, so on a gateway with >1 plug a command for plug B toggles plug A and telemetry is misattributed. Multi-plug needs a per-plug state table + instance-based KLAP driver. (The software **AmpHive Agent** already handles multiple plugs per gateway — this limit is ESP32-firmware-only.) (§3.50, TD#20, SEC §8.5) |
+| MQTT control loop + topic contract | ✅ | Matches backend topics. **Multi-plug since 2026-07-12** (TD#20, code-complete + builds clean, on-device verification pending): `main.c` now keeps a `plugs_mutex`-guarded per-plug slot table (each slot = DB `plug_id` + LAN IP + per-plug `tapo_plug_t` KLAP context + its own session/watchdog state) and `tapo_protocol.c` moved the KLAP session and energy integrator into that per-plug context, so a command for plug B can no longer actuate plug A and telemetry is published under each plug's own id. The gateway learns each plug's IP from the `local_ip` the backend now ships on ON/OFF (no on-device roster). (§3.50, TD#20, SEC §8.5) |
 | Captive portal provisioning | ✅ | `AmpHive_Setup_XXXX` → NVS → reboot. **Locked down fw 1.6.0** (SEC §8.1 closed): WPA2 AP + `/save` gated by a per-device setup code (NVS-persisted, printed over serial for the unit label), AP-only interface, 10-min idle timeout → reboot/STA retry. **Live on the real gateway 2026-07-11** (OTA `1.5.0-direct` → signed `1.6.0-direct`, rollback cancelled); the locked portal itself is verified by construction/build only — exercising it needs physical access to force a Wi-Fi-loss fallback. |
 | Edge watchdogs (duration/energy/thermal/over-current) | ✅ | Thermal + over-current now use the plug's `overheat_status`/`overcurrent_status` flags (the P110 has no °C sensor) |
 | Over-current cutoff | ✅ | Enforced via the plug's `overcurrent_status` flag → local OFF + `OVERCURRENT_CUTOFF` alarm |
@@ -401,13 +401,22 @@ audit merged; statuses below are as of 2026-07-11.*
     guarded with a warn-and-drop path; non-finite values (NaN/inf) are
     rejected too. A malformed reading now logs a warning instead of throwing
     inside the paho callback. (TD#25)
-50. **[Open] ESP32 firmware is single-plug.** `main.c` (`target_plug_ip`,
-    `active_session`, `active_plug_id`, `telemetry_interval_ms`) and
-    `tapo_protocol.c` (global `s_sess`, `s_energy_wh`) are single-instance:
-    commands for a second plug on the same gateway actuate the first, and
-    telemetry is published under the last-commanded id. The data model allows
-    many plugs per gateway, and the software AmpHive Agent already drives
-    multiple plugs — this is firmware-only. (TD#20, SEC §8.5)
+50. **[Resolved 2026-07-12 — code-complete + builds clean, on-device verify
+    pending] ESP32 firmware was single-plug.** Was: `main.c` (`target_plug_ip`,
+    `active_session`, `active_plug_id`) and `tapo_protocol.c` (global `s_sess`,
+    `s_energy_wh`) were single-instance, so commands for a second plug actuated
+    the first and telemetry was published under the last-commanded id. Fixed:
+    `main.c` now holds a `plugs_mutex`-guarded per-plug slot table and
+    `tapo_protocol.c` exposes a per-plug `tapo_plug_t` context (its own KLAP
+    session + NVS-persisted energy meter `wh_<plug_id>`); `session_nvs` persists
+    **all** per-plug sessions (one atomic blob, each carrying `plug_id` +
+    `local_ip`) so crash recovery restores every plug. The gateway learns a
+    plug's IP from the `local_ip` the backend now ships on ON/OFF
+    (`send_plug_command(..., local_ip=…)`) — no on-device roster, keeping the
+    per-gateway broker ACLs and the backend `plug.gateway_id` check intact
+    (SEC §8.5). The one physical gateway has a single plug, so multi-plug
+    behaviour is verified by construction + a clean ESP-IDF v5.3.3 build only;
+    driving two real plugs needs a second unit. (TD#20, SEC §8.5)
 51. **[Resolved 2026-07-11] Sessions startable on OFFLINE/MAINTENANCE plugs.**
     `start_charging_session` now 409s on any non-`AVAILABLE` status (OCCUPIED
     keeps its "in use" message; OFFLINE/MAINTENANCE get "out of service").

@@ -29,12 +29,25 @@ typedef struct {
     bool  device_on;     /**< current relay state as reported by the plug */
 } tapo_telemetry_t;
 
+/*
+ * Multi-plug model (TD#20): one ESP32 gateway can drive several P110s. The Tapo
+ * *account* (email/password → auth_hash) and the nominal voltage are shared by
+ * all of them, so those stay module-global in `tapo_init`. Everything that is
+ * per-connection — the KLAP handshake/session keys, the session cookie+seq, and
+ * the driver-side energy integrator — lives in a per-plug `tapo_plug_t` handle,
+ * so plug A's crypto/session can never be reused to act on plug B (SECURITY.md
+ * §8.5). Each plug also keeps its own NVS-persisted energy meter (key
+ * "wh_<plug_id>") so a mid-session reboot doesn't disarm its energy watchdog.
+ */
+typedef struct tapo_plug_s tapo_plug_t;
+
 /**
- * @brief Initialize the Tapo KLAP driver with the account credentials.
+ * @brief Initialize the shared Tapo account credentials (call once, before any
+ *        tapo_plug_* call).
  *
  * The email/password are the Tapo cloud account (same as the mobile app) and are
- * used to derive the KLAP auth hash: SHA256(SHA1(email) + SHA1(password)). Must be
- * called once before any set/get call.
+ * used to derive the KLAP auth hash: SHA256(SHA1(email) + SHA1(password)). All
+ * plugs on the gateway belong to this one account.
  *
  * @param tapo_email       Tapo account email
  * @param tapo_password    Tapo account password
@@ -44,24 +57,39 @@ typedef struct {
 esp_err_t tapo_init(const char *tapo_email, const char *tapo_password, float nominal_voltage);
 
 /**
- * @brief Turn a local Tapo smart plug ON or OFF (KLAP set_device_info).
+ * @brief Create a per-plug driver context.
  *
- * @param plug_ip Local IP address of the plug
- * @param turn_on true to turn ON, false to turn OFF
- * @return ESP_OK on success
+ * Allocates the plug's own KLAP session state, mutex, and energy integrator
+ * (restored from NVS key "wh_<plug_id>" so the meter survives reboots). The
+ * handshake is performed lazily on the first set/get. `tapo_init` must have been
+ * called first.
+ *
+ * @param plug_id   DB plug id (used to key the plug's persisted energy meter)
+ * @param local_ip  Plug's LAN IP address
+ * @return a handle, or NULL on allocation failure / before tapo_init
  */
-esp_err_t tapo_set_power_state(const char *plug_ip, bool turn_on);
+tapo_plug_t *tapo_plug_create(int plug_id, const char *local_ip);
 
 /**
- * @brief Read power telemetry + safety status from a local Tapo smart plug.
- *
- * Issues get_energy_usage (power) and get_device_info (state + safety statuses)
- * over the KLAP session and maps them into out_telemetry.
- *
- * @param plug_ip Local IP address of the plug
- * @param out_telemetry Pointer to write telemetry results into
+ * @brief Update a plug context's LAN IP (e.g. the plug got a new DHCP lease).
+ *        Invalidates the current KLAP session so the next call re-handshakes.
+ */
+void tapo_plug_set_ip(tapo_plug_t *plug, const char *local_ip);
+
+/**
+ * @brief Turn a plug ON or OFF (KLAP set_device_info).
  * @return ESP_OK on success
  */
-esp_err_t tapo_get_telemetry(const char *plug_ip, tapo_telemetry_t *out_telemetry);
+esp_err_t tapo_plug_set_power(tapo_plug_t *plug, bool turn_on);
+
+/**
+ * @brief Read power telemetry + safety status from a plug.
+ *
+ * Issues get_energy_usage (power) and get_device_info (state + safety statuses)
+ * over the plug's KLAP session and maps them into out_telemetry; advances the
+ * plug's monotonic energy integrator (trapezoidal) and throttled NVS persist.
+ * @return ESP_OK on success
+ */
+esp_err_t tapo_plug_get_telemetry(tapo_plug_t *plug, tapo_telemetry_t *out_telemetry);
 
 #endif // TAPO_PROTOCOL_H
