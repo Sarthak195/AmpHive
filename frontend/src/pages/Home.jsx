@@ -22,6 +22,13 @@
  * society resident already knows where their own charger is). Each section
  * header carries live per-status counts. The public list starts open only
  * for drivers with no private chargers.
+ *
+ * Reservations (2026-07-12, feat/reservations): each plug card gets a
+ * "Reserve" action (→ ReserveModal: date/time/duration + the plug's
+ * upcoming windows) and a "Reserved until HH:MM" badge when a booking
+ * covers right now (distinct from occupied; the holder sees "Reserved for
+ * you" instead and can still start). A "Your reservations" strip lists the
+ * driver's upcoming bookings with a cancel button.
  */
 
 import { useState, useEffect, useMemo, useRef } from 'react';
@@ -32,7 +39,9 @@ import { useSession } from '../contexts/SessionContext';
 import { useConfig } from '../contexts/ConfigContext';
 import api from '../api/client';
 import MapComponent from '../components/MapComponent';
+import ReserveModal from '../components/ReserveModal';
 import { AVAILABILITY_CSS_VAR, AVAILABILITY_LABELS, AVAILABILITY_STATES, getPlugAvailability } from '../utils/plugAvailability';
+import { fmtTime, fmtWindow } from '../utils/reservationTime';
 
 // Sentinel value for the group filter's "no group assigned" option — distinct
 // from '' (which means "All groups") since group_name itself is never this.
@@ -97,6 +106,13 @@ const Home = () => {
   const [startError, setStartError] = useState('');
   const [starting, setStarting] = useState(false);
 
+  // Reservations: the driver's upcoming bookings (the strip), the plug being
+  // reserved (modal open when non-null), and cancel-in-flight/error state.
+  const [myReservations, setMyReservations] = useState([]);
+  const [reservePlug, setReservePlug] = useState(null);
+  const [cancellingId, setCancellingId] = useState(null);
+  const [reservationError, setReservationError] = useState('');
+
   // Map/list filters (shared state — both the list and MapComponent's
   // markers read from the same filteredPlugs).
   const [availabilityFilter, setAvailabilityFilter] = useState('');
@@ -129,10 +145,36 @@ const Home = () => {
     }
   };
 
-  // Fetch available plugs when user is logged in
+  const fetchReservations = async () => {
+    try {
+      const data = await api.get('/api/reservations/my');
+      // Defensive shape guard: older API data (or a mocked flat list) just
+      // leaves the strip empty rather than crashing Home.
+      setMyReservations(Array.isArray(data?.upcoming) ? data.upcoming : []);
+    } catch (err) {
+      console.error('Failed to fetch reservations:', err);
+    }
+  };
+
+  const cancelReservation = async (id) => {
+    setReservationError('');
+    setCancellingId(id);
+    try {
+      await api.post(`/api/reservations/${id}/cancel`);
+      await fetchReservations();
+      fetchPlugs(); // reserved_now badges may have changed
+    } catch (err) {
+      setReservationError(err.message);
+    } finally {
+      setCancellingId(null);
+    }
+  };
+
+  // Fetch available plugs + the driver's reservations when logged in
   useEffect(() => {
     if (!user) return;
     fetchPlugs();
+    fetchReservations();
   }, [user]);
 
   // Live plug-availability: when any plug flips OCCUPIED/AVAILABLE (someone
@@ -247,12 +289,14 @@ const Home = () => {
 
   // One plug card — shared by the private and public sections. A plug is
   // startable only if it is available AND its gateway is reachable right
-  // now. gateway_online defaults true for older API data; an unreachable
-  // charger is shown but not clickable so the driver isn't sent into a 409
-  // at start.
+  // now AND it isn't inside someone else's reserved window (the server
+  // would 409 the start anyway; the card just doesn't invite the click).
+  // gateway_online defaults true for older API data; an unreachable charger
+  // is shown but not clickable so the driver isn't sent into a 409 at start.
   const renderPlugCard = (plug, index) => {
     const unreachable = plug.gateway_online === false;
-    const startable = plug.status === 'available' && !unreachable;
+    const reservedByOther = plug.reserved_now === true && plug.reserved_now_by_me !== true;
+    const startable = plug.status === 'available' && !unreachable && !reservedByOther;
     return (
       <div
         key={plug.id}
@@ -275,6 +319,18 @@ const Home = () => {
             <span className={`badge ${unreachable ? 'badge-danger' : statusColor(plug.status)}`}>
               {unreachable ? 'charger offline' : plug.status}
             </span>
+            {/* Reservation badge — deliberately distinct from "occupied":
+                the plug is free hardware-wise but time-claimed. The holder
+                sees "Reserved for you" and the card stays startable. */}
+            {plug.reserved_now && (
+              <span className="badge badge-primary">
+                {plug.reserved_now_by_me
+                  ? 'Reserved for you'
+                  : plug.reserved_until
+                    ? `Reserved until ${fmtTime(plug.reserved_until)}`
+                    : 'Reserved'}
+              </span>
+            )}
           </div>
           <div className="flex items-center gap-3" style={{ fontSize: '0.85rem', color: 'var(--color-text-secondary)', flexWrap: 'wrap' }}>
             <span>ID: {plug.id}</span>
@@ -294,15 +350,30 @@ const Home = () => {
             )}
           </div>
         </div>
-        {startable ? (
-          <span style={{ color: 'var(--color-primary)', fontWeight: 600, fontSize: '0.9rem', flexShrink: 0 }}>
-            Charge →
-          </span>
-        ) : unreachable ? (
-          <span style={{ color: 'var(--color-text-muted)', fontSize: '0.8rem', flexShrink: 0 }}>
-            Unreachable
-          </span>
-        ) : null}
+        <div className="flex flex-col items-end gap-2" style={{ flexShrink: 0 }}>
+          {startable ? (
+            <span style={{ color: 'var(--color-primary)', fontWeight: 600, fontSize: '0.9rem' }}>
+              Charge →
+            </span>
+          ) : unreachable ? (
+            <span style={{ color: 'var(--color-text-muted)', fontSize: '0.8rem' }}>
+              Unreachable
+            </span>
+          ) : null}
+          {/* Book a future slot — any accessible plug except one an operator
+              took out of service (the server 409s MAINTENANCE bookings). */}
+          {plug.status !== 'maintenance' && (
+            <button
+              className="btn btn-ghost btn-sm"
+              onClick={(e) => {
+                e.stopPropagation();
+                setReservePlug(plug);
+              }}
+            >
+              Reserve
+            </button>
+          )}
+        </div>
       </div>
     );
   };
@@ -451,6 +522,39 @@ const Home = () => {
               </div>
             );
           })()}
+        </div>
+      )}
+
+      {/* Your reservations — the driver's upcoming booked windows, each
+          with its plug, window, and a cancel action. Hidden when empty. */}
+      {user && myReservations.length > 0 && (
+        <div className="glass glass-panel animate-slide-up" style={{ marginBottom: '1.5rem' }}>
+          <h3 style={{ marginBottom: '0.75rem' }}>Your reservations</h3>
+          <div className="flex flex-col gap-3">
+            {myReservations.map((r) => (
+              <div
+                key={r.id}
+                className="flex justify-between items-center"
+                style={{ gap: '0.75rem', flexWrap: 'wrap' }}
+              >
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontWeight: 600 }}>{r.plug_name || `Plug ${r.plug_id}`}</div>
+                  <div style={{ fontSize: '0.85rem', color: 'var(--color-text-secondary)' }}>
+                    {fmtWindow(r.start_at, r.end_at)}
+                  </div>
+                </div>
+                <button
+                  className="btn btn-ghost btn-sm"
+                  style={{ flexShrink: 0 }}
+                  disabled={cancellingId === r.id}
+                  onClick={() => cancelReservation(r.id)}
+                >
+                  {cancellingId === r.id ? '...' : 'Cancel'}
+                </button>
+              </div>
+            ))}
+          </div>
+          {reservationError && <div className="error-text mt-2">{reservationError}</div>}
         </div>
       )}
 
@@ -605,6 +709,20 @@ const Home = () => {
             </>
           )}
         </div>
+      )}
+
+      {/* Reserve modal — date/time/duration form + the plug's upcoming
+          windows so the driver books around them. */}
+      {reservePlug && (
+        <ReserveModal
+          plug={reservePlug}
+          onClose={() => setReservePlug(null)}
+          onBooked={() => {
+            setReservePlug(null);
+            fetchReservations();
+            fetchPlugs(); // reserved_now / next_reservation may have changed
+          }}
+        />
       )}
 
       {/* Not logged in */}

@@ -45,6 +45,61 @@ from backend.services.telemetry import COINS_PER_KWH
 logger = logging.getLogger("amphive.api")
 router = APIRouter()
 
+
+async def _reservation_fields_for_plugs(db, plug_ids, user_id, now):
+    """
+    [Reservations] The PlugResponse reservation fields (reserved_now /
+    reserved_now_by_me / reserved_until / next_reservation) for a batch of
+    plugs in ONE grouped query — the list endpoint below is deliberately
+    N+1-free and must stay that way. Lazily expires lapsed holds first
+    (services/reservations.py; committed by the caller's read path), so a
+    no-show never shows as "reserved". Returns {plug_id: field-dict};
+    plugs absent from the map have no current/upcoming reservations.
+    """
+    from backend.database.models import Reservation, ReservationStatus
+    from backend.schemas import ReservationWindow
+    from backend.services.reservations import expire_lapsed_reservations
+
+    if not plug_ids:
+        return {}
+
+    expired = await expire_lapsed_reservations(db, plug_ids=plug_ids, now=now)
+    if expired:
+        await db.commit()  # read path — persist the lazy flip
+
+    rows = await db.execute(
+        select(Reservation)
+        .where(
+            and_(
+                Reservation.plug_id.in_(plug_ids),
+                Reservation.status == ReservationStatus.BOOKED,
+                Reservation.end_at > now,
+            )
+        )
+        .order_by(Reservation.plug_id, Reservation.start_at)
+    )
+
+    fields = {}
+    for res in rows.scalars():
+        entry = fields.setdefault(res.plug_id, {
+            "reserved_now": False,
+            "reserved_now_by_me": False,
+            "reserved_until": None,
+            "next_reservation": None,
+        })
+        if res.start_at <= now:
+            # The covering window (at most one — BOOKED windows never overlap).
+            entry["reserved_now"] = True
+            entry["reserved_now_by_me"] = res.user_id == user_id
+            entry["reserved_until"] = res.end_at.isoformat()
+        elif entry["next_reservation"] is None:
+            # Rows are ordered by start_at, so the first future one wins.
+            entry["next_reservation"] = ReservationWindow(
+                start_at=res.start_at.isoformat(),
+                end_at=res.end_at.isoformat(),
+            )
+    return fields
+
 # ===========================================================================
 # Plug Endpoints
 # ===========================================================================
@@ -88,8 +143,16 @@ async def get_available_plugs(
     )
 
     now = datetime.now(timezone.utc)
+    all_rows = rows.all()
+
+    # [Reservations] reserved_now / next_reservation etc. for every listed
+    # plug in one grouped query — NOT per-plug (this endpoint stays N+1-free).
+    reservation_fields = await _reservation_fields_for_plugs(
+        db, [plug.id for plug, _, _, _ in all_rows], user.id, now
+    )
+
     responses = []
-    for plug, group_name, group_is_public, gateway in rows.all():
+    for plug, group_name, group_is_public, gateway in all_rows:
         # Resolved effective rate (plug tariff -> group tariff -> tenant
         # default -> env fallback; services/pricing.py). One lookup per plug
         # — tolerable N+1 for typical per-site plug counts; batch this if the
@@ -110,6 +173,7 @@ async def get_available_plugs(
                 # group_is_public is None for ungrouped plugs (outer join) —
                 # only an explicit False marks a private group.
                 is_private=group_is_public is False,
+                **reservation_fields.get(plug.id, {}),
             )
         )
     return responses
@@ -171,6 +235,12 @@ async def get_plug(
     # -> env fallback (services/pricing.py resolve_rate_for_plug).
     price_per_kwh = await resolve_rate_for_plug(db, plug)
 
+    # [Reservations] Same grouped helper the list uses, over this one plug.
+    now = datetime.now(timezone.utc)
+    reservation_fields = await _reservation_fields_for_plugs(
+        db, [plug.id], user.id, now
+    )
+
     return PlugResponse(
         id=plug.id,
         name=plug.name,
@@ -183,6 +253,7 @@ async def get_plug(
         gateway_online=gateway_is_live(gateway) if gateway else False,
         price_per_kwh=float(price_per_kwh),
         is_private=is_private,
+        **reservation_fields.get(plug.id, {}),
     )
 
 

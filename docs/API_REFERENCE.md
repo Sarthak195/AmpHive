@@ -57,8 +57,8 @@ Token: HS256 JWT, claims `sub`/`role`/`email`/`iat`/`exp`, **7-day** expiry.
 
 | Method | Path | Auth | Body/Params | Behaviour |
 |--------|------|------|-------------|-----------|
-| GET | `/api/plugs/available` | JWT | — | Plugs in accessible groups **or** ungrouped (`group_id IS NULL`, visible to all) → `[{id, name, status, current_power_w, plug_model, group_name?, gateway_online, is_private}]` — `gateway_online: bool` (added 2026-07-10) is whether the plug's gateway is live: `ONLINE` + `last_seen` within the liveness window; `is_private: bool` (added 2026-07-12) is true for plugs in a non-public group (necessarily one the caller joined) — drives the Home page's "Your chargers" vs "Public chargers" sections |
-| GET | `/api/plugs/{plug_id}` | JWT | path `plug_id:int` | Single plug; 404 if missing, 403 if in a private group the user hasn't joined. Response also carries `gateway_online` and `is_private` (as above) |
+| GET | `/api/plugs/available` | JWT | — | Plugs in accessible groups **or** ungrouped (`group_id IS NULL`, visible to all) → `[{id, name, status, current_power_w, plug_model, group_name?, gateway_online, is_private, reserved_now, reserved_now_by_me, reserved_until, next_reservation}]` — `gateway_online: bool` (added 2026-07-10) is whether the plug's gateway is live: `ONLINE` + `last_seen` within the liveness window; `is_private: bool` (added 2026-07-12) is true for plugs in a non-public group (necessarily one the caller joined) — drives the Home page's "Your chargers" vs "Public chargers" sections. The reservation fields (added 2026-07-12, all plugs batched into ONE grouped query so the endpoint stays N+1-free): `reserved_now: bool` = a BOOKED window covers right now (after lazy no-show expiry), `reserved_now_by_me: bool` = the caller holds it, `reserved_until: str?` = ISO end of that covering window, `next_reservation: {start_at, end_at}?` = the next strictly-future BOOKED window |
+| GET | `/api/plugs/{plug_id}` | JWT | path `plug_id:int` | Single plug; 404 if missing, 403 if in a private group the user hasn't joined. Response also carries `gateway_online`, `is_private`, and the reservation fields (as above) |
 
 > **Provisioning moved.** The old unauthenticated `POST /api/plugs/register` and
 > `POST /api/gateways/register` have been **removed**. Gateways and plugs are now
@@ -70,7 +70,7 @@ Token: HS256 JWT, claims `sub`/`role`/`email`/`iat`/`exp`, **7-day** expiry.
 
 | Method | Path | Auth | Body/Params | Behaviour |
 |--------|------|------|-------------|-----------|
-| POST | `/api/sessions/start` | JWT | `{plug_id, max_duration_seconds=14400, max_kwh=30.0}` | Reject if the user already has `MAX_ACTIVE_SESSIONS_PER_USER` (env, default 2) ACTIVE sessions (409; counted under a user-row lock so concurrent starts can't exceed the cap) → access check → reject if OCCUPIED/offline/gateway-dead (409) → resolve the billing rate → size + require an authorization hold ≥ 50 (402; **2026-07-12** — `min(available_balance, max_kwh × rate)`, `services/wallet.py available_balance`, replacing the old flat-balance floor — see MARKET_GAP_ANALYSIS.md §3) → MQTT `ON` (500 on publish fail) → create session (snapshotting the hold onto `hold_coins`), mark plug OCCUPIED → `{status:"started", session_id, plug_id, plug_name, message}` |
+| POST | `/api/sessions/start` | JWT | `{plug_id, max_duration_seconds=14400, max_kwh=30.0}` | Reject if the user already has `MAX_ACTIVE_SESSIONS_PER_USER` (env, default 2) ACTIVE sessions (409; counted under a user-row lock so concurrent starts can't exceed the cap) → access check → reject if OCCUPIED/offline/gateway-dead (409) → **reservation gate** (2026-07-12, under the plug row lock: lazy no-show expiry first, then if a BOOKED window covers now and belongs to someone else → 409 "Plug is reserved until <end>"; the holder's own start marks the reservation FULFILLED and links `session_id` — see [Plug reservations](#plug-reservations-routersreservationspy-2026-07-12)) → resolve the billing rate → size + require an authorization hold ≥ 50 (402; **2026-07-12** — `min(available_balance, max_kwh × rate)`, `services/wallet.py available_balance`, replacing the old flat-balance floor — see MARKET_GAP_ANALYSIS.md §3) → MQTT `ON` (500 on publish fail) → create session (snapshotting the hold onto `hold_coins`), mark plug OCCUPIED → `{status:"started", session_id, plug_id, plug_name, message}` |
 | POST | `/api/sessions/stop` | JWT | `{session_id}` | Owner+active check → MQTT `OFF` (best-effort) → finalize from telemetry → debit wallet → ledger `session_debit` → plug AVAILABLE → `{status:"completed", session_id, energy_kwh, coins_spent, balance_remaining}` |
 | GET | `/api/sessions/active` | JWT | — | Retrieve **all** active sessions for the logged-in user, newest first → `{active:true, sessions:[{session_id, plug_id, plug_name, started_at}, …], session_id, plug_id, plug_name, started_at}` (the top-level single-session fields mirror the newest entry for older clients) or `{active:false, sessions:[]}` |
 | — | `Socket.io` connection | JWT | connection query or auth dict | Real-time bi-directional channel for telemetry updates and session status (sole live-telemetry transport since 2026-07-07). |
@@ -91,6 +91,27 @@ Token: HS256 JWT, claims `sub`/`role`/`email`/`iat`/`exp`, **7-day** expiry.
   - Event: `unsubscribe_session`
   - Payload: `{ "session_id": <int> }`
 
+
+## Plug reservations (`routers/reservations.py`, 2026-07-12)
+
+Book a future `[start_at, end_at)` window on a plug (the private
+society/office use case — group members share one charger). During the
+window only the holder can start a session (the gate in
+`POST /api/sessions/start` above). **FREE in v1** — no coin hold. Statuses:
+`booked → cancelled | fulfilled | expired`. Expiry is **lazy** (no
+background sweep): every read path and the start gate first flip BOOKED
+rows past `start_at + RESERVATION_NO_SHOW_GRACE_MIN` (or past `end_at`) to
+EXPIRED, so a no-show never blocks anyone. Overlap exclusion is enforced
+under a `SELECT ... FOR UPDATE` on the plug row, so concurrent bookings
+serialize; per-user cap enforcement locks the user row (user → plug lock
+order, same as session start).
+
+| Method | Path | Auth | Body/Params | Behaviour |
+|--------|------|------|-------------|-----------|
+| POST | `/api/reservations` | JWT | `{plug_id, start_at, end_at}` (ISO; naive datetimes read as UTC) | Access check (ungrouped ∪ public group ∪ joined private group — 403), plug not MAINTENANCE (409; OFFLINE is bookable — the liveness gate still runs at start time), window rules (400: ≥15 min, ≤`RESERVATION_MAX_HOURS`, start ≥ now−2 min, start ≤ now+`RESERVATION_MAX_ADVANCE_DAYS`), per-user cap of BOOKED-with-future-end (`MAX_UPCOMING_RESERVATIONS_PER_USER` — 409), `[start,end)` intersection with a BOOKED window on the plug (409, back-to-back edges legal). Sends a confirmation notification. → reservation object |
+| GET | `/api/reservations/my` | JWT | — | `{upcoming: [...], history: [...]}` — upcoming = BOOKED with `end_at` in the future, soonest first; history = everything else, newest first, capped at 20. Each entry: `{id, plug_id, plug_name, user_id, tenant_id, start_at, end_at, status, session_id, created_at, is_mine}` |
+| POST | `/api/reservations/{id}/cancel` | JWT | path `id:int` | Owner, or cpo/admin **of the owning tenant** (anyone else → 404, existence not leaked). Only BOOKED cancels (409 otherwise). An operator cancel notifies the driver. → the cancelled reservation |
+| GET | `/api/plugs/{plug_id}/reservations` | JWT | path `plug_id:int` | The plug's schedule for anyone with plug access (403 otherwise): current + upcoming BOOKED windows within the booking horizon (`RESERVATION_MAX_ADVANCE_DAYS`), soonest first, each with the holder's `user_name` + `is_mine` — how group members book around each other. (Lives in `routers/reservations.py`, not `plugs.py`.) |
 
 ## Payments — Razorpay (`services/payments.py`)
 
@@ -167,6 +188,7 @@ scoped to the caller's `tenant_id`, so operators only ever see their own assets.
 | GET | `/api/cpo/events` | cpo/admin | query `limit=50` (max 200), `unacknowledged_only?` (bool), `severity?` (e.g. `critical`) | Gateway/plug operational events (safety cutoffs, `UNAUTHORIZED_ON` alarms, OTA notices) for the CPO's tenant, newest first → `[{id, gateway_id, plug_id, event_type, severity, detail, acknowledged, created_at}]`. (Added 2026-07-10.) |
 | POST | `/api/cpo/events/{event_id}/ack` | cpo/admin | path `event_id:int` | Acknowledge (clear from the active feed) one event; tenant-scoped. → `{status:"acknowledged", event_id}` |
 | GET | `/api/cpo/audit` | cpo/admin | query `limit=50` (max 200), `offset=0` | Admin action audit trail (TD#26) for the CPO's tenant, newest first → `[{id, actor_user_id, actor_email, action, target_type, target_id, detail, created_at}]`. Covers gateway create, plug create, plug status change, group create/delete, and access-code regen — written non-fatally by `services/audit.py` (a write failure is logged, never breaks the admin action). Gateway/plug delete aren't recorded yet — no such CPO endpoints exist. (Added 2026-07-12.) |
+| GET | `/api/cpo/reservations` | cpo/admin | query `status?` (booked/cancelled/fulfilled/expired; 400 otherwise), `upcoming_only?` (bool), `limit=50` (max 200), `offset=0` | The tenant's plug reservations, newest window first, each with `plug_name` + the driver's `user_email`/`user_name`. Lazily expires lapsed holds first (so a no-show is never shown as BOOKED). Cancelling uses the shared `POST /api/reservations/{id}/cancel`, which admits the owning tenant's cpo/admin. (Added 2026-07-12.) |
 
 ---
 
@@ -190,3 +212,7 @@ scoped to the caller's `tenant_id`, so operators only ever see their own assets.
 | `LOGIN_RATE_LIMIT` / `REGISTER_RATE_LIMIT` | `10/60` / `10/3600` | Auth rate limits, `"<attempts>/<window sec>"` per client IP (429 + Retry-After) |
 | `VAPID_PRIVATE_KEY` / `VAPID_SUBJECT` | `""` / `mailto:admin@amphive.example` | Web Push signing key + contact; empty key = push disabled (feed + Socket.io still work) |
 | `LOW_BALANCE_WARN_FRACTION` | `0.8` | Notify the driver once per session when accrued cost crosses this fraction of the wallet balance (`0` disables) |
+| `RESERVATION_MAX_HOURS` | `4` | Longest bookable reservation window (`services/reservations.py`) |
+| `RESERVATION_MAX_ADVANCE_DAYS` | `7` | How far ahead a reservation may start (also the per-plug schedule horizon) |
+| `MAX_UPCOMING_RESERVATIONS_PER_USER` | `2` | Per-user cap of BOOKED reservations with `end_at` in the future (409 past it) |
+| `RESERVATION_NO_SHOW_GRACE_MIN` | `15` | Minutes after `start_at` an unfulfilled BOOKED reservation lazily flips to EXPIRED and stops blocking the plug |

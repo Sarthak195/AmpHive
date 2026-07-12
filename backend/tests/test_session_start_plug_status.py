@@ -101,6 +101,8 @@ async def test_available_plug_passes_the_status_gate():
         _scalar_one(user),
         _scalar_one(0),
         _scalar_one_or_none(_plug(PlugStatus.AVAILABLE)),
+        MagicMock(),                          # [Reservations] lazy-expiry UPDATE
+        _scalar_one_or_none(None),            # [Reservations] no covering booking
         _scalar_one(gateway),                # gateway lookup
     )
 

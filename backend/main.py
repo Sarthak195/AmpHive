@@ -244,7 +244,8 @@ def public_config():
 # ===========================================================================
 
 from backend.routers import (  # noqa: E402
-    auth, cpo, direct, groups, notifications, payments, plugs, sessions,
+    auth, cpo, direct, groups, notifications, payments, plugs, reservations,
+    sessions,
 )
 
 app.include_router(auth.router)
@@ -255,6 +256,9 @@ app.include_router(payments.router)
 app.include_router(notifications.router)
 app.include_router(direct.router)
 app.include_router(cpo.router)
+# Appended after the original eight so their OpenAPI order stays stable
+# (feat/reservations, 2026-07-12).
+app.include_router(reservations.router)
 
 import socketio
 from backend.services.socketio_manager import sio

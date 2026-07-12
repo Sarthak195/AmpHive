@@ -25,6 +25,7 @@ ORM: SQLAlchemy 2.0 `DeclarativeBase` with `mapped_column`. Enums use
 | `PlugStatus` (`plug_status`) | `available`, `occupied`, `offline`, `maintenance` |
 | `SessionStatus` (`session_status`) | `active`, `completed`, `paid`, `cancelled` |
 | `TransactionType` (`tx_type`) | `topup`, `session_debit`, `refund` |
+| `ReservationStatus` (`reservation_status`) | `booked`, `cancelled`, `fulfilled`, `expired` (2026-07-12, `0014_reservations`) |
 
 ## 2. Tables
 
@@ -162,6 +163,29 @@ SERIAL PK · `user_id` → users (CASCADE, indexed) · `endpoint` VARCHAR(1024)
 VARCHAR(64) (client encryption keys) · `created_at` TIMESTAMPTZ. Pruned when
 the push service reports the subscription gone (404/410) or the user
 disables push. Added by `0008_notifications` (2026-07-11).
+
+### `reservations`
+A driver's booked time window on a plug (2026-07-12, `0014_reservations` —
+the private society/office use case; **free** in v1, no coin hold). `id`
+SERIAL PK · `plug_id` → plugs (CASCADE) · `user_id` → users (CASCADE,
+indexed) · `tenant_id` → tenants (CASCADE, indexed; **denormalized** from
+plug → gateway → tenant, mirroring `charging_sessions`, so CPO-scoped
+queries need no join) · `start_at`/`end_at` TIMESTAMPTZ (half-open
+`[start_at, end_at)`, so back-to-back bookings can share an edge) ·
+`status` `reservation_status` (default `booked`) · `session_id` →
+charging_sessions (SET NULL, nullable — set when FULFILLED, i.e. the holder
+started a session inside the window) · `created_at` TIMESTAMPTZ. Composite
+index `idx_reservations_plug_start (plug_id, start_at)` — the
+session-start gate / overlap check / per-plug schedule shape.
+
+Lifecycle: `booked → cancelled | fulfilled | expired`. Expiry is **lazy**
+(`services/reservations.py expire_lapsed_reservations`, run by every read
+path + the session-start gate — no background sweep): a BOOKED row past
+`start_at + RESERVATION_NO_SHOW_GRACE_MIN` (or past `end_at`) flips to
+`expired`. Overlap exclusion among BOOKED rows is app-level, serialized by
+`SELECT ... FOR UPDATE` on the plug row in the booking path (deliberately
+no tstzrange EXCLUDE constraint — it would require btree_gist for a race
+the plug lock already closes).
 
 ## 3. Relationships
 
