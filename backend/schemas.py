@@ -108,6 +108,11 @@ class PlugResponse(BaseModel):
     # and public-group plugs are False. The driver Home page uses this to
     # section the charger list into "your chargers" vs "public chargers".
     is_private: bool = False
+    # [Plug watches] True when the CURRENT user has an armed one-shot
+    # "notify me when free" watch on this plug (POST/DELETE
+    # /api/plugs/{id}/watch). Drives the Home card's bell toggle; cleared
+    # server-side when the watch fires (services/plug_watch.py).
+    watching: bool = False
 
 
 class GatewayEventResponse(BaseModel):

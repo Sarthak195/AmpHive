@@ -57,8 +57,10 @@ Token: HS256 JWT, claims `sub`/`role`/`email`/`iat`/`exp`, **7-day** expiry.
 
 | Method | Path | Auth | Body/Params | Behaviour |
 |--------|------|------|-------------|-----------|
-| GET | `/api/plugs/available` | JWT | — | Plugs in accessible groups **or** ungrouped (`group_id IS NULL`, visible to all) → `[{id, name, status, current_power_w, plug_model, group_name?, gateway_online, is_private}]` — `gateway_online: bool` (added 2026-07-10) is whether the plug's gateway is live: `ONLINE` + `last_seen` within the liveness window; `is_private: bool` (added 2026-07-12) is true for plugs in a non-public group (necessarily one the caller joined) — drives the Home page's "Your chargers" vs "Public chargers" sections |
-| GET | `/api/plugs/{plug_id}` | JWT | path `plug_id:int` | Single plug; 404 if missing, 403 if in a private group the user hasn't joined. Response also carries `gateway_online` and `is_private` (as above) |
+| GET | `/api/plugs/available` | JWT | — | Plugs in accessible groups **or** ungrouped (`group_id IS NULL`, visible to all) → `[{id, name, status, current_power_w, plug_model, group_name?, gateway_online, is_private, watching}]` — `gateway_online: bool` (added 2026-07-10) is whether the plug's gateway is live: `ONLINE` + `last_seen` within the liveness window; `is_private: bool` (added 2026-07-12) is true for plugs in a non-public group (necessarily one the caller joined) — drives the Home page's "Your chargers" vs "Public chargers" sections; `watching: bool` (added 2026-07-12) is whether the **caller** has an armed "notify me when free" watch on the plug (computed with ONE extra per-user query for the whole list, not per plug) |
+| GET | `/api/plugs/{plug_id}` | JWT | path `plug_id:int` | Single plug; 404 if missing, 403 if in a private group the user hasn't joined. Response also carries `gateway_online`, `is_private`, and `watching` (as above) |
+| POST | `/api/plugs/{plug_id}/watch` | JWT | path `plug_id:int` | Arm a **one-shot "notify me when free" watch** (2026-07-12): when the plug next flips back to AVAILABLE (session end or CPO maintenance-clear), the caller gets a `plug_available` notification through the standard pipeline (feed + Socket.io + Web Push, `services/plug_watch.py`) and the watch deletes itself. Idempotent (re-arming returns the same 200; a concurrent double-tap is absorbed via the `UNIQUE(user_id, plug_id)` constraint). Access = the `GET /api/plugs/{id}` rule (403 for a non-member on a private-group plug; 404 unknown plug). Occupied/offline/maintenance plugs are all watchable; the one rejection is 409 when the plug is startable right now (AVAILABLE **and** its gateway live). → `{status:"watching", plug_id, watching:true}` |
+| DELETE | `/api/plugs/{plug_id}/watch` | JWT | path `plug_id:int` | Disarm the caller's watch. Idempotent — a watch that doesn't exist (never armed / already fired / plug gone) is a no-op 200; deliberately no access check (the row is the caller's own — a driver who left the plug's private group can still clear it). → `{status:"not_watching", plug_id, watching:false}` |
 
 > **Provisioning moved.** The old unauthenticated `POST /api/plugs/register` and
 > `POST /api/gateways/register` have been **removed**. Gateways and plugs are now
@@ -105,9 +107,10 @@ Token: HS256 JWT, claims `sub`/`role`/`email`/`iat`/`exp`, **7-day** expiry.
 
 Per-user feed written by `services/notifications.py` at the emit points
 (session stop/auto-stop/reap/safety-cutoff, low balance, charger offline,
-top-up credit); delivered live over the Socket.io `notification` event (the
-user's own room) and optionally by **Web Push** (VAPID; enabled when
-`VAPID_PRIVATE_KEY` is set).
+top-up credit, and — 2026-07-12 — `plug_available` when a watched plug frees
+up, see `POST /api/plugs/{id}/watch`); delivered live over the Socket.io
+`notification` event (the user's own room) and optionally by **Web Push**
+(VAPID; enabled when `VAPID_PRIVATE_KEY` is set).
 
 | Method | Path | Auth | Body/Params | Behaviour |
 |--------|------|------|-------------|-----------|

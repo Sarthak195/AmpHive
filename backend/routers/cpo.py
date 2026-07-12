@@ -624,6 +624,14 @@ async def cpo_plug_maintenance(
         from backend.services.socketio_manager import emit_plug_status
         await emit_plug_status(plug.id, plug.status.value)
 
+        # [Plug watches] `clear` just returned the plug to AVAILABLE — fan
+        # out "notify me when free" to its watchers (one-shot; best-effort by
+        # contract, never raises — services/plug_watch.py). Nobody excluded:
+        # unlike a session end, no watcher caused this flip.
+        if plug.status == PlugStatus.AVAILABLE:
+            from backend.services.plug_watch import notify_watchers_plug_available
+            await notify_watchers_plug_available(db, plug)
+
     return {
         "status": "updated",
         "plug_id": plug.id,
