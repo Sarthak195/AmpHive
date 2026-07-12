@@ -77,7 +77,7 @@ attributed to the session; the reaper judges sessions by
 `COALESCE(last_telemetry_at, started_at)`.
 
 `max_kwh` float (nullable) · `max_duration_seconds` int (nullable) — added
-2026-07-12 (Alembic `0014_session_limits`): the stop conditions the session
+2026-07-12 (Alembic `0015_session_limits`): the stop conditions the session
 was started with (user-chosen or the request defaults, 30 kWh / 4 h),
 snapshotted from `SessionStartRequest`. Enforced backend-side by
 `MQTTManager._maybe_auto_stop_on_limits` on the telemetry path (env
@@ -173,6 +173,20 @@ VARCHAR(64) (client encryption keys) · `created_at` TIMESTAMPTZ. Pruned when
 the push service reports the subscription gone (404/410) or the user
 disables push. Added by `0008_notifications` (2026-07-11).
 
+### `plug_watches`
+One-shot "notify me when free" subscriptions: a driver looking at an
+occupied/offline plug arms one via `POST /api/plugs/{id}/watch`; when the
+plug next flips back to AVAILABLE (`finalize_charging_session`, or the CPO
+maintenance-clear path) `services/plug_watch.py` sends each watcher a
+`plug_available` notification (feed + Socket.io + Web Push) and **deletes**
+the rows — transient state, not history. `id` SERIAL PK · `user_id` → users
+(CASCADE) · `plug_id` → plugs (CASCADE) · `created_at` TIMESTAMPTZ.
+**UNIQUE `(user_id, plug_id)`** (`uq_plug_watches_user_plug` — arming is
+idempotent; its leading `user_id` also serves the per-user `watching` lookup
+on the plug list/detail responses) + index on `plug_id`
+(`idx_plug_watches_plug`, the per-plug fan-out read). Added by Alembic
+revision `0014_plug_watches` (2026-07-12).
+
 ## 3. Relationships
 
 ```
@@ -180,7 +194,8 @@ tenants ─┬─< users ─┬─< charging_sessions >─┬─ plugs >── g
          │          ├─< ledger_transactions │
          │          ├─< group_memberships >──┤
          │          ├─< notifications >── plugs / charging_sessions (nullable)
-         │          └─< push_subscriptions   │
+         │          ├─< push_subscriptions   │
+         │          └─< plug_watches >───────┤
          ├─< gateways ─< plugs               │
          ├─< charging_sessions               │
          ├─< telemetry_readings >── plugs / charging_sessions (nullable)

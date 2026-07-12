@@ -256,6 +256,15 @@ async def finalize_charging_session(
     from backend.services.socketio_manager import emit_plug_status
     await emit_plug_status(plug.id, PlugStatus.AVAILABLE.value)
 
+    # [Plug watches] "Notify me when free" fan-out — the plug just flipped
+    # back to AVAILABLE (the billing commit above already landed). Excludes
+    # the driver whose session just ended: they get their own receipt
+    # notification below and don't need to hear that their plug freed.
+    # Best-effort by contract — notify_watchers_plug_available never raises
+    # into this billing path (services/plug_watch.py).
+    from backend.services.plug_watch import notify_watchers_plug_available
+    await notify_watchers_plug_available(db, plug, exclude_user_id=session.user_id)
+
     # 6. End telemetry stream
     state.telemetry_store.end_session(plug.id)
     await set_plug_telemetry_interval(db, plug.id, 10000)

@@ -140,6 +140,27 @@ async def test_try_record_audit_is_non_fatal_and_logs_on_failure(caplog):
     assert "Audit log write failed" in caplog.text
 
 
+@pytest.mark.asyncio
+async def test_try_record_audit_swallows_rollback_failure_too(caplog):
+    """Regression (PR #27): even the failure-path rollback is best-effort —
+    if the commit fails AND the rollback fails (e.g. the connection died),
+    neither exception may propagate into the already-committed admin action.
+    Both failures must still be visible at ERROR."""
+    db = AsyncMock()
+    db.add = MagicMock()
+    db.commit = AsyncMock(side_effect=RuntimeError("db exploded"))
+    db.rollback = AsyncMock(side_effect=RuntimeError("rollback exploded"))
+
+    with caplog.at_level(logging.ERROR, logger="amphive.api"):
+        await try_record_audit(  # must not raise
+            db, tenant_id=1, actor_user_id=42,
+            action="payout.mark_paid", target_type="payout", target_id="1",
+        )
+
+    assert "Audit rollback failed" in caplog.text
+    assert "Audit log write failed" in caplog.text
+
+
 # --- routers/cpo.py wiring ----------------------------------------------
 
 

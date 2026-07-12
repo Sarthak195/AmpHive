@@ -21,24 +21,23 @@ never limit-auto-stopped (staleness reaping and balance-exhaustion auto-stop
 still apply, exactly as before). New sessions always persist both values,
 including the schema defaults (30 kWh / 14400 s).
 
-NOTE on revision chaining: authored on a parallel branch cut from
-`origin/main` when `0013_auth_holds` was the head; a sibling branch may also
-create an 0014 chained on 0013 — the merge coordinator renumbers at merge
-time (the established parallel-agent protocol). This revision only touches
-these two columns, so it stays self-contained and reorderable.
+NOTE on revision chaining: authored on a parallel branch as 0014 chained on
+0013_auth_holds; renumbered to 0015 at merge-train time onto 0014_plug_watches
+(the established parallel-agent protocol). This revision only touches these
+two columns, so it stays self-contained and reorderable.
 
 Idempotent add (same rationale as 0002 onward): a create_all-built database
 may already have these columns from the model, so guard with an
 information_schema check.
 
-Revision ID: 0014_session_limits
-Revises: 0013_auth_holds
+Revision ID: 0015_session_limits
+Revises: 0014_plug_watches
 Create Date: 2026-07-12
 """
 from alembic import op
 
-revision = "0014_session_limits"
-down_revision = "0013_auth_holds"
+revision = "0015_session_limits"
+down_revision = "0014_plug_watches"
 branch_labels = None
 depends_on = None
 

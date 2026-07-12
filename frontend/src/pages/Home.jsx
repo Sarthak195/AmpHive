@@ -22,6 +22,14 @@
  * society resident already knows where their own charger is). Each section
  * header carries live per-status counts. The public list starts open only
  * for drivers with no private chargers.
+ *
+ * Notify-when-free bell (2026-07-12): any plug card that is NOT currently
+ * startable (in use / offline / maintenance, per the shared plugAvailability
+ * classification) shows a small bell toggle. It arms a one-shot server-side
+ * watch (POST/DELETE /api/plugs/{id}/watch, optimistic UI via the API's
+ * `watching` field); when the plug frees up, the driver is pinged through
+ * the existing notification pipeline (bell feed + Socket.io + Web Push) and
+ * the watch clears itself.
  */
 
 import { useState, useEffect, useMemo, useRef } from 'react';
@@ -143,12 +151,18 @@ const Home = () => {
 
   // Live plug-availability: when any plug flips OCCUPIED/AVAILABLE (someone
   // else started/stopped a session), update its badge in place so the list
-  // stays current without a manual refresh.
+  // stays current without a manual refresh. A flip to 'available' also fired
+  // and cleared any armed one-shot watch server-side, so clear the local
+  // bell state along with it.
   useEffect(() => {
     if (!socket) return;
     const handlePlugStatus = ({ plug_id, status }) => {
       setPlugs((prev) =>
-        prev.map((p) => (p.id === plug_id ? { ...p, status } : p))
+        prev.map((p) =>
+          p.id === plug_id
+            ? { ...p, status, ...(status === 'available' ? { watching: false } : {}) }
+            : p
+        )
       );
     };
     socket.on('plug_status', handlePlugStatus);
@@ -253,6 +267,25 @@ const Home = () => {
     }
   };
 
+  // "Notify me when free" (one-shot watch) bell toggle — optimistic: flip
+  // the local state immediately, reconcile with the server, revert on
+  // failure. Delivery of the actual notification is the existing pipeline
+  // (NotificationBell + Web Push); nothing more to do client-side.
+  const toggleWatch = async (plug) => {
+    const next = !plug.watching;
+    setPlugs((prev) => prev.map((p) => (p.id === plug.id ? { ...p, watching: next } : p)));
+    try {
+      if (next) {
+        await api.post(`/api/plugs/${plug.id}/watch`);
+      } else {
+        await api.delete(`/api/plugs/${plug.id}/watch`);
+      }
+    } catch (err) {
+      console.error('Failed to toggle plug watch:', err);
+      setPlugs((prev) => prev.map((p) => (p.id === plug.id ? { ...p, watching: !next } : p)));
+    }
+  };
+
   // Status badge color mapping
   const statusColor = (status) => {
     switch (status) {
@@ -265,12 +298,14 @@ const Home = () => {
 
   // One plug card — shared by the private and public sections. A plug is
   // startable only if it is available AND its gateway is reachable right
-  // now. gateway_online defaults true for older API data; an unreachable
-  // charger is shown but not clickable so the driver isn't sent into a 409
-  // at start.
+  // now (the shared plugAvailability classification). gateway_online
+  // defaults true for older API data; an unreachable charger is shown but
+  // not clickable so the driver isn't sent into a 409 at start. Any
+  // non-startable plug gets a "Notify when free" bell instead — a one-shot
+  // watch that pings the driver (feed + push) when the plug frees up.
   const renderPlugCard = (plug, index) => {
     const unreachable = plug.gateway_online === false;
-    const startable = plug.status === 'available' && !unreachable;
+    const startable = getPlugAvailability(plug) === 'available';
     return (
       <div
         key={plug.id}
@@ -316,11 +351,41 @@ const Home = () => {
           <span style={{ color: 'var(--color-primary)', fontWeight: 600, fontSize: '0.9rem', flexShrink: 0 }}>
             Charge →
           </span>
-        ) : unreachable ? (
-          <span style={{ color: 'var(--color-text-muted)', fontSize: '0.8rem', flexShrink: 0 }}>
-            Unreachable
-          </span>
-        ) : null}
+        ) : (
+          <div className="flex items-center gap-2" style={{ flexShrink: 0 }}>
+            {unreachable && (
+              <span style={{ color: 'var(--color-text-muted)', fontSize: '0.8rem' }}>
+                Unreachable
+              </span>
+            )}
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              aria-pressed={!!plug.watching}
+              aria-label={
+                plug.watching
+                  ? `Stop watching ${plug.name}`
+                  : `Notify me when ${plug.name} is free`
+              }
+              title={
+                plug.watching
+                  ? "Watching — you'll be notified when it's free"
+                  : 'Notify me when this plug is free'
+              }
+              onClick={(e) => {
+                e.stopPropagation();
+                toggleWatch(plug);
+              }}
+              style={{
+                whiteSpace: 'nowrap',
+                fontSize: '0.8rem',
+                color: plug.watching ? 'var(--color-primary)' : 'var(--color-text-muted)',
+              }}
+            >
+              {plug.watching ? '🔔 Watching' : '🔔 Notify me'}
+            </button>
+          </div>
+        )}
       </div>
     );
   };

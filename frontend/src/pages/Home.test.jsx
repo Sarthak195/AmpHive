@@ -2,11 +2,14 @@
  * Home page tests: QR/deep-link start (`?plug=` prefill, the auth gate that
  * preserves it through login, and the "unknown id" notice), the sectioned
  * charger list (private "Your chargers" first, "Public chargers" collapsed
- * by default when private ones exist, map at the bottom, collapsed), and the
- * availability + group filters with their live legend counts.
+ * by default when private ones exist, map at the bottom, collapsed), the
+ * availability + group filters with their live legend counts, and the
+ * "notify me when free" bell toggle on non-startable plug cards (optimistic
+ * POST/DELETE against /api/plugs/{id}/watch, revert on failure, cleared by
+ * a live plug_status→available flip).
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 
@@ -351,5 +354,117 @@ describe('Home — optional charging limit at start', () => {
     await userEvent.click(screen.getByText('Lobby Plug'));
 
     expect(startSession).toHaveBeenCalledWith(1, { max_kwh: 2 });
+  });
+});
+
+describe('Home — "notify me when free" bell', () => {
+  beforeEach(() => {
+    useAuth.mockReturnValue({ user: DRIVER });
+    api.get.mockResolvedValue(PLUGS);
+  });
+
+  it('shows the bell only on non-startable plugs', async () => {
+    renderHome('/');
+    await screen.findByText('Lobby Plug');
+    // Open the public section so all four cards are rendered.
+    await userEvent.click(screen.getByRole('button', { name: /Public chargers/ }));
+
+    // Startable (id 1, available + gateway online): no bell, "Charge →".
+    expect(
+      screen.queryByRole('button', { name: /Notify me when Lobby Plug is free/ })
+    ).not.toBeInTheDocument();
+    // Occupied (id 2), gateway-offline (id 3), and status-offline (id 4): bells.
+    expect(
+      screen.getByRole('button', { name: /Notify me when Garage Plug is free/ })
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: /Notify me when Rooftop Plug is free/ })
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: /Notify me when Basement Plug is free/ })
+    ).toBeInTheDocument();
+  });
+
+  it('arms a watch optimistically: POSTs and flips the bell to Watching', async () => {
+    api.post.mockResolvedValue({ status: 'watching', plug_id: 2, watching: true });
+    renderHome('/');
+    await screen.findByText('Garage Plug');
+
+    await userEvent.click(
+      screen.getByRole('button', { name: /Notify me when Garage Plug is free/ })
+    );
+
+    expect(api.post).toHaveBeenCalledWith('/api/plugs/2/watch');
+    const watching = screen.getByRole('button', { name: /Stop watching Garage Plug/ });
+    expect(watching).toHaveAttribute('aria-pressed', 'true');
+    expect(watching).toHaveTextContent('Watching');
+  });
+
+  it('disarms a watching plug: DELETEs and flips the bell back', async () => {
+    api.get.mockResolvedValue(
+      PLUGS.map((p) => (p.id === 2 ? { ...p, watching: true } : p))
+    );
+    api.delete.mockResolvedValue({ status: 'not_watching', plug_id: 2, watching: false });
+    renderHome('/');
+    await screen.findByText('Garage Plug');
+
+    await userEvent.click(
+      screen.getByRole('button', { name: /Stop watching Garage Plug/ })
+    );
+
+    expect(api.delete).toHaveBeenCalledWith('/api/plugs/2/watch');
+    expect(
+      screen.getByRole('button', { name: /Notify me when Garage Plug is free/ })
+    ).toHaveAttribute('aria-pressed', 'false');
+  });
+
+  it('reverts the optimistic flip when the API call fails', async () => {
+    api.post.mockRejectedValue(new Error('This plug is available right now'));
+    renderHome('/');
+    await screen.findByText('Garage Plug');
+
+    await userEvent.click(
+      screen.getByRole('button', { name: /Notify me when Garage Plug is free/ })
+    );
+
+    // Reverted: back to the unarmed bell, no Watching state left behind.
+    expect(
+      await screen.findByRole('button', { name: /Notify me when Garage Plug is free/ })
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: /Stop watching Garage Plug/ })
+    ).not.toBeInTheDocument();
+  });
+
+  it('clears the bell when the plug flips available live (one-shot fired server-side)', async () => {
+    const handlers = {};
+    const socket = {
+      on: (event, fn) => { handlers[event] = fn; },
+      off: vi.fn(),
+    };
+    useSession.mockReturnValue({
+      startSession: vi.fn(),
+      activeSessions: [],
+      switchSession: vi.fn(),
+      error: null,
+      socket,
+    });
+    api.get.mockResolvedValue(
+      PLUGS.map((p) => (p.id === 2 ? { ...p, watching: true } : p))
+    );
+    renderHome('/');
+    await screen.findByText('Garage Plug');
+    expect(
+      screen.getByRole('button', { name: /Stop watching Garage Plug/ })
+    ).toBeInTheDocument();
+
+    // The server fired + deleted the watch when the plug freed; the same
+    // plug_status broadcast clears the local bell (and makes it startable).
+    act(() => handlers.plug_status({ plug_id: 2, status: 'available' }));
+
+    expect(
+      screen.queryByRole('button', { name: /Stop watching Garage Plug/ })
+    ).not.toBeInTheDocument();
+    expect(screen.getAllByText('Charge →').length).toBeGreaterThan(1);
   });
 });

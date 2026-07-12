@@ -63,14 +63,17 @@ Legend: ✅ present · 🟡 partial · ❌ absent.
    invoices, and **no driver-portal button** to view/download one yet — both
    frontend follow-ups. Still blocks real-money operation until that UI
    lands.
-6. **CPO payout / settlement — backend ledger now exists, manual settlement
+6. **CPO payout / settlement — ledger + portal UI, manual settlement
    only.** Money still flows driver → platform, but a `Payout` ledger now
    tracks what's owed back to each CPO (`GET /api/cpo/earnings`,
    `GET`/`POST /api/cpo/payouts`, admin `POST .../mark_paid`) — closing
    [requirements.md §5.1](../requirements.md)'s "withdraw earnings" promise
-   at the record-keeping level. There is **no bank/UPI/payment-gateway
-   integration**: the admin marks a payout PAID after transferring funds
-   out-of-band, and there is **no CPO-portal UI** yet (backend/API only).
+   at the record-keeping level. **2026-07-12:** the CPO-portal UI shipped —
+   `/cpo/earnings` shows lifetime/unsettled earnings, requests payouts, and
+   lists/cancels them (admin sees "Mark paid") — and all three payout money
+   ops are written to the TD#26 audit trail. There is still **no
+   bank/UPI/payment-gateway integration**: the admin marks a payout PAID
+   after transferring funds out-of-band.
 
 ---
 
@@ -130,7 +133,7 @@ Legend: ✅ present · 🟡 partial · ❌ absent.
 | RFID / tap card to start | ChargePoint, EA | ❌ | By design (app-first) |
 | Reserve / book a charger ahead | Statiq, ChargeZone, Tata | ❌ | Should-do |
 | Scheduled / delayed start (charge off-peak) | Tesla, ChargePoint | ❌ | Aspirational |
-| Stop at target kWh / % SoC | Tesla, EA | 🟡 (2026-07-12) user-set "stop at X" **shipped** for kWh, time, and ₹/coins (a coins cap converts to kWh client-side at the plug's own rate): optional collapsed-by-default limit control at session start, limits persisted on the session (Alembic `0014_session_limits`) and enforced by a backend auto-stop on the telemetry path (env `AUTO_STOP_ON_LIMITS`, ~1 s latency) + a reaper duration backstop, with live progress in the session monitor ("0.42 / 1.00 kWh · stops automatically"). **% SoC remains impossible by construction** — a metering smart plug cannot read the vehicle's state of charge (no ISO 15118 link; see "Plug & Charge" below), so the 🟡 is permanent unless the hardware class changes | — |
+| Stop at target kWh / % SoC | Tesla, EA | 🟡 (2026-07-12) user-set "stop at X" **shipped** for kWh, time, and ₹/coins (a coins cap converts to kWh client-side at the plug's own rate): optional collapsed-by-default limit control at session start, limits persisted on the session (Alembic `0015_session_limits`) and enforced by a backend auto-stop on the telemetry path (env `AUTO_STOP_ON_LIMITS`, ~1 s latency) + a reaper duration backstop, with live progress in the session monitor ("0.42 / 1.00 kWh · stops automatically"). **% SoC remains impossible by construction** — a metering smart plug cannot read the vehicle's state of charge (no ISO 15118 link; see "Plug & Charge" below), so the 🟡 is permanent unless the hardware class changes | — |
 | Plug & Charge / ISO 15118 autocharge | Tesla, EA, Ionity | ❌ | By design (smart plug, not ISO 15118 EVSE) |
 | Vehicle profile (make/model/connector) | ChargePoint, PlugShare | ❌ | Nice-to-have |
 
@@ -156,7 +159,7 @@ Benchmarked against ChargePoint/Statiq/Kazam operator dashboards.
 | CSV / Excel export of sessions & revenue | ❌ (specs §4 want it) | Should-do |
 | Configurable pricing / tariff UI | ❌ (no price model) | Should-do |
 | Tax / GST configuration | ❌ | Should-do |
-| Payout / earnings withdrawal | 🟡 backend ledger + endpoints (`Payout`, manual settlement); no CPO-portal UI yet | Should-do (UI) |
+| Payout / earnings withdrawal | ✅ (2026-07-12) `/cpo/earnings` portal page over the `Payout` ledger (earnings summary, request/cancel, admin mark-paid, audited); settlement itself stays manual/out-of-band — no payment-gateway money-out | — |
 | Remote diagnostics / fault console | ✅ (2026-07-12) `/cpo/faults`: lists `gateway_events` (severity/unacknowledged filters), acknowledge, and a top strip of plugs currently in maintenance | — |
 | Maintenance-mode toggle per plug | ✅ (2026-07-12) `POST /api/cpo/plugs/{id}/maintenance` (`enter`/`clear`, audited); a THERMAL_CUTOFF/OVERCURRENT_CUTOFF alarm now auto-enters MAINTENANCE too | — |
 | Bulk plug provisioning (CSV) | ❌ (specs §4 want it) | Aspirational |
@@ -208,7 +211,7 @@ specs missed. Cross-references:
 low-balance notifications (email/push/PWA) · per-CPO price model + tax invoice ·
 CSV export · basic map availability legend/filters.
 
-**Do next (revenue/trust):** CPO payout ledger · refund + dispute flow ·
+**Do next (revenue/trust):** ~~CPO payout ledger~~ (done 2026-07-12 — §1.6, incl. portal UI) · refund + dispute flow ·
 ~~authorization hold~~ (done 2026-07-12 — §3) · reservations · auto-topup ·
 maintenance-mode + fault console (pairs with ingesting the firmware `/alarms`
 topic).
