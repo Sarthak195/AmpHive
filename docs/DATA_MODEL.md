@@ -124,6 +124,25 @@ VARCHAR(48) · `severity` VARCHAR(16) (default `warning`;
 indexes on `(tenant_id, created_at)` and `(gateway_id, created_at)`. Added by
 Alembic revision `0005_gateway_events` (2026-07-10).
 
+### `audit_logs`
+CPO admin action audit trail (TD#26) — gateway/plug/group create-delete,
+status changes, and access-code regeneration, previously unrecorded. Written
+by `services/audit.py` (`record_audit` stages the row; `try_record_audit`
+commits it non-fatally — a write failure is caught, logged, and rolled back
+without breaking the admin action it documents), called from
+`routers/cpo.py` after each action's own commit has landed. Read via
+`GET /api/cpo/audit`. `id` **BIGINT PK** · `tenant_id` → tenants (CASCADE,
+**not null**) · `actor_user_id` → users (**SET NULL**, nullable — the acting
+user's account must stay deletable without erasing the audit trail) ·
+`action` VARCHAR(64) (e.g. `gateway.create`, `plug.status_change`,
+`access_code.regen`) · `target_type` VARCHAR(32) (e.g. `gateway`, `plug`,
+`group`) · `target_id` VARCHAR(64) (nullable; stringified so one column fits
+both string gateway ids and integer plug/group ids) · `detail` TEXT
+(nullable, free-form) · `created_at` TIMESTAMPTZ. Index on
+`(tenant_id, created_at)`. Added by Alembic revision `0007_audit_log`
+(2026-07-12). Gateway/plug **delete** are pre-named in the action taxonomy
+but have no CPO endpoint yet to hook — nothing to audit until they exist.
+
 ## 3. Relationships
 
 ```
@@ -134,6 +153,7 @@ tenants ─┬─< users ─┬─< charging_sessions >─┬─ plugs >── g
          ├─< charging_sessions               │
          ├─< telemetry_readings >── plugs / charging_sessions (nullable)
          ├─< gateway_events >── gateways / plugs (nullable)
+         ├─< audit_logs >── users (actor, nullable)
          └─< charger_groups ─┬─< plugs       │
                              └─< group_memberships
 ```
@@ -147,8 +167,9 @@ joined via `access_code`.
 - **`backend/migrations/versions/0001_baseline.py`** — frozen PostgreSQL DDL
   snapshot of the full 9-table schema at adoption (includes everything the
   retired `_INPLACE_UPGRADES` produced). Never edit or regenerate it. (The
-  live schema is now **10 tables** — `gateway_events` arrived later via
-  revision `0005_gateway_events`, 2026-07-10.)
+  live schema is now **11 tables** — `gateway_events` arrived via revision
+  `0005_gateway_events` (2026-07-10) and `audit_logs` via `0007_audit_log`
+  (2026-07-12).)
 - **New schema change** = new revision: `alembic -c backend/alembic.ini
   revision --autogenerate -m "..."` (autogenerate needs a reachable database —
   use the CI postgres or the VM; dev boxes run no DB by policy).

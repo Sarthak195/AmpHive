@@ -138,8 +138,13 @@ been fixed by the 2026-07-08…11 work — see the shipped sections below).*
 
 ## Next month — scale & polish
 
-- [ ] **[2026-07-06 audit] CPO admin audit log** — record gateway/plug/group
-      create-delete, status changes, and access-code regen. (TD#26)
+- [x] **[2026-07-06 audit] CPO admin audit log.** Done 2026-07-12 — new
+      `audit_logs` table (Alembic `0007_audit_log`) + `services/audit.py`
+      (non-fatal write: a failure is logged, never breaks the admin action),
+      wired into gateway create, plug create, plug status change, group
+      create/delete, and access-code regen in `routers/cpo.py`; read via
+      `GET /api/cpo/audit`. Gateway/plug delete have no endpoint yet to hook.
+      (TD#26)
 - [ ] **[2026-07-06 audit] Fix crash-recovery duration watchdog** — the
       recovered firmware session resets its start time each reboot, so the time
       cap restarts from zero (energy cap still holds). Needs an SNTP wall-clock

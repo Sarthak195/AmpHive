@@ -16,12 +16,14 @@ Interactive docs: `http://<host>:8000/docs`.
   `cpo` or `admin`, enforced by `require_role(...)` (`backend/services/rbac.py`).
 - **CORS:** explicit allowlist (localhost, `amphive.duckdns.org`, VM IP) —
   locked down 2026-07-06.
-- **40 endpoints total**, grouped below: health (1), auth (4), groups (2),
-  plugs (2), sessions (4), payments (3), Direct Mode (5), CPO portal (19).
+- **41 endpoints total**, grouped below: health (1), auth (4), groups (2),
+  plugs (2), sessions (4), payments (3), Direct Mode (5), CPO portal (20).
   (The legacy SSE endpoint `/api/sessions/live/{id}` was retired 2026-07-07 —
   live telemetry is Socket.io only. The CPO gateway OTA-trigger endpoint was
   added 2026-07-07; the `/api/auth/logout` revocation endpoint 2026-07-08; the
-  CPO events feed + ack endpoints 2026-07-10.)
+  CPO events feed + ack endpoints 2026-07-10; the CPO audit-log endpoint
+  2026-07-12. This count predates a few other endpoints added alongside it —
+  not re-audited here.)
 
 ---
 
@@ -143,6 +145,7 @@ scoped to the caller's `tenant_id`, so operators only ever see their own assets.
 | GET | `/api/cpo/analytics/telemetry` | cpo/admin | query `plug_id?, days=1, bucket=hour` | `date_trunc`-bucketed time-series from `telemetry_readings` (bucket ∈ {minute, hour, day}; 400 otherwise) → `[{timestamp, avg_power_w, max_power_w, energy_kwh, avg_current_a, max_current_a, sample_count}]`. Powers the dashboard load graph (peak W + A). |
 | GET | `/api/cpo/events` | cpo/admin | query `limit=50` (max 200), `unacknowledged_only?` (bool), `severity?` (e.g. `critical`) | Gateway/plug operational events (safety cutoffs, `UNAUTHORIZED_ON` alarms, OTA notices) for the CPO's tenant, newest first → `[{id, gateway_id, plug_id, event_type, severity, detail, acknowledged, created_at}]`. (Added 2026-07-10.) |
 | POST | `/api/cpo/events/{event_id}/ack` | cpo/admin | path `event_id:int` | Acknowledge (clear from the active feed) one event; tenant-scoped. → `{status:"acknowledged", event_id}` |
+| GET | `/api/cpo/audit` | cpo/admin | query `limit=50` (max 200), `offset=0` | Admin action audit trail (TD#26) for the CPO's tenant, newest first → `[{id, actor_user_id, actor_email, action, target_type, target_id, detail, created_at}]`. Covers gateway create, plug create, plug status change, group create/delete, and access-code regen — written non-fatally by `services/audit.py` (a write failure is logged, never breaks the admin action). Gateway/plug delete aren't recorded yet — no such CPO endpoints exist. (Added 2026-07-12.) |
 
 ---
 

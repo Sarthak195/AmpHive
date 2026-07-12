@@ -441,9 +441,16 @@ audit merged; statuses below are as of 2026-07-11.*
     gateway staleness (read-time `gateway_is_live` + `gateway_online` in the
     driver API + session reaper — TD#27), the shared-`Event` latency nit
     (closed by retiring SSE 2026-07-07 — TD#32), registration validation
-    (`EmailStr` + password rule, 2026-07-11 — TD#30), and the portal input CSS
+    (`EmailStr` + password rule, 2026-07-11 — TD#30), the portal input CSS
     (`box-sizing:border-box`, fw 1.6.0 — the `width:100%%` diagnosis was
-    wrong: the HTML is printf-formatted, so `%%` already rendered as `%`).
+    wrong: the HTML is printf-formatted, so `%%` already rendered as `%`),
+    and the **CPO admin audit log** (2026-07-12 — TD#26): a new `audit_logs`
+    table + `services/audit.py` (`record_audit`/`try_record_audit`, non-fatal
+    — a write failure is logged, never breaks the admin action) records
+    gateway/plug/group create, plug status change, group delete, and
+    access-code regen with actor/tenant/target, readable via
+    `GET /api/cpo/audit`. Gateway/plug **delete** are pre-named in the action
+    taxonomy but have no endpoint yet to hook (no such CPO routes exist).
     Still open: unstructured stdout-only logging (no correlation ids — TD#28),
-    no CPO admin audit log (TD#26), and the portal Wi-Fi/plug reachability
-    pre-check (TD#31, second half). (TD#26–31)
+    and the portal Wi-Fi/plug reachability pre-check (TD#31, second half).
+    (TD#26–31)
