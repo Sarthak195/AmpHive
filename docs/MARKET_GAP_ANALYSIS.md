@@ -49,9 +49,20 @@ Legend: ✅ present · 🟡 partial · ❌ absent.
    data model**. No per-CPO/per-site/per-group rates, no time-of-day/peak pricing,
    no per-minute, no idle fee, no session start fee. The market (and AmpHive's own
    CPO spec) treats configurable tariffs as core. See [§3](#3-pricing--billing-depth).
-5. **No tax invoice / receipt.** Indian commercial charging must issue a
-   GST invoice; AmpHive produces neither an invoice nor a formal per-session
-   receipt (history shows energy + coins only). Blocks real-money operation.
+5. **No tax invoice / receipt — backend now exists, no UI yet.** Indian
+   commercial charging must issue a GST invoice; a numbered `Invoice`
+   (Alembic `0011_gst_invoices`, 2026-07-12) is now issued per finished
+   session — inclusive GST split off `coins_spent` (env `GST_RATE_PCT`,
+   default 18%), immutable seller/line snapshots, sequential per-tenant
+   numbering under a row lock. `GET /api/sessions/{id}/invoice`
+   (driver/cpo/admin; `?format=html` returns a printable copy) and CPO list
+   `GET /api/cpo/invoices`. **Intra-state GST only** — CGST/SGST vs. IGST is
+   not split out (see [§3](#3-pricing--billing-depth)). Since these are
+   bearer-JWT API endpoints, nothing is reachable by just typing a URL:
+   there is **no CPO-portal UI** to configure GSTIN/legal name or browse
+   invoices, and **no driver-portal button** to view/download one yet — both
+   frontend follow-ups. Still blocks real-money operation until that UI
+   lands.
 6. **CPO payout / settlement — backend ledger now exists, manual settlement
    only.** Money still flows driver → platform, but a `Payout` ledger now
    tracks what's owed back to each CPO (`GET /api/cpo/earnings`,
@@ -91,7 +102,7 @@ Legend: ✅ present · 🟡 partial · ❌ absent.
 | Pay-per-use *without* pre-funding a wallet | ChargePoint, Tata (post-paid/direct) | ❌ (must pre-load coins) | Should-do |
 | Auto-recharge / auto-topup wallet | Statiq, Ather | ❌ | Should-do |
 | Authorization *hold* sized to the session | Tesla, EA (pre-auth) | ❌ — 50-coin floor only; overage is forgiven | Should-do (see [SECURITY.md](SECURITY.md)) |
-| GST tax invoice / downloadable receipt | Indian legal requirement | ❌ | Should-do |
+| GST tax invoice / downloadable receipt | Indian legal requirement | 🟡 (2026-07-12) backend live: numbered `Invoice` per session (inclusive GST split, immutable seller/line snapshot, sequential per-tenant numbering), `GET /api/sessions/{id}/invoice` (+ `?format=html`), CPO list `GET /api/cpo/invoices`; intra-state only (no CGST/SGST/IGST split); no CPO/driver-portal UI yet | Should-do (UI) |
 | Refunds | all | ❌ (`REFUND` enum exists, no code path) | Should-do |
 | Promo codes / coupons / referral credit | Statiq, Ather, Kazam | ❌ | Should-do |
 | Loyalty / reward points | Tata, Ather | ❌ | Nice-to-have |
