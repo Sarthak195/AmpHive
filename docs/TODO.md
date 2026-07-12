@@ -153,9 +153,18 @@ been fixed by the 2026-07-08…11 work — see the shipped sections below).*
       live telemetry is session-id-attributed now, but readings buffered across
       an MQTT outage still attach to the plug's current ACTIVE session on
       resync. (TD#24)
-- [ ] **[2026-07-06 audit] Structured logging + correlation ids** across backend
-      (JSON, request ids) and a firmware log topic for field diagnostics;
-      persist the broker log. (TD#28)
+- [x] **[2026-07-06 audit] Structured logging + correlation ids — backend.**
+      Done 2026-07-12 — `backend/logging_config.py` (JSON-lines formatter on
+      the root logger, `correlation_id` ContextVar + `logging.Filter`, env
+      `LOG_LEVEL`/`LOG_FORMAT`); a FastAPI middleware binds/echoes
+      `X-Request-ID` per request so an HTTP request traces through to the
+      MQTT command it triggers. Hot-path f-strings converted in
+      `routers/auth.py`, `routers/sessions.py`,
+      `services/session_lifecycle.py`, `services/mqtt_manager.py`. Broker log
+      now also persists to a file on the `mosquitto_log` volume (durable
+      across container recreation), stdout bounded via the compose
+      `logging:` driver. Tests: `backend/tests/test_logging.py`. Still open:
+      a firmware log topic for field diagnostics (serial-only today). (TD#28)
 - [x] **[2026-07-06 audit] Registration validation.** Done 2026-07-11 —
       `EmailStr` + 8-72 char password rule; login left unvalidated for
       pre-rule accounts. (TD#30)
@@ -242,13 +251,22 @@ been fixed by the 2026-07-08…11 work — see the shipped sections below).*
 
 ## Long term — productionization
 
-- [ ] **[2026-07-06 audit] Multi-plug ESP32 gateway support** — the firmware
-      drives a single plug: `main.c` has one `target_plug_ip`/`active_session`
-      and `tapo_protocol.c` one global KLAP session + energy integrator, so a
-      command for plug B toggles plug A and telemetry is misattributed. Needs a
-      per-plug state table + an instance-based KLAP driver, and (recommended)
-      the target `local_ip` carried in the `ON` payload. The software AmpHive
-      Agent already handles multi-plug — this is ESP32-only. (TD#20, SEC §8.5)
+- [x] **[2026-07-06 audit] Multi-plug ESP32 gateway support** (shipped fw
+      **1.7.1-direct**, **verified on-device 2026-07-12** — single-plug charging
+      regression on the real gateway; two-real-plug test still needs a second
+      unit). The firmware no longer drives a single plug: `main.c` keeps a `plugs_mutex`-guarded
+      per-plug slot table (each slot = DB `plug_id` + LAN IP + a per-plug
+      `tapo_plug_t` KLAP context + its own session/watchdog state), and
+      `tapo_protocol.c` moved the KLAP session + energy integrator into that
+      per-plug context (own mutex + NVS meter `wh_<plug_id>`). `session_nvs`
+      persists **all** per-plug sessions in one atomic blob (each with `plug_id`
+      + `local_ip`) so crash recovery restores every plug. The backend ships the
+      target `local_ip` on ON/OFF (`send_plug_command(..., local_ip=…)`), which
+      is how the gateway drives the right plug and learns unseen ones — no
+      on-device roster, so the per-gateway broker ACLs and the backend
+      `plug.gateway_id` check are untouched (SEC §8.5). The one physical gateway
+      has a single plug, so a two-real-plug on-device test needs a second unit.
+      (TD#20, SEC §8.5)
 - [ ] **[2026-07-06 audit] Device security hardening** — flash encryption +
       Secure Boot v2 (NVS secrets are plaintext-extractable) and button-hold
       provisioning instead of the boot-time portal fallback (now LOW: the

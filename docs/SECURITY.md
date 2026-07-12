@@ -397,23 +397,31 @@ over or harvest the owner's Tapo account. Ordered by severity.*
 - **Remaining fix:** require a physical button-hold to enter provisioning
   instead of auto-opening it on Wi-Fi loss; keep retrying STA otherwise.
 
-### 8.5 Multi-plug refactor must stay security-safe
+### 8.5 Multi-plug refactor — **DONE 2026-07-12, stayed security-safe** (code-complete + builds clean, on-device verify pending)
 
-The single-plug → multi-plug refactor (TECH_DEBT #20) touches this surface, so
-capture it here:
+The single-plug → multi-plug refactor (TECH_DEBT #20) touched this surface. Each
+guardrail below was honored — recorded here so the invariants are auditable:
 
-- `tapo_protocol.c` holds **one** global KLAP session (`s_sess`) and **one**
-  energy integrator (`s_energy_wh`); multi-plug needs a **per-plug** KLAP session
-  + meter so plug A's crypto/session can't be reused to act on plug B.
-- Prefer carrying the target `local_ip` in the backend `ON` command payload (the
-  backend already stores `plugs.local_ip`) over shipping a plug roster to the
-  device — fewer secrets on-device.
-- Broker ACLs are **per-gateway**, not per-plug (live since 2026-07-10:
-  `pattern readwrite amphive/gateways/%u/#`) — keep it that way: one gateway
-  legitimately drives several plugs under its own subtree.
-- Backend-side `plug.gateway_id == <topic gateway>` validation shipped
-  2026-07-11 (see §3): a gateway can only report for plugs it actually owns —
-  the multi-plug refactor must not weaken that check.
+- **Per-plug KLAP session + meter (done).** `tapo_protocol.c` no longer holds a
+  global `s_sess` / `s_energy_wh`; each plug gets an opaque `tapo_plug_t` with its
+  own KLAP handshake/session (keys, cookie, seq) and its own energy integrator +
+  mutex, so plug A's crypto/session can't be reused to act on plug B. The shared
+  Tapo *account* `auth_hash` stays global (one account owns every plug — that is
+  not a per-plug secret).
+- **`local_ip` in the command, no on-device roster (done).** The gateway learns
+  each plug's IP from the `local_ip` the backend ships on ON/OFF
+  (`send_plug_command(..., local_ip=plug.local_ip)`); it stores no static plug
+  roster and no extra secrets. A plug it hasn't seen (e.g. after a reboot) is
+  learned from the command itself.
+- **Broker ACLs stay per-gateway (unchanged).** Still
+  `pattern readwrite amphive/gateways/%u/#` (per-gateway, live since 2026-07-10);
+  one gateway legitimately drives several plugs under its own subtree, so no ACL
+  change was needed or made.
+- **Backend `plug.gateway_id == <topic gateway>` check preserved.** The
+  2026-07-11 ownership check (§3) is untouched: multi-plug telemetry already
+  carries a per-plug `plug_id` and is validated against the topic gateway, so a
+  gateway still can only report for plugs it owns. `_persist_telemetry` was not
+  weakened.
 
 ### 8.6 Backend authn hardening — **RESOLVED**
 

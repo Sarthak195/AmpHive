@@ -90,7 +90,10 @@ async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
 
     # Generate JWT token
     token = create_access_token(user.id, user.role.value, user.email, user.token_version)
-    logger.info(f"New user registered: {user.email} (id={user.id})")
+    logger.info(
+        "New user registered",
+        extra={"user_id": user.id, "email": user.email},
+    )
 
     return AuthResponse(
         token=token,
@@ -118,7 +121,10 @@ async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=401, detail="Invalid email or password.")
 
     token = create_access_token(user.id, user.role.value, user.email, user.token_version)
-    logger.info(f"User logged in: {user.email}")
+    logger.info(
+        "User logged in",
+        extra={"user_id": user.id, "email": user.email},
+    )
 
     await check_and_speed_up_active_session(db, user.id)
 
@@ -171,7 +177,10 @@ async def logout(
     )
     new_epoch = result.scalar_one()
     await db.commit()
-    logger.info(f"User logged out (tokens revoked): {user.email} (tv={new_epoch})")
+    logger.info(
+        "User logged out (tokens revoked)",
+        extra={"user_id": user.id, "email": user.email, "token_version": new_epoch},
+    )
     return {"status": "logged_out"}
 
 
