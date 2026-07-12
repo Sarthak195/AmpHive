@@ -561,3 +561,38 @@ async def test_persist_telemetry_accepts_own_plug_and_enqueues_sample():
     assert plug.current_power_w == 100.0
     fake_tp.enqueue.assert_called_once_with(sample)
     MQTTManager._instance = None
+
+
+def test_send_plug_command_includes_local_ip_in_payload():
+    """ON/OFF carry the target plug's local_ip so a multi-plug gateway (TD#20)
+    actuates the right plug and can learn an unseen one from the command."""
+    MQTTManager._instance = None
+    mgr = MQTTManager(db_session_factory=lambda: None)
+    mgr.client = MagicMock()
+    mgr.client.publish.return_value.is_published.return_value = True
+
+    ok = mgr.send_plug_command("gw-1", 7, "ON", session_id=42, local_ip="10.0.0.7")
+
+    assert ok is True
+    args, _ = mgr.client.publish.call_args
+    assert args[0] == "amphive/gateways/gw-1/plugs/7/commands"
+    payload = json.loads(args[1])
+    assert payload["action"] == "ON"
+    assert payload["local_ip"] == "10.0.0.7"
+    assert payload["session_id"] == "42"
+    MQTTManager._instance = None
+
+
+def test_send_plug_command_omits_local_ip_when_absent():
+    """Without local_ip the key is omitted, so old single-plug firmware falls
+    back to its one provisioned target plug (backward-safe)."""
+    MQTTManager._instance = None
+    mgr = MQTTManager(db_session_factory=lambda: None)
+    mgr.client = MagicMock()
+    mgr.client.publish.return_value.is_published.return_value = True
+
+    mgr.send_plug_command("gw-1", 7, "OFF")
+
+    args, _ = mgr.client.publish.call_args
+    assert "local_ip" not in json.loads(args[1])
+    MQTTManager._instance = None

@@ -52,11 +52,14 @@ Legend: ✅ present · 🟡 partial · ❌ absent.
 5. **No tax invoice / receipt.** Indian commercial charging must issue a
    GST invoice; AmpHive produces neither an invoice nor a formal per-session
    receipt (history shows energy + coins only). Blocks real-money operation.
-6. **No CPO payout / settlement.** Money flows driver → platform and stops there.
-   There is no revenue-share, withdrawal, or settlement ledger to pay the host —
-   [requirements.md §5.1](../requirements.md) promises CPOs can "withdraw
-   earnings," but no code models it. Without it the two-sided marketplace has only
-   one side.
+6. **CPO payout / settlement — backend ledger now exists, manual settlement
+   only.** Money still flows driver → platform, but a `Payout` ledger now
+   tracks what's owed back to each CPO (`GET /api/cpo/earnings`,
+   `GET`/`POST /api/cpo/payouts`, admin `POST .../mark_paid`) — closing
+   [requirements.md §5.1](../requirements.md)'s "withdraw earnings" promise
+   at the record-keeping level. There is **no bank/UPI/payment-gateway
+   integration**: the admin marks a payout PAID after transferring funds
+   out-of-band, and there is **no CPO-portal UI** yet (backend/API only).
 
 ---
 
@@ -142,7 +145,7 @@ Benchmarked against ChargePoint/Statiq/Kazam operator dashboards.
 | CSV / Excel export of sessions & revenue | ❌ (specs §4 want it) | Should-do |
 | Configurable pricing / tariff UI | ❌ (no price model) | Should-do |
 | Tax / GST configuration | ❌ | Should-do |
-| Payout / earnings withdrawal | ❌ (specs §5.1 promise it) | Should-do |
+| Payout / earnings withdrawal | 🟡 backend ledger + endpoints (`Payout`, manual settlement); no CPO-portal UI yet | Should-do (UI) |
 | Remote diagnostics / fault console | ❌ (plug has a `maintenance` status enum, no workflow) | Should-do |
 | Maintenance-mode toggle per plug | 🟡 enum exists, unused | Should-do |
 | Bulk plug provisioning (CSV) | ❌ (specs §4 want it) | Aspirational |

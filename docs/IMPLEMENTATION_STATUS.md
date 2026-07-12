@@ -27,7 +27,9 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 | Razorpay webhook auto-credit | ✅ | Credits coins on `payment.captured`; atomic + idempotent vs. `/verify` (dedupes on the UNIQUE `razorpay_payment_id` via `IntegrityError`). Money columns are `Numeric(12,2)`/Decimal (2026-07-06). |
 | Wallet debit on stop + ledger | ✅ | Row-locked (`SELECT ... FOR UPDATE`) in stop/verify/webhook paths |
 | Prepaid protection: auto-stop on balance exhaustion | ✅ | On each telemetry write, if the accrued energy cost (`kwh × COINS_PER_KWH`) reaches the driver's wallet balance, the session is auto-stopped via the shared `finalize_charging_session` path (own txn, row-locked, race-safe with a user stop / the reaper). Caps free charging past a drained wallet to ≤ one telemetry interval. Env-toggle `AUTO_STOP_ON_BALANCE_EXHAUSTED` (default on). Tests in `test_mqtt_manager.py`. |
+| Driver notifications (feed + Socket.io + Web Push) | ✅ | 2026-07-11: `notifications`/`push_subscriptions` tables (Alembic `0007`), `services/notifications.py` (persist → Socket.io user room → VAPID Web Push via `pywebpush`, dead subscriptions pruned on 404/410). Emit points: every session stop (user/auto-stop/reaper/safety cutoff), low balance once per session (`LOW_BALANCE_WARN_FRACTION`, default 0.8), gateway-offline mid-session, top-up credit. Endpoints `/api/notifications*` (feed + read + push-subscription CRUD). **Behavior change:** `THERMAL_CUTOFF`/`OVERCURRENT_CUTOFF` alarms now finalize the plug's ACTIVE session immediately (bills recorded energy, frees the plug) instead of leaving it for the reaper. Tests in `test_notifications.py`. **Verified live in prod 2026-07-11** (migration `0007` applied at startup; billed fake-plug session #24 → `session_stopped` notification with the exact receipt figures (0.234 kWh / 1.17 coins / 497.79 left), unread_count 1 → read → 0; push public-key endpoint `enabled:true`). Browser-side push delivery needs a manual browser opt-in — not yet exercised. |
 | Direct Mode Tapo endpoints | ✅ | Gated by `DIRECT_MODE`; lib or relay mode |
+| CPO payout / settlement ledger | 🟡 | **Record-keeping only — no bank/UPI/payment-gateway integration.** `Payout` model (Alembic `0009_payouts`) + `services/payouts.py` compute a tenant's gross/fee/net earnings (`SUM(coins_spent)` of its COMPLETED sessions, single aggregate query on the already-denormalized `charging_sessions.tenant_id`) and a rolling settlement watermark (`MAX(period_end)` over non-CANCELLED payouts). `GET /api/cpo/earnings` (lifetime + unsettled), `POST`/`GET /api/cpo/payouts` (request/list; 400 if nothing unsettled, 409 if a request is already pending, race-safe via a `SELECT ... FOR UPDATE` tenant-row lock so concurrent requests can't double-settle the same window), admin-only `POST .../mark_paid`, and owner-or-admin `POST .../cancel` (frees the window). No CPO-portal UI yet (backend/API only) — closes [requirements.md §5.1](../requirements.md)'s "withdraw earnings" promise at the record-keeping level; see [MARKET_GAP_ANALYSIS.md](MARKET_GAP_ANALYSIS.md) §1.6/§7. |
 
 ### Frontend
 | Capability | Status | Notes |
@@ -42,6 +44,7 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 | Razorpay top-up flow | ✅ | CDN script + `window.Razorpay`; key comes from backend order. Formats and displays decimal coin balances. |
 | Pricing clarity | ✅ | `GET /api/config` (public) feeds a `ConfigProvider`; Home shows the tariff (`coins_per_kwh`) + what the driver's balance covers (≈ kWh) with a top-up nudge below the minimum, and the session monitor reads the rate from config instead of hardcoding it. The session-start minimum is now env-driven (`MIN_START_BALANCE_COINS`) and the 402 message matches the displayed number (2026-07-10). |
 | Low-balance live warning | ✅ | The session monitor warns (with remaining coins ≈ kWh) as accrued cost nears the wallet balance, pairing with the backend auto-stop so the driver sees it coming. Tests in `SessionMonitor.test.jsx`. |
+| Driver notification bell + Web Push opt-in | ✅ | 2026-07-11: navbar `NotificationBell` — unread badge, dropdown feed (`GET /api/notifications`), live prepend from the Socket.io `notification` user-room event, mark-read/mark-all, and an enable-push flow (permission → `sw.js` service worker → `pushManager.subscribe` with the backend-derived VAPID key). `frontend/public/sw.js` is push-only (no fetch interception). Tests in `NotificationBell.test.jsx`. |
 | Post-session receipt | ✅ | `finalize_charging_session` now returns a full receipt (plug name, energy, peak power, duration, coins charged + any forgiven shortfall, balance before → after, timestamps, stop reason); the Session page shows a `SessionReceipt` card on stop (with an auto-stop notice when applicable) and refreshes the wallet. **Verified live end-to-end 2026-07-10** — a real billed session on the fake plug (0.101 kWh → 0.51 coins, balance 499.47 → 498.96, reconciled in the ledger). Tests in `SessionReceipt.test.jsx`. |
 | Charger groups (join/list) | ✅ | |
 | CPO operator portal (setup, dashboard, plugs, groups, sessions) | ✅ | `pages/cpo/*` behind `CpoProtectedRoute`; charts via `recharts` |
@@ -59,7 +62,7 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 | **Unauthorized physical-on guard (fw ≥ 1.5.0)** | ✅ | The relay ON with no active session (physical button / Tapo app / stale NVS resume) is forced OFF locally every poll and alarmed once per episode (`UNAUTHORIZED_ON`, rising-edge). Uses the plug's real `device_on` (previously read but discarded). **Live on the real gateway 2026-07-10** (OTA'd to `1.5.0-direct`); the backend ingests the alarm end-to-end (verified in prod). The remote out-of-band physical-press trigger itself is unit-tested + by-construction (no LAN path to press the button remotely). |
 | **Richer telemetry: relay state + trapezoidal energy (fw ≥ 1.5.0)** | ✅ | Telemetry now carries the actual `relay` (device_on) state alongside derived `current`/nominal `voltage`; the driver-side kWh integrator switched from left-rectangle to the **trapezoidal rule** (averages consecutive power samples) for lower error on ramping loads at the 10 s cadence. **Verified on the wire 2026-07-10** (real gateway telemetry shows `"relay":false`). |
 | `microlink` Tailscale client (Noise/ts2021, DERP, DISCO, STUN, WG) | 🟡 | **Demoted to legacy transport** (`AMPHIVE_DIRECT_MQTT=0`): works for full-cone NATs, but symmetric NAT defeats DISCO hole-punching (root-caused 2026-07-09) — the reason for the direct-MQTT pivot. Kept compilable for rollback/comparison. |
-| MQTT control loop + topic contract | 🟡 | Matches backend topics. **2026-07-06 audit: single-plug only** — `main.c` has one `target_plug_ip`/`active_session` and `tapo_protocol.c` one global KLAP session + energy integrator, so on a gateway with >1 plug a command for plug B toggles plug A and telemetry is misattributed. Multi-plug needs a per-plug state table + instance-based KLAP driver. (The software **AmpHive Agent** already handles multiple plugs per gateway — this limit is ESP32-firmware-only.) (§3.50, TD#20, SEC §8.5) |
+| MQTT control loop + topic contract | ✅ | Matches backend topics. **Multi-plug (TD#20), shipped fw 1.7.1-direct, verified on-device 2026-07-12**: `main.c` keeps a `plugs_mutex`-guarded per-plug slot table (each slot = DB `plug_id` + LAN IP + per-plug `tapo_plug_t` KLAP context + its own session/watchdog state) and `tapo_protocol.c` moved the KLAP session and energy integrator into that per-plug context, so a command for plug B can no longer actuate plug A and telemetry is published under each plug's own id. The gateway learns each plug's IP from the `local_ip` the backend ships on ON/OFF (no on-device roster), and pre-registers its provisioned plug at boot so idle telemetry flows immediately (the liveness gate stays fresh — a 1.7.0 regression fixed in 1.7.1). **Single-plug charging regression verified end-to-end on the real gateway** (OTA to 1.7.1, billed session: 0.014 kWh → 0.07 coins, ledger reconciled); two-real-plug validation still needs a second unit. (§3.50, TD#20, SEC §8.5) |
 | Captive portal provisioning | ✅ | `AmpHive_Setup_XXXX` → NVS → reboot. **Locked down fw 1.6.0** (SEC §8.1 closed): WPA2 AP + `/save` gated by a per-device setup code (NVS-persisted, printed over serial for the unit label), AP-only interface, 10-min idle timeout → reboot/STA retry. **Live on the real gateway 2026-07-11** (OTA `1.5.0-direct` → signed `1.6.0-direct`, rollback cancelled); the locked portal itself is verified by construction/build only — exercising it needs physical access to force a Wi-Fi-loss fallback. |
 | Edge watchdogs (duration/energy/thermal/over-current) | ✅ | Thermal + over-current now use the plug's `overheat_status`/`overcurrent_status` flags (the P110 has no °C sensor) |
 | Over-current cutoff | ✅ | Enforced via the plug's `overcurrent_status` flag → local OFF + `OVERCURRENT_CUTOFF` alarm |
@@ -402,13 +405,29 @@ audit merged; statuses below are as of 2026-07-11.*
     guarded with a warn-and-drop path; non-finite values (NaN/inf) are
     rejected too. A malformed reading now logs a warning instead of throwing
     inside the paho callback. (TD#25)
-50. **[Open] ESP32 firmware is single-plug.** `main.c` (`target_plug_ip`,
-    `active_session`, `active_plug_id`, `telemetry_interval_ms`) and
-    `tapo_protocol.c` (global `s_sess`, `s_energy_wh`) are single-instance:
-    commands for a second plug on the same gateway actuate the first, and
-    telemetry is published under the last-commanded id. The data model allows
-    many plugs per gateway, and the software AmpHive Agent already drives
-    multiple plugs — this is firmware-only. (TD#20, SEC §8.5)
+50. **[Resolved 2026-07-12 — code-complete + builds clean, on-device verify
+    pending] ESP32 firmware was single-plug.** Was: `main.c` (`target_plug_ip`,
+    `active_session`, `active_plug_id`) and `tapo_protocol.c` (global `s_sess`,
+    `s_energy_wh`) were single-instance, so commands for a second plug actuated
+    the first and telemetry was published under the last-commanded id. Fixed:
+    `main.c` now holds a `plugs_mutex`-guarded per-plug slot table and
+    `tapo_protocol.c` exposes a per-plug `tapo_plug_t` context (its own KLAP
+    session + NVS-persisted energy meter `wh_<plug_id>`); `session_nvs` persists
+    **all** per-plug sessions (one atomic blob, each carrying `plug_id` +
+    `local_ip`) so crash recovery restores every plug. The gateway learns a
+    plug's IP from the `local_ip` the backend now ships on ON/OFF
+    (`send_plug_command(..., local_ip=…)`) — no on-device roster, keeping the
+    per-gateway broker ACLs and the backend `plug.gateway_id` check intact
+    (SEC §8.5). **Regression caught + fixed on-device 2026-07-12:** the first
+    build (1.7.0) dropped the pre-multi-plug "poll the provisioned plug from
+    boot" behaviour, so a session-less gateway published no idle telemetry and
+    fell out of the liveness window (session starts 409'd "gateway offline").
+    Fixed in **1.7.1** by pre-registering the provisioned plug at boot
+    (provisional id `1`, corrected to the backend's real id by IP-adoption on the
+    first command). **Single-plug path then verified end-to-end on the real
+    gateway** (OTA `1.7.0`→`1.7.1`, telemetry resumed, billed session 0.014 kWh →
+    0.07 coins, balance reconciled). Two-real-plug behaviour still needs a second
+    unit. (TD#20, SEC §8.5)
 51. **[Resolved 2026-07-11] Sessions startable on OFFLINE/MAINTENANCE plugs.**
     `start_charging_session` now 409s on any non-`AVAILABLE` status (OCCUPIED
     keeps its "in use" message; OFFLINE/MAINTENANCE get "out of service").
@@ -442,9 +461,30 @@ audit merged; statuses below are as of 2026-07-11.*
     gateway staleness (read-time `gateway_is_live` + `gateway_online` in the
     driver API + session reaper — TD#27), the shared-`Event` latency nit
     (closed by retiring SSE 2026-07-07 — TD#32), registration validation
-    (`EmailStr` + password rule, 2026-07-11 — TD#30), and the portal input CSS
+    (`EmailStr` + password rule, 2026-07-11 — TD#30), the portal input CSS
     (`box-sizing:border-box`, fw 1.6.0 — the `width:100%%` diagnosis was
-    wrong: the HTML is printf-formatted, so `%%` already rendered as `%`).
-    Still open: unstructured stdout-only logging (no correlation ids — TD#28),
-    no CPO admin audit log (TD#26), and the portal Wi-Fi/plug reachability
-    pre-check (TD#31, second half). (TD#26–31)
+    wrong: the HTML is printf-formatted, so `%%` already rendered as `%`),
+    **backend structured logging** (2026-07-12 — TD#28, backend half):
+    `backend/logging_config.py` installs a JSON-lines formatter on the root
+    logger (`ts`/`level`/`logger`/`msg`/`correlation_id` + structured `extra`
+    fields; env `LOG_LEVEL`/`LOG_FORMAT`), a `correlation_id` ContextVar +
+    `logging.Filter` stamp every record, and a FastAPI middleware
+    (`backend/main.py`) binds it from/echoes it to `X-Request-ID` per
+    request — tracing an HTTP request through to the MQTT command it
+    triggers for same-task calls (the paho callback thread and background
+    services log `-`). Hot-path f-strings converted in `routers/auth.py`,
+    `routers/sessions.py`, `services/session_lifecycle.py`,
+    `services/mqtt_manager.py`. The broker log is now also mirrored to a file
+    on the previously-unused `mosquitto_log` volume (durable across container
+    recreation) with the primary stdout stream size/count-bounded via the
+    compose `logging:` driver. Tests: `backend/tests/test_logging.py`.
+    And the **CPO admin audit log** (2026-07-12 — TD#26): a new `audit_logs`
+    table + `services/audit.py` (`record_audit`/`try_record_audit`, non-fatal
+    — a write failure is logged, never breaks the admin action) records
+    gateway/plug/group create, plug status change, group delete, and
+    access-code regen with actor/tenant/target, readable via
+    `GET /api/cpo/audit`. Gateway/plug **delete** are pre-named in the action
+    taxonomy but have no endpoint yet to hook (no such CPO routes exist).
+    Still open: firmware `ESP_LOGI` remains serial-only (no log topic —
+    TD#28, firmware half), and the portal Wi-Fi/plug reachability pre-check
+    (TD#31, second half). (TD#26, TD#28, TD#31)

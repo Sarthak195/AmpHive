@@ -15,7 +15,7 @@ import enum
 from datetime import datetime
 from typing import List, Optional
 from decimal import Decimal
-from sqlalchemy import CheckConstraint, Column, Integer, BigInteger, String, Float, Numeric, Boolean, ForeignKey, DateTime, Enum as SQLEnum, Index, text
+from sqlalchemy import CheckConstraint, Column, Integer, BigInteger, String, Float, Numeric, Boolean, ForeignKey, DateTime, Enum as SQLEnum, Index, Text, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 class Base(DeclarativeBase):
@@ -336,4 +336,179 @@ class GatewayEvent(Base):
     __table_args__ = (
         Index("idx_gateway_events_tenant_created", "tenant_id", "created_at"),
         Index("idx_gateway_events_gateway_created", "gateway_id", "created_at"),
+    )
+
+
+# --- CPO Admin Audit Trail ---
+
+class AuditLog(Base):
+    """
+    Record of CPO admin actions in this multi-tenant billing system: gateway/
+    plug/group create-delete, status changes, and access-code regeneration
+    (TD#26 — there was previously no accountability trail for admin actions).
+    Written by services/audit.py (record_audit / try_record_audit), called
+    from routers/cpo.py after each mutating admin action's own commit has
+    already landed. Read via GET /api/cpo/audit.
+
+    Design notes mirror GatewayEvent:
+    - action / target_type are plain Strings, not PG enums: the action
+      taxonomy (e.g. "gateway.create", "plug.status_change",
+      "access_code.regen") is expected to grow without a schema migration.
+    - tenant_id is NOT NULL + CASCADE, matching Gateway/ChargingSession/
+      ChargerGroup/GatewayEvent — deleting a tenant deletes its audit trail
+      along with everything else it owns.
+    - actor_user_id is nullable + SET NULL: the acting user's account must
+      stay deletable without erasing the audit trail (same rationale as
+      LedgerTransaction.session_id's nullable-on-delete).
+    - target_id is a String even though gateway ids are natively strings and
+      plug/group ids are ints — one column that fits either FK'd resource
+      without a polymorphic-FK setup.
+    - detail is free-form Text, not a fixed-shape column: different actions
+      carry different context (e.g. an old -> new status transition).
+    - No relationship() back-refs on Tenant/User: like TelemetryReading and
+      GatewayEvent, this is a high-cardinality append-only log that should
+      never be a lazy-loadable collection.
+    """
+    __tablename__ = "audit_logs"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    actor_user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    # e.g. "gateway.create", "gateway.delete", "plug.create", "plug.delete",
+    # "plug.status_change", "group.create", "group.delete", "access_code.regen"
+    action: Mapped[str] = mapped_column(String(64), nullable=False)
+    # e.g. "gateway", "plug", "group"
+    target_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    target_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    detail: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+
+    __table_args__ = (
+        Index("idx_audit_logs_tenant_created", "tenant_id", "created_at"),
+    )
+
+
+# --- Driver Notifications ---
+
+class Notification(Base):
+    """
+    Per-user notification feed (drivers first; the CPO alarm feed stays on
+    gateway_events). Written by services/notifications.py at the session
+    lifecycle / wallet / safety emit points, delivered live over Socket.io
+    (user room) + Web Push, and listed by GET /api/notifications.
+
+    Design notes mirror GatewayEvent:
+    - type/severity are plain Strings, not PG enums — the set evolves without
+      a schema migration ("session_stopped", "low_balance", "charger_offline",
+      "safety_cutoff", "topup_credited", ...).
+    - plug_id/session_id are nullable SET NULL context refs: deleting a plug
+      or session must not erase a user's notification history.
+    - read (not "acknowledged") — driver-facing wording; flipping it hides the
+      row from the unread badge without deleting the audit trail.
+    """
+    __tablename__ = "notifications"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    type: Mapped[str] = mapped_column(String(32), nullable=False)
+    severity: Mapped[str] = mapped_column(String(16), default="info", nullable=False)
+    title: Mapped[str] = mapped_column(String(120), nullable=False)
+    body: Mapped[str] = mapped_column(String(500), nullable=False)
+    plug_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("plugs.id", ondelete="SET NULL"), nullable=True)
+    session_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("charging_sessions.id", ondelete="SET NULL"), nullable=True)
+    read: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+
+    __table_args__ = (
+        # Feed query: newest N for a user; unread-count query filters read=false.
+        Index("idx_notifications_user_created", "user_id", "created_at"),
+    )
+
+
+class PushSubscription(Base):
+    """
+    A browser Web-Push subscription (one row per browser/device the user
+    enabled push on). endpoint is the push service URL and is globally unique
+    by construction; p256dh/auth are the client keys pywebpush encrypts
+    against. Rows are pruned when the push service reports the subscription
+    gone (404/410) or the user disables push.
+    """
+    __tablename__ = "push_subscriptions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    endpoint: Mapped[str] = mapped_column(String(1024), unique=True, nullable=False)
+    p256dh: Mapped[str] = mapped_column(String(255), nullable=False)
+    auth: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+
+
+# --- CPO Payout / Settlement Ledger ---
+#
+# Record-keeping only: there is NO bank/UPI/payment-gateway integration here.
+# A CPO requests a payout of its unsettled driver-coin earnings (snapshotted
+# into a REQUESTED row); the platform operator (admin) marks it PAID once the
+# transfer has happened out-of-band (bank/UPI, outside this app). This is the
+# other half of the money loop from the driver-side Razorpay top-up — see
+# services/payouts.py for the earnings/watermark math and routers/cpo.py for
+# the endpoints.
+
+class PayoutStatus(str, enum.Enum):
+    REQUESTED = "requested"
+    PAID = "paid"
+    CANCELLED = "cancelled"
+
+
+class Payout(Base):
+    """
+    A settlement snapshot for one tenant over one window [period_start,
+    period_end): the gross coins collected from that tenant's COMPLETED
+    sessions ending in the window, the platform's cut, and the net owed to
+    the CPO. Windows are computed from a rolling per-tenant watermark (see
+    services.payouts.tenant_settlement_watermark) — MAX(period_end) over the
+    tenant's non-CANCELLED payouts — so consecutive requests cover disjoint,
+    contiguous ranges and a CANCELLED payout frees its window for a later
+    request.
+
+    Status lifecycle: REQUESTED -> PAID (admin marks paid, out-of-band
+    transfer already happened) or REQUESTED -> CANCELLED (CPO or admin frees
+    the window without paying). Both transitions are made under a row lock
+    (SELECT ... FOR UPDATE on this row) with the current status re-checked,
+    so a double mark_paid/cancel (or a race between the two) settles exactly
+    once — mirrors the finalize_charging_session double-stop guard. Terminal
+    states (PAID/CANCELLED) never transition further. The REQUESTED-payout
+    uniqueness-per-tenant check and the watermark read that seeds a new
+    request are themselves serialized by row-locking the tenant (see
+    routers/cpo.py) so two concurrent requests can't double-settle the same
+    window.
+
+    Design notes mirror GatewayEvent/TelemetryReading: no relationship()
+    back-refs on Tenant/User — this is an append-mostly financial log that
+    should never be a lazy-loadable collection.
+    """
+    __tablename__ = "payouts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    # Half-open settlement window [period_start, period_end) this payout
+    # covers, so a boundary timestamp can never be double-counted across two
+    # payouts (see services.payouts.sum_completed_session_coins).
+    period_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    period_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # Money: NUMERIC(12,2) -> Decimal, via services.money.to_money (see the
+    # money note in that module). platform_fee_coins + net_coins == gross_coins.
+    gross_coins: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    platform_fee_coins: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    net_coins: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    status: Mapped[PayoutStatus] = mapped_column(SQLEnum(PayoutStatus, name="payout_status", values_callable=lambda x: [e.value for e in x]), default=PayoutStatus.REQUESTED, nullable=False)
+    requested_by_user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+    paid_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # Composite covers both the "does tenant X have a REQUESTED payout"
+    # existence check and plain tenant-scoped listing (tenant_id is the
+    # leading column, so it also serves tenant_id-only lookups).
+    __table_args__ = (
+        Index("idx_payouts_tenant_status", "tenant_id", "status"),
     )

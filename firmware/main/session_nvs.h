@@ -6,59 +6,55 @@
 #include "esp_err.h"
 
 #define SESSION_ID_MAX_LEN 32
+#define PLUG_IP_MAX_LEN    16   /* "255.255.255.255" + NUL */
+
+/* Max concurrent per-plug sessions a single gateway persists for crash
+ * recovery. main.c sizes its plug slot table to this too, so they can't
+ * diverge (a gateway with more plugs than this simply won't crash-recover the
+ * overflow ones — the backend session reaper still finalises them). */
+#define SESSION_NVS_MAX_PLUGS 4
 
 /**
- * @brief Parameters for an active charging session, persisted in NVS.
+ * @brief Parameters for one active charging session, persisted in NVS.
  *
- * Stored in the "session" NVS namespace so a reboot/crash can recover
- * the in-flight session and continue enforcing safety limits locally.
+ * Multi-plug (TD#20): a gateway can run several plugs, so crash recovery must
+ * restore *each* plug's session AND the plug's `local_ip` (the device learns
+ * IPs from the backend ON command, which is gone after a reboot — without the
+ * IP it couldn't re-drive the plug to keep enforcing the watchdog). The whole
+ * set is stored as one blob in the "session" namespace so a save is atomic.
  */
 typedef struct {
-    bool     active;                        /**< true while a session is running */
-    char     session_id[SESSION_ID_MAX_LEN]; /**< backend session ID (may be empty) */
-    uint32_t start_time_s;                  /**< tick-derived start time (seconds) */
-    uint32_t max_duration_s;                /**< max allowed duration from ON cmd */
-    uint32_t max_kwh_mwh;                   /**< max_kwh × 1000 (milli-Wh integer) */
-    uint32_t start_energy_mwh;              /**< starting kWh × 1000 */
+    bool     active;                          /**< true while a session is running */
+    int      plug_id;                         /**< DB plug id this session drives */
+    char     local_ip[PLUG_IP_MAX_LEN];       /**< plug LAN IP (to re-drive on recovery) */
+    char     session_id[SESSION_ID_MAX_LEN];  /**< backend session ID (may be empty) */
+    uint32_t start_time_s;                    /**< tick-derived start time (seconds) */
+    uint32_t max_duration_s;                  /**< max allowed duration from ON cmd */
+    uint32_t max_kwh_mwh;                      /**< max_kwh × 1000 (milli-Wh integer) */
+    uint32_t start_energy_mwh;                /**< starting kWh × 1000 */
 } session_params_t;
 
 /**
- * @brief Persist the current session parameters to NVS.
+ * @brief Persist the full set of active sessions to NVS (atomic replace).
  *
- * Called immediately after a session is started (ON command received and
- * the plug is successfully turned on).
+ * Called whenever any plug's session state changes (start / stop / watchdog
+ * cutoff). Pass every currently-active session; anything not in the array is
+ * dropped from NVS. `count` is clamped to SESSION_NVS_MAX_PLUGS.
  *
- * @param params Pointer to the session parameters to store
+ * @param arr   Array of active session params (only `active` entries need be included)
+ * @param count Number of entries in `arr`
  * @return ESP_OK on success
  */
-esp_err_t session_nvs_save(const session_params_t *params);
+esp_err_t session_nvs_save_all(const session_params_t *arr, int count);
 
 /**
- * @brief Load a previously persisted session from NVS.
+ * @brief Load all persisted active sessions from NVS (for crash recovery).
  *
- * Called on boot (after tapo_init) to check for crash recovery.
- * If no active session is stored, params->active will be false.
- *
- * @param params Pointer to receive the loaded session parameters
- * @return ESP_OK on success (even if no active session — check params->active)
+ * @param arr        Caller buffer to receive the sessions
+ * @param max        Capacity of `arr`
+ * @param out_count  Set to the number of sessions written (0 if none)
+ * @return ESP_OK on success (even if none — check *out_count)
  */
-esp_err_t session_nvs_load(session_params_t *params);
-
-/**
- * @brief Clear the persisted session from NVS.
- *
- * Called on normal session stop (OFF command) and on all watchdog cutoffs
- * (duration, energy, thermal).
- *
- * @return ESP_OK on success
- */
-esp_err_t session_nvs_clear(void);
-
-/**
- * @brief Quick check whether an active session exists in NVS.
- *
- * @return true if NVS contains an active session record
- */
-bool session_nvs_has_active(void);
+esp_err_t session_nvs_load_all(session_params_t *arr, int max, int *out_count);
 
 #endif // SESSION_NVS_H
