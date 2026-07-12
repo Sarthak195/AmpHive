@@ -317,6 +317,47 @@ p {
   overflow: hidden;
 }
 
+/* Colored dot markers on the map (Available/In use/Offline) — see
+   components/MapComponent.jsx + utils/plugAvailability.js. `divIcon`
+   renders this HTML in place of Leaflet's default marker image. */
+.plug-marker-icon {
+  background: transparent;
+  border: none;
+}
+
+.plug-marker-dot {
+  display: block;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid hsla(0, 0%, 100%, 0.9);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+}
+
+/* Map availability legend (Home page) — mirrors the marker/badge colors,
+   with live counts that update as the filters above narrow the plug list. */
+.map-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 1.25rem;
+  margin-bottom: 0.75rem;
+  font-size: 0.85rem;
+  color: var(--color-text-secondary);
+}
+
+.map-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.map-legend-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
 /* --- Animations --- */
 
 @keyframes pulse {
@@ -1141,6 +1182,13 @@ p {
   .modal-content {
     padding: 1.5rem;
   }
+
+  /* Filter bar is shared by the CPO plugs table and the driver Home page
+     (availability/group filters) — bump both selects to a real touch
+     target on phones. */
+  .filter-bar select {
+    min-height: 44px;
+  }
 }
 
 @media (max-width: 480px) {
@@ -1151,6 +1199,62 @@ p {
   .filter-bar {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .map-legend {
+    gap: 0.35rem 0.85rem;
+  }
+}
+
+/* --- QR Code Modal (CPO Plugs → per-plug deep-link QR) --- */
+
+/* QR codes need a light background + quiet zone to scan reliably even
+   though the rest of the UI is dark-themed. */
+.qr-code-box {
+  display: inline-flex;
+  background: #ffffff;
+  padding: 1rem;
+  border-radius: var(--radius-md);
+}
+
+.qr-print-area {
+  width: 100%;
+}
+
+/* Printing a QR modal should produce just the code + plug name/id — not
+   the navbar, sidebar, or modal chrome around it. Standard "print one
+   element" trick: hide everything, then re-reveal only the target subtree
+   (visibility, not display, so it isn't clipped by hidden ancestors) and
+   pin it to the top of the page. */
+@media print {
+  body * {
+    visibility: hidden;
+  }
+
+  .qr-print-area,
+  .qr-print-area * {
+    visibility: visible;
+  }
+
+  .qr-print-area {
+    position: absolute;
+    top: 0;
+    left: 0;
+    padding: 2rem;
+  }
+
+  .modal-overlay {
+    position: static;
+    background: none;
+  }
+
+  .navbar,
+  .cpo-sidebar,
+  .cpo-sidebar-toggle,
+  .modal-header,
+  .modal-actions,
+  .modal-close {
+    display: none !important;
   }
 }
 

@@ -27,14 +27,14 @@ green standalone instead of leaving a dangling 0006 fork for the orchestrator
 to untangle). Any further 0008/0010-style migrations still in flight get
 re-chained past this one at merge time same as always.
 
-Revision ID: 0009_disputes
-Revises: 0007_audit_log
+Revision ID: 0011_disputes
+Revises: 0010_tariffs
 Create Date: 2026-07-12
 """
 from alembic import op
 
-revision = "0009_disputes"
-down_revision = "0007_audit_log"
+revision = "0011_disputes"
+down_revision = "0010_tariffs"
 branch_labels = None
 depends_on = None
 

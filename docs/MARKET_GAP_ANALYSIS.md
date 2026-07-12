@@ -27,12 +27,16 @@ Legend: ✅ present · 🟡 partial · ❌ absent.
 
 ## 1. The headline gaps (highest user-visible impact)
 
-1. **No QR-code start.** Every mainstream Indian network (Statiq, Tata, Ather,
+1. **No QR-code start.** ~~Every mainstream Indian network (Statiq, Tata, Ather,
    ChargeZone) makes *scan-the-QR-on-the-charger* the primary start action.
-   AmpHive is **Plug-ID-typed-by-hand only** — [requirements.md](../requirements.md)
-   explicitly declines QR. That is a real UX disadvantage at a public bay; a QR
-   that deep-links to `/?plug=<id>` (prefilled, still auth-gated) would close it
-   cheaply without changing the security model.
+   AmpHive is **Plug-ID-typed-by-hand only**~~ **Closed 2026-07-12:** the CPO
+   Plugs page renders a printable per-plug QR (`qrcode.react`) encoding
+   `/?plug=<id>`; the phone's own camera resolves it (still no in-app
+   scanner, matching [requirements.md](../requirements.md)'s decision against
+   one) and Home prefills + focuses the Plug ID input, still fully
+   auth-gated — an anonymous scan is sent through `/login` and returned to
+   the same deep link afterward. Closes this cheaply without changing the
+   security model, as originally proposed here.
 2. **No native mobile app.** AmpHive is a React web SPA; the market ships
    iOS/Android apps (with the OS-level push, background session alerts, and
    "add to home screen" polish drivers expect). A PWA is the low-cost bridge.
@@ -48,11 +52,14 @@ Legend: ✅ present · 🟡 partial · ❌ absent.
 5. **No tax invoice / receipt.** Indian commercial charging must issue a
    GST invoice; AmpHive produces neither an invoice nor a formal per-session
    receipt (history shows energy + coins only). Blocks real-money operation.
-6. **No CPO payout / settlement.** Money flows driver → platform and stops there.
-   There is no revenue-share, withdrawal, or settlement ledger to pay the host —
-   [requirements.md §5.1](../requirements.md) promises CPOs can "withdraw
-   earnings," but no code models it. Without it the two-sided marketplace has only
-   one side.
+6. **CPO payout / settlement — backend ledger now exists, manual settlement
+   only.** Money still flows driver → platform, but a `Payout` ledger now
+   tracks what's owed back to each CPO (`GET /api/cpo/earnings`,
+   `GET`/`POST /api/cpo/payouts`, admin `POST .../mark_paid`) — closing
+   [requirements.md §5.1](../requirements.md)'s "withdraw earnings" promise
+   at the record-keeping level. There is **no bank/UPI/payment-gateway
+   integration**: the admin marks a payout PAID after transferring funds
+   out-of-band, and there is **no CPO-portal UI** yet (backend/API only).
 
 ---
 
@@ -61,8 +68,8 @@ Legend: ✅ present · 🟡 partial · ❌ absent.
 | Market feature | Seen in | AmpHive | Verdict |
 |----------------|---------|:-------:|---------|
 | Map of chargers | all | 🟡 Leaflet/OSM markers of available public plugs | — |
-| Real-time availability on map | all | 🟡 status flips to occupied; no free/in-use/offline legend or count | Should-do |
-| Filter by power / price / connector / amenities | ChargePoint, PlugShare, Statiq | ❌ | Should-do |
+| Real-time availability on map | all | ✅ (2026-07-12) markers color-coded Available/In use/Offline with a legend + live counts | — |
+| Filter by power / price / connector / amenities | ChargePoint, PlugShare, Statiq | 🟡 (2026-07-12) availability + group-name filters shipped; power/price/connector remain absent — **there is no power-rating (or price) column anywhere in the plug data model**, so those specific filters aren't buildable without a schema change first | Should-do (power/price columns) |
 | Search / autocomplete by location or Plug ID | most; specs §4 | ❌ (type exact Plug ID) | Should-do |
 | "Find nearest" + hand-off to Google/Apple Maps nav | all | ❌ | Should-do |
 | Favorites / saved chargers | ChargePoint, Tesla, PlugShare | ❌ | Should-do |
@@ -75,7 +82,7 @@ Legend: ✅ present · 🟡 partial · ❌ absent.
 
 | Market feature | Seen in | AmpHive | Verdict |
 |----------------|---------|:-------:|---------|
-| Configurable per-kWh tariff per site/CPO | all networks; specs §5.1, FL 1.2 | ❌ one global env rate | Should-do |
+| Configurable per-kWh tariff per site/CPO | all networks; specs §5.1, FL 1.2 | 🟡 backend live: `Tariff` model + resolution chain (plug → group → tenant default → env) snapshotted per session, CPO CRUD/assign API; no CPO-portal UI yet | Should-do |
 | Time-of-day / peak / off-peak pricing | ChargePoint, Tata, Statiq | ❌ | Aspirational |
 | Per-minute billing | ChargePoint, EA | ❌ | Aspirational |
 | Idle / occupancy fee (car parked, not charging) | Tesla, ChargePoint, EA; FL 1.2 | ❌ | Aspirational |
@@ -108,7 +115,7 @@ Legend: ✅ present · 🟡 partial · ❌ absent.
 |----------------|---------|:-------:|---------|
 | Remote start / stop from app | all | ✅ | — |
 | Live session telemetry (kW, kWh, cost, time) | all | ✅ Socket.io | — |
-| QR-scan to start | Indian norm | ❌ Plug-ID typed only | Should-do |
+| QR-scan to start | Indian norm | ✅ (2026-07-12) printable per-plug QR (CPO Plugs) deep-links to `/?plug=<id>`, prefilled + auth-gated on Home; Plug-ID typing still works too | — |
 | RFID / tap card to start | ChargePoint, EA | ❌ | By design (app-first) |
 | Reserve / book a charger ahead | Statiq, ChargeZone, Tata | ❌ | Should-do |
 | Scheduled / delayed start (charge off-peak) | Tesla, ChargePoint | ❌ | Aspirational |
@@ -138,9 +145,9 @@ Benchmarked against ChargePoint/Statiq/Kazam operator dashboards.
 | CSV / Excel export of sessions & revenue | ❌ (specs §4 want it) | Should-do |
 | Configurable pricing / tariff UI | ❌ (no price model) | Should-do |
 | Tax / GST configuration | ❌ | Should-do |
-| Payout / earnings withdrawal | ❌ (specs §5.1 promise it) | Should-do |
-| Remote diagnostics / fault console | ❌ (plug has a `maintenance` status enum, no workflow) | Should-do |
-| Maintenance-mode toggle per plug | 🟡 enum exists, unused | Should-do |
+| Payout / earnings withdrawal | 🟡 backend ledger + endpoints (`Payout`, manual settlement); no CPO-portal UI yet | Should-do (UI) |
+| Remote diagnostics / fault console | ✅ (2026-07-12) `/cpo/faults`: lists `gateway_events` (severity/unacknowledged filters), acknowledge, and a top strip of plugs currently in maintenance | — |
+| Maintenance-mode toggle per plug | ✅ (2026-07-12) `POST /api/cpo/plugs/{id}/maintenance` (`enter`/`clear`, audited); a THERMAL_CUTOFF/OVERCURRENT_CUTOFF alarm now auto-enters MAINTENANCE too | — |
 | Bulk plug provisioning (CSV) | ❌ (specs §4 want it) | Aspirational |
 | Dynamic load balancing across a site | ❌ (specs FL 4.1 want it) | Aspirational |
 | Carbon-offset / green metrics | ❌ (specs FL 1.2 mention it) | Nice-to-have |

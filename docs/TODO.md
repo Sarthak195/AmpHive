@@ -274,9 +274,17 @@ been fixed by the 2026-07-08…11 work — see the shipped sections below).*
       The overlay-key/anonymous-broker half of the original item was resolved
       2026-07-10 (direct MQTT: per-gateway creds + ACLs + TLS).
       (SEC §8.2/§8.4)
-- [ ] **[2026-07-06 audit] Driver notifications** — session start/stop, low
-      balance, plug offline, and safety cutoffs. The CPO side ships (alarm
-      events feed + ack); the driver side is still in-app-only. (TD#21 done)
+- [x] **[2026-07-06 audit] Driver notifications.** Done 2026-07-11 — per-user
+      `notifications` feed (`services/notifications.py` + Alembic `0007`)
+      written at every stop path (user/auto-stop/reaper/**safety cutoff** —
+      cutoff alarms now also *finalize* the session instead of leaving it to
+      the reaper), low-balance warning (once per session at
+      `LOW_BALANCE_WARN_FRACTION`, default 80%), charger-offline (LWT with an
+      ACTIVE session), and top-up credit. Delivered in-app (navbar bell +
+      Socket.io user rooms) **and via Web Push** (VAPID, `pywebpush`;
+      `frontend/public/sw.js`; keys in `.env`, push off gracefully when
+      unset). Email deferred (no SMTP provider). Endpoints under
+      `/api/notifications*` — see API_REFERENCE.md.
 - [x] **[2026-07-06 audit] Auth rate limiting.** Done 2026-07-11 — per-IP
       in-process sliding window on `/api/auth/login` + `/register`
       (429 + Retry-After; `LOGIN_RATE_LIMIT`/`REGISTER_RATE_LIMIT` env,

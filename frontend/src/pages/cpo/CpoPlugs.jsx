@@ -3,12 +3,15 @@
  * ====================================
  * CRUD interface for managing smart plugs across the CPO's gateways.
  * Features: plug table with status filters, add/edit modals, inline
- * status toggling between Available and Maintenance.
+ * status toggling between Available and Maintenance, and a per-plug QR
+ * code (2026-07-12) linking to the driver deep-link start (`/?plug=<id>`)
+ * for printing and posting at the charger.
  *
  * Data source: /api/cpo/plugs, /api/cpo/gateways, /api/cpo/groups
  */
 
 import { useState, useEffect, useCallback, useMemo } from 'react';
+import { QRCodeSVG } from 'qrcode.react';
 import CpoLayout from '../../components/CpoLayout';
 import api from '../../api/client';
 
@@ -54,6 +57,9 @@ const CpoPlugs = () => {
   const [editingPlug, setEditingPlug] = useState(null);
   const [formError, setFormError] = useState('');
   const [formLoading, setFormLoading] = useState(false);
+
+  // QR code modal — the plug currently being shown, or null when closed.
+  const [qrPlug, setQrPlug] = useState(null);
 
   // Add form fields
   const [addForm, setAddForm] = useState({
@@ -287,6 +293,13 @@ const CpoPlugs = () => {
                       >
                         Edit
                       </button>
+                      <button
+                        className="btn btn-ghost btn-sm"
+                        onClick={() => setQrPlug(plug)}
+                        title="Show the QR code that starts this plug"
+                      >
+                        🔳 QR
+                      </button>
                       {(plug.status === 'available' || plug.status === 'maintenance') && (
                         <button
                           className="btn btn-ghost btn-sm"
@@ -464,6 +477,56 @@ const CpoPlugs = () => {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* QR Code Modal — deep-links to the driver Home page's `?plug=`
+          prefill (Home.jsx / requirements.md still declines in-app QR
+          *scanning*; this is a printable code the CPO posts at the charger
+          that a phone camera resolves to a normal, auth-gated URL). Origin
+          is read fresh from window.location at render time — never
+          hardcoded — so this works unchanged on any deployment. */}
+      {qrPlug && (
+        <div className="modal-overlay" onClick={() => setQrPlug(null)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2>QR Code</h2>
+              <button className="modal-close" onClick={() => setQrPlug(null)}>✕</button>
+            </div>
+
+            <div className="qr-print-area flex flex-col items-center gap-3">
+              <div className="qr-code-box">
+                <QRCodeSVG
+                  value={`${window.location.origin}/?plug=${qrPlug.id}`}
+                  size={200}
+                  bgColor="#ffffff"
+                  fgColor="#0a0e14"
+                  level="M"
+                  marginSize={2}
+                />
+              </div>
+              <div className="text-center">
+                <p style={{ fontWeight: 600, color: 'var(--color-text-primary)', margin: 0 }}>{qrPlug.name}</p>
+                <p style={{ color: 'var(--color-text-muted)', fontSize: '0.85rem', margin: '0.15rem 0 0' }}>
+                  Plug ID: {qrPlug.id}
+                </p>
+                <p style={{ color: 'var(--color-text-muted)', fontSize: '0.75rem', wordBreak: 'break-all', margin: '0.5rem 0 0' }}>
+                  {window.location.origin}/?plug={qrPlug.id}
+                </p>
+              </div>
+            </div>
+
+            <p style={{ color: 'var(--color-text-muted)', fontSize: '0.8rem', textAlign: 'center', marginTop: '1rem' }}>
+              Scanning this opens AmpHive with the Plug ID prefilled — the driver still signs in and taps Start.
+            </p>
+
+            <div className="modal-actions">
+              <button type="button" className="btn btn-ghost" onClick={() => setQrPlug(null)}>Close</button>
+              <button type="button" className="btn btn-cpo" onClick={() => window.print?.()}>
+                🖨️ Print
+              </button>
+            </div>
           </div>
         </div>
       )}

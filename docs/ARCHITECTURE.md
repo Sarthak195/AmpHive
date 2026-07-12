@@ -160,7 +160,14 @@ is loaded via a CDN `<script>` and used through `window.Razorpay`. Home renders 
 **Leaflet/OpenStreetMap** map (`MapComponent`, `react-leaflet`) of available
 plugs — plug **coordinates are persisted** (`Plug.latitude`/`longitude`, falling
 back to the gateway's coords); markers use real coordinates and plugs without a
-known location are omitted (the old `Math.random()` fallback is gone).
+known location are omitted (the old `Math.random()` fallback is gone). Markers are
+color-coded by availability (Available/In use/Offline, `utils/plugAvailability.js`)
+with a legend + live counts, and availability/group-name filters narrow both the
+list and the map together. Visiting `/?plug=<id>` (e.g. from a QR code printed via
+`/cpo/plugs`) prefills and focuses the Plug ID start input — still fully
+auth-gated: `ProtectedRoute`/`CpoProtectedRoute` and this deep-link guard all stash
+the origin location as router `state.from` so `Login.jsx` returns the driver to it
+(query string included) after signing in, instead of always landing on `/`.
 
 **CPO operator portal** — a second set of pages under `frontend/src/pages/cpo/`
 (`CpoSetup`, `CpoDashboard`, `CpoPlugs`, `CpoGroups`, `CpoSessions`) sits behind

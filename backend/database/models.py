@@ -57,6 +57,23 @@ class Tenant(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+    # [Tariffs] The tenant-wide fallback tariff, used by services/pricing.py's
+    # resolve_rate_for_plug() when a plug has no tariff of its own and (if
+    # grouped) its charger group has none either. NULL = no tenant default
+    # configured yet -> resolution falls through to the global COINS_PER_KWH
+    # env var. ON DELETE SET NULL: deleting the referenced Tariff must not
+    # break the tenant row, just drop back a link in the resolution chain.
+    # use_alter breaks the tariffs<->tenants FK cycle for DDL sorting (tariffs
+    # already references tenants via tariffs.tenant_id): the back-reference is
+    # added via ALTER after both tables exist, otherwise create_all/drop_all
+    # (the DB-gated test fixtures) raise CircularDependencyError. Named to match
+    # the auto-generated name from the migration's inline REFERENCES clause.
+    default_tariff_id: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        ForeignKey("tariffs.id", ondelete="SET NULL", use_alter=True,
+                   name="tenants_default_tariff_id_fkey"),
+        nullable=True,
+    )
 
     # Relationships
     users: Mapped[List["User"]] = relationship("User", back_populates="tenant", cascade="all, delete-orphan")
@@ -150,6 +167,11 @@ class Plug(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
     # [P2] Link each plug to a charger group. NULL = ungrouped/legacy (visible to all users).
     group_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("charger_groups.id", ondelete="SET NULL"), nullable=True)
+    # [Tariffs] Per-plug pricing override. NULL = fall back to the plug's
+    # group tariff, then the tenant default, then the global COINS_PER_KWH env
+    # var — see services/pricing.py resolve_rate_for_plug(). ON DELETE SET
+    # NULL so deleting a Tariff just drops this plug back a link in the chain.
+    tariff_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("tariffs.id", ondelete="SET NULL"), nullable=True)
 
     # Relationships
     gateway: Mapped[Gateway] = relationship("Gateway", back_populates="plugs")
@@ -175,6 +197,15 @@ class ChargingSession(Base):
     last_telemetry_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     # Money: NUMERIC(12,2) → Decimal (energy_kwh/peak_power_w stay Float — measurements).
     coins_spent: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal("0.00"), nullable=False)
+    # [Tariffs] The coins-per-kWh rate resolved (services/pricing.py
+    # resolve_rate_for_plug) and SNAPSHOTTED at session start. Every billing
+    # path (finalize_charging_session, the mqtt_manager balance-exhaustion
+    # auto-stop, the live TelemetryStore cost calc) must read this instead of
+    # re-resolving, so a tariff edit or reassignment mid-session never
+    # retroactively changes what an in-flight or already-billed session is
+    # charged. NULL only for legacy sessions started before this column
+    # existed — those fall back to the global COINS_PER_KWH env var.
+    rate_coins_per_kwh: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
     status: Mapped[SessionStatus] = mapped_column(SQLEnum(SessionStatus, name="session_status", values_callable=lambda x: [e.value for e in x]), default=SessionStatus.ACTIVE, nullable=False)
 
     # Relationships
@@ -226,6 +257,11 @@ class ChargerGroup(Base):
     # access_code: shareable code for private groups (e.g. "SUNRISE2024").
     # NULL for public groups. Must be unique across the platform.
     access_code: Mapped[Optional[str]] = mapped_column(String(20), unique=True, nullable=True)
+    # [Tariffs] Group-level pricing override, used for any plug in this group
+    # that has no tariff of its own. NULL = fall back to the tenant default,
+    # then the global COINS_PER_KWH env var — see services/pricing.py
+    # resolve_rate_for_plug(). ON DELETE SET NULL, same rationale as Plug.tariff_id.
+    tariff_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("tariffs.id", ondelete="SET NULL"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
 
     # Relationships
@@ -387,6 +423,173 @@ class AuditLog(Base):
         Index("idx_audit_logs_tenant_created", "tenant_id", "created_at"),
     )
 
+
+# --- Driver Notifications ---
+
+class Notification(Base):
+    """
+    Per-user notification feed (drivers first; the CPO alarm feed stays on
+    gateway_events). Written by services/notifications.py at the session
+    lifecycle / wallet / safety emit points, delivered live over Socket.io
+    (user room) + Web Push, and listed by GET /api/notifications.
+
+    Design notes mirror GatewayEvent:
+    - type/severity are plain Strings, not PG enums — the set evolves without
+      a schema migration ("session_stopped", "low_balance", "charger_offline",
+      "safety_cutoff", "topup_credited", ...).
+    - plug_id/session_id are nullable SET NULL context refs: deleting a plug
+      or session must not erase a user's notification history.
+    - read (not "acknowledged") — driver-facing wording; flipping it hides the
+      row from the unread badge without deleting the audit trail.
+    """
+    __tablename__ = "notifications"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    type: Mapped[str] = mapped_column(String(32), nullable=False)
+    severity: Mapped[str] = mapped_column(String(16), default="info", nullable=False)
+    title: Mapped[str] = mapped_column(String(120), nullable=False)
+    body: Mapped[str] = mapped_column(String(500), nullable=False)
+    plug_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("plugs.id", ondelete="SET NULL"), nullable=True)
+    session_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("charging_sessions.id", ondelete="SET NULL"), nullable=True)
+    read: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+
+    __table_args__ = (
+        # Feed query: newest N for a user; unread-count query filters read=false.
+        Index("idx_notifications_user_created", "user_id", "created_at"),
+    )
+
+
+class PushSubscription(Base):
+    """
+    A browser Web-Push subscription (one row per browser/device the user
+    enabled push on). endpoint is the push service URL and is globally unique
+    by construction; p256dh/auth are the client keys pywebpush encrypts
+    against. Rows are pruned when the push service reports the subscription
+    gone (404/410) or the user disables push.
+    """
+    __tablename__ = "push_subscriptions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    endpoint: Mapped[str] = mapped_column(String(1024), unique=True, nullable=False)
+    p256dh: Mapped[str] = mapped_column(String(255), nullable=False)
+    auth: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+
+
+# --- CPO Payout / Settlement Ledger ---
+#
+# Record-keeping only: there is NO bank/UPI/payment-gateway integration here.
+# A CPO requests a payout of its unsettled driver-coin earnings (snapshotted
+# into a REQUESTED row); the platform operator (admin) marks it PAID once the
+# transfer has happened out-of-band (bank/UPI, outside this app). This is the
+# other half of the money loop from the driver-side Razorpay top-up — see
+# services/payouts.py for the earnings/watermark math and routers/cpo.py for
+# the endpoints.
+
+class PayoutStatus(str, enum.Enum):
+    REQUESTED = "requested"
+    PAID = "paid"
+    CANCELLED = "cancelled"
+
+
+class Payout(Base):
+    """
+    A settlement snapshot for one tenant over one window [period_start,
+    period_end): the gross coins collected from that tenant's COMPLETED
+    sessions ending in the window, the platform's cut, and the net owed to
+    the CPO. Windows are computed from a rolling per-tenant watermark (see
+    services.payouts.tenant_settlement_watermark) — MAX(period_end) over the
+    tenant's non-CANCELLED payouts — so consecutive requests cover disjoint,
+    contiguous ranges and a CANCELLED payout frees its window for a later
+    request.
+
+    Status lifecycle: REQUESTED -> PAID (admin marks paid, out-of-band
+    transfer already happened) or REQUESTED -> CANCELLED (CPO or admin frees
+    the window without paying). Both transitions are made under a row lock
+    (SELECT ... FOR UPDATE on this row) with the current status re-checked,
+    so a double mark_paid/cancel (or a race between the two) settles exactly
+    once — mirrors the finalize_charging_session double-stop guard. Terminal
+    states (PAID/CANCELLED) never transition further. The REQUESTED-payout
+    uniqueness-per-tenant check and the watermark read that seeds a new
+    request are themselves serialized by row-locking the tenant (see
+    routers/cpo.py) so two concurrent requests can't double-settle the same
+    window.
+
+    Design notes mirror GatewayEvent/TelemetryReading: no relationship()
+    back-refs on Tenant/User — this is an append-mostly financial log that
+    should never be a lazy-loadable collection.
+    """
+    __tablename__ = "payouts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    # Half-open settlement window [period_start, period_end) this payout
+    # covers, so a boundary timestamp can never be double-counted across two
+    # payouts (see services.payouts.sum_completed_session_coins).
+    period_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    period_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # Money: NUMERIC(12,2) -> Decimal, via services.money.to_money (see the
+    # money note in that module). platform_fee_coins + net_coins == gross_coins.
+    gross_coins: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    platform_fee_coins: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    net_coins: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    status: Mapped[PayoutStatus] = mapped_column(SQLEnum(PayoutStatus, name="payout_status", values_callable=lambda x: [e.value for e in x]), default=PayoutStatus.REQUESTED, nullable=False)
+    requested_by_user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+    paid_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # Composite covers both the "does tenant X have a REQUESTED payout"
+    # existence check and plain tenant-scoped listing (tenant_id is the
+    # leading column, so it also serves tenant_id-only lookups).
+    __table_args__ = (
+        Index("idx_payouts_tenant_status", "tenant_id", "status"),
+    )
+
+
+# --- Tariffs (per-CPO/per-site pricing) ---
+
+class Tariff(Base):
+    """
+    A named coins-per-kWh pricing plan a tenant (CPO) defines and assigns to
+    a plug, a charger group, or as the tenant's default — replacing the old
+    single global COINS_PER_KWH env var with per-CPO/per-site rates.
+
+    Resolution (services/pricing.py resolve_rate_for_plug), first match wins:
+        plug.tariff_id -> plug.group.tariff_id -> tenant.default_tariff_id
+        -> the global COINS_PER_KWH env var (legacy fallback)
+
+    The resolved rate is SNAPSHOTTED onto ChargingSession.rate_coins_per_kwh
+    at session start and never re-resolved for that session: editing a
+    Tariff's price_per_kwh, or reassigning a plug/group/tenant to a different
+    tariff, must not retroactively change the bill for a session already in
+    flight or already completed. All billing paths (finalize_charging_session,
+    the mqtt_manager balance-exhaustion auto-stop, the live TelemetryStore
+    cost calc) read the session's snapshot, not this table, directly.
+
+    No relationship() back-refs to Plug/ChargerGroup/Tenant: those tables also
+    hold a Tenant<->Tariff-style FK pair in the opposite direction
+    (Tenant.default_tariff_id -> Tariff.id vs. Tariff.tenant_id ->
+    Tenant.id), which SQLAlchemy can't auto-disambiguate into a relationship()
+    without explicit foreign_keys= wiring on both sides. Every call site
+    resolves via explicit `select(Tariff)...` queries instead (matching how
+    the rest of this codebase already reads Plug.group_id / ChargerGroup
+    without relying on lazy relationship attributes across the async
+    boundary).
+    """
+    __tablename__ = "tariffs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    # Money: NUMERIC(12,2) → Decimal, same convention as the wallet columns
+    # (services/money.to_money). Coins charged per kWh consumed under this plan.
+    price_per_kwh: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), onupdate=text("CURRENT_TIMESTAMP"), nullable=False)
 
 # --- Session Disputes / Refunds (coins-only remedy) ---
 

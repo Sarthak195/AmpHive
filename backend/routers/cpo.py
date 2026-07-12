@@ -21,22 +21,25 @@ from backend import state
 from backend.database.db import async_session_factory, get_db
 from backend.database.models import (
     AuditLog, ChargerGroup, ChargingSession, DisputeStatus, Gateway,
-    GatewayEvent, GatewayStatus, GroupMembership, LedgerTransaction, Plug,
-    PlugStatus, SessionDispute, SessionStatus, TelemetryReading, Tenant,
-    TransactionType, User, UserRole,
+    GatewayEvent, GatewayStatus, GroupMembership, LedgerTransaction,
+    Payout, PayoutStatus, Plug, PlugStatus, SessionDispute, SessionStatus,
+    TelemetryReading, Tenant, TransactionType, User, UserRole,
 )
 from backend.schemas import (
     AuthResponse, CpoDisputeResolveRequest, CpoGatewayCreateRequest,
     CpoGatewayOtaRequest, CpoGroupCreateRequest, CpoGroupUpdateRequest,
-    CpoPlugCreateRequest, CpoPlugUpdateRequest, CpoSetupRequest,
-    CreateOrderRequest, CreateOrderResponse, DirectPlugRequest,
-    DisputeResponse, GatewayEventResponse, GatewayRegisterRequest,
-    GroupResponse, JoinGroupRequest, LoginRequest, PlugRegisterRequest,
-    PlugResponse, RegisterRequest, SessionStartRequest, SessionStopRequest,
-    UserResponse, VerifyPaymentRequest,
+    CpoPlugCreateRequest, CpoPlugMaintenanceRequest, CpoPlugUpdateRequest,
+    CpoSetupRequest, CreateOrderRequest, CreateOrderResponse,
+    DirectPlugRequest, DisputeResponse, GatewayEventResponse,
+    GatewayRegisterRequest, GroupResponse, JoinGroupRequest, LoginRequest,
+    PlugRegisterRequest, PlugResponse, RegisterRequest,
+    SessionStartRequest, SessionStopRequest, UserResponse,
+    VerifyPaymentRequest,
 )
 from backend.services import payments as payment_service
 from backend.services.audit import try_record_audit
+
+from backend.services import payouts as payout_service
 from backend.services.auth import (
     create_access_token, decode_access_token, get_current_user,
     hash_password, verify_password,
@@ -538,6 +541,94 @@ async def cpo_update_plug(
         "name": plug.name,
         "plug_status": plug.status.value,
         "group_id": plug.group_id,
+    }
+
+
+@router.post("/api/cpo/plugs/{plug_id}/maintenance")
+async def cpo_plug_maintenance(
+    plug_id: int,
+    req: CpoPlugMaintenanceRequest,
+    user: User = Depends(require_role("cpo", "admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Operator maintenance workflow (fault console): explicitly put a plug into
+    MAINTENANCE or clear it back to AVAILABLE. Distinct from the general
+    status setter on PUT /api/cpo/plugs/{id} — this is the dedicated action
+    the fault console drives, and it always audits (action
+    `plug.maintenance_enter` / `plug.maintenance_clear`).
+
+    `clear` is refused (409) while the plug still has an ACTIVE session —
+    mirrors session-start's own 409 on a non-AVAILABLE plug, just from the
+    other direction: a plug can't be handed back into service out from under
+    a driver mid-charge.
+    """
+    action = (req.action or "").strip().lower()
+    if action not in ("enter", "clear"):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid action. Must be 'enter' or 'clear'.",
+        )
+
+    result = await db.execute(
+        select(Plug)
+        .join(Gateway, Plug.gateway_id == Gateway.id)
+        .where(and_(Plug.id == plug_id, Gateway.tenant_id == user.tenant_id))
+    )
+    plug = result.scalar_one_or_none()
+    if not plug:
+        raise HTTPException(status_code=404, detail="Plug not found or access denied.")
+
+    old_status = plug.status  # captured pre-mutation for the audit diff
+
+    if action == "enter":
+        plug.status = PlugStatus.MAINTENANCE
+    else:  # clear
+        active_result = await db.execute(
+            select(func.count())
+            .select_from(ChargingSession)
+            .where(and_(
+                ChargingSession.plug_id == plug_id,
+                ChargingSession.status == SessionStatus.ACTIVE,
+            ))
+        )
+        if active_result.scalar_one() > 0:
+            raise HTTPException(
+                status_code=409,
+                detail="Cannot clear maintenance: this plug has an active charging session.",
+            )
+        plug.status = PlugStatus.AVAILABLE
+
+    await db.commit()
+    await db.refresh(plug)
+
+    logger.info(
+        f"CPO plug maintenance '{action}': {plug.id} ({plug.name}) "
+        f"{old_status.value} -> {plug.status.value} by {user.email}"
+    )
+
+    detail = f"{old_status.value} -> {plug.status.value}"
+    if req.note:
+        detail += f"; note={req.note}"
+    await try_record_audit(
+        db,
+        tenant_id=user.tenant_id,
+        actor_user_id=user.id,
+        action=f"plug.maintenance_{action}",
+        target_type="plug",
+        target_id=plug.id,
+        detail=detail,
+    )
+
+    if plug.status != old_status:
+        from backend.services.socketio_manager import emit_plug_status
+        await emit_plug_status(plug.id, plug.status.value)
+
+    return {
+        "status": "updated",
+        "plug_id": plug.id,
+        "action": action,
+        "plug_status": plug.status.value,
     }
 
 
@@ -1235,6 +1326,456 @@ async def cpo_list_audit_log(
         }
         for entry, actor_email in result.all()
     ]
+
+# ===========================================================================
+# CPO Payout / Settlement Ledger
+# ===========================================================================
+# Manual settlement — RECORD-KEEPING ONLY. There is no bank/UPI/payment-
+# gateway integration: a CPO snapshots its unsettled coin earnings into a
+# REQUESTED payout, and the platform operator (admin) marks it PAID once the
+# transfer has happened out-of-band. See services/payouts.py for the
+# earnings/watermark math (requirements.md §5.1's "withdraw earnings" promise
+# — MARKET_GAP_ANALYSIS.md §1.6 / §7).
+# ===========================================================================
+
+
+def _require_tenant_id(user: User) -> int:
+    """Every /api/cpo/payouts* and /api/cpo/earnings route is tenant-scoped.
+    A 'cpo' always has a tenant_id (set by cpo_setup); a bare 'admin' with no
+    tenant attached hits this — same shape as cpo_setup's own checks."""
+    if user.tenant_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail="You are not associated with a tenant.",
+        )
+    return user.tenant_id
+
+
+def _payout_response(payout: Payout) -> dict:
+    return {
+        "id": payout.id,
+        "tenant_id": payout.tenant_id,
+        "period_start": payout.period_start.isoformat() if payout.period_start else None,
+        "period_end": payout.period_end.isoformat() if payout.period_end else None,
+        "gross_coins": float(payout.gross_coins),
+        "platform_fee_coins": float(payout.platform_fee_coins),
+        "net_coins": float(payout.net_coins),
+        "status": payout.status.value,
+        "requested_by_user_id": payout.requested_by_user_id,
+        "requested_at": payout.requested_at.isoformat() if payout.requested_at else None,
+        "paid_at": payout.paid_at.isoformat() if payout.paid_at else None,
+        "note": payout.note,
+    }
+
+
+@router.get("/api/cpo/earnings")
+async def cpo_earnings(
+    user: User = Depends(require_role("cpo", "admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Lifetime + unsettled earnings for the CPO's tenant: gross coins collected
+    from COMPLETED sessions, the platform's cut, and the net owed to the CPO
+    — plus the settlement watermark (unsettled = watermark -> now). This is
+    the read-only dashboard view; POST /api/cpo/payouts snapshots the
+    unsettled leg into a payout request.
+    """
+    tenant_id = _require_tenant_id(user)
+    summary = await payout_service.tenant_earnings_summary(db, tenant_id)
+
+    return {
+        "watermark": summary["watermark"].isoformat(),
+        "as_of": summary["now"].isoformat(),
+        "platform_fee_pct": float(payout_service.platform_fee_pct()),
+        "lifetime": {
+            "gross_coins": float(summary["lifetime_gross_coins"]),
+            "platform_fee_coins": float(summary["lifetime_platform_fee_coins"]),
+            "net_coins": float(summary["lifetime_net_coins"]),
+        },
+        "unsettled": {
+            "period_start": summary["watermark"].isoformat(),
+            "period_end": summary["now"].isoformat(),
+            "gross_coins": float(summary["unsettled_gross_coins"]),
+            "platform_fee_coins": float(summary["unsettled_platform_fee_coins"]),
+            "net_coins": float(summary["unsettled_net_coins"]),
+        },
+    }
+
+
+@router.post("/api/cpo/payouts")
+async def cpo_request_payout(
+    user: User = Depends(require_role("cpo", "admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Snapshot the tenant's unsettled earnings (watermark -> now) into a new
+    REQUESTED payout. 400 if there's nothing to settle (unsettled net <= 0),
+    409 if a payout is already REQUESTED for this tenant (only one pending
+    settlement at a time).
+
+    Race-safe: row-locks the tenant for the duration of this transaction, so
+    two concurrent requests serialize — the loser re-reads the watermark
+    (and the now-committed REQUESTED row) after the winner commits, and gets
+    the 409 instead of snapshotting an overlapping window. See
+    services/payouts.py for the watermark definition.
+    """
+    tenant_id = _require_tenant_id(user)
+
+    lock_result = await db.execute(
+        select(Tenant.id).where(Tenant.id == tenant_id).with_for_update()
+    )
+    if lock_result.scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail="Tenant not found.")
+
+    existing = await db.execute(
+        select(Payout.id).where(
+            and_(Payout.tenant_id == tenant_id, Payout.status == PayoutStatus.REQUESTED)
+        )
+    )
+    if existing.scalar_one_or_none() is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="A payout request is already pending for this tenant.",
+        )
+
+    watermark = await payout_service.tenant_settlement_watermark(db, tenant_id)
+    now = datetime.now(timezone.utc)
+    gross = await payout_service.sum_completed_session_coins(
+        db, tenant_id, window_start=watermark, window_end=now
+    )
+    fee, net = payout_service.compute_fee_and_net(gross)
+    if net <= ZERO_MONEY:
+        raise HTTPException(
+            status_code=400,
+            detail="No unsettled earnings to pay out.",
+        )
+
+    payout = Payout(
+        tenant_id=tenant_id,
+        period_start=watermark,
+        period_end=now,
+        gross_coins=gross,
+        platform_fee_coins=fee,
+        net_coins=net,
+        status=PayoutStatus.REQUESTED,
+        requested_by_user_id=user.id,
+    )
+    db.add(payout)
+    await db.commit()
+    await db.refresh(payout)
+
+    logger.info(
+        f"CPO payout requested: tenant={tenant_id} payout={payout.id} "
+        f"window=[{watermark.isoformat()}, {now.isoformat()}) "
+        f"gross={gross} fee={fee} net={net} by {user.email}"
+    )
+    return _payout_response(payout)
+
+
+@router.get("/api/cpo/payouts")
+async def cpo_list_payouts(
+    user: User = Depends(require_role("cpo", "admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """List the tenant's payouts, newest request first."""
+    tenant_id = _require_tenant_id(user)
+    result = await db.execute(
+        select(Payout)
+        .where(Payout.tenant_id == tenant_id)
+        .order_by(Payout.requested_at.desc(), Payout.id.desc())
+    )
+    return [_payout_response(p) for p in result.scalars().all()]
+
+
+@router.post("/api/cpo/payouts/{payout_id}/mark_paid")
+async def cpo_mark_payout_paid(
+    payout_id: int,
+    user: User = Depends(require_role("admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Platform operator marks a payout PAID after settling it manually
+    out-of-band (bank transfer / UPI outside this app). Admin-only — a CPO
+    cannot mark its own payout paid. 409 if the payout isn't REQUESTED
+    (already PAID/CANCELLED, or a concurrent mark_paid/cancel got there
+    first — the row lock below makes the state check itself race-safe).
+    """
+    result = await db.execute(
+        select(Payout).where(Payout.id == payout_id).with_for_update()
+    )
+    payout = result.scalar_one_or_none()
+    if not payout:
+        raise HTTPException(status_code=404, detail="Payout not found.")
+    if payout.status != PayoutStatus.REQUESTED:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Payout is '{payout.status.value}', not 'requested'.",
+        )
+
+    payout.status = PayoutStatus.PAID
+    payout.paid_at = datetime.now(timezone.utc)
+    await db.commit()
+    await db.refresh(payout)
+
+    logger.info(f"CPO payout {payout.id} marked PAID by admin {user.email}")
+    return _payout_response(payout)
+
+
+@router.post("/api/cpo/payouts/{payout_id}/cancel")
+async def cpo_cancel_payout(
+    payout_id: int,
+    user: User = Depends(require_role("cpo", "admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Cancel a REQUESTED payout, freeing its window for a future request (the
+    watermark excludes CANCELLED payouts). The owning CPO or an admin may
+    cancel; any other tenant's CPO gets 404 (not "403", so a cross-tenant
+    caller can't distinguish "not yours" from "doesn't exist"). 409 if the
+    payout isn't REQUESTED — same race-safe row-lock as mark_paid.
+    """
+    result = await db.execute(
+        select(Payout).where(Payout.id == payout_id).with_for_update()
+    )
+    payout = result.scalar_one_or_none()
+    if not payout:
+        raise HTTPException(status_code=404, detail="Payout not found.")
+    if user.role != UserRole.ADMIN and payout.tenant_id != user.tenant_id:
+        raise HTTPException(status_code=404, detail="Payout not found.")
+    if payout.status != PayoutStatus.REQUESTED:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Payout is '{payout.status.value}', not 'requested'.",
+        )
+
+    payout.status = PayoutStatus.CANCELLED
+    await db.commit()
+    await db.refresh(payout)
+
+    logger.info(f"CPO payout {payout.id} cancelled by {user.email}")
+    return _payout_response(payout)
+
+
+# ===========================================================================
+# CPO Tariff (per-CPO/per-site pricing) Management
+# ===========================================================================
+# Appended at the end of the file (feat/tariff-pricing) to avoid touching the
+# shared header import block above, which another concurrent change also
+# edits. Local imports here are intentional, not an oversight.
+from backend.database.models import Tariff  # noqa: E402
+from backend.schemas import (  # noqa: E402
+    CpoTariffAssignRequest, CpoTariffCreateRequest, CpoTariffUpdateRequest,
+)
+
+
+async def _load_tenant_tariff(db: AsyncSession, tariff_id: int, tenant_id: int) -> Tariff:
+    """Fetch a tariff, enforcing it belongs to `tenant_id`. Shared by the
+    three assignment endpoints below so cross-tenant assignment (attaching
+    another tenant's tariff to your plug/group/tenant-default) is rejected
+    the same way everywhere."""
+    result = await db.execute(
+        select(Tariff).where(and_(Tariff.id == tariff_id, Tariff.tenant_id == tenant_id))
+    )
+    tariff = result.scalar_one_or_none()
+    if not tariff:
+        raise HTTPException(
+            status_code=404,
+            detail="Tariff not found or does not belong to your organization.",
+        )
+    return tariff
+
+
+@router.get("/api/cpo/tariffs")
+async def cpo_list_tariffs(
+    user: User = Depends(require_role("cpo", "admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """List all tariffs (pricing plans) owned by the CPO's tenant."""
+    result = await db.execute(
+        select(Tariff).where(Tariff.tenant_id == user.tenant_id).order_by(Tariff.name)
+    )
+    tariffs = list(result.scalars().all())
+
+    return [
+        {
+            "id": t.id,
+            "name": t.name,
+            "price_per_kwh": float(t.price_per_kwh),
+            "created_at": t.created_at.isoformat() if t.created_at else None,
+            "updated_at": t.updated_at.isoformat() if t.updated_at else None,
+        }
+        for t in tariffs
+    ]
+
+
+@router.post("/api/cpo/tariffs")
+async def cpo_create_tariff(
+    req: CpoTariffCreateRequest,
+    user: User = Depends(require_role("cpo", "admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Create a new tariff under the CPO's tenant."""
+    tariff = Tariff(
+        tenant_id=user.tenant_id,
+        name=req.name,
+        price_per_kwh=to_money(req.price_per_kwh),
+    )
+    db.add(tariff)
+    await db.commit()
+    await db.refresh(tariff)
+
+    logger.info(
+        f"CPO tariff created: '{tariff.name}' (id={tariff.id}, "
+        f"{tariff.price_per_kwh}/kWh) by {user.email}"
+    )
+
+    return {
+        "status": "created",
+        "tariff_id": tariff.id,
+        "name": tariff.name,
+        "price_per_kwh": float(tariff.price_per_kwh),
+    }
+
+
+@router.put("/api/cpo/tariffs/{tariff_id}")
+async def cpo_update_tariff(
+    tariff_id: int,
+    req: CpoTariffUpdateRequest,
+    user: User = Depends(require_role("cpo", "admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update a tariff's name and/or rate. Tenant-scoped — a CPO can only
+    edit their own tenant's tariffs."""
+    tariff = await _load_tenant_tariff(db, tariff_id, user.tenant_id)
+
+    if req.name is not None:
+        tariff.name = req.name
+    if req.price_per_kwh is not None:
+        tariff.price_per_kwh = to_money(req.price_per_kwh)
+
+    await db.commit()
+    await db.refresh(tariff)
+
+    logger.info(f"CPO tariff updated: '{tariff.name}' (id={tariff.id}) by {user.email}")
+
+    return {
+        "status": "updated",
+        "tariff_id": tariff.id,
+        "name": tariff.name,
+        "price_per_kwh": float(tariff.price_per_kwh),
+    }
+
+
+@router.delete("/api/cpo/tariffs/{tariff_id}")
+async def cpo_delete_tariff(
+    tariff_id: int,
+    user: User = Depends(require_role("cpo", "admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Delete a tariff. Any plug / charger group / tenant-default currently
+    pointing at it falls back to the next link in the resolution chain (each
+    FK is ON DELETE SET NULL — see models.py) rather than being left dangling.
+    """
+    tariff = await _load_tenant_tariff(db, tariff_id, user.tenant_id)
+
+    tariff_name = tariff.name
+    await db.delete(tariff)
+    await db.commit()
+
+    logger.info(f"CPO tariff deleted: '{tariff_name}' (id={tariff_id}) by {user.email}")
+
+    return {"status": "deleted", "tariff_id": tariff_id, "name": tariff_name}
+
+
+@router.put("/api/cpo/plugs/{plug_id}/tariff")
+async def cpo_assign_plug_tariff(
+    plug_id: int,
+    req: CpoTariffAssignRequest,
+    user: User = Depends(require_role("cpo", "admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Assign (tariff_id set) or unassign (tariff_id null) the tariff a specific
+    plug bills at. Both the plug and the tariff must belong to the caller's
+    tenant — a CPO cannot attach another tenant's tariff to their own plug,
+    nor reach a plug they don't own.
+    """
+    plug_result = await db.execute(
+        select(Plug)
+        .join(Gateway, Plug.gateway_id == Gateway.id)
+        .where(and_(Plug.id == plug_id, Gateway.tenant_id == user.tenant_id))
+    )
+    plug = plug_result.scalar_one_or_none()
+    if not plug:
+        raise HTTPException(status_code=404, detail="Plug not found or access denied.")
+
+    if req.tariff_id is not None:
+        await _load_tenant_tariff(db, req.tariff_id, user.tenant_id)
+
+    plug.tariff_id = req.tariff_id
+    await db.commit()
+
+    logger.info(f"CPO plug tariff assignment: plug={plug_id} tariff={req.tariff_id} by {user.email}")
+
+    return {"status": "updated", "plug_id": plug_id, "tariff_id": req.tariff_id}
+
+
+@router.put("/api/cpo/groups/{group_id}/tariff")
+async def cpo_assign_group_tariff(
+    group_id: int,
+    req: CpoTariffAssignRequest,
+    user: User = Depends(require_role("cpo", "admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Assign/unassign the tariff a charger group's plugs fall back to when
+    they have no tariff of their own. Tenant-scoped on both the group and the
+    tariff, same cross-tenant protection as the plug endpoint above."""
+    group_result = await db.execute(
+        select(ChargerGroup).where(
+            and_(ChargerGroup.id == group_id, ChargerGroup.tenant_id == user.tenant_id)
+        )
+    )
+    group = group_result.scalar_one_or_none()
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found or access denied.")
+
+    if req.tariff_id is not None:
+        await _load_tenant_tariff(db, req.tariff_id, user.tenant_id)
+
+    group.tariff_id = req.tariff_id
+    await db.commit()
+
+    logger.info(f"CPO group tariff assignment: group={group_id} tariff={req.tariff_id} by {user.email}")
+
+    return {"status": "updated", "group_id": group_id, "tariff_id": req.tariff_id}
+
+
+@router.put("/api/cpo/tenant/default-tariff")
+async def cpo_assign_tenant_default_tariff(
+    req: CpoTariffAssignRequest,
+    user: User = Depends(require_role("cpo", "admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Assign/unassign the CPO's tenant-wide default tariff — the last link
+    in the resolution chain before the global COINS_PER_KWH env fallback."""
+    tenant_result = await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))
+    tenant = tenant_result.scalar_one_or_none()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found.")
+
+    if req.tariff_id is not None:
+        await _load_tenant_tariff(db, req.tariff_id, user.tenant_id)
+
+    tenant.default_tariff_id = req.tariff_id
+    await db.commit()
+
+    logger.info(
+        f"CPO tenant default tariff assignment: tenant={user.tenant_id} "
+        f"tariff={req.tariff_id} by {user.email}"
+    )
+
+    return {"status": "updated", "tenant_id": user.tenant_id, "tariff_id": req.tariff_id}
 
 
 # ===========================================================================

@@ -1,8 +1,23 @@
 import { MapContainer, TileLayer, Marker, Popup } from 'react-leaflet';
+import L from 'leaflet';
+import { AVAILABILITY_CSS_VAR, getPlugAvailability } from '../utils/plugAvailability';
+
+// Colored dot markers (Available / In use / Offline) instead of Leaflet's
+// default blue pin, so marker color encodes the same state as the Home
+// legend + badges — see utils/plugAvailability.js for the shared mapping.
+// `L.divIcon` renders arbitrary HTML, which avoids shipping separate PNG
+// icon assets for each color.
+const markerIcon = (state) => L.divIcon({
+  className: 'plug-marker-icon',
+  html: `<span class="plug-marker-dot" style="background: var(${AVAILABILITY_CSS_VAR[state]})"></span>`,
+  iconSize: [18, 18],
+  iconAnchor: [9, 9],
+  popupAnchor: [0, -10],
+});
 
 export default function MapComponent({ plugs, onPlugSelect }) {
   // Center roughly on India, or a default location
-  const center = [20.5937, 78.9629]; 
+  const center = [20.5937, 78.9629];
   const zoom = 4;
 
   return (
@@ -22,16 +37,17 @@ export default function MapComponent({ plugs, onPlugSelect }) {
           .map((plug) => {
           const lat = plug.latitude;
           const lng = plug.longitude;
+          const state = getPlugAvailability(plug);
 
           return (
-            <Marker key={plug.id} position={[lat, lng]}>
+            <Marker key={plug.id} position={[lat, lng]} icon={markerIcon(state)}>
               <Popup>
                 <div style={{ textAlign: 'center' }}>
                   <strong>{plug.name}</strong><br />
                   <span style={{ fontSize: '0.85rem' }}>ID: {plug.id} | Status: {plug.status}</span><br />
                   {plug.status === 'available' && (
-                    <button 
-                      className="btn btn-primary btn-sm" 
+                    <button
+                      className="btn btn-primary btn-sm"
                       style={{ marginTop: '0.5rem', padding: '0.2rem 0.5rem' }}
                       onClick={(e) => {
                         e.stopPropagation();

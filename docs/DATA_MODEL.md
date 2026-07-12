@@ -143,12 +143,34 @@ both string gateway ids and integer plug/group ids) · `detail` TEXT
 (2026-07-12). Gateway/plug **delete** are pre-named in the action taxonomy
 but have no CPO endpoint yet to hook — nothing to audit until they exist.
 
+### `notifications`
+Per-user driver notification feed (session stopped/auto-stopped/reaped/safety
+cutoff, low balance, charger offline, top-up credited), written by
+`services/notifications.py` and read by `GET /api/notifications`. `id`
+**BIGINT PK** · `user_id` → users (CASCADE) · `type` VARCHAR(32) (plain
+string, not a PG enum — the set evolves) · `severity` VARCHAR(16) (default
+`info`) · `title` VARCHAR(120) · `body` VARCHAR(500) · `plug_id` → plugs
+(SET NULL, nullable) · `session_id` → charging_sessions (SET NULL, nullable)
+· `read` bool (default false) · `created_at` TIMESTAMPTZ. Composite index on
+`(user_id, created_at)`. Added by Alembic revision `0008_notifications`
+(2026-07-11, renumbered from 0007 at merge — `0007_audit_log` landed first).
+
+### `push_subscriptions`
+Web-Push subscriptions, one row per browser/device that enabled push. `id`
+SERIAL PK · `user_id` → users (CASCADE, indexed) · `endpoint` VARCHAR(1024)
+**UNIQUE** (the push-service URL) · `p256dh` VARCHAR(255) · `auth`
+VARCHAR(64) (client encryption keys) · `created_at` TIMESTAMPTZ. Pruned when
+the push service reports the subscription gone (404/410) or the user
+disables push. Added by `0008_notifications` (2026-07-11).
+
 ## 3. Relationships
 
 ```
 tenants ─┬─< users ─┬─< charging_sessions >─┬─ plugs >── gateways >── tenants
          │          ├─< ledger_transactions │
-         │          └─< group_memberships >──┤
+         │          ├─< group_memberships >──┤
+         │          ├─< notifications >── plugs / charging_sessions (nullable)
+         │          └─< push_subscriptions   │
          ├─< gateways ─< plugs               │
          ├─< charging_sessions               │
          ├─< telemetry_readings >── plugs / charging_sessions (nullable)
@@ -167,9 +189,10 @@ joined via `access_code`.
 - **`backend/migrations/versions/0001_baseline.py`** — frozen PostgreSQL DDL
   snapshot of the full 9-table schema at adoption (includes everything the
   retired `_INPLACE_UPGRADES` produced). Never edit or regenerate it. (The
-  live schema is now **11 tables** — `gateway_events` arrived via revision
-  `0005_gateway_events` (2026-07-10) and `audit_logs` via `0007_audit_log`
-  (2026-07-12).)
+  live schema is now **13 tables** — `gateway_events` arrived via
+  `0005_gateway_events` (2026-07-10), `audit_logs` via `0007_audit_log`
+  (2026-07-12), and `notifications` + `push_subscriptions` via
+  `0008_notifications` (2026-07-11, renumbered from 0007 at merge).)
 - **New schema change** = new revision: `alembic -c backend/alembic.ini
   revision --autogenerate -m "..."` (autogenerate needs a reachable database —
   use the CI postgres or the VM; dev boxes run no DB by policy).

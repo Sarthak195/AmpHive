@@ -92,6 +92,11 @@ class PlugResponse(BaseModel):
     # driver UI uses this to warn that a plug is unreachable before a start is
     # attempted, instead of only discovering it via a 409 at session start.
     gateway_online: bool = True
+    # The resolved coins-per-kWh rate this plug would bill a session at right
+    # now (services/pricing.py resolve_rate_for_plug: plug tariff -> group
+    # tariff -> tenant default -> the global COINS_PER_KWH env fallback).
+    # Always populated by the router; Optional only for schema forward-safety.
+    price_per_kwh: Optional[float] = None
 
 
 class GatewayEventResponse(BaseModel):
@@ -138,6 +143,42 @@ class VerifyPaymentRequest(BaseModel):
     # Razorpay's API server-side. Kept optional so older clients that still
     # send it don't get a 422.
     amount_inr: Optional[float] = None
+
+
+# --- Notification Schemas ---
+
+class NotificationResponse(BaseModel):
+    """One driver notification (session stop, low balance, charger offline,
+    safety cutoff, top-up credit)."""
+    id: int
+    type: str
+    severity: str                 # "info" | "warning" | "critical"
+    title: str
+    body: str
+    plug_id: Optional[int] = None
+    session_id: Optional[int] = None
+    read: bool
+    created_at: Optional[str] = None
+
+
+class NotificationListResponse(BaseModel):
+    notifications: list[NotificationResponse]
+    unread_count: int
+
+
+class PushSubscriptionKeys(BaseModel):
+    p256dh: str = Field(min_length=1, max_length=255)
+    auth: str = Field(min_length=1, max_length=64)
+
+
+class PushSubscribeRequest(BaseModel):
+    """The browser PushSubscription.toJSON() shape."""
+    endpoint: str = Field(min_length=1, max_length=1024)
+    keys: PushSubscriptionKeys
+
+
+class PushUnsubscribeRequest(BaseModel):
+    endpoint: str = Field(min_length=1, max_length=1024)
 
 
 # --- Direct Mode Schemas ---
@@ -204,6 +245,17 @@ class CpoPlugUpdateRequest(BaseModel):
     longitude: Optional[float] = Field(default=None, ge=-180, le=180)
 
 
+class CpoPlugMaintenanceRequest(BaseModel):
+    """
+    Body for POST /api/cpo/plugs/{id}/maintenance — the dedicated operator
+    maintenance workflow (fault console), distinct from the general status
+    setter on CpoPlugUpdateRequest: "enter" always succeeds, "clear" is
+    refused (409) while the plug has an ACTIVE session.
+    """
+    action: str  # "enter" | "clear"
+    note: Optional[str] = Field(default=None, max_length=255)
+
+
 class CpoGroupCreateRequest(BaseModel):
     """Create a new charger group."""
     name: str
@@ -216,6 +268,33 @@ class CpoGroupUpdateRequest(BaseModel):
     is_public: Optional[bool] = None
     regenerate_access_code: bool = False
 
+
+# --- Tariff (per-CPO/per-site pricing) Schemas ---
+
+class CpoTariffCreateRequest(BaseModel):
+    """Create a new tariff (pricing plan) under the caller's tenant."""
+    name: str = Field(min_length=1, max_length=100)
+    # Coins per kWh. Inbound as float like other money-ish request fields
+    # (e.g. CreateOrderRequest.amount_inr) — the router normalizes it via
+    # services/money.to_money before it ever touches the Numeric(12,2) column.
+    price_per_kwh: float = Field(gt=0, le=1000)
+
+
+class CpoTariffUpdateRequest(BaseModel):
+    """Update an existing tariff's name and/or rate."""
+    name: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    price_per_kwh: Optional[float] = Field(default=None, gt=0, le=1000)
+
+
+class CpoTariffAssignRequest(BaseModel):
+    """
+    Assign or unassign the tariff that bills a plug / charger group / the
+    tenant default — the target is named by the URL path (plug_id, group_id,
+    or the tenant-default endpoint); this body only carries which tariff.
+    `tariff_id=None` clears the assignment (falls back to the next link in
+    the resolution chain — see services/pricing.py resolve_rate_for_plug).
+    """
+    tariff_id: Optional[int] = None
 
 # --- Session Dispute / Refund Schemas ---
 

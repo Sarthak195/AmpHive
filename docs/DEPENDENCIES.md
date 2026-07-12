@@ -78,7 +78,7 @@ main.jsx  (ReactDOM.createRoot, StrictMode)
     │
     └── CPO routes  (CpoProtectedRoute → requires 'cpo' role)
         └── pages/cpo/{CpoSetup,CpoDashboard,CpoPlugs,CpoGroups,CpoSessions}.jsx
-            → components/CpoLayout.jsx, recharts (analytics charts)
+            → components/CpoLayout.jsx, recharts (analytics charts), qrcode.react (CpoPlugs per-plug QR)
 ```
 
 ### NPM packages (`frontend/package.json`)
@@ -87,11 +87,12 @@ main.jsx  (ReactDOM.createRoot, StrictMode)
 |---------|------|
 | `react` / `react-dom` ^19 | UI framework |
 | `react-router-dom` ^6 | Client-side routing |
-| `leaflet` / `react-leaflet` | OpenStreetMap map on Home (`MapComponent`) |
+| `leaflet` / `react-leaflet` | OpenStreetMap map on Home (`MapComponent`), color-coded markers via `utils/plugAvailability.js` |
+| `qrcode.react` | Per-plug QR code (`CpoPlugs` → deep-links to `/?plug=<id>`, 2026-07-12) |
 | `recharts` | CPO analytics charts |
 | `vite` ^8, `@vitejs/plugin-react` | Build tool / dev server |
 | `eslint` (+ react-hooks / react-refresh plugins) | Linting |
-| `typescript`, `@types/*` | Toolchain present, but **app code is `.jsx`/`.js`** |
+| `vitest`, `@testing-library/*`, `jsdom` | Component tests (`npm test`) — **no TypeScript toolchain**; app code is plain `.jsx`/`.js` by decision (TD#14) |
 
 ### External CDN / runtime
 

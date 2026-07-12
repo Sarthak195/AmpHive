@@ -7,6 +7,7 @@ import os
 import re
 import time
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Callable, Dict, Any, Optional
 
 import paho.mqtt.client as mqtt
@@ -26,6 +27,21 @@ GATEWAY_SEEN_BUMP_INTERVAL_SEC = 60.0
 # (the finalize path clamps the debit but doesn't end the session on its own).
 # Env-toggleable; on by default.
 AUTO_STOP_ON_BALANCE_EXHAUSTED = os.getenv("AUTO_STOP_ON_BALANCE_EXHAUSTED", "true").lower() in ("1", "true", "yes")
+
+# Driver notification: warn once per session when the accrued cost crosses
+# this fraction of the wallet balance (0 disables). Pairs with the in-app
+# monitor warning, but reaches drivers who are not watching the app.
+LOW_BALANCE_WARN_FRACTION = float(os.getenv("LOW_BALANCE_WARN_FRACTION", "0.8"))
+
+# Fault console: a hardware SAFETY cutoff (THERMAL_CUTOFF/OVERCURRENT_CUTOFF)
+# has already force-OFF'd the plug locally in firmware — auto-flip it to
+# MAINTENANCE so a new session can't be *started* on it (session-start already
+# 409s any non-AVAILABLE plug) until an operator clears it via
+# POST /api/cpo/plugs/{id}/maintenance. Runs AFTER the safety-cutoff
+# auto-finalize below (same coroutine, sequenced) so it isn't raced/overwritten
+# by finalize_charging_session's own plug.status = AVAILABLE. Env-toggleable;
+# on by default.
+AUTO_MAINTENANCE_ON_CRITICAL_ALARM = os.getenv("AUTO_MAINTENANCE_ON_CRITICAL_ALARM", "true").lower() in ("1", "true", "yes")
 
 
 class MQTTManager:
@@ -63,6 +79,10 @@ class MQTTManager:
         # Per-gateway monotonic timestamp of the last last_seen_at refresh
         # (see GATEWAY_SEEN_BUMP_INTERVAL_SEC). Only touched on the paho thread.
         self._gateway_seen_bumped: Dict[str, float] = {}
+        # Session ids already sent a low-balance warning (once per session).
+        # Only touched on the event loop. Bounded by an occasional full clear —
+        # worst case a long-running session gets one repeat warning.
+        self._low_balance_warned: set = set()
 
         self.client = mqtt.Client(client_id="amphive_backend_server", callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
 
@@ -261,7 +281,8 @@ class MQTTManager:
         # asyncio.Event.set() is NOT thread-safe when called from another thread —
         # it can fail to wake stream() waiters or corrupt loop state. Marshal the
         # update onto the loop so the whole store stays single-threaded.
-        # (cost_coins is left to TelemetryStore to auto-calc via COINS_PER_KWH.)
+        # (cost_coins is left to TelemetryStore to auto-calc from this plug's
+        # snapshotted per-session rate, falling back to COINS_PER_KWH.)
         if self.telemetry_store and self.event_loop:
             self.event_loop.call_soon_threadsafe(
                 functools.partial(
@@ -475,6 +496,112 @@ class MQTTManager:
                 extra={"gateway_id": gateway_id, "plug_id": plug_id, "error": str(e)},
             )
 
+        # A safety cutoff means the firmware already forced the relay OFF and
+        # cleared its local session — finalize the backend session to match
+        # (bills the recorded energy, frees the plug, notifies the driver).
+        # Previously the session sat ACTIVE until the reaper noticed, and the
+        # driver never learned why charging stopped.
+        if plug_id is not None and event_type in self._SAFETY_CUTOFF_REASONS:
+            await self._finalize_session_after_cutoff(plug_id, event_type)
+
+        # Fault console (additive): the same safety cutoffs also auto-enter the
+        # plug into MAINTENANCE so a NEW session can't start until an operator
+        # clears it (session-start already 409s any non-AVAILABLE plug).
+        # Deliberately sequenced AFTER the finalize call above, in this same
+        # coroutine — not an independently scheduled task — so the MAINTENANCE
+        # flip can't be raced/overwritten by finalize_charging_session's own
+        # `plug.status = AVAILABLE`. Runs even when no session was found above
+        # (a cutoff with no active session still needs the plug taken out of
+        # service). Env-gated via AUTO_MAINTENANCE_ON_CRITICAL_ALARM.
+        if (
+            AUTO_MAINTENANCE_ON_CRITICAL_ALARM
+            and plug_id is not None
+            and event_type in self._SAFETY_CUTOFF_REASONS
+        ):
+            await self._auto_enter_maintenance(plug_id, event_type)
+
+    _SAFETY_CUTOFF_REASONS = {
+        "THERMAL_CUTOFF": "safety cutoff: plug reported overheat",
+        "OVERCURRENT_CUTOFF": "safety cutoff: plug reported over-current",
+    }
+
+    async def _finalize_session_after_cutoff(self, plug_id: int, event_type: str):
+        """Finalize the ACTIVE session (if any) on a plug the firmware just cut
+        off. Race-safe: finalize row-locks and re-checks ACTIVE, so a
+        concurrent user stop / reaper settles exactly once."""
+        from backend.database.models import ChargingSession, SessionStatus
+        from backend.services.session_lifecycle import finalize_charging_session
+        from sqlalchemy import select
+
+        try:
+            async with self.db_session_factory() as db:
+                session_id = (await db.execute(
+                    select(ChargingSession.id).where(
+                        ChargingSession.plug_id == plug_id,
+                        ChargingSession.status == SessionStatus.ACTIVE,
+                    )
+                )).scalar_one_or_none()
+            if session_id is None:
+                return
+            async with self.db_session_factory() as db:
+                outcome = await finalize_charging_session(
+                    db, session_id, reason=self._SAFETY_CUTOFF_REASONS[event_type]
+                )
+            if outcome is not None:
+                logger.warning(
+                    f"Finalized session {session_id} after {event_type} on plug {plug_id}"
+                )
+        except Exception:
+            logger.exception(f"Post-cutoff finalize failed for plug {plug_id} ({event_type})")
+
+    async def _auto_enter_maintenance(self, plug_id: int, event_type: str):
+        """
+        Force a plug into MAINTENANCE after a hardware safety cutoff (called
+        from _persist_gateway_event, right after _finalize_session_after_cutoff
+        — see the ordering note there). The firmware has already force-OFF'd
+        the relay locally — this only stops a *new* session from being started
+        on the plug (session-start 409s any non-AVAILABLE plug) until an
+        operator clears it via POST /api/cpo/plugs/{id}/maintenance. No-op if
+        the plug is unknown or already MAINTENANCE.
+        """
+        from backend.database.models import Plug, PlugStatus
+        from sqlalchemy import select
+
+        try:
+            async with self.db_session_factory() as session:
+                plug = (await session.execute(
+                    select(Plug).where(Plug.id == plug_id)
+                )).scalar_one_or_none()
+                if plug is None:
+                    logger.warning(
+                        "Auto-maintenance: plug not found, skipping",
+                        extra={"plug_id": plug_id},
+                    )
+                    return
+                if plug.status == PlugStatus.MAINTENANCE:
+                    return
+                plug.status = PlugStatus.MAINTENANCE
+                await session.commit()
+        except Exception as e:
+            logger.error(
+                "Auto-maintenance failed",
+                extra={"plug_id": plug_id, "error": str(e)},
+            )
+            return
+
+        logger.warning(
+            "Plug auto-set to MAINTENANCE after safety alarm (operator must clear it)",
+            extra={"plug_id": plug_id, "event_type": event_type},
+        )
+        try:
+            from backend.services.socketio_manager import emit_plug_status
+            await emit_plug_status(plug_id, PlugStatus.MAINTENANCE.value)
+        except Exception as e:
+            logger.error(
+                "Failed to broadcast auto-maintenance plug_status",
+                extra={"plug_id": plug_id, "error": str(e)},
+            )
+
     async def _persist_telemetry(self, gateway_id: str, plug_id: int, watts: float, kwh: float,
                                  session_id: Optional[int] = None,
                                  sample: Optional[Dict[str, Any]] = None):
@@ -504,6 +631,7 @@ class MQTTManager:
         # Captured for the post-commit balance check (see below).
         updated_session_id: Optional[int] = None
         updated_user_id: Optional[int] = None
+        updated_rate: Optional[Decimal] = None
 
         try:
             async with self.db_session_factory() as session:
@@ -558,6 +686,7 @@ class MQTTManager:
                     active_session.last_telemetry_at = datetime.now(timezone.utc)
                     updated_session_id = active_session.id
                     updated_user_id = active_session.user_id
+                    updated_rate = active_session.rate_coins_per_kwh
 
                 await session.commit()
         except Exception as e:
@@ -572,30 +701,68 @@ class MQTTManager:
         # drained wallet (the finalize path only clamps the debit — it doesn't
         # stop the session). Done in a separate txn after the persist commit.
         if updated_session_id is not None and updated_user_id is not None:
-            await self._maybe_auto_stop_on_exhaustion(updated_session_id, updated_user_id, kwh)
+            await self._maybe_auto_stop_on_exhaustion(
+                updated_session_id, updated_user_id, kwh, updated_rate
+            )
 
-    async def _maybe_auto_stop_on_exhaustion(self, session_id: int, user_id: int, energy_kwh: float):
+    async def _maybe_auto_stop_on_exhaustion(self, session_id: int, user_id: int, energy_kwh: float,
+                                              rate_coins_per_kwh: Optional[Decimal] = None):
         """Finalize an ACTIVE session once its accrued cost meets/exceeds the
         user's wallet balance. No-op when disabled, when the wallet still
         covers the energy, or when the session is already gone (finalize
-        re-checks ACTIVE under a row lock, so this is race-safe)."""
+        re-checks ACTIVE under a row lock, so this is race-safe).
+
+        `rate_coins_per_kwh` is the session's SNAPSHOTTED rate (see
+        services/pricing.py resolve_rate_for_plug / models.py
+        ChargingSession.rate_coins_per_kwh) — the accrued cost must use the
+        same rate this session will actually be billed at, not the global
+        default, or a tariff'd session could auto-stop too early/late. NULL
+        (legacy sessions with no snapshot) falls back to the env default."""
         if not AUTO_STOP_ON_BALANCE_EXHAUSTED or not self.db_session_factory:
             return
         from backend.database.models import User
-        from backend.services.money import to_money
+        from backend.services.money import energy_cost, to_money
         from backend.services.telemetry import COINS_PER_KWH
         from sqlalchemy import select
 
         try:
-            accrued_cost = to_money(energy_kwh * COINS_PER_KWH)
+            rate = rate_coins_per_kwh if rate_coins_per_kwh is not None else COINS_PER_KWH
+            accrued_cost = energy_cost(energy_kwh, rate)
             if accrued_cost <= 0:
                 return
             async with self.db_session_factory() as db:
                 user = (await db.execute(
                     select(User).where(User.id == user_id)
                 )).scalar_one_or_none()
-                if user is None or accrued_cost < user.coin_balance:
+                if user is None:
                     return
+                balance = user.coin_balance
+            if accrued_cost < balance:
+                # Still covered — maybe warn (once per session) as the cost
+                # approaches the balance, so the driver sees the auto-stop
+                # coming even with the app closed.
+                if (
+                    LOW_BALANCE_WARN_FRACTION > 0
+                    and float(accrued_cost) >= float(balance) * LOW_BALANCE_WARN_FRACTION
+                    and session_id not in self._low_balance_warned
+                ):
+                    if len(self._low_balance_warned) > 1000:
+                        self._low_balance_warned.clear()
+                    self._low_balance_warned.add(session_id)
+                    remaining = to_money(balance - accrued_cost)
+                    kwh_left = float(remaining) / COINS_PER_KWH if COINS_PER_KWH else 0.0
+                    from backend.services.notifications import notify
+                    await notify(
+                        user_id,
+                        "low_balance",
+                        "Balance running low",
+                        f"Your current session has used most of your wallet — "
+                        f"~{remaining:.2f} coins (≈{kwh_left:.2f} kWh) left before "
+                        f"charging auto-stops. Top up to keep charging.",
+                        severity="warning",
+                        session_id=session_id,
+                    )
+                return
             # Wallet is exhausted — stop through the shared finalize path
             # (own txn; row-locks + re-checks ACTIVE so a concurrent user stop
             # or the reaper settles this exactly once).
@@ -604,6 +771,7 @@ class MQTTManager:
                 outcome = await finalize_charging_session(
                     db, session_id, reason="auto-stopped: wallet balance exhausted"
                 )
+            self._low_balance_warned.discard(session_id)
             if outcome is not None:
                 logger.warning(
                     "Auto-stopped session: wallet balance exhausted",
@@ -682,6 +850,47 @@ class MQTTManager:
 
         if status == "online":
             await self._republish_off_for_orphaned_plugs(gateway_id)
+        else:
+            await self._notify_drivers_gateway_offline(gateway_id)
+
+    async def _notify_drivers_gateway_offline(self, gateway_id: str):
+        """
+        A gateway going offline (LWT) mid-session means telemetry — and with it
+        billing and remote stop — is gone; the reaper will finalize the session
+        after SESSION_STALE_TIMEOUT_SEC. Tell each affected driver now rather
+        than letting them discover a frozen monitor.
+        """
+        from backend.database.models import ChargingSession, Plug, SessionStatus
+        from sqlalchemy import select
+
+        try:
+            async with self.db_session_factory() as session:
+                rows = (await session.execute(
+                    select(ChargingSession.id, ChargingSession.user_id, Plug.id, Plug.name)
+                    .join(Plug, ChargingSession.plug_id == Plug.id)
+                    .where(
+                        Plug.gateway_id == gateway_id,
+                        ChargingSession.status == SessionStatus.ACTIVE,
+                    )
+                )).all()
+        except Exception:
+            logger.exception(f"Offline-notification query failed for gateway {gateway_id}")
+            return
+
+        from backend.services.notifications import notify
+        for session_id, user_id, plug_id, plug_name in rows:
+            await notify(
+                user_id,
+                "charger_offline",
+                "Charger connection lost",
+                f"{plug_name} went offline during your session. The plug's own "
+                f"safety limits still apply; if it doesn't reconnect, the "
+                f"session will be closed and billed for the energy recorded "
+                f"so far.",
+                severity="warning",
+                plug_id=plug_id,
+                session_id=session_id,
+            )
 
     async def _republish_off_for_orphaned_plugs(self, gateway_id: str):
         """
