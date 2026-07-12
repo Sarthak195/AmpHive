@@ -130,7 +130,7 @@ Legend: ✅ present · 🟡 partial · ❌ absent.
 | RFID / tap card to start | ChargePoint, EA | ❌ | By design (app-first) |
 | Reserve / book a charger ahead | Statiq, ChargeZone, Tata | ❌ | Should-do |
 | Scheduled / delayed start (charge off-peak) | Tesla, ChargePoint | ❌ | Aspirational |
-| Stop at target kWh / % SoC | Tesla, EA | 🟡 `max_kwh` safety cap exists; no user "stop at X" goal | Should-do |
+| Stop at target kWh / % SoC | Tesla, EA | 🟡 (2026-07-12) user-set "stop at X" **shipped** for kWh, time, and ₹/coins (a coins cap converts to kWh client-side at the plug's own rate): optional collapsed-by-default limit control at session start, limits persisted on the session (Alembic `0014_session_limits`) and enforced by a backend auto-stop on the telemetry path (env `AUTO_STOP_ON_LIMITS`, ~1 s latency) + a reaper duration backstop, with live progress in the session monitor ("0.42 / 1.00 kWh · stops automatically"). **% SoC remains impossible by construction** — a metering smart plug cannot read the vehicle's state of charge (no ISO 15118 link; see "Plug & Charge" below), so the 🟡 is permanent unless the hardware class changes | — |
 | Plug & Charge / ISO 15118 autocharge | Tesla, EA, Ionity | ❌ | By design (smart plug, not ISO 15118 EVSE) |
 | Vehicle profile (make/model/connector) | ChargePoint, PlugShare | ❌ | Nice-to-have |
 

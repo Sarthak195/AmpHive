@@ -44,18 +44,21 @@ const TWO_SESSIONS = {
 };
 
 const Probe = () => {
-  const { activeSessions, sessionId, isActive, startSession, stopSession, switchSession } =
+  const { activeSessions, sessionId, isActive, focusedLimits, startSession, stopSession, switchSession } =
     useSession();
   return (
     <div>
       <div data-testid="focused">{String(sessionId)}</div>
       <div data-testid="isActive">{String(isActive)}</div>
+      <div data-testid="limits">{JSON.stringify(focusedLimits) || 'null'}</div>
       <ul data-testid="sessions">
         {activeSessions.map((s) => (
           <li key={s.session_id}>{s.plug_name}</li>
         ))}
       </ul>
       <button onClick={() => startSession('7').catch(() => {})}>start</button>
+      <button onClick={() => startSession('7', { max_kwh: 1.5 }).catch(() => {})}>start-kwh-limited</button>
+      <button onClick={() => startSession('7', { max_duration_seconds: 1800 }).catch(() => {})}>start-time-limited</button>
       <button onClick={() => stopSession().catch(() => {})}>stop</button>
       <button onClick={() => switchSession(activeSessions[1])}>switch-to-older</button>
     </div>
@@ -123,9 +126,77 @@ describe('startSession', () => {
 
     await userEvent.click(screen.getByText('start'));
 
+    // No limit chosen → ONLY plug_id is sent (backend defaults apply).
     expect(api.post).toHaveBeenCalledWith('/api/sessions/start', { plug_id: 7 });
     expect(screen.getByTestId('focused')).toHaveTextContent('9');
     expect(screen.getByText('Plug X')).toBeInTheDocument();
+  });
+
+  it('sends max_kwh when a limit is chosen and tracks the echoed limits', async () => {
+    api.get.mockResolvedValue({ active: false, sessions: [] });
+    api.post.mockResolvedValue({
+      status: 'started',
+      session_id: 9,
+      plug_id: 7,
+      plug_name: 'Plug X',
+      max_kwh: 1.5,
+      max_duration_seconds: 14400, // backend echoes the default it applied
+    });
+    renderProbe();
+    await waitFor(() => expect(api.get).toHaveBeenCalled());
+
+    await userEvent.click(screen.getByText('start-kwh-limited'));
+
+    expect(api.post).toHaveBeenCalledWith('/api/sessions/start', { plug_id: 7, max_kwh: 1.5 });
+    expect(screen.getByTestId('limits')).toHaveTextContent(
+      JSON.stringify({ max_kwh: 1.5, max_duration_seconds: 14400 })
+    );
+  });
+
+  it('sends max_duration_seconds for a time limit', async () => {
+    api.get.mockResolvedValue({ active: false, sessions: [] });
+    api.post.mockResolvedValue({
+      status: 'started', session_id: 9, plug_id: 7, plug_name: 'Plug X',
+    });
+    renderProbe();
+    await waitFor(() => expect(api.get).toHaveBeenCalled());
+
+    await userEvent.click(screen.getByText('start-time-limited'));
+
+    expect(api.post).toHaveBeenCalledWith(
+      '/api/sessions/start', { plug_id: 7, max_duration_seconds: 1800 }
+    );
+  });
+});
+
+describe('focusedLimits restore', () => {
+  it('carries the limits reported by /api/sessions/active into the focused session', async () => {
+    api.get.mockResolvedValue({
+      active: true,
+      sessions: [
+        {
+          session_id: 5, plug_id: 3, plug_name: 'Plug L',
+          started_at: '2026-07-12T09:00:00+00:00',
+          max_kwh: 1.0, max_duration_seconds: 1800,
+        },
+      ],
+      session_id: 5, plug_id: 3, plug_name: 'Plug L',
+      started_at: '2026-07-12T09:00:00+00:00',
+    });
+    renderProbe();
+
+    await waitFor(() => expect(screen.getByTestId('focused')).toHaveTextContent('5'));
+    expect(screen.getByTestId('limits')).toHaveTextContent(
+      JSON.stringify({ max_kwh: 1.0, max_duration_seconds: 1800 })
+    );
+  });
+
+  it('leaves focusedLimits null for a legacy session without limit fields', async () => {
+    api.get.mockResolvedValue(TWO_SESSIONS); // fixture has no limit fields
+    renderProbe();
+
+    await waitFor(() => expect(screen.getByTestId('focused')).toHaveTextContent('2'));
+    expect(screen.getByTestId('limits')).toHaveTextContent('null');
   });
 });
 

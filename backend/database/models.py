@@ -262,6 +262,26 @@ class ChargingSession(Base):
     plug: Mapped[Plug] = relationship("Plug", back_populates="sessions")
     ledger_transactions: Mapped[List["LedgerTransaction"]] = relationship("LedgerTransaction", back_populates="session")
 
+    # [Session limits] The stop conditions this session was STARTED with,
+    # snapshotted verbatim from SessionStartRequest (max_kwh /
+    # max_duration_seconds — the same values forwarded to the gateway in the
+    # MQTT ON payload, where the firmware enforces them locally as watchdogs).
+    # Persisted so the BACKEND can mirror that enforcement on the telemetry
+    # path (the firmware cuts the relay but publishes no alarm on these
+    # cutoffs, so without this mirror the session would linger ACTIVE until
+    # the reaper): MQTTManager._maybe_auto_stop_on_limits finalizes with
+    # "auto-stopped: energy limit reached" / "auto-stopped: time limit
+    # reached" (env toggle AUTO_STOP_ON_LIMITS), and the session reaper
+    # sweeps a duration backstop. Always set at start (including the schema
+    # defaults, 30 kWh / 4 h) since 2026-07-12; NULL only for legacy sessions
+    # predating the columns — those are never limit-auto-stopped (staleness
+    # reaping and balance exhaustion still apply). max_kwh is Float, not
+    # Numeric: it's an energy measurement threshold, not money (matches
+    # energy_kwh). Alembic revision 0014_session_limits. Appended at the
+    # class tail (after the relationships) to ease parallel-branch merges.
+    max_kwh: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    max_duration_seconds: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
 
 class LedgerTransaction(Base):
     __tablename__ = "ledger_transactions"
