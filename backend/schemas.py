@@ -36,6 +36,12 @@ class UserResponse(BaseModel):
     full_name: str
     role: str
     coin_balance: float
+    # [Auth holds] Additive: coin_balance minus coins held by this user's
+    # OTHER active sessions (services/wallet.py available_balance) — what a
+    # NEW session-start would actually be sized against. Always populated by
+    # /api/auth/me; Optional only for schema forward-safety (mirrors
+    # PlugResponse.price_per_kwh's convention below).
+    available_balance: Optional[float] = None
 
 
 # --- Session Schemas ---
@@ -124,6 +130,12 @@ class LedgerEntryResponse(BaseModel):
     session_id: Optional[int] = None
     razorpay_payment_id: Optional[str] = None
     created_at: Optional[str] = None
+    # [Auth holds] Additive: the driver's CURRENT available balance
+    # (coin_balance minus what active sessions hold right now — see
+    # services/wallet.py available_balance), repeated on every row of a
+    # GET /api/wallet/ledger response — NOT a per-transaction historical
+    # figure like balance_after. Optional for schema forward-safety.
+    available_balance: Optional[float] = None
 
 
 class CreateOrderRequest(BaseModel):

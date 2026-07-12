@@ -40,10 +40,10 @@ Interactive docs: `http://<host>:8000/docs`.
 |--------|------|------|------|----------|
 | POST | `/api/auth/register` | none | `{email, password, full_name}` | `{token, user}` — creates a `driver`, `coin_balance=0`. 400 on duplicate email. |
 | POST | `/api/auth/login` | none | `{email, password}` | `{token, user}` — 401 on bad credentials. |
-| GET | `/api/auth/me` | JWT | — | `{id, email, full_name, role, coin_balance}` |
+| GET | `/api/auth/me` | JWT | — | `{id, email, full_name, role, coin_balance, available_balance}` — `available_balance` (added 2026-07-12) is `coin_balance` minus coins held by the driver's OTHER active sessions' authorization holds (`services/wallet.py available_balance`); additive, `coin_balance` unchanged |
 | POST | `/api/auth/logout` | JWT | — | Revokes every token for the caller (bumps `users.token_version`; "log out everywhere") → `{status:"logged_out"}`. |
 
-`user` object shape: `{id, email, full_name, role, coin_balance}` (where `coin_balance` is a float).
+`user` object shape: `{id, email, full_name, role, coin_balance}` (where `coin_balance` is a float; the `/api/auth/register`/`/api/auth/login` `AuthResponse.user` dict predates `available_balance` and hasn't been extended to it — only `GET /api/auth/me` (`UserResponse`) carries the new field today).
 Token: HS256 JWT, claims `sub`/`role`/`email`/`iat`/`exp`, **7-day** expiry.
 
 ## Charger groups
@@ -70,7 +70,7 @@ Token: HS256 JWT, claims `sub`/`role`/`email`/`iat`/`exp`, **7-day** expiry.
 
 | Method | Path | Auth | Body/Params | Behaviour |
 |--------|------|------|-------------|-----------|
-| POST | `/api/sessions/start` | JWT | `{plug_id, max_duration_seconds=14400, max_kwh=30.0}` | Reject if the user already has `MAX_ACTIVE_SESSIONS_PER_USER` (env, default 2) ACTIVE sessions (409; counted under a user-row lock so concurrent starts can't exceed the cap) → access check → require balance ≥ 50 (402) → reject if OCCUPIED (409) → MQTT `ON` (500 on publish fail) → create session, mark plug OCCUPIED → `{status:"started", session_id, plug_id, plug_name, message}` |
+| POST | `/api/sessions/start` | JWT | `{plug_id, max_duration_seconds=14400, max_kwh=30.0}` | Reject if the user already has `MAX_ACTIVE_SESSIONS_PER_USER` (env, default 2) ACTIVE sessions (409; counted under a user-row lock so concurrent starts can't exceed the cap) → access check → reject if OCCUPIED/offline/gateway-dead (409) → resolve the billing rate → size + require an authorization hold ≥ 50 (402; **2026-07-12** — `min(available_balance, max_kwh × rate)`, `services/wallet.py available_balance`, replacing the old flat-balance floor — see MARKET_GAP_ANALYSIS.md §3) → MQTT `ON` (500 on publish fail) → create session (snapshotting the hold onto `hold_coins`), mark plug OCCUPIED → `{status:"started", session_id, plug_id, plug_name, message}` |
 | POST | `/api/sessions/stop` | JWT | `{session_id}` | Owner+active check → MQTT `OFF` (best-effort) → finalize from telemetry → debit wallet → ledger `session_debit` → plug AVAILABLE → `{status:"completed", session_id, energy_kwh, coins_spent, balance_remaining}` |
 | GET | `/api/sessions/active` | JWT | — | Retrieve **all** active sessions for the logged-in user, newest first → `{active:true, sessions:[{session_id, plug_id, plug_name, started_at}, …], session_id, plug_id, plug_name, started_at}` (the top-level single-session fields mirror the newest entry for older clients) or `{active:false, sessions:[]}` |
 | — | `Socket.io` connection | JWT | connection query or auth dict | Real-time bi-directional channel for telemetry updates and session status (sole live-telemetry transport since 2026-07-07). |
@@ -99,7 +99,7 @@ Token: HS256 JWT, claims `sub`/`role`/`email`/`iat`/`exp`, **7-day** expiry.
 | POST | `/api/payments/create-order` | JWT | `{amount_inr: float}` (₹10–₹10,000, supporting decimals) | Creates a Razorpay order → `{order_id, amount(paise), currency, key_id}`. 503 if Razorpay unconfigured. |
 | POST | `/api/payments/verify` | JWT | `{razorpay_order_id, razorpay_payment_id, razorpay_signature}` (`amount_inr` is deprecated and **ignored**) | HMAC verify (400 if bad) → fetch the payment from Razorpay's API and credit the **Razorpay-confirmed amount**, never a client-sent one (502 if Razorpay unreachable; 409 if not yet captured — the webhook credits on capture; 403 if the payment's order was created for another user) → ledger `topup` → `{status:"success", coins_credited, new_balance}` |
 | POST | `/api/payments/webhook` | none (HMAC-gated) | raw body + `X-Razorpay-Signature` | HMAC verify (400 if bad) → on `payment.captured`, auto-credit coins from the payment's `notes`/`amount` (atomic, row-locked, supporting decimals) → ledger `topup`. Idempotent vs. `/verify` (dedupes on `razorpay_payment_id`). → `{status:"credited"\|"already_credited"\|"ignored"\|"user_not_found"}` |
-| GET | `/api/wallet/ledger` | JWT | `?limit` (default 100, max 500) | Unified wallet ledger for the user — top-up credits **and** session debits, newest first. Returns a list of `{id, amount(signed), transaction_type("topup"\|"session_debit"\|"refund"), direction("credit"\|"debit"), description, balance_after, session_id, razorpay_payment_id, created_at}`. |
+| GET | `/api/wallet/ledger` | JWT | `?limit` (default 100, max 500) | Unified wallet ledger for the user — top-up credits **and** session debits, newest first. Returns a list of `{id, amount(signed), transaction_type("topup"\|"session_debit"\|"refund"), direction("credit"\|"debit"), description, balance_after, session_id, razorpay_payment_id, created_at, available_balance}`. `available_balance` (added 2026-07-12, same figure as `/api/auth/me`) is the driver's CURRENT available balance, computed once and repeated on every row — unlike `balance_after` (a per-transaction historical snapshot), it is not tied to that row's point in time. Additive field; the endpoint's list shape is unchanged. |
 
 ## Driver notifications (`routers/notifications.py`, 2026-07-11)
 

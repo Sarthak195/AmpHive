@@ -41,7 +41,7 @@ from backend.services.session_lifecycle import (
     gateway_is_live, set_plug_telemetry_interval,
 )
 from backend.services.telemetry import COINS_PER_KWH
-from backend.services.wallet import credit_wallet
+from backend.services.wallet import available_balance, credit_wallet
 
 logger = logging.getLogger("amphive.api")
 router = APIRouter()
@@ -129,6 +129,17 @@ async def get_wallet_ledger(
     driver History view previously showed only charging-session debits; this is
     the full money trail (`transaction_type` distinguishes them, `direction`
     is derived from the sign for convenient client rendering).
+
+    [Auth holds] Each row also carries `available_balance` — the driver's
+    CURRENT available balance (coin_balance minus what active sessions hold
+    right now, services/wallet.py available_balance), computed once and
+    repeated on every row. This is deliberately NOT a per-transaction
+    historical figure like `balance_after` (which is the coin_balance
+    snapshot immediately after that one transaction posted, forever fixed);
+    it is "what you could spend right now," attached to the response rather
+    than changing this endpoint's list-shaped body into an object, so
+    existing list consumers (the frontend History ledger tab) are unaffected
+    — additive field only, same convention as UserResponse.available_balance.
     """
     limit = max(1, min(limit, 500))
     result = await db.execute(
@@ -138,6 +149,8 @@ async def get_wallet_ledger(
         .limit(limit)
     )
     rows = list(result.scalars().all())
+
+    current_available = float(await available_balance(db, user.id))
 
     return [
         LedgerEntryResponse(
@@ -150,6 +163,7 @@ async def get_wallet_ledger(
             session_id=tx.session_id,
             razorpay_payment_id=tx.razorpay_payment_id,
             created_at=tx.created_at.isoformat() if tx.created_at else None,
+            available_balance=current_available,
         )
         for tx in rows
     ]

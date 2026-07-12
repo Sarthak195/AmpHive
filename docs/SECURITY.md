@@ -261,6 +261,28 @@ BFG + force-push) to purge the dead values entirely.
   holds (`min(final_cost, balance)`) and records that same delta in `amount` /
   `balance_after` / `coins_spent`, so the ledger reconciles even when a bill
   exceeds the balance (the forgiven shortfall is logged).
+- [Closed 2026-07-12] **Forgiven-overage leak closed for held sessions
+  (MARKET_GAP_ANALYSIS.md §3 "Authorization hold").** The item above meant a
+  session could start on a flat `MIN_START_BALANCE_COINS` floor and then bill
+  past whatever the wallet actually held, with the shortfall simply forgiven
+  — a real revenue leak, not just a display nit. `POST /api/sessions/start`
+  now sizes a session-scoped authorization hold up front
+  (`ChargingSession.hold_coins`, Alembic `0013_auth_holds`):
+  `min(available_balance, max_kwh × rate)`, where `available_balance`
+  (`services/wallet.py`) is `coin_balance` minus what the driver's OTHER
+  ACTIVE sessions already hold — computed under the same user-row lock the
+  start path already takes, so two concurrent starts can't double-reserve
+  the same coins. `finalize_charging_session` then debits
+  `min(final_cost, hold_coins)`, so a held session's bill can never exceed
+  what it reserved; any unspent remainder is released with no money
+  movement (the hold was always logical, never a real debit — `coin_balance`
+  and its non-negative CHECK are untouched by holds). The mqtt_manager
+  balance-exhaustion auto-stop also switched from the driver's whole wallet
+  balance to the session's own hold, so one session can't be kept alive past
+  its reservation by a sibling session's unspent balance. **Residual:**
+  legacy sessions predating this migration (`hold_coins IS NULL`) keep the
+  old floor-only/forgiven-overage behavior — the leak is closed going
+  forward, not retroactively. Tests: `backend/tests/test_auth_holds.py`.
 
 ## 6. Operational notes
 

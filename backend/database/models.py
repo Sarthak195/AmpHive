@@ -230,6 +230,30 @@ class ChargingSession(Base):
     # charged. NULL only for legacy sessions started before this column
     # existed — those fall back to the global COINS_PER_KWH env var.
     rate_coins_per_kwh: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
+    # [Auth holds] Authorization hold: coins RESERVED (logically, never
+    # debited) at session start — min(available_balance, max_kwh * rate),
+    # computed by services/wallet.py available_balance() + services/money.py
+    # energy_cost() in routers/sessions.py start_charging_session. This does
+    # NOT touch coin_balance or its non-negative CHECK (see the wallet.py
+    # module docstring) — it is a read-time reservation, not a write.
+    # Consumers:
+    #   - finalize_charging_session caps the real debit at
+    #     min(final_cost, hold_coins), so a held session can never be billed
+    #     more than it reserved (closes the forgiven-overage revenue leak —
+    #     SECURITY.md §5 — for every held session); any unspent remainder is
+    #     simply released (no money moved for the reservation, so none moves
+    #     back — the hold stops counting the moment the session leaves
+    #     ACTIVE, since available_balance() only sums ACTIVE sessions).
+    #   - mqtt_manager._maybe_auto_stop_on_exhaustion uses this as the
+    #     auto-stop threshold instead of the driver's whole wallet balance,
+    #     so a session stops when IT exhausts its own reservation, not a
+    #     balance a concurrent session may also be holding against.
+    # NULL only for legacy sessions started before this column existed —
+    # those keep the pre-hold behavior throughout (finalize debits
+    # min(final_cost, live balance), forgiving any shortfall; auto-stop
+    # thresholds on the live wallet balance). Alembic revision
+    # 0012_auth_holds.
+    hold_coins: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
     status: Mapped[SessionStatus] = mapped_column(SQLEnum(SessionStatus, name="session_status", values_callable=lambda x: [e.value for e in x]), default=SessionStatus.ACTIVE, nullable=False)
 
     # Relationships
