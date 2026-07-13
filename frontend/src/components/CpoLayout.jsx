@@ -5,8 +5,8 @@
  * Features a collapsible sidebar with navigation links, tenant info,
  * and a floating toggle button for mobile.
  *
- * The sidebar uses a purple accent color to visually distinguish
- * the CPO portal from the driver-facing app.
+ * The CPO portal is set apart from the driver app by its sidebar layout and
+ * density — the accent is the shared amp-lime (the old purple is retired).
  */
 
 import { useState } from 'react';

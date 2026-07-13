@@ -9,6 +9,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import CpoLayout from '../../components/CpoLayout';
+import CpoSummary from '../../components/CpoSummary';
 import api from '../../api/client';
 
 /**
@@ -188,34 +189,14 @@ const CpoSessions = () => {
         </button>
       </div>
 
-      {/* Summary Stats Bar */}
-      <div className="glass" style={{
-        padding: '1rem 1.5rem',
-        marginBottom: '1.5rem',
-        display: 'flex',
-        gap: '2rem',
-        flexWrap: 'wrap',
-        borderRadius: 'var(--radius-md)',
-      }}>
-        <div>
-          <span style={{ color: 'var(--color-text-muted)', fontSize: '0.78rem' }}>Sessions</span>
-          <p style={{ color: 'var(--color-text-primary)', fontWeight: 600, margin: '0.1rem 0 0', fontSize: '1.1rem' }}>
-            {stats.total}
-          </p>
-        </div>
-        <div>
-          <span style={{ color: 'var(--color-text-muted)', fontSize: '0.78rem' }}>Total Energy</span>
-          <p style={{ color: 'var(--color-text-primary)', fontWeight: 600, margin: '0.1rem 0 0', fontSize: '1.1rem' }}>
-            {stats.totalEnergy.toFixed(3)} kWh
-          </p>
-        </div>
-        <div>
-          <span style={{ color: 'var(--color-text-muted)', fontSize: '0.78rem' }}>Total Revenue</span>
-          <p style={{ color: 'var(--color-accent)', fontWeight: 600, margin: '0.1rem 0 0', fontSize: '1.1rem' }}>
-            🪙 {stats.totalRevenue.toFixed(2)}
-          </p>
-        </div>
-      </div>
+      {/* Summary Stats */}
+      <CpoSummary
+        items={[
+          { label: 'Sessions', value: stats.total },
+          { label: 'Total Energy', value: `${stats.totalEnergy.toFixed(3)} kWh` },
+          { label: 'Total Revenue', value: `🪙 ${stats.totalRevenue.toFixed(2)}`, tone: 'accent' },
+        ]}
+      />
 
       {/* Sessions Table */}
       {loading ? (

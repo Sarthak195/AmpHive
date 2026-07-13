@@ -65,7 +65,7 @@ const WalletCard = () => {
           Current Balance
         </h3>
         <div className="flex items-baseline gap-3">
-          <span style={{
+          <span className="num" style={{
             fontSize: '3rem',
             fontWeight: 700,
             color: 'var(--color-accent)',

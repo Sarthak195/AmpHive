@@ -77,32 +77,26 @@ export default function History() {
             <p>No charging sessions found.</p>
           </div>
         ) : (
-          <div className="glass-panel" style={{ overflowX: 'auto', padding: '1rem' }}>
-            <table className="data-table" style={{ width: '100%', borderCollapse: 'collapse' }}>
+          <div className="data-table-container animate-fade-in">
+            <table className="data-table">
               <thead>
-                <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.1)', textAlign: 'left' }}>
-                  <th style={{ padding: '1rem' }}>Date</th>
-                  <th style={{ padding: '1rem' }}>Plug ID</th>
-                  <th style={{ padding: '1rem' }}>Energy (kWh)</th>
-                  <th style={{ padding: '1rem' }}>Cost (Coins)</th>
-                  <th style={{ padding: '1rem' }}>Status</th>
+                <tr>
+                  <th>Date</th>
+                  <th>Plug ID</th>
+                  <th>Energy (kWh)</th>
+                  <th>Cost (Coins)</th>
+                  <th>Status</th>
                 </tr>
               </thead>
               <tbody>
                 {sessions.map((s) => (
-                  <tr key={s.id} style={{ borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
-                    <td style={{ padding: '1rem' }}>{formatDate(s.started_at)}</td>
-                    <td style={{ padding: '1rem' }}>{s.plug_id}</td>
-                    <td style={{ padding: '1rem' }}>{s.energy_kwh.toFixed(3)}</td>
-                    <td style={{ padding: '1rem', color: 'var(--color-accent)' }}>{s.coins_spent.toFixed(2)}</td>
-                    <td style={{ padding: '1rem' }}>
-                      <span style={{
-                        padding: '0.25rem 0.5rem',
-                        borderRadius: '4px',
-                        fontSize: '0.85rem',
-                        backgroundColor: s.status === 'completed' || s.status === 'paid' ? 'rgba(198, 255, 0, 0.2)' : 'rgba(255, 165, 2, 0.2)',
-                        color: s.status === 'completed' || s.status === 'paid' ? 'var(--color-success)' : 'var(--color-warning)',
-                      }}>
+                  <tr key={s.id}>
+                    <td>{formatDate(s.started_at)}</td>
+                    <td>{s.plug_id}</td>
+                    <td className="num">{s.energy_kwh.toFixed(3)}</td>
+                    <td className="num" style={{ color: 'var(--color-accent)' }}>{s.coins_spent.toFixed(2)}</td>
+                    <td>
+                      <span className={`badge ${s.status === 'completed' || s.status === 'paid' ? 'badge-success' : 'badge-warning'}`}>
                         {s.status}
                       </span>
                     </td>
@@ -117,36 +111,35 @@ export default function History() {
           <p>No wallet activity yet. Top up to add coins.</p>
         </div>
       ) : (
-        <div className="glass-panel" style={{ overflowX: 'auto', padding: '1rem' }}>
-          <table className="data-table" style={{ width: '100%', borderCollapse: 'collapse' }}>
+        <div className="data-table-container animate-fade-in">
+          <table className="data-table">
             <thead>
-              <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.1)', textAlign: 'left' }}>
-                <th style={{ padding: '1rem' }}>Date</th>
-                <th style={{ padding: '1rem' }}>Type</th>
-                <th style={{ padding: '1rem' }}>Description</th>
-                <th style={{ padding: '1rem', textAlign: 'right' }}>Amount</th>
-                <th style={{ padding: '1rem', textAlign: 'right' }}>Balance</th>
+              <tr>
+                <th>Date</th>
+                <th>Type</th>
+                <th>Description</th>
+                <th style={{ textAlign: 'right' }}>Amount</th>
+                <th style={{ textAlign: 'right' }}>Balance</th>
               </tr>
             </thead>
             <tbody>
               {ledger.map((tx) => {
                 const credit = tx.direction === 'credit';
                 return (
-                  <tr key={tx.id} style={{ borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
-                    <td style={{ padding: '1rem' }}>{formatDate(tx.created_at)}</td>
-                    <td style={{ padding: '1rem' }}>{TX_LABEL[tx.transaction_type] || tx.transaction_type}</td>
-                    <td style={{ padding: '1rem', color: 'var(--color-text-secondary)', fontSize: '0.9rem' }}>
+                  <tr key={tx.id}>
+                    <td>{formatDate(tx.created_at)}</td>
+                    <td>{TX_LABEL[tx.transaction_type] || tx.transaction_type}</td>
+                    <td style={{ color: 'var(--color-text-secondary)' }}>
                       {tx.description || (tx.session_id ? `Session #${tx.session_id}` : '—')}
                     </td>
-                    <td style={{
-                      padding: '1rem',
+                    <td className="num" style={{
                       textAlign: 'right',
                       fontWeight: 600,
                       color: credit ? 'var(--color-success)' : 'var(--color-danger)',
                     }}>
                       {credit ? '+' : ''}{tx.amount.toFixed(2)}
                     </td>
-                    <td style={{ padding: '1rem', textAlign: 'right', color: 'var(--color-text-secondary)' }}>
+                    <td className="num" style={{ textAlign: 'right', color: 'var(--color-text-secondary)' }}>
                       {tx.balance_after.toFixed(2)}
                     </td>
                   </tr>

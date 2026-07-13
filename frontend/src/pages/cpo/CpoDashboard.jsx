@@ -15,6 +15,7 @@ import {
 } from 'recharts';
 import CpoLayout from '../../components/CpoLayout';
 import CpoAlerts from '../../components/CpoAlerts';
+import CpoSummary from '../../components/CpoSummary';
 import api from '../../api/client';
 
 /**
@@ -179,40 +180,15 @@ const CpoDashboard = () => {
         </div>
       </div>
 
-      {/* All-Time Summary Bar */}
-      <div className="glass" style={{
-        padding: '1rem 1.5rem',
-        marginBottom: '2rem',
-        display: 'flex',
-        gap: '2rem',
-        flexWrap: 'wrap',
-        borderRadius: 'var(--radius-md)',
-      }}>
-        <div>
-          <span style={{ color: 'var(--color-text-muted)', fontSize: '0.8rem' }}>All-Time Sessions</span>
-          <p style={{ color: 'var(--color-text-primary)', fontWeight: 600, margin: '0.15rem 0 0', fontSize: '1.1rem' }}>
-            {overview?.all_time?.sessions?.toLocaleString() || 0}
-          </p>
-        </div>
-        <div>
-          <span style={{ color: 'var(--color-text-muted)', fontSize: '0.8rem' }}>Total Energy</span>
-          <p style={{ color: 'var(--color-text-primary)', fontWeight: 600, margin: '0.15rem 0 0', fontSize: '1.1rem' }}>
-            {overview?.all_time?.energy_kwh?.toLocaleString() || 0} kWh
-          </p>
-        </div>
-        <div>
-          <span style={{ color: 'var(--color-text-muted)', fontSize: '0.8rem' }}>Total Revenue</span>
-          <p style={{ color: 'var(--color-accent)', fontWeight: 600, margin: '0.15rem 0 0', fontSize: '1.1rem' }}>
-            🪙 {overview?.all_time?.revenue_coins?.toLocaleString() || 0}
-          </p>
-        </div>
-        <div>
-          <span style={{ color: 'var(--color-text-muted)', fontSize: '0.8rem' }}>Gateways Online</span>
-          <p style={{ color: 'var(--color-success)', fontWeight: 600, margin: '0.15rem 0 0', fontSize: '1.1rem' }}>
-            {overview?.gateways?.online || 0} / {overview?.gateways?.total || 0}
-          </p>
-        </div>
-      </div>
+      {/* All-Time Summary */}
+      <CpoSummary
+        items={[
+          { label: 'All-Time Sessions', value: (overview?.all_time?.sessions ?? 0).toLocaleString() },
+          { label: 'Total Energy', value: `${(overview?.all_time?.energy_kwh ?? 0).toLocaleString()} kWh` },
+          { label: 'Total Revenue', value: `🪙 ${(overview?.all_time?.revenue_coins ?? 0).toLocaleString()}`, tone: 'accent' },
+          { label: 'Gateways Online', value: `${overview?.gateways?.online ?? 0} / ${overview?.gateways?.total ?? 0}`, tone: 'success' },
+        ]}
+      />
 
       {/* Charts: Revenue and Energy side by side */}
       <div className="charts-grid">
