@@ -1291,3 +1291,45 @@ class MQTTManager:
                 extra={"gateway_id": gateway_id, "plug_id": plug_id, "topic": topic, "error": str(e)},
             )
             return False
+
+    def send_plug_limits(self, gateway_id: str, plug_id: int, max_kwh: float, max_duration_seconds: int, local_ip: Optional[str] = None) -> bool:
+        """
+        Sends a SET_LIMITS command to a specific plug registered under a gateway.
+        Topic: amphive/gateways/{gateway_id}/plugs/{plug_id}/commands
+        Payload: {"action": "SET_LIMITS", "max_kwh": X, "max_duration_seconds": Y, "local_ip": "<str>"}
+
+        Updates a RUNNING session's watchdog thresholds (energy + duration caps)
+        in place. Unlike ON, the firmware does **not** re-read the meter baseline
+        or touch start_energy_kwh/start_time_s/session_active/session_id — so
+        billing is unaffected. The firmware ignores it when no session is active.
+        `local_ip` targets the physical plug on a multi-plug gateway (TD#20),
+        mirroring ON/OFF; the empty-string default is harmless for older
+        single-plug firmware, which falls back to its provisioned target.
+        """
+        topic = f"amphive/gateways/{gateway_id}/plugs/{plug_id}/commands"
+        payload = {
+            "action": "SET_LIMITS",
+            "max_kwh": max_kwh,
+            "max_duration_seconds": max_duration_seconds,
+            "local_ip": local_ip or "",
+        }
+
+        try:
+            payload_str = json.dumps(payload)
+            info = self.client.publish(topic, payload_str, qos=1)
+            info.wait_for_publish(timeout=3.0)
+            logger.info(
+                "Published limits command",
+                extra={
+                    "gateway_id": gateway_id, "plug_id": plug_id,
+                    "max_kwh": max_kwh, "max_duration_seconds": max_duration_seconds,
+                    "topic": topic,
+                },
+            )
+            return info.is_published()
+        except Exception as e:
+            logger.error(
+                "Failed to publish limits command",
+                extra={"gateway_id": gateway_id, "plug_id": plug_id, "topic": topic, "error": str(e)},
+            )
+            return False
