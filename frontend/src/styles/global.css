@@ -1300,6 +1300,50 @@ p {
   margin-top: 0.25rem;
 }
 
+/* --- CPO summary strip (shared metric bar) --- */
+/* One consistent strip with mono tabular figures, replacing the copy-pasted
+   inline "glass + flex + gap" summary bars that were duplicated across the
+   Dashboard / Gateways / Sessions pages. See components/CpoSummary.jsx. */
+.cpo-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.25rem 2.25rem;
+  padding: 1rem 1.5rem;
+  margin-bottom: 1.5rem;
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  backdrop-filter: blur(20px) saturate(1.2);
+  -webkit-backdrop-filter: blur(20px) saturate(1.2);
+  border: 1px solid var(--color-surface-border);
+}
+
+.cpo-summary-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  min-width: 0;
+}
+
+.cpo-summary-item .label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--color-text-muted);
+}
+
+.cpo-summary-item .value {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  font-size: 1.2rem;
+  letter-spacing: -0.01em;
+  color: var(--color-text-primary);
+}
+
+.cpo-summary-item .value.accent { color: var(--color-accent); }
+.cpo-summary-item .value.success { color: var(--color-success); }
+
 /* --- Data Tables --- */
 
 .data-table-container {

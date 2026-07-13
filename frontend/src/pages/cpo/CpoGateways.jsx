@@ -11,6 +11,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import CpoLayout from '../../components/CpoLayout';
+import CpoSummary from '../../components/CpoSummary';
 import api from '../../api/client';
 
 // Default OTA image (public signed bucket). Operators can edit before pushing;
@@ -96,14 +97,11 @@ const CpoGateways = () => {
 
       {/* Summary */}
       {!loading && (
-        <div className="glass" style={{ padding: '1rem 1.5rem', marginBottom: '1.5rem', borderRadius: 'var(--radius-md)', display: 'flex', gap: '2rem', flexWrap: 'wrap' }}>
-          <div>
-            <span style={{ color: 'var(--color-text-muted)', fontSize: '0.8rem' }}>Gateways Online</span>
-            <p style={{ color: 'var(--color-success)', fontWeight: 600, margin: '0.15rem 0 0', fontSize: '1.1rem' }}>
-              {onlineCount} / {gateways.length}
-            </p>
-          </div>
-        </div>
+        <CpoSummary
+          items={[
+            { label: 'Gateways Online', value: `${onlineCount} / ${gateways.length}`, tone: 'success' },
+          ]}
+        />
       )}
 
       {loading ? (
@@ -117,8 +115,8 @@ const CpoGateways = () => {
           </p>
         </div>
       ) : (
-        <div className="glass glass-panel" style={{ overflowX: 'auto' }}>
-          <table className="data-table" style={{ width: '100%' }}>
+        <div className="data-table-container animate-fade-in">
+          <table className="data-table">
             <thead>
               <tr>
                 <th>Name</th>
