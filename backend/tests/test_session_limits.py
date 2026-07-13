@@ -284,6 +284,239 @@ async def test_finalize_receipt_carries_limits(factory, monkeypatch):
 
 
 # =============================================================================
+# 1b. DB-gated: PATCH /api/sessions/{id}/limits — edit a running session
+#     ("start now, set the target later"). Covers persistence, the auth-hold
+#     re-size (grow/cap/shrink), and the 404/409 guards.
+# =============================================================================
+
+async def _seed_active_session(
+    factory, *, tenant_id, user_id, plug_id,
+    max_kwh, max_duration, hold="50.00", rate="5.00", status=None, energy=0.0,
+):
+    """Insert a charging session (ACTIVE by default) and return its id."""
+    from backend.database.models import ChargingSession, SessionStatus
+
+    async with factory() as db:
+        s = ChargingSession(
+            tenant_id=tenant_id, user_id=user_id, plug_id=plug_id,
+            status=status or SessionStatus.ACTIVE, energy_kwh=energy,
+            rate_coins_per_kwh=Decimal(rate),
+            hold_coins=Decimal(hold) if hold is not None else None,
+            max_kwh=max_kwh, max_duration_seconds=max_duration,
+        )
+        db.add(s)
+        await db.commit()
+        return s.id
+
+
+async def _patch_limits(factory, *, session_id, user_id, max_kwh=None, max_duration=None):
+    from backend.routers.sessions import update_session_limits
+    from backend.schemas import SessionLimitsUpdateRequest
+
+    kwargs = {}
+    if max_kwh is not None:
+        kwargs["max_kwh"] = max_kwh
+    if max_duration is not None:
+        kwargs["max_duration_seconds"] = max_duration
+    req = SessionLimitsUpdateRequest(**kwargs)
+    async with factory() as db:
+        return await update_session_limits(session_id, req, _fake_user(user_id), db)
+
+
+@db_gated
+@pytest.mark.asyncio
+async def test_patch_updates_limits_and_echoes(factory):
+    """PATCH persists the new stop conditions and echoes them back."""
+    from sqlalchemy import select
+
+    from backend.database.models import ChargingSession
+
+    tenant_id = await _seed_tenant(factory)
+    gw = await _seed_gateway(factory, tenant_id, "gw-patch-1")
+    plug_id = await _seed_plug(factory, gw)
+    uid = await _seed_user(factory, "500.00", tenant_id)
+    sid = await _seed_active_session(
+        factory, tenant_id=tenant_id, user_id=uid, plug_id=plug_id,
+        max_kwh=1.0, max_duration=1800,
+    )
+
+    result = await _patch_limits(factory, session_id=sid, user_id=uid, max_kwh=2.0, max_duration=3600)
+    assert result["status"] == "updated"
+    assert result["max_kwh"] == 2.0
+    assert result["max_duration_seconds"] == 3600
+
+    async with factory() as db:
+        session = (await db.execute(
+            select(ChargingSession).where(ChargingSession.id == sid)
+        )).scalar_one()
+    assert session.max_kwh == 2.0
+    assert session.max_duration_seconds == 3600
+
+
+@db_gated
+@pytest.mark.asyncio
+async def test_patch_only_updates_the_field_provided(factory):
+    """A duration-only PATCH leaves max_kwh (and its hold) untouched."""
+    from sqlalchemy import select
+
+    from backend.database.models import ChargingSession
+
+    tenant_id = await _seed_tenant(factory)
+    gw = await _seed_gateway(factory, tenant_id, "gw-patch-2")
+    plug_id = await _seed_plug(factory, gw)
+    uid = await _seed_user(factory, "500.00", tenant_id)
+    sid = await _seed_active_session(
+        factory, tenant_id=tenant_id, user_id=uid, plug_id=plug_id,
+        max_kwh=1.0, max_duration=1800, hold="5.00",
+    )
+
+    await _patch_limits(factory, session_id=sid, user_id=uid, max_duration=7200)
+
+    async with factory() as db:
+        session = (await db.execute(
+            select(ChargingSession).where(ChargingSession.id == sid)
+        )).scalar_one()
+    assert session.max_duration_seconds == 7200
+    assert session.max_kwh == 1.0                     # unchanged
+    assert session.hold_coins == Decimal("5.00")      # hold untouched (no max_kwh change)
+
+
+@db_gated
+@pytest.mark.asyncio
+async def test_patch_grows_hold_when_max_kwh_raised(factory):
+    """Raising max_kwh grows the hold to min(available + own hold, kwh * rate)."""
+    from sqlalchemy import select
+
+    from backend.database.models import ChargingSession
+
+    tenant_id = await _seed_tenant(factory)
+    gw = await _seed_gateway(factory, tenant_id, "gw-patch-3")
+    plug_id = await _seed_plug(factory, gw)
+    uid = await _seed_user(factory, "500.00", tenant_id)
+    # hold 5 (= 1 kWh * 5). Raise to 10 kWh → 50 coins, well within the 500 wallet.
+    sid = await _seed_active_session(
+        factory, tenant_id=tenant_id, user_id=uid, plug_id=plug_id,
+        max_kwh=1.0, max_duration=1800, hold="5.00", rate="5.00",
+    )
+
+    await _patch_limits(factory, session_id=sid, user_id=uid, max_kwh=10.0)
+
+    async with factory() as db:
+        session = (await db.execute(
+            select(ChargingSession).where(ChargingSession.id == sid)
+        )).scalar_one()
+    assert session.hold_coins == Decimal("50.00")
+
+
+@db_gated
+@pytest.mark.asyncio
+async def test_patch_hold_capped_by_available_balance(factory):
+    """A raised ceiling the wallet can't back caps the hold at what's available
+    (this session's own hold added back in)."""
+    from sqlalchemy import select
+
+    from backend.database.models import ChargingSession
+
+    tenant_id = await _seed_tenant(factory)
+    gw = await _seed_gateway(factory, tenant_id, "gw-patch-4")
+    plug_id = await _seed_plug(factory, gw)
+    uid = await _seed_user(factory, "20.00", tenant_id)  # thin wallet
+    sid = await _seed_active_session(
+        factory, tenant_id=tenant_id, user_id=uid, plug_id=plug_id,
+        max_kwh=1.0, max_duration=1800, hold="5.00", rate="5.00",
+    )
+
+    # 100 kWh * 5 = 500 wanted, but only 20 coins exist → hold caps at 20.
+    await _patch_limits(factory, session_id=sid, user_id=uid, max_kwh=100.0)
+
+    async with factory() as db:
+        session = (await db.execute(
+            select(ChargingSession).where(ChargingSession.id == sid)
+        )).scalar_one()
+    assert session.hold_coins == Decimal("20.00")
+
+
+@db_gated
+@pytest.mark.asyncio
+async def test_patch_shrinks_hold_when_max_kwh_lowered(factory):
+    """Lowering max_kwh shrinks the hold, freeing the difference."""
+    from sqlalchemy import select
+
+    from backend.database.models import ChargingSession
+
+    tenant_id = await _seed_tenant(factory)
+    gw = await _seed_gateway(factory, tenant_id, "gw-patch-5")
+    plug_id = await _seed_plug(factory, gw)
+    uid = await _seed_user(factory, "500.00", tenant_id)
+    sid = await _seed_active_session(
+        factory, tenant_id=tenant_id, user_id=uid, plug_id=plug_id,
+        max_kwh=10.0, max_duration=1800, hold="50.00", rate="5.00",
+    )
+
+    await _patch_limits(factory, session_id=sid, user_id=uid, max_kwh=2.0)
+
+    async with factory() as db:
+        session = (await db.execute(
+            select(ChargingSession).where(ChargingSession.id == sid)
+        )).scalar_one()
+    assert session.hold_coins == Decimal("10.00")     # 2 kWh * 5
+
+
+@db_gated
+@pytest.mark.asyncio
+async def test_patch_409_when_session_not_active(factory):
+    from fastapi import HTTPException
+
+    from backend.database.models import SessionStatus
+
+    tenant_id = await _seed_tenant(factory)
+    gw = await _seed_gateway(factory, tenant_id, "gw-patch-6")
+    plug_id = await _seed_plug(factory, gw)
+    uid = await _seed_user(factory, "500.00", tenant_id)
+    sid = await _seed_active_session(
+        factory, tenant_id=tenant_id, user_id=uid, plug_id=plug_id,
+        max_kwh=1.0, max_duration=1800, status=SessionStatus.COMPLETED,
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await _patch_limits(factory, session_id=sid, user_id=uid, max_kwh=2.0)
+    assert exc.value.status_code == 409
+
+
+@db_gated
+@pytest.mark.asyncio
+async def test_patch_404_when_not_owner(factory):
+    from fastapi import HTTPException
+
+    tenant_id = await _seed_tenant(factory)
+    gw = await _seed_gateway(factory, tenant_id, "gw-patch-7")
+    plug_id = await _seed_plug(factory, gw)
+    owner = await _seed_user(factory, "500.00", tenant_id)
+    other = await _seed_user(factory, "500.00", tenant_id)
+    sid = await _seed_active_session(
+        factory, tenant_id=tenant_id, user_id=owner, plug_id=plug_id,
+        max_kwh=1.0, max_duration=1800,
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await _patch_limits(factory, session_id=sid, user_id=other, max_kwh=2.0)
+    assert exc.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_patch_400_when_no_fields_given():
+    """The empty-request guard fires before any DB work — so this needs no DB."""
+    from fastapi import HTTPException
+
+    from backend.routers.sessions import update_session_limits
+    from backend.schemas import SessionLimitsUpdateRequest
+
+    with pytest.raises(HTTPException) as exc:
+        await update_session_limits(1, SessionLimitsUpdateRequest(), _fake_user(1), None)
+    assert exc.value.status_code == 400
+
+
+# =============================================================================
 # 2. DB-free: the telemetry-path auto-stop mirror
 # =============================================================================
 

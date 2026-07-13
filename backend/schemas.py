@@ -54,6 +54,15 @@ class SessionStartRequest(BaseModel):
     max_duration_seconds: int = Field(default=14400, gt=0, le=86400)  # 4 h default, 24 h cap
     max_kwh: float = Field(default=30.0, gt=0, le=100.0)              # 30 kWh default, 100 kWh cap
 
+
+class SessionLimitsUpdateRequest(BaseModel):
+    """PATCH a RUNNING session's stop conditions ("start now, set the target
+    later"). Both optional — send whichever you're changing; the same bounds as
+    SessionStartRequest apply. The endpoint 400s if neither is given."""
+    max_duration_seconds: Optional[int] = Field(default=None, gt=0, le=86400)
+    max_kwh: Optional[float] = Field(default=None, gt=0, le=100.0)
+
+
 class SessionStopRequest(BaseModel):
     session_id: int
 
