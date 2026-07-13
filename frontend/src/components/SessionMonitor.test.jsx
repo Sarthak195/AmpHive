@@ -4,7 +4,7 @@
  * gateway-alarm banner, and the voltage/relay secondary line.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent, act } from '@testing-library/react';
 
 import SessionMonitor from './SessionMonitor';
 import { useSession } from '../contexts/SessionContext';
@@ -201,5 +201,57 @@ describe('SessionMonitor', () => {
     });
     render(<SessionMonitor />);
     expect(screen.queryByText(/stops automatically/)).not.toBeInTheDocument();
+  });
+
+  it('opens the limit editor and PATCHes the new target on save', async () => {
+    const updateLimits = vi.fn().mockResolvedValue({
+      status: 'updated', max_kwh: 2, max_duration_seconds: 1800,
+    });
+    useSession.mockReturnValue({
+      sessionData: { ...baseData, energy_kwh: 0.42, is_stale: false },
+      isActive: true,
+      stopSession: vi.fn(),
+      updateLimits,
+      sessionId: 7,
+      lastFrameAt: Date.now(),
+      focusedStartedAt: new Date().toISOString(),
+      focusedLimits: { max_kwh: 1.0, max_duration_seconds: 1800 },
+      alarms: [],
+    });
+    render(<SessionMonitor />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    // Prefilled from the current limits; bump the energy target 1 → 2 kWh.
+    fireEvent.change(screen.getByLabelText(/Energy limit/i), { target: { value: '2' } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Save limit/i }));
+    });
+
+    // 0.5 h stayed → 1800 s; new kWh sent alongside it.
+    expect(updateLimits).toHaveBeenCalledWith(7, { max_kwh: 2, max_duration_seconds: 1800 });
+  });
+
+  it('rejects an empty limit edit without calling the API', () => {
+    const updateLimits = vi.fn();
+    useSession.mockReturnValue({
+      sessionData: { ...baseData, is_stale: false },
+      isActive: true,
+      stopSession: vi.fn(),
+      updateLimits,
+      sessionId: 7,
+      lastFrameAt: Date.now(),
+      focusedStartedAt: new Date().toISOString(),
+      focusedLimits: { max_kwh: 1.0, max_duration_seconds: 1800 },
+      alarms: [],
+    });
+    render(<SessionMonitor />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    fireEvent.change(screen.getByLabelText(/Energy limit/i), { target: { value: '' } });
+    fireEvent.change(screen.getByLabelText(/Time limit/i), { target: { value: '' } });
+    fireEvent.click(screen.getByRole('button', { name: /Save limit/i }));
+
+    expect(screen.getByText(/Enter an energy/i)).toBeInTheDocument();
+    expect(updateLimits).not.toHaveBeenCalled();
   });
 });

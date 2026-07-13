@@ -25,7 +25,8 @@ from backend.schemas import (
     CpoSetupRequest, CreateOrderRequest, CreateOrderResponse,
     DirectPlugRequest, DisputeCreateRequest, DisputeResponse,
     GatewayRegisterRequest, GroupResponse, JoinGroupRequest, LoginRequest,
-    PlugRegisterRequest, PlugResponse, RegisterRequest, SessionStartRequest,
+    PlugRegisterRequest, PlugResponse, RegisterRequest,
+    SessionLimitsUpdateRequest, SessionStartRequest,
     SessionStopRequest, UserResponse, VerifyPaymentRequest,
 )
 from backend.services import payments as payment_service
@@ -431,6 +432,111 @@ async def stop_charging_session(
     if check.scalar_one_or_none() is None:
         raise HTTPException(status_code=404, detail="Session not found.")
     raise HTTPException(status_code=400, detail="This session is not active.")
+
+
+@router.patch("/api/sessions/{session_id}/limits")
+async def update_session_limits(
+    session_id: int,
+    req: SessionLimitsUpdateRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Update a RUNNING session's stop conditions (max_kwh / max_duration_seconds)
+    after it started — "start now, set the target later". Send whichever you're
+    changing (400 if neither).
+
+    Enforcement is backend-side and near-immediate: _persist_telemetry reads the
+    session's limits fresh from the DB on every telemetry frame (~1 s), so the
+    shared finalize auto-stop honors the new value within ~1 s. The firmware's
+    local relay watchdog still holds the limit sent in the ON payload at start,
+    so RAISING a limit above that on-device value is bounded by the charger
+    until a firmware SET_LIMITS command ships (tracked follow-up); lowering /
+    adjusting within it is exact. Billing is always metered energy, so neither
+    case can misbill.
+
+    Auth hold: changing max_kwh re-sizes this session's hold (hold_coins) with
+    the same min(available, max_kwh * rate) rule the start path uses — grown so
+    a raised ceiling stays covered, shrunk to free the difference when lowered.
+    Recomputed under the user-row lock (taken first; user -> session order here
+    has no cycle with finalize's session -> user). Legacy NULL-hold sessions
+    keep a NULL hold.
+    """
+    updates = {}
+    if req.max_kwh is not None:
+        updates["max_kwh"] = req.max_kwh
+    if req.max_duration_seconds is not None:
+        updates["max_duration_seconds"] = req.max_duration_seconds
+    if not updates:
+        raise HTTPException(
+            status_code=400,
+            detail="Provide max_kwh and/or max_duration_seconds to update.",
+        )
+
+    # Lock the user row first so the hold recompute below can't race a
+    # concurrent start/patch for this user (the same lock the start path takes).
+    locked_user = await db.execute(
+        select(User).where(User.id == user.id).with_for_update()
+    )
+    if locked_user.scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    result = await db.execute(
+        select(ChargingSession)
+        .where(
+            and_(
+                ChargingSession.id == session_id,
+                ChargingSession.user_id == user.id,
+            )
+        )
+        .with_for_update()
+    )
+    session = result.scalar_one_or_none()
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session not found.")
+    if session.status != SessionStatus.ACTIVE:
+        raise HTTPException(
+            status_code=409,
+            detail="This session is not active — its limits can no longer change.",
+        )
+
+    if "max_duration_seconds" in updates:
+        session.max_duration_seconds = updates["max_duration_seconds"]
+    if "max_kwh" in updates:
+        session.max_kwh = updates["max_kwh"]
+        # Re-size the hold for a held session (skip legacy NULL-hold ones).
+        # available_balance() already nets out THIS session's own hold (it's
+        # ACTIVE), so add it back to get what this session may reserve, then cap
+        # by the new max_kwh * rate — the exact start-path sizing.
+        if session.hold_coins is not None:
+            rate = (
+                session.rate_coins_per_kwh
+                if session.rate_coins_per_kwh is not None
+                else COINS_PER_KWH
+            )
+            headroom = await available_balance(db, user.id) + session.hold_coins
+            session.hold_coins = to_money(
+                min(headroom, energy_cost(session.max_kwh, rate))
+            )
+
+    await db.commit()
+    await db.refresh(session)
+
+    logger.info(
+        "Session limits updated",
+        extra={
+            "session_id": session.id, "user_id": user.id,
+            "max_kwh": session.max_kwh,
+            "max_duration_seconds": session.max_duration_seconds,
+        },
+    )
+
+    return {
+        "status": "updated",
+        "session_id": session.id,
+        "max_kwh": session.max_kwh,
+        "max_duration_seconds": session.max_duration_seconds,
+    }
 
 
 @router.get("/api/sessions/active")
