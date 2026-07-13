@@ -426,6 +426,101 @@ p {
   padding-top: 0.75rem;
 }
 
+/* ===========================================================================
+   Driver Home — two-pane dashboard layout (layout redesign 2026-07-13)
+   ===========================================================================
+   A main column (start action + chargers) beside a sticky side rail (wallet +
+   reservations), so the page stops being one endless vertical scroll. Colors
+   come entirely from the existing tokens — this block is structure only. */
+
+.home-dash {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 330px;
+  gap: 1.5rem;
+  align-items: start;
+}
+
+.home-main {
+  min-width: 0;                 /* let the grid child shrink instead of overflow */
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.home-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  position: sticky;
+  top: 72px;                    /* below the sticky navbar */
+}
+
+/* Below the two-pane breakpoint the rail drops under the main column, so the
+   start action still leads and the page is a single readable stack. */
+@media (max-width: 900px) {
+  .home-dash { grid-template-columns: 1fr; }
+  .home-rail { position: static; }
+}
+
+/* Charger tabs replace the three stacked collapsible sections — one list at a
+   time (Your chargers / Public / Map), so they stop compounding the scroll. */
+.charge-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.charge-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-height: 40px;
+  padding: 0.45rem 0.95rem;
+  border-radius: 999px;
+  border: 1px solid var(--color-surface-border);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-family: var(--font-family);
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.charge-tab:hover {
+  border-color: var(--color-surface-border-hover);
+  color: var(--color-text-primary);
+}
+
+.charge-tab.active {
+  background: var(--color-primary);
+  color: hsl(72, 14%, 6%);
+  border-color: var(--color-primary);
+}
+
+.charge-tab .tab-count {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  padding: 0 0.35rem;
+  border-radius: 999px;
+  background: hsla(0, 0%, 100%, 0.08);
+}
+
+.charge-tab.active .tab-count { background: hsla(72, 14%, 6%, 0.18); }
+
+/* Charger cards flow in a responsive grid instead of a full-width stack —
+   uses the horizontal space, so a handful of chargers fit in one screen. */
+.plug-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  gap: 1rem;
+}
+
+@media (max-width: 480px) {
+  .plug-grid { grid-template-columns: 1fr; }
+}
+
 /* --- Animations --- */
 
 @keyframes pulse {

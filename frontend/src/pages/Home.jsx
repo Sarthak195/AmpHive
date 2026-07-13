@@ -48,8 +48,7 @@ import { useConfig } from '../contexts/ConfigContext';
 import api from '../api/client';
 import MapComponent from '../components/MapComponent';
 import ReserveModal from '../components/ReserveModal';
-import ChargeLimitControl from '../components/ChargeLimitControl';
-import { computeChargeLimits } from '../utils/chargeLimits';
+import ChargeSetupModal from '../components/ChargeSetupModal';
 import { AVAILABILITY_CSS_VAR, AVAILABILITY_LABELS, AVAILABILITY_STATES, getPlugAvailability } from '../utils/plugAvailability';
 import { fmtTime, fmtWindow } from '../utils/reservationTime';
 
@@ -65,44 +64,6 @@ const countByAvailability = (list) => {
   return counts;
 };
 
-// Collapsible charger section ("dropdown") — the header is a real <button>
-// (keyboard/screen-reader operable, aria-expanded) showing the section name
-// plus live per-status counts; the body holds the plug cards or the map.
-const PlugSection = ({ title, icon, counts, open, onToggle, children }) => (
-  <section className="plug-section">
-    <button
-      type="button"
-      className="plug-section-header"
-      onClick={onToggle}
-      aria-expanded={open}
-    >
-      <span className="plug-section-title">
-        <span aria-hidden="true">{icon}</span>
-        <span>{title}</span>
-      </span>
-      <span className="flex items-center gap-3" style={{ flexShrink: 0 }}>
-        {counts && (
-          <span className="plug-section-counts">
-            {AVAILABILITY_STATES.filter((s) => counts[s] > 0).map((s) => (
-              <span key={s} className="map-legend-item">
-                <span
-                  className="map-legend-dot"
-                  style={{ background: `var(${AVAILABILITY_CSS_VAR[s]})` }}
-                />
-                {counts[s]} {AVAILABILITY_LABELS[s].toLowerCase()}
-              </span>
-            ))}
-          </span>
-        )}
-        <span className={`plug-section-chevron ${open ? 'open' : ''}`} aria-hidden="true">
-          ▾
-        </span>
-      </span>
-    </button>
-    {open && <div className="plug-section-body">{children}</div>}
-  </section>
-);
-
 const Home = () => {
   const { user } = useAuth();
   const { startSession, activeSessions, switchSession, error: sessionError, socket } = useSession();
@@ -114,11 +75,10 @@ const Home = () => {
   const [plugs, setPlugs] = useState([]);
   const [loadingPlugs, setLoadingPlugs] = useState(false);
   const [startError, setStartError] = useState('');
-  const [starting, setStarting] = useState(false);
-  // Optional charging-limit spec from ChargeLimitControl ({ mode, value } |
-  // null). Kept raw here: the coins→kWh conversion happens at start time
-  // with the rate of the plug actually targeted (see rateForPlug below).
-  const [limitSpec, setLimitSpec] = useState(null);
+  // The charger being set up. Tapping a card (or hitting "Set up" on a typed
+  // Plug ID) opens a ChargeSetupModal for an OPTIONAL timer/kWh — charging no
+  // longer starts instantly. null = no modal open.
+  const [setupPlug, setSetupPlug] = useState(null);
 
   // Reservations: the driver's upcoming bookings (the strip), the plug being
   // reserved (modal open when non-null), and cancel-in-flight/error state.
@@ -132,14 +92,11 @@ const Home = () => {
   const [availabilityFilter, setAvailabilityFilter] = useState('');
   const [groupFilter, setGroupFilter] = useState('');
 
-  // Collapsible sections. Private starts open (it's the primary use case);
-  // the map starts closed (deprioritized for society/office installs — and
-  // Leaflet tiles aren't fetched at all while collapsed). `publicOpen` is
-  // tri-state: null = auto (open only when the driver has no private
-  // chargers), true/false once the driver toggles it.
-  const [privateOpen, setPrivateOpen] = useState(true);
-  const [publicOpen, setPublicOpen] = useState(null);
-  const [mapOpen, setMapOpen] = useState(false);
+  // Charger tabs: which of Your chargers / Public / Map is shown. null = auto
+  // (Your chargers when the driver has any private ones, else Public). Only
+  // one list renders at a time so the sections stop compounding the scroll;
+  // the map's Leaflet tiles are fetched only while its tab is active.
+  const [activeTab, setActiveTab] = useState(null);
 
   // QR / deep-link start
   const plugParam = new URLSearchParams(location.search).get('plug');
@@ -272,11 +229,10 @@ const Home = () => {
   // Pre-filter check, so the "join a group" hint only shows when the driver
   // truly has no private chargers (not merely filtered them all out).
   const hasAnyPrivate = useMemo(() => plugs.some((p) => p.is_private), [plugs]);
-  const publicIsOpen = publicOpen ?? !hasAnyPrivate;
+  const effectiveTab = activeTab ?? (hasAnyPrivate ? 'yours' : 'public');
 
-  // Per-section header counts + the map legend (public plugs are what the
-  // map plots) — all update live as the filters above narrow the set.
-  const privateCounts = useMemo(() => countByAvailability(privatePlugs), [privatePlugs]);
+  // Per-status counts for the public plugs — feeds the map legend, which
+  // updates live as the filters above narrow the set.
   const publicCounts = useMemo(() => countByAvailability(publicPlugs), [publicPlugs]);
 
   // Coins-per-kWh for a given plug id: the plug's own resolved price when we
@@ -288,25 +244,30 @@ const Home = () => {
     return price > 0 ? price : (coins_per_kwh || 5);
   };
 
-  const handleStartSession = async (e, targetPlugId = null) => {
-    if (e) e.preventDefault();
-    const pid = targetPlugId || plugId.trim();
-    if (!pid) return;
-
+  // Tapping a charger (or hitting "Set up" on a typed Plug ID) opens the setup
+  // modal for an optional timer/kWh — it no longer starts charging instantly.
+  const openSetup = (plug) => {
     setStartError('');
-    setStarting(true);
+    setSetupPlug(plug);
+  };
 
-    try {
-      // Optional user-set stop condition — converted here (not in the
-      // control) so a coins cap uses the rate of the plug actually being
-      // started. null → nothing sent → backend defaults apply.
-      await startSession(pid, computeChargeLimits(limitSpec, rateForPlug(pid)));
-      navigate('/session');
-    } catch (err) {
-      setStartError(err.message);
-    } finally {
-      setStarting(false);
-    }
+  // Resolve a plug id to the known plug (for name/price in the modal), falling
+  // back to a minimal object for an id that isn't in the accessible list.
+  const plugForId = (pid) =>
+    plugs.find((p) => String(p.id) === String(pid)) || { id: pid, name: `Plug ${pid}` };
+
+  const handleStartFromInput = (e) => {
+    if (e) e.preventDefault();
+    const pid = plugId.trim();
+    if (!pid) return;
+    openSetup(plugForId(pid));
+  };
+
+  // Actually begin charging, from the setup modal. Throws on failure so the
+  // modal surfaces the error; on success we go to the live monitor.
+  const doStart = async (pid, limits) => {
+    await startSession(pid, limits);
+    navigate('/session');
   };
 
   // "Notify me when free" (one-shot watch) bell toggle — optimistic: flip
@@ -365,7 +326,7 @@ const Home = () => {
         }}
         onClick={() => {
           if (startable) {
-            handleStartSession(null, plug.id);
+            openSetup(plug);
           }
         }}
       >
@@ -478,335 +439,326 @@ const Home = () => {
   }
 
   return (
-    <div className="page-container animate-fade-in">
+    <div className="page-container animate-fade-in" style={user ? { maxWidth: '1120px' } : undefined}>
       {/* Header */}
-      <header className="text-center" style={{ marginBottom: '2rem' }}>
+      <header className="text-center" style={{ marginBottom: '1.5rem' }}>
         <h1 style={{ color: 'var(--color-primary)', fontSize: 'clamp(1.6rem, 6vw, 2.2rem)', marginBottom: '0.25rem' }}>
           ⚡ AmpHive
         </h1>
         <p style={{ fontSize: '1.05rem' }}>Shared EV Charging Network</p>
       </header>
 
-
-      {/* Active Session Banners — one per active session (max 2) */}
-      {activeSessions.map((session) => (
-        <div
-          key={session.session_id}
-          className="glass animate-slide-up"
-          style={{
-            padding: '1rem 1.25rem',
-            background: 'var(--color-primary-glow)',
-            border: '1px solid var(--color-primary)',
-            borderRadius: 'var(--radius-md)',
-            marginBottom: '1rem',
-            display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-            flexWrap: 'wrap',
-            gap: '0.75rem',
-          }}
-        >
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', minWidth: 0 }}>
-            <span style={{ fontSize: '1.25rem' }}>⚡</span>
-            <div style={{ minWidth: 0 }}>
-              <div style={{ fontWeight: 600 }}>Active charging session in progress</div>
-              <div style={{ fontSize: '0.85rem', color: 'var(--color-text-secondary)' }}>
-                Plug: {session.plug_name}
-              </div>
-            </div>
-          </div>
-          <button
-            className="btn btn-accent btn-sm"
-            style={{ whiteSpace: 'nowrap', flexShrink: 0 }}
-            onClick={() => {
-              switchSession(session);
-              navigate('/session');
-            }}
-          >
-            Resume Session
+      {!user ? (
+        /* Not logged in */
+        <div className="glass glass-panel text-center animate-slide-up" style={{ padding: '3rem 2rem' }}>
+          <p style={{ fontSize: '1.5rem', marginBottom: '0.75rem' }}>🔐</p>
+          <h2 style={{ marginBottom: '0.5rem' }}>Sign in to get started</h2>
+          <p style={{ marginBottom: '1.5rem' }}>
+            Create an account to top up your wallet and start charging.
+          </p>
+          <button className="btn btn-primary btn-lg" onClick={() => navigate('/login', { state: { from: location } })}>
+            Sign In
           </button>
         </div>
-      ))}
-
-      {/* Wallet Card */}
-      <div style={{ marginBottom: '1.5rem' }}>
-        <WalletCard />
-      </div>
-
-      {/* Start Charging Section */}
-      {user && (
-        <div ref={startCardRef} className="glass glass-panel animate-slide-up" style={{ marginBottom: '1.5rem' }}>
-          <h3 style={{ marginBottom: '0.25rem' }}>Start Charging</h3>
-          <p style={{ marginBottom: '1.25rem', fontSize: '0.9rem' }}>
-            Enter a Plug ID to begin charging your vehicle.
-          </p>
-
-          {/* QR / deep-link notice: the ?plug= id from a scanned QR or
-              shared link didn't resolve to a plug this account can see. */}
-          {deepLinkNotice && (
-            <div
-              className="mt-2"
-              style={{
-                marginBottom: '1rem',
-                padding: '0.65rem 0.85rem',
-                borderRadius: 'var(--radius-md)',
-                background: 'hsla(30, 90%, 55%, 0.12)',
-                border: '1px solid hsla(30, 90%, 55%, 0.35)',
-                color: 'var(--color-warning, #f0a020)',
-                fontSize: '0.85rem',
-              }}
-            >
-              {deepLinkNotice}
-            </div>
-          )}
-
-          <form onSubmit={handleStartSession} className="flex gap-3">
-            <input
-              ref={plugInputRef}
-              type="text"
-              className="input"
-              placeholder="Enter Plug ID (e.g. 1)"
-              value={plugId}
-              onChange={(e) => {
-                setPlugId(e.target.value);
-                if (deepLinkNotice) setDeepLinkNotice('');
-              }}
-              style={{ flex: 1 }}
-            />
-            <button
-              type="submit"
-              className="btn btn-accent"
-              disabled={!plugId.trim() || starting}
-            >
-              {starting ? '...' : 'Start'}
-            </button>
-          </form>
-
-          {/* Optional stop condition — kWh / time / ₹ coins ("only charge
-              1 kWh"). Collapsed by default; enforced backend-side at the
-              limit (mirrored by the firmware's local watchdogs). */}
-          <ChargeLimitControl
-            rate={rateForPlug(plugId.trim())}
-            onChange={setLimitSpec}
-          />
-
-          {(startError || sessionError) && (
-            <div className="error-text mt-2">{startError || sessionError}</div>
-          )}
-
-          {/* Pricing hint: tariff + what the current balance covers, so the
-              driver knows the cost before starting. */}
-          {(() => {
-            const balance = Number(user.coin_balance) || 0;
-            const rate = coins_per_kwh || 5;
-            const belowMin = balance < (min_start_balance_coins || 0);
-            const estKwh = rate > 0 ? balance / rate : 0;
-            return (
-              <div style={{ marginTop: '0.75rem', fontSize: '0.82rem', color: 'var(--color-text-muted)' }}>
-                Rate <strong style={{ color: 'var(--color-text-secondary)' }}>{rate} coins/kWh</strong>
-                {' · '}your balance (<strong style={{ color: 'var(--color-text-secondary)' }}>{balance.toFixed(2)}</strong> coins)
-                covers ≈ <strong style={{ color: 'var(--color-text-secondary)' }}>{estKwh.toFixed(1)} kWh</strong>.
-                {belowMin && (
-                  <span style={{ color: 'var(--color-warning, #f0a020)' }}>
-                    {' '}Minimum {min_start_balance_coins} coins to start —{' '}
-                    <span
-                      style={{ color: 'var(--color-primary)', cursor: 'pointer', textDecoration: 'underline' }}
-                      onClick={() => navigate('/topup')}
-                    >
-                      top up
-                    </span>.
-                  </span>
-                )}
-              </div>
-            );
-          })()}
-        </div>
-      )}
-
-      {/* Your reservations — the driver's upcoming booked windows, each
-          with its plug, window, and a cancel action. Hidden when empty. */}
-      {user && myReservations.length > 0 && (
-        <div className="glass glass-panel animate-slide-up" style={{ marginBottom: '1.5rem' }}>
-          <h3 style={{ marginBottom: '0.75rem' }}>Your reservations</h3>
-          <div className="flex flex-col gap-3">
-            {myReservations.map((r) => (
+      ) : (
+        /* Two-pane dashboard: primary action + chargers in the main column,
+           wallet + reservations in a sticky side rail. */
+        <div className="home-dash">
+          {/* ================= MAIN COLUMN ================= */}
+          <div className="home-main">
+            {/* Active session banner(s) — one per active session (max 2) */}
+            {activeSessions.map((session) => (
               <div
-                key={r.id}
-                className="flex justify-between items-center"
-                style={{ gap: '0.75rem', flexWrap: 'wrap' }}
+                key={session.session_id}
+                className="glass animate-slide-up"
+                style={{
+                  padding: '0.9rem 1.15rem',
+                  background: 'var(--color-primary-glow)',
+                  border: '1px solid var(--color-primary)',
+                  borderRadius: 'var(--radius-md)',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  flexWrap: 'wrap',
+                  gap: '0.75rem',
+                }}
               >
-                <div style={{ minWidth: 0 }}>
-                  <div style={{ fontWeight: 600 }}>{r.plug_name || `Plug ${r.plug_id}`}</div>
-                  <div style={{ fontSize: '0.85rem', color: 'var(--color-text-secondary)' }}>
-                    {fmtWindow(r.start_at, r.end_at)}
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', minWidth: 0 }}>
+                  <span style={{ fontSize: '1.25rem' }}>⚡</span>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontWeight: 600 }}>Active charging session in progress</div>
+                    <div style={{ fontSize: '0.85rem', color: 'var(--color-text-secondary)' }}>
+                      Plug: {session.plug_name}
+                    </div>
                   </div>
                 </div>
                 <button
-                  className="btn btn-ghost btn-sm"
-                  style={{ flexShrink: 0 }}
-                  disabled={cancellingId === r.id}
-                  onClick={() => cancelReservation(r.id)}
+                  className="btn btn-accent btn-sm"
+                  style={{ whiteSpace: 'nowrap', flexShrink: 0 }}
+                  onClick={() => { switchSession(session); navigate('/session'); }}
                 >
-                  {cancellingId === r.id ? '...' : 'Cancel'}
+                  Resume Session
                 </button>
               </div>
             ))}
+
+            {/* Start charging — the primary action, leading the page. */}
+            <div ref={startCardRef} className="glass glass-panel animate-slide-up">
+              <h3 style={{ marginBottom: '0.25rem' }}>Start Charging</h3>
+              <p style={{ marginBottom: '1.25rem', fontSize: '0.9rem' }}>
+                Enter a Plug ID, or tap a charger below — you'll set an optional timer or kWh limit before it starts.
+              </p>
+
+              {deepLinkNotice && (
+                <div
+                  className="mt-2"
+                  style={{
+                    marginBottom: '1rem',
+                    padding: '0.65rem 0.85rem',
+                    borderRadius: 'var(--radius-md)',
+                    background: 'hsla(30, 90%, 55%, 0.12)',
+                    border: '1px solid hsla(30, 90%, 55%, 0.35)',
+                    color: 'var(--color-warning, #f0a020)',
+                    fontSize: '0.85rem',
+                  }}
+                >
+                  {deepLinkNotice}
+                </div>
+              )}
+
+              <form onSubmit={handleStartFromInput} className="flex gap-3">
+                <input
+                  ref={plugInputRef}
+                  type="text"
+                  className="input"
+                  placeholder="Enter Plug ID (e.g. 1)"
+                  value={plugId}
+                  onChange={(e) => {
+                    setPlugId(e.target.value);
+                    if (deepLinkNotice) setDeepLinkNotice('');
+                  }}
+                  style={{ flex: 1 }}
+                />
+                <button type="submit" className="btn btn-accent" disabled={!plugId.trim()}>
+                  Set up
+                </button>
+              </form>
+
+              {(startError || sessionError) && (
+                <div className="error-text mt-2">{startError || sessionError}</div>
+              )}
+
+              {/* Pricing hint: tariff + what the balance covers before starting. */}
+              {(() => {
+                const balance = Number(user.coin_balance) || 0;
+                const rate = coins_per_kwh || 5;
+                const belowMin = balance < (min_start_balance_coins || 0);
+                const estKwh = rate > 0 ? balance / rate : 0;
+                return (
+                  <div style={{ marginTop: '0.75rem', fontSize: '0.82rem', color: 'var(--color-text-muted)' }}>
+                    Rate <strong style={{ color: 'var(--color-text-secondary)' }}>{rate} coins/kWh</strong>
+                    {' · '}your balance (<strong style={{ color: 'var(--color-text-secondary)' }}>{balance.toFixed(2)}</strong> coins)
+                    covers ≈ <strong style={{ color: 'var(--color-text-secondary)' }}>{estKwh.toFixed(1)} kWh</strong>.
+                    {belowMin && (
+                      <span style={{ color: 'var(--color-warning, #f0a020)' }}>
+                        {' '}Minimum {min_start_balance_coins} coins to start —{' '}
+                        <span
+                          style={{ color: 'var(--color-primary)', cursor: 'pointer', textDecoration: 'underline' }}
+                          onClick={() => navigate('/topup')}
+                        >
+                          top up
+                        </span>.
+                      </span>
+                    )}
+                  </div>
+                );
+              })()}
+            </div>
+
+            {/* Chargers — tabbed (Your chargers / Public / Map), one list at a
+                time instead of three stacked collapsible sections. */}
+            <div className="animate-slide-up">
+              <div className="flex justify-between items-center" style={{ marginBottom: '1rem' }}>
+                <h3 style={{ margin: 0 }}>Chargers</h3>
+                <button className="btn btn-ghost btn-sm" onClick={fetchPlugs}>Refresh</button>
+              </div>
+
+              {loadingPlugs ? (
+                <div className="plug-grid">
+                  {[1, 2, 3].map((i) => (
+                    <div key={i} className="skeleton" style={{ height: '96px', width: '100%' }} />
+                  ))}
+                </div>
+              ) : plugs.length === 0 ? (
+                <div className="glass glass-panel text-center" style={{ padding: '2.5rem 2rem' }}>
+                  <p style={{ fontSize: '1.5rem', marginBottom: '0.5rem' }}>🔌</p>
+                  <p>No chargers available yet.</p>
+                  <p style={{ fontSize: '0.85rem', marginTop: '0.5rem' }}>
+                    Join a charger group to see available plugs, or enter a Plug ID directly above.
+                  </p>
+                  <button className="btn btn-primary btn-sm mt-4" onClick={() => navigate('/groups')}>
+                    Browse Groups
+                  </button>
+                </div>
+              ) : (
+                <>
+                  {/* Tabs */}
+                  <div className="charge-tabs">
+                    <button
+                      type="button"
+                      aria-pressed={effectiveTab === 'yours'}
+                      className={`charge-tab ${effectiveTab === 'yours' ? 'active' : ''}`}
+                      onClick={() => setActiveTab('yours')}
+                    >
+                      🏠 Your chargers <span className="tab-count">{privatePlugs.length}</span>
+                    </button>
+                    <button
+                      type="button"
+                      aria-pressed={effectiveTab === 'public'}
+                      className={`charge-tab ${effectiveTab === 'public' ? 'active' : ''}`}
+                      onClick={() => setActiveTab('public')}
+                    >
+                      🌐 Public chargers <span className="tab-count">{publicPlugs.length}</span>
+                    </button>
+                    <button
+                      type="button"
+                      aria-pressed={effectiveTab === 'map'}
+                      className={`charge-tab ${effectiveTab === 'map' ? 'active' : ''}`}
+                      onClick={() => setActiveTab('map')}
+                    >
+                      🗺️ Map
+                    </button>
+                  </div>
+
+                  {/* Filters — narrow the current tab's list + the map markers. */}
+                  <div className="filter-bar">
+                    <select
+                      value={availabilityFilter}
+                      onChange={(e) => setAvailabilityFilter(e.target.value)}
+                      aria-label="Filter by availability"
+                    >
+                      <option value="">All statuses</option>
+                      <option value="available">Available now</option>
+                      <option value="in_use">In use</option>
+                      <option value="offline">Offline</option>
+                    </select>
+                    <select
+                      value={groupFilter}
+                      onChange={(e) => setGroupFilter(e.target.value)}
+                      aria-label="Filter by group"
+                    >
+                      {groupOptions.map((g) => (
+                        <option key={g.value} value={g.value}>{g.label}</option>
+                      ))}
+                    </select>
+                    <span style={{ color: 'var(--color-text-muted)', fontSize: '0.85rem' }}>
+                      {filteredPlugs.length} of {plugs.length} plug{plugs.length !== 1 ? 's' : ''}
+                    </span>
+                  </div>
+
+                  {/* Your chargers tab */}
+                  {effectiveTab === 'yours' && (
+                    privatePlugs.length > 0 ? (
+                      <div className="plug-grid">{privatePlugs.map(renderPlugCard)}</div>
+                    ) : !hasAnyPrivate ? (
+                      <div className="glass glass-panel text-center" style={{ padding: '1.5rem' }}>
+                        <p style={{ fontSize: '0.9rem' }}>
+                          No private chargers yet. If your society or office runs
+                          AmpHive chargers, join their group with an access code.
+                        </p>
+                        <button className="btn btn-primary btn-sm mt-4" onClick={() => navigate('/groups')}>
+                          Join a group
+                        </button>
+                      </div>
+                    ) : (
+                      <p style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>
+                        None match the current filters.
+                      </p>
+                    )
+                  )}
+
+                  {/* Public chargers tab */}
+                  {effectiveTab === 'public' && (
+                    publicPlugs.length > 0 ? (
+                      <div className="plug-grid">{publicPlugs.map(renderPlugCard)}</div>
+                    ) : (
+                      <p style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>
+                        None match the current filters.
+                      </p>
+                    )
+                  )}
+
+                  {/* Map tab — public plugs only; Leaflet mounts (and fetches
+                      tiles) only while this tab is active. */}
+                  {effectiveTab === 'map' && (
+                    <>
+                      <div className="map-legend" aria-label="Plug availability legend">
+                        {AVAILABILITY_STATES.map((state) => (
+                          <span key={state} className="map-legend-item">
+                            <span
+                              className="map-legend-dot"
+                              style={{ background: `var(${AVAILABILITY_CSS_VAR[state]})` }}
+                            />
+                            {AVAILABILITY_LABELS[state]} ({publicCounts[state]})
+                          </span>
+                        ))}
+                      </div>
+                      <MapComponent plugs={publicPlugs} onPlugSelect={(id) => openSetup(plugForId(id))} />
+                    </>
+                  )}
+                </>
+              )}
+            </div>
           </div>
-          {reservationError && <div className="error-text mt-2">{reservationError}</div>}
+
+          {/* ================= SIDE RAIL ================= */}
+          <aside className="home-rail">
+            <WalletCard />
+
+            {myReservations.length > 0 && (
+              <div className="glass glass-panel animate-slide-up">
+                <h3 style={{ marginBottom: '0.75rem' }}>Your reservations</h3>
+                <div className="flex flex-col gap-3">
+                  {myReservations.map((r) => (
+                    <div
+                      key={r.id}
+                      className="flex justify-between items-center"
+                      style={{ gap: '0.75rem', flexWrap: 'wrap' }}
+                    >
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ fontWeight: 600 }}>{r.plug_name || `Plug ${r.plug_id}`}</div>
+                        <div style={{ fontSize: '0.85rem', color: 'var(--color-text-secondary)' }}>
+                          {fmtWindow(r.start_at, r.end_at)}
+                        </div>
+                      </div>
+                      <button
+                        className="btn btn-ghost btn-sm"
+                        style={{ flexShrink: 0 }}
+                        disabled={cancellingId === r.id}
+                        onClick={() => cancelReservation(r.id)}
+                      >
+                        {cancellingId === r.id ? '...' : 'Cancel'}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+                {reservationError && <div className="error-text mt-2">{reservationError}</div>}
+              </div>
+            )}
+          </aside>
         </div>
       )}
 
-      {/* Chargers — sectioned list: the driver's private (society/office)
-          chargers first, then public ones, with the map at the bottom. */}
-      {user && (
-        <div className="animate-slide-up" style={{ animationDelay: '0.15s' }}>
-          <div className="flex justify-between items-center" style={{ marginBottom: '1rem' }}>
-            <h3 style={{ margin: 0 }}>Chargers</h3>
-            <button className="btn btn-ghost btn-sm" onClick={fetchPlugs}>
-              Refresh
-            </button>
-          </div>
-
-          {/* Filters — shared state feeds every section below (both lists
-              and the map markers); there is no power-rating field anywhere
-              in the plug data model, so (per spec) that filter is not
-              offered here. */}
-          {plugs.length > 0 && (
-            <div className="filter-bar">
-              <select
-                value={availabilityFilter}
-                onChange={(e) => setAvailabilityFilter(e.target.value)}
-                aria-label="Filter by availability"
-              >
-                <option value="">All statuses</option>
-                <option value="available">Available now</option>
-                <option value="in_use">In use</option>
-                <option value="offline">Offline</option>
-              </select>
-              <select
-                value={groupFilter}
-                onChange={(e) => setGroupFilter(e.target.value)}
-                aria-label="Filter by group"
-              >
-                {groupOptions.map((g) => (
-                  <option key={g.value} value={g.value}>{g.label}</option>
-                ))}
-              </select>
-              <span style={{ color: 'var(--color-text-muted)', fontSize: '0.85rem' }}>
-                {filteredPlugs.length} of {plugs.length} plug{plugs.length !== 1 ? 's' : ''}
-              </span>
-            </div>
-          )}
-
-          {loadingPlugs ? (
-            <div className="flex flex-col gap-3">
-              {[1, 2, 3].map(i => (
-                <div key={i} className="skeleton" style={{ height: '72px', width: '100%' }} />
-              ))}
-            </div>
-          ) : plugs.length === 0 ? (
-            <div className="glass glass-panel text-center" style={{ padding: '2.5rem 2rem' }}>
-              <p style={{ fontSize: '1.5rem', marginBottom: '0.5rem' }}>🔌</p>
-              <p>No chargers available yet.</p>
-              <p style={{ fontSize: '0.85rem', marginTop: '0.5rem' }}>
-                Join a charger group to see available plugs, or enter a Plug ID directly above.
-              </p>
-              <button
-                className="btn btn-primary btn-sm mt-4"
-                onClick={() => navigate('/groups')}
-              >
-                Browse Groups
-              </button>
-            </div>
-          ) : filteredPlugs.length === 0 ? (
-            <div className="glass glass-panel text-center" style={{ padding: '2rem' }}>
-              <p style={{ fontSize: '1.3rem', marginBottom: '0.5rem' }}>🔍</p>
-              <p>No chargers match your filters.</p>
-              <button
-                className="btn btn-ghost btn-sm mt-4"
-                onClick={() => { setAvailabilityFilter(''); setGroupFilter(''); }}
-              >
-                Clear filters
-              </button>
-            </div>
-          ) : (
-            <>
-              {/* Private chargers — the driver's own society/office groups. */}
-              <PlugSection
-                title="Your chargers"
-                icon="🏠"
-                counts={privateCounts}
-                open={privateOpen}
-                onToggle={() => setPrivateOpen((o) => !o)}
-              >
-                {privatePlugs.length > 0 ? (
-                  <div className="flex flex-col gap-3">
-                    {privatePlugs.map(renderPlugCard)}
-                  </div>
-                ) : !hasAnyPrivate ? (
-                  <div className="glass glass-panel text-center" style={{ padding: '1.5rem' }}>
-                    <p style={{ fontSize: '0.9rem' }}>
-                      No private chargers yet. If your society or office runs
-                      AmpHive chargers, join their group with an access code.
-                    </p>
-                    <button
-                      className="btn btn-primary btn-sm mt-4"
-                      onClick={() => navigate('/groups')}
-                    >
-                      Join a group
-                    </button>
-                  </div>
-                ) : (
-                  <p style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>
-                    None match the current filters.
-                  </p>
-                )}
-              </PlugSection>
-
-              {/* Public chargers — public groups + ungrouped/legacy plugs. */}
-              <PlugSection
-                title="Public chargers"
-                icon="🌐"
-                counts={publicCounts}
-                open={publicIsOpen}
-                onToggle={() => setPublicOpen(!publicIsOpen)}
-              >
-                {publicPlugs.length > 0 ? (
-                  <div className="flex flex-col gap-3">
-                    {publicPlugs.map(renderPlugCard)}
-                  </div>
-                ) : (
-                  <p style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>
-                    None match the current filters.
-                  </p>
-                )}
-              </PlugSection>
-
-              {/* Map — bottom of the page by design: society/office drivers
-                  already know where their charger is. Public plugs only;
-                  collapsed by default (tiles aren't fetched until opened). */}
-              <PlugSection
-                title="Map — public chargers"
-                icon="🗺️"
-                open={mapOpen}
-                onToggle={() => setMapOpen((o) => !o)}
-              >
-                <div className="map-legend" aria-label="Plug availability legend">
-                  {AVAILABILITY_STATES.map((state) => (
-                    <span key={state} className="map-legend-item">
-                      <span
-                        className="map-legend-dot"
-                        style={{ background: `var(${AVAILABILITY_CSS_VAR[state]})` }}
-                      />
-                      {AVAILABILITY_LABELS[state]} ({publicCounts[state]})
-                    </span>
-                  ))}
-                </div>
-                <MapComponent plugs={publicPlugs} onPlugSelect={(id) => handleStartSession(null, id)} />
-              </PlugSection>
-            </>
-          )}
-        </div>
+      {/* Charge setup modal — opens on a charger tap / Plug ID "Set up":
+          optional timer + kWh, then Start. No instant start. */}
+      {setupPlug && (
+        <ChargeSetupModal
+          plug={setupPlug}
+          rate={rateForPlug(setupPlug.id)}
+          balance={user?.coin_balance}
+          onStart={doStart}
+          onClose={() => setSetupPlug(null)}
+        />
       )}
 
       {/* Reserve modal — date/time/duration form + the plug's upcoming
@@ -821,20 +773,6 @@ const Home = () => {
             fetchPlugs(); // reserved_now / next_reservation may have changed
           }}
         />
-      )}
-
-      {/* Not logged in */}
-      {!user && (
-        <div className="glass glass-panel text-center animate-slide-up" style={{ padding: '3rem 2rem' }}>
-          <p style={{ fontSize: '1.5rem', marginBottom: '0.75rem' }}>🔐</p>
-          <h2 style={{ marginBottom: '0.5rem' }}>Sign in to get started</h2>
-          <p style={{ marginBottom: '1.5rem' }}>
-            Create an account to top up your wallet and start charging.
-          </p>
-          <button className="btn btn-primary btn-lg" onClick={() => navigate('/login', { state: { from: location } })}>
-            Sign In
-          </button>
-        </div>
       )}
     </div>
   );

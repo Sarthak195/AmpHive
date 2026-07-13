@@ -130,70 +130,66 @@ describe('Home — QR / deep-link start', () => {
   });
 });
 
-describe('Home — private/public sections + map at the bottom', () => {
+describe('Home — charger tabs (Your chargers / Public / Map)', () => {
   beforeEach(() => {
     useAuth.mockReturnValue({ user: DRIVER });
     api.get.mockResolvedValue(PLUGS);
   });
 
-  it('splits plugs into "Your chargers" (open) and "Public chargers" (collapsed when private ones exist)', async () => {
+  it('defaults to Your chargers; Public is one tab-click away (one list at a time)', async () => {
     renderHome('/');
     await screen.findByText('Lobby Plug');
 
-    // Private section open: both Sunrise Apartments plugs visible.
+    // Your chargers active by default → both Sunrise plugs visible…
+    expect(screen.getByRole('button', { name: /Your chargers/ })).toHaveAttribute('aria-pressed', 'true');
     expect(screen.getByText('Garage Plug')).toBeInTheDocument();
-    // Public section collapsed by default (this driver has private plugs).
+    // …and the public list is not rendered until its tab is chosen.
     expect(screen.queryByText('Rooftop Plug')).not.toBeInTheDocument();
     expect(screen.queryByText('Basement Plug')).not.toBeInTheDocument();
 
-    const publicHeader = screen.getByRole('button', { name: /Public chargers/ });
-    expect(publicHeader).toHaveAttribute('aria-expanded', 'false');
-    await userEvent.click(publicHeader);
+    await userEvent.click(screen.getByRole('button', { name: /Public chargers/ }));
 
+    // One list at a time: public plugs show, private ones hide.
     expect(screen.getByText('Rooftop Plug')).toBeInTheDocument();
     expect(screen.getByText('Basement Plug')).toBeInTheDocument();
+    expect(screen.queryByText('Lobby Plug')).not.toBeInTheDocument();
   });
 
-  it('section headers carry live per-status counts', async () => {
+  it('each tab shows its plug count', async () => {
+    renderHome('/');
+    await screen.findByText('Lobby Plug');
+    // Sunrise (private) = 2; public (Rooftop + Basement) = 2.
+    expect(screen.getByRole('button', { name: /Your chargers/ })).toHaveTextContent('2');
+    expect(screen.getByRole('button', { name: /Public chargers/ })).toHaveTextContent('2');
+  });
+
+  it('the Map tab mounts the map lazily and plots public plugs only', async () => {
     renderHome('/');
     await screen.findByText('Lobby Plug');
 
-    const privateHeader = screen.getByRole('button', { name: /Your chargers/ });
-    // Private: Lobby available + Garage in use (zero-count states hidden).
-    expect(privateHeader).toHaveTextContent('1 available');
-    expect(privateHeader).toHaveTextContent('1 in use');
-    // Public: Rooftop (gateway offline) + Basement (status offline).
-    expect(screen.getByRole('button', { name: /Public chargers/ })).toHaveTextContent('2 offline');
-  });
-
-  it('map section sits collapsed at the bottom and plots public plugs when opened', async () => {
-    renderHome('/');
-    await screen.findByText('Lobby Plug');
-
-    // Collapsed: no map rendered (tiles not fetched), no legend.
+    // Not on the map tab → nothing mounted (no tiles fetched), no legend.
     expect(screen.queryByTestId('map-mock')).not.toBeInTheDocument();
 
-    const mapHeader = screen.getByRole('button', { name: /Map — public chargers/ });
-    await userEvent.click(mapHeader);
+    await userEvent.click(screen.getByRole('button', { name: /Map/ }));
 
-    // Public plugs only (ids 3, 4) — private society plugs stay off the map.
-    expect(screen.getByTestId('map-mock')).toHaveTextContent('3,4');
-    // Legend counts cover what the map shows: both public plugs are offline.
+    expect(screen.getByTestId('map-mock')).toHaveTextContent('3,4'); // public ids only
     expect(screen.getByText('Available (0)')).toBeInTheDocument();
     expect(screen.getByText('In use (0)')).toBeInTheDocument();
     expect(screen.getByText('Offline (2)')).toBeInTheDocument();
   });
 
-  it('shows a join-a-group hint (and opens the public list) when the driver has no private chargers', async () => {
+  it('defaults to Public and shows a join hint on Your chargers when the driver has none', async () => {
     api.get.mockResolvedValue(PLUGS.map((p) => ({ ...p, is_private: false })));
     renderHome('/');
-    await screen.findByText('Lobby Plug'); // public section auto-opens
+    await screen.findByText('Lobby Plug'); // all public → shown on the default Public tab
 
+    expect(screen.getByRole('button', { name: /Public chargers/ })).toHaveAttribute('aria-pressed', 'true');
+
+    await userEvent.click(screen.getByRole('button', { name: /Your chargers/ }));
     expect(screen.getByText(/join their group with an access code/)).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Public chargers/ })).toHaveAttribute('aria-expanded', 'true');
   });
 
-  it('the availability filter reduces the rendered plug list and updates the section counts', async () => {
+  it('the availability filter narrows the active tab + the "X of Y" count', async () => {
     renderHome('/');
     await screen.findByText('Lobby Plug');
     expect(screen.getByText('Garage Plug')).toBeInTheDocument();
@@ -204,26 +200,26 @@ describe('Home — private/public sections + map at the bottom', () => {
     expect(screen.queryByText('Garage Plug')).not.toBeInTheDocument();
     expect(screen.getByText('1 of 4 plugs')).toBeInTheDocument();
 
-    // Rooftop Plug has status=available but its gateway is offline, so the
-    // "available" filter correctly excludes it from the public section too.
+    // Public has no available plug (Rooftop's gateway is offline) → empty tab.
     await userEvent.click(screen.getByRole('button', { name: /Public chargers/ }));
     expect(screen.queryByText('Rooftop Plug')).not.toBeInTheDocument();
     expect(screen.getByText('None match the current filters.')).toBeInTheDocument();
   });
 
-  it('the group filter reduces the rendered plug list and the map markers', async () => {
+  it('the group filter narrows the list and the map markers', async () => {
     renderHome('/');
     await screen.findByText('Lobby Plug');
 
     await userEvent.selectOptions(screen.getByLabelText('Filter by group'), 'Downtown Mall');
 
+    // Sunrise plugs filtered out of the (default) Your chargers tab.
     expect(screen.queryByText('Lobby Plug')).not.toBeInTheDocument();
     expect(screen.queryByText('Garage Plug')).not.toBeInTheDocument();
 
     await userEvent.click(screen.getByRole('button', { name: /Public chargers/ }));
     expect(screen.getByText('Basement Plug')).toBeInTheDocument();
 
-    await userEvent.click(screen.getByRole('button', { name: /Map — public chargers/ }));
+    await userEvent.click(screen.getByRole('button', { name: /Map/ }));
     expect(screen.getByTestId('map-mock')).toHaveTextContent('4');
   });
 
@@ -238,11 +234,12 @@ describe('Home — private/public sections + map at the bottom', () => {
     expect(screen.queryByText('Lobby Plug')).not.toBeInTheDocument();
   });
 
-  it('shows a no-charger empty state when no plugs are accessible at all (filters not offered)', async () => {
+  it('shows a no-charger empty state when no plugs are accessible at all (tabs/filters not offered)', async () => {
     api.get.mockResolvedValue([]);
     renderHome('/');
     expect(await screen.findByText('No chargers available yet.')).toBeInTheDocument();
     expect(screen.queryByLabelText('Filter by availability')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Your chargers/ })).not.toBeInTheDocument();
   });
 });
 
@@ -341,13 +338,7 @@ describe('Home — reservations', () => {
   });
 });
 
-describe('Home — optional charging limit at start', () => {
-  // Lobby Plug (id 1) carries its own resolved tariff, so a ₹/coins limit
-  // typed against it must convert at 10 coins/kWh, not the global 5.
-  const PRICED_PLUGS = PLUGS.map((p) =>
-    p.id === 1 ? { ...p, price_per_kwh: 10 } : p
-  );
-
+describe('Home — tap a charger opens the setup panel (no instant start)', () => {
   let startSession;
 
   const renderWithSessionRoute = () =>
@@ -362,7 +353,7 @@ describe('Home — optional charging limit at start', () => {
 
   beforeEach(() => {
     useAuth.mockReturnValue({ user: DRIVER });
-    api.get.mockResolvedValue(PRICED_PLUGS);
+    api.get.mockResolvedValue(PLUGS);
     startSession = vi.fn().mockResolvedValue({ session_id: 9 });
     useSession.mockReturnValue({
       startSession,
@@ -373,85 +364,46 @@ describe('Home — optional charging limit at start', () => {
     });
   });
 
-  const typeAndStart = async (plugIdText) => {
-    await userEvent.type(screen.getByPlaceholderText('Enter Plug ID (e.g. 1)'), plugIdText);
-    await userEvent.click(screen.getByRole('button', { name: 'Start' }));
-  };
-
-  it('is collapsed by default and sends NO limit when untouched', async () => {
+  it('tapping a startable charger opens the setup modal instead of charging instantly', async () => {
     renderWithSessionRoute();
     await screen.findByText('Lobby Plug');
 
-    expect(screen.getByRole('button', { name: /Set a charging limit/ }))
-      .toHaveAttribute('aria-expanded', 'false');
+    await userEvent.click(screen.getByText('Lobby Plug')); // tap the card
 
-    await typeAndStart('1');
-    expect(startSession).toHaveBeenCalledWith('1', null);
+    expect(await screen.findByRole('heading', { name: /Set up your charge/i })).toBeInTheDocument();
+    expect(startSession).not.toHaveBeenCalled(); // NOT an instant start
   });
 
-  it('sends max_kwh for a kWh preset', async () => {
+  it('starts with no limit from the setup modal when both fields are blank', async () => {
     renderWithSessionRoute();
     await screen.findByText('Lobby Plug');
-
-    await userEvent.click(screen.getByRole('button', { name: /Set a charging limit/ }));
-    await userEvent.click(screen.getByRole('button', { name: '1 kWh' }));
-    await typeAndStart('1');
-
-    expect(startSession).toHaveBeenCalledWith('1', { max_kwh: 1 });
-  });
-
-  it('sends max_duration_seconds for a time preset', async () => {
-    renderWithSessionRoute();
-    await screen.findByText('Lobby Plug');
-
-    await userEvent.click(screen.getByRole('button', { name: /Set a charging limit/ }));
-    await userEvent.click(screen.getByRole('button', { name: 'Time' }));
-    await userEvent.click(screen.getByRole('button', { name: '30 min' }));
-    await typeAndStart('1');
-
-    expect(startSession).toHaveBeenCalledWith('1', { max_duration_seconds: 1800 });
-  });
-
-  it("converts a ₹/coins limit at the target plug's own price_per_kwh", async () => {
-    renderWithSessionRoute();
-    await screen.findByText('Lobby Plug');
-
-    await userEvent.click(screen.getByRole('button', { name: /Set a charging limit/ }));
-    await userEvent.click(screen.getByRole('button', { name: '₹ / coins' }));
-    await userEvent.click(screen.getByRole('button', { name: '₹50' }));
-
-    // The derived-kWh preview uses plug 1's 10 coins/kWh tariff…
-    await userEvent.type(screen.getByPlaceholderText('Enter Plug ID (e.g. 1)'), '1');
-    expect(screen.getByText(/≈ 5\.00 kWh at 10 coins\/kWh/)).toBeInTheDocument();
-
-    // …and so does the payload: ₹50 / 10 = 5 kWh, not ₹50 / 5.
-    await userEvent.click(screen.getByRole('button', { name: 'Start' }));
-    expect(startSession).toHaveBeenCalledWith('1', { max_kwh: 5 });
-  });
-
-  it('falls back to the config coins_per_kwh for a plug without a known price', async () => {
-    renderWithSessionRoute();
-    await screen.findByText('Lobby Plug');
-
-    await userEvent.click(screen.getByRole('button', { name: /Set a charging limit/ }));
-    await userEvent.click(screen.getByRole('button', { name: '₹ / coins' }));
-    await userEvent.click(screen.getByRole('button', { name: '₹25' }));
-    // Plug 999 isn't in the list → config rate (5 coins/kWh) → 5 kWh.
-    await typeAndStart('999');
-
-    expect(startSession).toHaveBeenCalledWith('999', { max_kwh: 5 });
-  });
-
-  it('applies the chosen limit to a plug-card click too', async () => {
-    renderWithSessionRoute();
-    await screen.findByText('Lobby Plug');
-
-    await userEvent.click(screen.getByRole('button', { name: /Set a charging limit/ }));
-    await userEvent.click(screen.getByRole('button', { name: '2 kWh' }));
-    // Card click starts Lobby Plug (available + gateway online).
     await userEvent.click(screen.getByText('Lobby Plug'));
+    await screen.findByRole('heading', { name: /Set up your charge/i });
 
-    expect(startSession).toHaveBeenCalledWith(1, { max_kwh: 2 });
+    await userEvent.click(screen.getByRole('button', { name: /Start charging/ }));
+    expect(startSession).toHaveBeenCalledWith(1, null);
+  });
+
+  it('forwards a kWh limit set in the modal', async () => {
+    renderWithSessionRoute();
+    await screen.findByText('Lobby Plug');
+    await userEvent.click(screen.getByText('Lobby Plug'));
+    await screen.findByRole('heading', { name: /Set up your charge/i });
+
+    await userEvent.type(screen.getByLabelText(/kWh to dispense/i), '5');
+    await userEvent.click(screen.getByRole('button', { name: /Start charging/ }));
+    expect(startSession).toHaveBeenCalledWith(1, { max_kwh: 5 });
+  });
+
+  it('typing a Plug ID and hitting "Set up" opens the modal (does not start)', async () => {
+    renderWithSessionRoute();
+    await screen.findByText('Lobby Plug');
+
+    await userEvent.type(screen.getByPlaceholderText('Enter Plug ID (e.g. 1)'), '2');
+    await userEvent.click(screen.getByRole('button', { name: 'Set up' }));
+
+    expect(await screen.findByRole('heading', { name: /Set up your charge/i })).toBeInTheDocument();
+    expect(startSession).not.toHaveBeenCalled();
   });
 });
 
@@ -464,17 +416,17 @@ describe('Home — "notify me when free" bell', () => {
   it('shows the bell only on non-startable plugs', async () => {
     renderHome('/');
     await screen.findByText('Lobby Plug');
-    // Open the public section so all four cards are rendered.
-    await userEvent.click(screen.getByRole('button', { name: /Public chargers/ }));
 
-    // Startable (id 1, available + gateway online): no bell, "Charge →".
+    // Your chargers tab (default): startable Lobby has no bell; occupied Garage does.
     expect(
       screen.queryByRole('button', { name: /Notify me when Lobby Plug is free/ })
     ).not.toBeInTheDocument();
-    // Occupied (id 2), gateway-offline (id 3), and status-offline (id 4): bells.
     expect(
       screen.getByRole('button', { name: /Notify me when Garage Plug is free/ })
     ).toBeInTheDocument();
+
+    // Public tab: both public plugs are non-startable (gateway/status offline) → bells.
+    await userEvent.click(screen.getByRole('button', { name: /Public chargers/ }));
     expect(
       screen.getByRole('button', { name: /Notify me when Rooftop Plug is free/ })
     ).toBeInTheDocument();
