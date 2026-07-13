@@ -15,7 +15,7 @@ import enum
 from datetime import datetime
 from typing import List, Optional
 from decimal import Decimal
-from sqlalchemy import CheckConstraint, Column, Integer, BigInteger, String, Float, Numeric, Boolean, ForeignKey, DateTime, Enum as SQLEnum, Index, Text, UniqueConstraint, text
+from sqlalchemy import CheckConstraint, Column, Integer, BigInteger, SmallInteger, String, Float, Numeric, Boolean, ForeignKey, DateTime, Enum as SQLEnum, Index, Text, UniqueConstraint, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 class Base(DeclarativeBase):
@@ -98,6 +98,14 @@ class Tenant(Base):
     # mutation) the same way services/wallet.py's debit_wallet_clamped
     # bypasses the identity map; see that module's docstring for why.
     next_invoice_seq: Mapped[int] = mapped_column(Integer, default=1, server_default=text("1"), nullable=False)
+    # [Pricing v2 — docs/PRICING_V2_SPEC.md] IANA timezone this CPO's
+    # minute-of-day tariff slots (TariffSlot.start_min/end_min) are interpreted
+    # in: a slot is a CPO-local WALL-CLOCK window, so resolving which slot
+    # covers "now" must first project the instant into this zone
+    # (services/pricing.py resolve_rate_window). NOT NULL with a server_default
+    # so every existing row backfills to India's zone at migration time; a
+    # bad/blank value falls back to "Asia/Kolkata" (then UTC) at resolve time.
+    timezone: Mapped[str] = mapped_column(String(64), nullable=False, default="Asia/Kolkata", server_default=text("'Asia/Kolkata'"))
 
     # Relationships
     users: Mapped[List["User"]] = relationship("User", back_populates="tenant", cascade="all, delete-orphan")
@@ -281,6 +289,30 @@ class ChargingSession(Base):
     # class tail (after the relationships) to ease parallel-branch merges.
     max_kwh: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     max_duration_seconds: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+    # [Pricing v2 — docs/PRICING_V2_SPEC.md] Segment-accrual state for
+    # time-of-day tariffs, written by services/billing.py close_out_segment
+    # each time a session crosses a slot boundary mid-charge. All three are
+    # NULL for a legacy SINGLE-rate session (the only kind that exists in
+    # Phase 1): billing then reads rate_coins_per_kwh flat over the whole
+    # energy, exactly as before. A NON-NULL rate_segment_start_kwh flips the
+    # session into segmented mode:
+    #   - settled_cost_coins: coins already accrued for CLOSED segments (the
+    #     energy consumed under every prior rate), frozen so a later rate
+    #     change never re-prices past energy — same immutability rationale as
+    #     rate_coins_per_kwh's snapshot.
+    #   - rate_segment_start_kwh: the session's energy_kwh reading at which the
+    #     CURRENT (open) segment began; cost from here on = energy above this
+    #     marker times the current rate_coins_per_kwh. Forward-only (energy
+    #     only rises), so the open-segment energy is never negative.
+    #   - rate_valid_until: wall-clock instant the current rate stops applying
+    #     (the covering slot's boundary from resolve_rate_window) — a cheap
+    #     "recompute the rate at/after this time" trigger for the later
+    #     boundary-crossing wiring. Phase 1 never reads these on any live
+    #     billing path.
+    settled_cost_coins: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
+    rate_segment_start_kwh: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    rate_valid_until: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class LedgerTransaction(Base):
@@ -660,6 +692,52 @@ class Tariff(Base):
     price_per_kwh: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), onupdate=text("CURRENT_TIMESTAMP"), nullable=False)
+
+
+class TariffSlot(Base):
+    """
+    A time-of-day pricing slot within a Tariff (Pricing v2 — see
+    docs/PRICING_V2_SPEC.md). A Tariff may own many slots; each names a
+    coins-per-kWh price that applies during a half-open minute-of-day window
+    [start_min, end_min) on the weekdays selected by days_mask, interpreted in
+    the owning tenant's local WALL-CLOCK (Tenant.timezone). When no slot covers
+    a given instant the plug bills at the parent Tariff's flat price_per_kwh —
+    the slot layer is a strict refinement, never removing the flat fallback
+    (services/pricing.py resolve_rate_window / _slot_rate_and_bound).
+
+    A window that wraps past midnight (e.g. a 22:00–06:00 night rate) is
+    modelled as TWO slots, [1320,1440) and [0,360), so every slot stays within
+    a single local day and resolution needs no cross-day span logic.
+
+    Phase 1 is SCHEMA + RESOLUTION + BILLING HELPERS only: no slots are created
+    yet and no live billing path reads them, so current billing is unchanged.
+
+    No relationship() back-ref to Tariff — call sites load a tariff's slots via
+    an explicit `select(TariffSlot).where(TariffSlot.tariff_id == ...)`,
+    matching how Tariff itself is resolved across the async boundary.
+    """
+    __tablename__ = "tariff_slots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # Owning tariff. CASCADE: a slot is meaningless without its tariff (mirrors
+    # the tenant-ownership CASCADE convention). Indexed — every resolution
+    # loads a tariff's slots by tariff_id.
+    tariff_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("tariffs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    # Half-open minute-of-day window [start_min, end_min), local wall-clock.
+    # start_min in 0..1439 (inclusive); end_min in 1..1440 (1440 == midnight /
+    # end-of-day). SmallInteger: a minute-of-day never exceeds 1440.
+    start_min: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    end_min: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    # Money: NUMERIC(12,2) -> Decimal (services/money.to_money), same
+    # convention as Tariff.price_per_kwh.
+    price_per_kwh: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    # Weekday bitmask, Mon=bit0 .. Sun=bit6; 127 = all seven days. A slot is
+    # active on weekday w iff (days_mask >> w) & 1. server_default 127 so a
+    # slot inserted without one applies every day.
+    days_mask: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=127, server_default=text("127"))
+
 
 # --- Session Disputes / Refunds (coins-only remedy) ---
 
