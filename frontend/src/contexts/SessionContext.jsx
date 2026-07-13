@@ -224,6 +224,33 @@ export const SessionProvider = ({ children }) => {
     }
   }, [sessionId, refreshActiveSessions, refreshUser]);
 
+  // Update a RUNNING session's stop conditions ("start now, set the target
+  // later"). PATCHes the backend, then reflects the returned limits into the
+  // focused-limits display and the activeSessions list. The change is enforced
+  // backend-side within ~1 s (routers/sessions.py update_session_limits); only
+  // the keys provided are sent. Defaults to the focused session when no id.
+  const updateLimits = useCallback(async (targetId, limits) => {
+    const id = targetId ?? sessionId;
+    if (!id) return;
+    const payload = {};
+    if (limits?.max_kwh != null) payload.max_kwh = limits.max_kwh;
+    if (limits?.max_duration_seconds != null) payload.max_duration_seconds = limits.max_duration_seconds;
+    const result = await api.patch(`/api/sessions/${id}/limits`, payload);
+    const next = {
+      max_kwh: result?.max_kwh ?? null,
+      max_duration_seconds: result?.max_duration_seconds ?? null,
+    };
+    if (id === sessionId) {
+      setFocusedLimits(
+        next.max_kwh != null || next.max_duration_seconds != null ? next : null
+      );
+    }
+    setActiveSessions((prev) =>
+      prev.map((s) => (s.session_id === id ? { ...s, ...next } : s))
+    );
+    return result;
+  }, [sessionId]);
+
   const dismissReceipt = useCallback(() => setReceipt(null), []);
 
   const clearSession = useCallback(() => {
@@ -266,7 +293,7 @@ export const SessionProvider = ({ children }) => {
       socket,
       activeSessions, sessionData, sessionId, isActive, error,
       lastFrameAt, focusedStartedAt, focusedLimits, alarms, receipt,
-      startSession, stopSession, clearSession, switchSession, dismissReceipt,
+      startSession, stopSession, updateLimits, clearSession, switchSession, dismissReceipt,
     }}>
       {children}
     </SessionContext.Provider>

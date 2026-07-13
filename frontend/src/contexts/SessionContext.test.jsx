@@ -11,7 +11,7 @@ import { SessionProvider, useSession } from './SessionContext';
 import api from '../api/client';
 
 vi.mock('../api/client', () => ({
-  default: { get: vi.fn(), post: vi.fn(), put: vi.fn(), delete: vi.fn() },
+  default: { get: vi.fn(), post: vi.fn(), put: vi.fn(), patch: vi.fn(), delete: vi.fn() },
 }));
 // The user object must be render-stable: SessionProvider keys effects on
 // [user], so a fresh object each call would loop the socket effect forever.
@@ -44,7 +44,7 @@ const TWO_SESSIONS = {
 };
 
 const Probe = () => {
-  const { activeSessions, sessionId, isActive, focusedLimits, startSession, stopSession, switchSession } =
+  const { activeSessions, sessionId, isActive, focusedLimits, startSession, stopSession, switchSession, updateLimits } =
     useSession();
   return (
     <div>
@@ -61,6 +61,7 @@ const Probe = () => {
       <button onClick={() => startSession('7', { max_duration_seconds: 1800 }).catch(() => {})}>start-time-limited</button>
       <button onClick={() => stopSession().catch(() => {})}>stop</button>
       <button onClick={() => switchSession(activeSessions[1])}>switch-to-older</button>
+      <button onClick={() => updateLimits(2, { max_kwh: 2.5 }).catch(() => {})}>update-focused-limit</button>
     </div>
   );
 };
@@ -197,6 +198,25 @@ describe('focusedLimits restore', () => {
 
     await waitFor(() => expect(screen.getByTestId('focused')).toHaveTextContent('2'));
     expect(screen.getByTestId('limits')).toHaveTextContent('null');
+  });
+});
+
+describe('updateLimits', () => {
+  it('PATCHes the focused session limits and reflects the returned values', async () => {
+    api.get.mockResolvedValue(TWO_SESSIONS);
+    api.patch.mockResolvedValue({
+      status: 'updated', session_id: 2, max_kwh: 2.5, max_duration_seconds: 3600,
+    });
+    renderProbe();
+    await waitFor(() => expect(screen.getByTestId('focused')).toHaveTextContent('2'));
+
+    await userEvent.click(screen.getByText('update-focused-limit'));
+
+    // Only the field set is sent; the returned limits land in focusedLimits.
+    expect(api.patch).toHaveBeenCalledWith('/api/sessions/2/limits', { max_kwh: 2.5 });
+    expect(screen.getByTestId('limits')).toHaveTextContent(
+      JSON.stringify({ max_kwh: 2.5, max_duration_seconds: 3600 })
+    );
   });
 });
 

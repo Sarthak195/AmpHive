@@ -54,7 +54,7 @@ const StatBox = ({ label, value, unit, colorVar = '--color-text-primary' }) => (
 
 const SessionMonitor = () => {
   const {
-    sessionData, isActive, stopSession,
+    sessionData, sessionId, isActive, stopSession, updateLimits,
     lastFrameAt, focusedStartedAt, focusedLimits, alarms,
   } = useSession();
   const { coins_per_kwh } = useConfig();
@@ -67,6 +67,14 @@ const SessionMonitor = () => {
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
   }, []);
+
+  // Inline editor for the focused session's stop conditions — "start now, set
+  // the target later" (PATCH /api/sessions/{id}/limits via updateLimits).
+  const [editingLimit, setEditingLimit] = useState(false);
+  const [editKwh, setEditKwh] = useState('');
+  const [editHours, setEditHours] = useState('');
+  const [savingLimit, setSavingLimit] = useState(false);
+  const [limitError, setLimitError] = useState('');
 
   if (!isActive && !sessionData) {
     return (
@@ -135,6 +143,41 @@ const SessionMonitor = () => {
   const limitMaxDurationSec = focusedLimits?.max_duration_seconds;
   const energyNum = Number(sessionData?.energy_kwh) || 0;
   const hasLimit = isActive && (limitMaxKwh != null || limitMaxDurationSec != null);
+
+  // Open the inline editor prefilled with the current limits (kWh + hours).
+  const openLimitEditor = () => {
+    setEditKwh(limitMaxKwh != null ? String(limitMaxKwh) : '');
+    setEditHours(
+      limitMaxDurationSec != null
+        ? String(Number((limitMaxDurationSec / 3600).toFixed(2)))
+        : ''
+    );
+    setLimitError('');
+    setEditingLimit(true);
+  };
+
+  // Send only the fields the driver actually set (>0). At least one required.
+  const saveLimitEdit = async () => {
+    const limits = {};
+    const kwh = parseFloat(editKwh);
+    const hours = parseFloat(editHours);
+    if (!Number.isNaN(kwh) && kwh > 0) limits.max_kwh = kwh;
+    if (!Number.isNaN(hours) && hours > 0) limits.max_duration_seconds = Math.round(hours * 3600);
+    if (limits.max_kwh == null && limits.max_duration_seconds == null) {
+      setLimitError('Enter an energy (kWh) or time (hours) limit.');
+      return;
+    }
+    setSavingLimit(true);
+    setLimitError('');
+    try {
+      await updateLimits(sessionId, limits);
+      setEditingLimit(false);
+    } catch (err) {
+      setLimitError(err?.message || 'Could not update the limit.');
+    } finally {
+      setSavingLimit(false);
+    }
+  };
 
   return (
     <div className="glass glass-panel flex flex-col gap-6 animate-fade-in">
@@ -256,7 +299,8 @@ const SessionMonitor = () => {
         </div>
       )}
 
-      {/* Charging-limit progress ("0.42 / 1.00 kWh · stops automatically") */}
+      {/* Charging-limit progress ("0.42 / 1.00 kWh · stops automatically"),
+          with an inline Edit to change the target mid-session. */}
       {hasLimit && (
         <div
           className="flex items-center gap-2"
@@ -270,7 +314,7 @@ const SessionMonitor = () => {
           }}
         >
           <span style={{ fontSize: '1.1rem' }}>🎯</span>
-          <span>
+          <span style={{ flex: 1 }}>
             Limit:{' '}
             {limitMaxKwh != null && (
               <strong style={{ color: 'var(--color-text-primary)' }}>
@@ -285,6 +329,84 @@ const SessionMonitor = () => {
             )}
             {' · stops automatically'}
           </span>
+          {isActive && updateLimits && !editingLimit && (
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              onClick={openLimitEditor}
+              style={{ flexShrink: 0, padding: '0.3rem 0.75rem', fontSize: '0.78rem' }}
+            >
+              Edit
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Inline limit editor — change the target after the session started. */}
+      {editingLimit && (
+        <div
+          className="glass flex flex-col gap-3"
+          style={{
+            padding: '1rem',
+            borderRadius: 'var(--radius-md)',
+            background: 'hsla(73, 100%, 50%, 0.06)',
+            border: '1px solid hsla(73, 100%, 50%, 0.3)',
+          }}
+        >
+          <div style={{ fontWeight: 600, fontSize: '0.9rem', color: 'var(--color-text-primary)' }}>
+            Change charging limit
+          </div>
+          <div className="flex gap-3 flex-wrap">
+            <div className="input-group" style={{ flex: 1, minWidth: '130px' }}>
+              <label htmlFor="edit-kwh">Energy limit (kWh)</label>
+              <input
+                id="edit-kwh"
+                className="input"
+                type="number"
+                min="0"
+                step="0.1"
+                value={editKwh}
+                onChange={(e) => setEditKwh(e.target.value)}
+                placeholder="e.g. 5"
+              />
+            </div>
+            <div className="input-group" style={{ flex: 1, minWidth: '130px' }}>
+              <label htmlFor="edit-hours">Time limit (hours)</label>
+              <input
+                id="edit-hours"
+                className="input"
+                type="number"
+                min="0"
+                step="0.25"
+                value={editHours}
+                onChange={(e) => setEditHours(e.target.value)}
+                placeholder="e.g. 2"
+              />
+            </div>
+          </div>
+          <p style={{ fontSize: '0.78rem', color: 'var(--color-text-muted)', margin: 0 }}>
+            Takes effect within a few seconds. Raising a limit above what the charger
+            was set at start may be capped by the charger until it updates.
+          </p>
+          {limitError && <div className="error-text">{limitError}</div>}
+          <div className="flex gap-2" style={{ justifyContent: 'flex-end' }}>
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              onClick={() => setEditingLimit(false)}
+              disabled={savingLimit}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="btn btn-primary btn-sm"
+              onClick={saveLimitEdit}
+              disabled={savingLimit}
+            >
+              {savingLimit ? 'Saving…' : 'Save limit'}
+            </button>
+          </div>
         </div>
       )}
 
