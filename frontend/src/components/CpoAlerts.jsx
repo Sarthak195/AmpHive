@@ -18,7 +18,7 @@ import { useSession } from '../contexts/SessionContext';
 const SEVERITY_STYLE = {
   critical: { color: 'var(--color-danger)', bg: 'hsla(0, 80%, 50%, 0.10)', border: 'hsla(0, 80%, 50%, 0.35)', icon: '🚨' },
   warning: { color: 'var(--color-warning, #f0a020)', bg: 'hsla(38, 90%, 50%, 0.10)', border: 'hsla(38, 90%, 50%, 0.35)', icon: '⚠️' },
-  info: { color: 'var(--color-text-secondary)', bg: 'hsla(210, 20%, 50%, 0.10)', border: 'hsla(210, 20%, 50%, 0.30)', icon: 'ℹ️' },
+  info: { color: 'var(--color-text-secondary)', bg: 'hsla(75, 8%, 50%, 0.10)', border: 'hsla(75, 8%, 50%, 0.30)', icon: 'ℹ️' },
 };
 
 const timeAgo = (iso) => {

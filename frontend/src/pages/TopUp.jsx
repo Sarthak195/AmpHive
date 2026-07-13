@@ -83,8 +83,8 @@ const TopUp = () => {
           name: user.full_name || '',
         },
         theme: {
-          color: '#38b2f0',               // Match --color-primary
-          backdrop_color: 'rgba(15, 20, 25, 0.85)',
+          color: '#C6FF00',               // Match --color-primary
+          backdrop_color: 'rgba(14, 16, 8, 0.85)',
         },
         modal: {
           ondismiss: () => {

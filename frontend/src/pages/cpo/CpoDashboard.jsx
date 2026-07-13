@@ -24,7 +24,7 @@ const CustomTooltip = ({ active, payload, label }) => {
   if (!active || !payload?.length) return null;
   return (
     <div style={{
-      background: 'hsl(220, 20%, 14%)',
+      background: 'hsl(74, 14%, 14%)',
       border: '1px solid hsla(0,0%,100%,0.1)',
       borderRadius: '8px',
       padding: '0.6rem 0.85rem',
@@ -224,8 +224,8 @@ const CpoDashboard = () => {
               <AreaChart data={revenueData}>
                 <defs>
                   <linearGradient id="revenueGradient" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="hsl(270, 70%, 60%)" stopOpacity={0.3} />
-                    <stop offset="95%" stopColor="hsl(270, 70%, 60%)" stopOpacity={0} />
+                    <stop offset="5%" stopColor="hsl(36, 100%, 56%)" stopOpacity={0.3} />
+                    <stop offset="95%" stopColor="hsl(36, 100%, 56%)" stopOpacity={0} />
                   </linearGradient>
                 </defs>
                 <CartesianGrid strokeDasharray="3 3" stroke="hsla(0,0%,100%,0.06)" />
@@ -233,18 +233,18 @@ const CpoDashboard = () => {
                   dataKey="date"
                   tickFormatter={formatDate}
                   stroke="hsla(0,0%,100%,0.2)"
-                  tick={{ fill: 'hsl(220,10%,50%)', fontSize: 11 }}
+                  tick={{ fill: 'hsl(75, 8%, 50%)', fontSize: 11 }}
                 />
                 <YAxis
                   stroke="hsla(0,0%,100%,0.2)"
-                  tick={{ fill: 'hsl(220,10%,50%)', fontSize: 11 }}
+                  tick={{ fill: 'hsl(75, 8%, 50%)', fontSize: 11 }}
                 />
                 <Tooltip content={<CustomTooltip />} />
                 <Area
                   type="monotone"
                   dataKey="revenue_coins"
                   name="Revenue (coins)"
-                  stroke="hsl(270, 70%, 60%)"
+                  stroke="hsl(36, 100%, 56%)"
                   strokeWidth={2}
                   fill="url(#revenueGradient)"
                 />
@@ -268,17 +268,17 @@ const CpoDashboard = () => {
                   dataKey="date"
                   tickFormatter={formatDate}
                   stroke="hsla(0,0%,100%,0.2)"
-                  tick={{ fill: 'hsl(220,10%,50%)', fontSize: 11 }}
+                  tick={{ fill: 'hsl(75, 8%, 50%)', fontSize: 11 }}
                 />
                 <YAxis
                   stroke="hsla(0,0%,100%,0.2)"
-                  tick={{ fill: 'hsl(220,10%,50%)', fontSize: 11 }}
+                  tick={{ fill: 'hsl(75, 8%, 50%)', fontSize: 11 }}
                 />
                 <Tooltip content={<CustomTooltip />} />
                 <Bar
                   dataKey="energy_kwh"
                   name="Energy (kWh)"
-                  fill="hsl(200, 85%, 55%)"
+                  fill="hsl(73, 100%, 50%)"
                   radius={[4, 4, 0, 0]}
                   maxBarSize={24}
                 />
@@ -312,8 +312,8 @@ const CpoDashboard = () => {
             <AreaChart data={loadData}>
               <defs>
                 <linearGradient id="loadGradient" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="hsl(160, 70%, 50%)" stopOpacity={0.3} />
-                  <stop offset="95%" stopColor="hsl(160, 70%, 50%)" stopOpacity={0} />
+                  <stop offset="5%" stopColor="hsl(73, 100%, 50%)" stopOpacity={0.3} />
+                  <stop offset="95%" stopColor="hsl(73, 100%, 50%)" stopOpacity={0} />
                 </linearGradient>
               </defs>
               <CartesianGrid strokeDasharray="3 3" stroke="hsla(0,0%,100%,0.06)" />
@@ -321,18 +321,18 @@ const CpoDashboard = () => {
                 dataKey="timestamp"
                 tickFormatter={formatHour}
                 stroke="hsla(0,0%,100%,0.2)"
-                tick={{ fill: 'hsl(220,10%,50%)', fontSize: 11 }}
+                tick={{ fill: 'hsl(75, 8%, 50%)', fontSize: 11 }}
               />
               <YAxis
                 stroke="hsla(0,0%,100%,0.2)"
-                tick={{ fill: 'hsl(220,10%,50%)', fontSize: 11 }}
+                tick={{ fill: 'hsl(75, 8%, 50%)', fontSize: 11 }}
               />
               <Tooltip content={<CustomTooltip />} labelFormatter={formatHour} />
               <Area
                 type="monotone"
                 dataKey="avg_power_w"
                 name="Avg Power (W)"
-                stroke="hsl(160, 70%, 50%)"
+                stroke="hsl(73, 100%, 50%)"
                 strokeWidth={2}
                 fill="url(#loadGradient)"
               />
@@ -340,7 +340,7 @@ const CpoDashboard = () => {
                 type="monotone"
                 dataKey="max_power_w"
                 name="Peak Power (W)"
-                stroke="hsl(40, 90%, 55%)"
+                stroke="hsl(36, 100%, 56%)"
                 strokeWidth={1.5}
                 strokeDasharray="4 3"
                 fill="none"

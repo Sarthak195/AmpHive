@@ -501,7 +501,7 @@ const CpoPlugs = () => {
                   value={`${window.location.origin}/?plug=${qrPlug.id}`}
                   size={200}
                   bgColor="#ffffff"
-                  fgColor="#0a0e14"
+                  fgColor="#0C0E07"
                   level="M"
                   marginSize={2}
                 />

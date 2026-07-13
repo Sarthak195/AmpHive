@@ -27,7 +27,7 @@ const StatBox = ({ label, value, unit, colorVar = '--color-text-primary' }) => (
     className="glass flex flex-col justify-center"
     style={{
       padding: '1.25rem',
-      background: 'hsla(220, 20%, 15%, 0.6)',
+      background: 'hsla(74, 14%, 14%, 0.6)',
       borderRadius: 'var(--radius-md)',
     }}
   >
@@ -42,7 +42,7 @@ const StatBox = ({ label, value, unit, colorVar = '--color-text-primary' }) => (
       {label}
     </span>
     <div className="flex items-baseline gap-1">
-      <span style={{ fontSize: '1.75rem', fontWeight: 700, color: `var(${colorVar})` }}>
+      <span style={{ fontSize: '1.75rem', fontWeight: 700, color: `var(${colorVar})`, fontFamily: 'var(--font-mono)', fontVariantNumeric: 'tabular-nums', letterSpacing: '-0.02em' }}>
         {value}
       </span>
       <span style={{ color: 'var(--color-text-secondary)', fontSize: '0.85rem' }}>
@@ -183,7 +183,8 @@ const SessionMonitor = () => {
           </span>
           <span style={{
             fontSize: '1.5rem',
-            fontFamily: 'monospace',
+            fontFamily: 'var(--font-mono)',
+            fontVariantNumeric: 'tabular-nums',
             fontWeight: 700,
             color: 'var(--color-primary)',
             letterSpacing: '0.05em',
@@ -262,8 +263,8 @@ const SessionMonitor = () => {
           style={{
             padding: '0.75rem 1rem',
             borderRadius: 'var(--radius-md)',
-            background: 'hsla(200, 80%, 50%, 0.10)',
-            border: '1px solid hsla(200, 80%, 50%, 0.35)',
+            background: 'hsla(73, 100%, 50%, 0.10)',
+            border: '1px solid hsla(73, 100%, 50%, 0.35)',
             color: 'var(--color-text-secondary)',
             fontSize: '0.9rem',
           }}

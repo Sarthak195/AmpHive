@@ -100,7 +100,7 @@ export default function History() {
                         padding: '0.25rem 0.5rem',
                         borderRadius: '4px',
                         fontSize: '0.85rem',
-                        backgroundColor: s.status === 'completed' || s.status === 'paid' ? 'rgba(46, 213, 115, 0.2)' : 'rgba(255, 165, 2, 0.2)',
+                        backgroundColor: s.status === 'completed' || s.status === 'paid' ? 'rgba(198, 255, 0, 0.2)' : 'rgba(255, 165, 2, 0.2)',
                         color: s.status === 'completed' || s.status === 'paid' ? 'var(--color-success)' : 'var(--color-warning)',
                       }}>
                         {s.status}

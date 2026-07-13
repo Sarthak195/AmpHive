@@ -1,40 +1,44 @@
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
 
 :root {
-  /* Premium dark theme palette — deep navy with electric blue accents */
-  --color-bg: hsl(220, 20%, 7%);
-  --color-bg-gradient: linear-gradient(145deg, hsl(220, 20%, 7%) 0%, hsl(225, 25%, 12%) 50%, hsl(220, 20%, 7%) 100%);
+  /* High-Voltage Hive — warm-biased charcoal + amp-lime.
+     Amp = current; Hive = a colony of shared chargers, some of them charged
+     and glowing. The one bold color is amp-lime; amber and vermilion are the
+     warm/critical signals, kept separate from the brand hue. */
+  --color-bg: hsl(72, 14%, 5%);
+  --color-bg-gradient: linear-gradient(160deg, hsl(72, 14%, 5%) 0%, hsl(74, 16%, 8%) 55%, hsl(72, 14%, 5%) 100%);
 
-  /* Glassmorphism surface — frosted glass panels */
-  --color-surface: hsla(220, 20%, 18%, 0.45);
-  --color-surface-hover: hsla(220, 20%, 24%, 0.55);
-  --color-surface-border: hsla(0, 0%, 100%, 0.08);
-  --color-surface-border-hover: hsla(0, 0%, 100%, 0.15);
+  /* Surfaces — solid-ish charcoal panels (less frost than the old navy glass) */
+  --color-surface: hsla(74, 14%, 12%, 0.72);
+  --color-surface-hover: hsla(74, 14%, 16%, 0.82);
+  --color-surface-border: hsla(73, 60%, 55%, 0.10);
+  --color-surface-border-hover: hsla(73, 85%, 52%, 0.30);
 
-  /* Primary accent — electric cyan blue */
-  --color-primary: hsl(200, 85%, 55%);
-  --color-primary-hover: hsl(200, 85%, 65%);
-  --color-primary-glow: hsla(200, 85%, 55%, 0.25);
+  /* Primary accent — amp-lime (#C6FF00), the single bold color */
+  --color-primary: hsl(73, 100%, 50%);
+  --color-primary-hover: hsl(73, 100%, 60%);
+  --color-primary-glow: hsla(73, 100%, 50%, 0.22);
 
-  /* Secondary accent — warm amber/gold for coins and balance */
-  --color-accent: hsl(42, 95%, 55%);
-  --color-accent-hover: hsl(42, 95%, 65%);
-  --color-accent-glow: hsla(42, 95%, 55%, 0.2);
+  /* Secondary accent — warm amber for coins/balance + occupied */
+  --color-accent: hsl(36, 100%, 56%);
+  --color-accent-hover: hsl(36, 100%, 64%);
+  --color-accent-glow: hsla(36, 100%, 56%, 0.20);
 
-  /* Semantic colors */
-  --color-danger: hsl(350, 80%, 55%);
-  --color-danger-glow: hsla(350, 80%, 55%, 0.2);
-  --color-success: hsl(145, 70%, 48%);
-  --color-success-glow: hsla(145, 70%, 48%, 0.2);
-  --color-warning: hsl(30, 90%, 55%);
+  /* Semantic colors — available/success reads as energy (lime); warn amber; fault vermilion */
+  --color-danger: hsl(6, 100%, 62%);
+  --color-danger-glow: hsla(6, 100%, 62%, 0.18);
+  --color-success: hsl(73, 100%, 50%);
+  --color-success-glow: hsla(73, 100%, 50%, 0.16);
+  --color-warning: hsl(36, 100%, 56%);
 
-  /* Text */
-  --color-text-primary: hsl(0, 0%, 95%);
-  --color-text-secondary: hsl(220, 10%, 62%);
-  --color-text-muted: hsl(220, 10%, 45%);
+  /* Text — warm off-white ink on charcoal */
+  --color-text-primary: hsl(75, 22%, 94%);
+  --color-text-secondary: hsl(75, 8%, 64%);
+  --color-text-muted: hsl(75, 8%, 44%);
 
-  /* Typography */
+  /* Typography — Inter for body/display; a technical mono for telemetry, IDs, prices */
   --font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', 'Cascadia Code', 'Segoe UI Mono', Consolas, Menlo, monospace;
   --radius-sm: 8px;
   --radius-md: 12px;
   --radius-lg: 20px;
@@ -153,9 +157,9 @@ p {
 }
 
 .btn-primary {
-  background: linear-gradient(135deg, var(--color-primary) 0%, hsl(210, 80%, 50%) 100%);
-  color: white;
-  box-shadow: 0 4px 15px var(--color-primary-glow);
+  background: var(--color-primary);
+  color: hsl(72, 14%, 6%);
+  box-shadow: 0 4px 18px var(--color-primary-glow);
 }
 
 .btn-primary:hover:not(:disabled) {
@@ -165,7 +169,7 @@ p {
 
 .btn-accent {
   background: linear-gradient(135deg, var(--color-accent) 0%, hsl(38, 90%, 50%) 100%);
-  color: hsl(220, 20%, 7%);
+  color: hsl(74, 14%, 7%);
   font-weight: 700;
   box-shadow: 0 4px 15px var(--color-accent-glow);
 }
@@ -232,7 +236,7 @@ p {
   padding: 0.85rem 1rem;
   border-radius: var(--radius-md);
   border: 1px solid var(--color-surface-border);
-  background: hsla(220, 20%, 10%, 0.6);
+  background: hsla(74, 14%, 10%, 0.6);
   color: var(--color-text-primary);
   font-size: 1rem;
   font-family: var(--font-family);
@@ -489,7 +493,7 @@ p {
   border-top: none;
   border-left: none;
   border-right: none;
-  background: hsla(220, 20%, 8%, 0.85);
+  background: hsla(74, 14%, 8%, 0.85);
   backdrop-filter: blur(24px) saturate(1.3);
   -webkit-backdrop-filter: blur(24px) saturate(1.3);
 }
@@ -609,6 +613,48 @@ p {
   color: var(--color-primary);
 }
 
+/* --- Mono / numeric utilities (telemetry, IDs, prices) --- */
+
+.mono { font-family: var(--font-mono); }
+.num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
+
+/* --- Charger card: corner price ribbon + icon chips --- */
+/* The cost lives in a fixed corner ribbon (glanceable, no text line spent on
+   it); plug type / id / group become compact mono chips instead of a
+   sentence. Cards using these set position:relative + overflow:hidden. */
+
+.price-ribbon {
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 2;
+  background: var(--color-primary);
+  color: hsl(72, 14%, 6%);
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-size: 0.74rem;
+  letter-spacing: -0.01em;
+  padding: 3px 10px 4px;
+  border-bottom-left-radius: 11px;
+}
+
+.price-ribbon small { font-weight: 700; opacity: 0.7; font-size: 0.72em; }
+
+.chip-row { display: flex; flex-wrap: wrap; gap: 6px; }
+
+.chip {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-surface-border);
+  border-radius: 6px;
+  padding: 2px 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
 /* --- Divider --- */
 
 .divider {
@@ -622,9 +668,9 @@ p {
 
 .skeleton {
   background: linear-gradient(90deg,
-    hsla(220, 20%, 18%, 0.5) 25%,
-    hsla(220, 20%, 25%, 0.5) 50%,
-    hsla(220, 20%, 18%, 0.5) 75%
+    hsla(74, 14%, 18%, 0.5) 25%,
+    hsla(74, 14%, 25%, 0.5) 50%,
+    hsla(74, 14%, 18%, 0.5) 75%
   );
   background-size: 200% 100%;
   animation: shimmer 1.5s infinite;
@@ -676,7 +722,7 @@ p {
     position: fixed;
     inset: 0;
     top: 56px;
-    background: hsla(220, 20%, 4%, 0.5);
+    background: hsla(74, 14%, 4%, 0.5);
     z-index: 45;
   }
 
@@ -698,7 +744,7 @@ p {
     margin-top: 0.5rem;
     padding: 0.5rem 1rem 1rem;
     gap: 0;
-    background: hsla(220, 20%, 9%, 0.98);
+    background: hsla(74, 14%, 9%, 0.98);
     backdrop-filter: blur(24px) saturate(1.3);
     -webkit-backdrop-filter: blur(24px) saturate(1.3);
     border-bottom: 1px solid var(--color-surface-border);
@@ -790,11 +836,12 @@ p {
    =========================================================================== */
 
 :root {
-  /* CPO accent — vibrant purple to differentiate from driver's cyan */
-  --color-cpo-accent: hsl(270, 70%, 60%);
-  --color-cpo-accent-hover: hsl(270, 70%, 70%);
-  --color-cpo-accent-glow: hsla(270, 70%, 60%, 0.25);
-  --color-cpo-accent-subtle: hsla(270, 70%, 60%, 0.08);
+  /* CPO accent — unified with the driver brand (the old purple is retired).
+     The operator lane stays distinct by layout/density, not a separate hue. */
+  --color-cpo-accent: hsl(73, 100%, 50%);
+  --color-cpo-accent-hover: hsl(73, 100%, 60%);
+  --color-cpo-accent-glow: hsla(73, 100%, 50%, 0.22);
+  --color-cpo-accent-subtle: hsla(73, 100%, 50%, 0.08);
 }
 
 /* --- CPO Layout: Sidebar + Content --- */
@@ -807,7 +854,7 @@ p {
 .cpo-sidebar {
   width: 260px;
   flex-shrink: 0;
-  background: hsla(220, 20%, 10%, 0.8);
+  background: hsla(74, 14%, 10%, 0.8);
   backdrop-filter: blur(24px) saturate(1.3);
   -webkit-backdrop-filter: blur(24px) saturate(1.3);
   border-right: 1px solid var(--color-surface-border);
@@ -934,7 +981,7 @@ p {
   width: 48px;
   height: 48px;
   border-radius: 50%;
-  background: linear-gradient(135deg, var(--color-cpo-accent), hsl(280, 70%, 50%));
+  background: var(--color-cpo-accent);
   color: white;
   border: none;
   font-size: 1.3rem;
@@ -1040,7 +1087,7 @@ p {
   white-space: nowrap;
   position: sticky;
   top: 0;
-  background: hsla(220, 20%, 12%, 0.95);
+  background: hsla(74, 14%, 12%, 0.95);
   backdrop-filter: blur(10px);
 }
 
@@ -1065,7 +1112,7 @@ p {
 .modal-overlay {
   position: fixed;
   inset: 0;
-  background: hsla(220, 20%, 5%, 0.75);
+  background: hsla(74, 14%, 5%, 0.75);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
   display: flex;
@@ -1077,7 +1124,7 @@ p {
 }
 
 .modal-content {
-  background: hsl(220, 20%, 12%);
+  background: hsl(74, 14%, 12%);
   border: 1px solid var(--color-surface-border);
   border-radius: var(--radius-lg);
   padding: 2rem;
@@ -1169,7 +1216,7 @@ p {
   padding: 0.6rem 0.85rem;
   border-radius: var(--radius-md);
   border: 1px solid var(--color-surface-border);
-  background: hsla(220, 20%, 10%, 0.6);
+  background: hsla(74, 14%, 10%, 0.6);
   color: var(--color-text-primary);
   font-size: 0.88rem;
   font-family: var(--font-family);
@@ -1192,8 +1239,8 @@ p {
 /* --- CPO Button Variant --- */
 
 .btn-cpo {
-  background: linear-gradient(135deg, var(--color-cpo-accent) 0%, hsl(280, 70%, 50%) 100%);
-  color: white;
+  background: var(--color-cpo-accent);
+  color: hsl(72, 14%, 6%);
   box-shadow: 0 4px 15px var(--color-cpo-accent-glow);
 }
 
@@ -1209,7 +1256,7 @@ p {
   align-items: center;
   gap: 0.5rem;
   padding: 0.5rem 0.85rem;
-  background: hsla(220, 20%, 15%, 0.8);
+  background: hsla(74, 14%, 15%, 0.8);
   border: 1px dashed var(--color-surface-border-hover);
   border-radius: var(--radius-sm);
   font-family: 'SF Mono', 'Fira Code', monospace;
