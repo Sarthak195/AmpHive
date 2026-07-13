@@ -1,16 +1,22 @@
 /**
  * AmpHive Session Monitor Component
  * ===================================
- * Displays real-time charging telemetry in a grid layout.
- * Shows: power (W), energy (kWh), current (A), cost (coins), voltage + relay
- * state, a live elapsed timer, and session status with a stop button.
+ * The live charging screen, regrouped (layout redesign 2026-07-14) so the
+ * session SUMMARY leads and the instantaneous readings + warnings stop
+ * dominating the scroll:
  *
- * Robustness: the elapsed timer ticks client-side from the session start time
- * (so it never freezes between telemetry frames), and a "connection lost"
- * banner appears when telemetry goes stale — either the server flags the
+ *   - Hero band  — cost, energy, elapsed (the accumulated totals a driver
+ *                  actually glances at).
+ *   - Meter strip — power, current, voltage, relay, rate (instantaneous
+ *                  readings; live but secondary).
+ *   - Notices    — one-line alerts (stale feed, gateway alarm, low balance)
+ *                  and the auto-stop target, instead of stacked paragraphs.
+ *
+ * Robustness (unchanged): the elapsed timer ticks client-side from the session
+ * start time (so it never freezes between telemetry frames), and a stale-feed
+ * notice appears when telemetry goes quiet — either the server flags the
  * snapshot `is_stale`, or no frame has arrived for a while (dropped gateway /
- * socket). Gateway alarms affecting this plug (e.g. someone physically
- * switching the plug on/off) surface as an inline warning.
+ * socket). Gateway alarms affecting this plug surface as an inline notice.
  */
 
 import { useEffect, useState } from 'react';
@@ -22,33 +28,60 @@ import { useWallet } from '../contexts/WalletContext';
 // Matches the backend TELEMETRY_STALE_AFTER_SEC default (15 s).
 const STALE_AFTER_MS = 15000;
 
-const StatBox = ({ label, value, unit, colorVar = '--color-text-primary' }) => (
-  <div
-    className="glass flex flex-col justify-center"
-    style={{
-      padding: '1.25rem',
-      background: 'hsla(74, 14%, 14%, 0.6)',
-      borderRadius: 'var(--radius-md)',
-    }}
-  >
-    <span style={{
-      color: 'var(--color-text-muted)',
-      fontSize: '0.75rem',
-      textTransform: 'uppercase',
-      letterSpacing: '0.08em',
-      marginBottom: '0.4rem',
-      fontWeight: 600,
-    }}>
-      {label}
+// Live status pill (a colored dot + word) — Active / Reconnecting / Completed.
+const StatusPill = ({ isActive, isStale }) => {
+  if (!isActive) {
+    return (
+      <span className="session-status">
+        <span className="dot" style={{ background: 'var(--color-text-muted)' }} />
+        Completed
+      </span>
+    );
+  }
+  if (isStale) {
+    return (
+      <span className="session-status" style={{ color: 'var(--color-warning)' }}>
+        <span className="dot" style={{ background: 'var(--color-warning)' }} />
+        Reconnecting…
+      </span>
+    );
+  }
+  return (
+    <span className="session-status" style={{ color: 'var(--color-success)' }}>
+      <span
+        className="dot animate-pulse"
+        style={{ background: 'var(--color-success)', boxShadow: '0 0 8px var(--color-success-glow)' }}
+      />
+      Active
     </span>
-    <div className="flex items-baseline gap-1">
-      <span style={{ fontSize: '1.75rem', fontWeight: 700, color: `var(${colorVar})`, fontFamily: 'var(--font-mono)', fontVariantNumeric: 'tabular-nums', letterSpacing: '-0.02em' }}>
-        {value}
-      </span>
-      <span style={{ color: 'var(--color-text-secondary)', fontSize: '0.85rem' }}>
-        {unit}
-      </span>
-    </div>
+  );
+};
+
+// One accumulated headline number (cost / energy / elapsed).
+const HeroMetric = ({ label, value, unit }) => (
+  <div className="session-hero-metric">
+    <span className="session-hero-label">{label}</span>
+    <span className="session-hero-value">
+      {value}
+      {unit && <small>{unit}</small>}
+    </span>
+  </div>
+);
+
+// One instantaneous reading pill (power / current / voltage / relay / rate).
+// The value + unit are kept in a single <b> so they read as one token.
+const MeterPill = ({ label, children }) => (
+  <span className="meter-pill">
+    <span className="meter-pill-label">{label}</span>
+    {children}
+  </span>
+);
+
+// A one-line notice (stale feed / alarm / low balance / auto-stop target).
+const Notice = ({ tone, icon, children }) => (
+  <div className={`session-alert sa-${tone}`}>
+    <span className="sa-icon">{icon}</span>
+    <span className="sa-text">{children}</span>
   </div>
 );
 
@@ -137,8 +170,7 @@ const SessionMonitor = () => {
 
   // Charging-limit progress: this session's stop conditions (max_kwh /
   // max_duration_seconds — user-chosen or the standard caps), which the
-  // backend auto-stops at. Presented like the low-balance warning above,
-  // but informational — it's an expected, driver-chosen outcome.
+  // backend auto-stops at. Informational — an expected, driver-chosen outcome.
   const limitMaxKwh = focusedLimits?.max_kwh;
   const limitMaxDurationSec = focusedLimits?.max_duration_seconds;
   const energyNum = Number(sessionData?.energy_kwh) || 0;
@@ -180,156 +212,66 @@ const SessionMonitor = () => {
   };
 
   return (
-    <div className="glass glass-panel flex flex-col gap-6 animate-fade-in">
-      {/* Header: Title + Status + Timer */}
-      <div className="flex justify-between items-center">
-        <div>
-          <h2 style={{ marginBottom: '0.25rem' }}>Charging Session</h2>
-          <div className="flex items-center gap-2">
-            {!isActive ? (
-              <>
-                <div style={{ width: '10px', height: '10px', borderRadius: '50%', background: 'var(--color-text-muted)' }} />
-                <span style={{ color: 'var(--color-text-muted)', fontWeight: 500, fontSize: '0.9rem' }}>
-                  Completed
-                </span>
-              </>
-            ) : isStale ? (
-              <>
-                <div style={{ width: '10px', height: '10px', borderRadius: '50%', background: 'var(--color-warning, #f0a020)' }} />
-                <span style={{ color: 'var(--color-warning, #f0a020)', fontWeight: 600, fontSize: '0.9rem' }}>
-                  Reconnecting…
-                </span>
-              </>
-            ) : (
-              <>
-                <div
-                  style={{
-                    width: '10px',
-                    height: '10px',
-                    borderRadius: '50%',
-                    background: 'var(--color-success)',
-                    boxShadow: '0 0 8px var(--color-success-glow)',
-                  }}
-                  className="animate-pulse"
-                />
-                <span style={{ color: 'var(--color-success)', fontWeight: 600, fontSize: '0.9rem' }}>
-                  Active
-                </span>
-              </>
-            )}
-          </div>
-        </div>
-
-        <div style={{ textAlign: 'right' }}>
-          <span style={{ color: 'var(--color-text-muted)', fontSize: '0.75rem', display: 'block', marginBottom: '0.25rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-            Elapsed
-          </span>
-          <span style={{
-            fontSize: '1.5rem',
-            fontFamily: 'var(--font-mono)',
-            fontVariantNumeric: 'tabular-nums',
-            fontWeight: 700,
-            color: 'var(--color-primary)',
-            letterSpacing: '0.05em',
-          }}>
-            {formatTime(elapsedSec)}
-          </span>
-        </div>
+    <div className="glass glass-panel flex flex-col gap-4 animate-fade-in">
+      {/* Header: title + live status pill */}
+      <div className="flex justify-between items-center gap-3" style={{ flexWrap: 'wrap' }}>
+        <h2 style={{ margin: 0 }}>Charging Session</h2>
+        <StatusPill isActive={isActive} isStale={isStale} />
       </div>
 
-      {/* Connection-lost banner */}
-      {isStale && (
-        <div
-          className="flex items-center gap-2"
-          style={{
-            padding: '0.75rem 1rem',
-            borderRadius: 'var(--radius-md)',
-            background: 'hsla(38, 90%, 50%, 0.12)',
-            border: '1px solid hsla(38, 90%, 50%, 0.4)',
-            color: 'var(--color-warning, #f0a020)',
-            fontSize: '0.9rem',
-          }}
-        >
-          <span style={{ fontSize: '1.1rem' }}>⚠️</span>
-          <span>
-            Live readings paused — the charger stopped reporting. Values below
-            are the last known. Your session is still running and safety limits
-            are enforced on the charger; billing uses metered energy.
-          </span>
+      {/* Hero band: the session summary — the accumulated totals up front. */}
+      <div className="session-hero">
+        <HeroMetric label="Cost" value={cost} unit="coins" />
+        <HeroMetric label="Energy" value={energyKwh} unit="kWh" />
+        <HeroMetric label="Elapsed" value={formatTime(elapsedSec)} />
+      </div>
+
+      {/* One-line notices — only what's currently active, stacked tightly
+          instead of as full-height paragraph banners. */}
+      {(isStale || recentAlarm || lowBalance) && (
+        <div className="flex flex-col gap-2">
+          {isStale && (
+            <Notice tone="warn" icon="⚠️">
+              <strong>Live readings paused</strong> — reconnecting. Values below are the last
+              known; your session keeps running and billing uses metered energy.
+            </Notice>
+          )}
+          {recentAlarm && (
+            <Notice tone="danger" icon="🚨">
+              {recentAlarm.detail || `Charger alarm: ${recentAlarm.event_type}`}
+            </Notice>
+          )}
+          {lowBalance && (
+            <Notice tone="warn" icon="🔋">
+              Low balance — about <strong>{Math.max(0, remainingCoins).toFixed(1)}</strong> coins
+              (≈ {Math.max(0, remainingCoins / rate).toFixed(2)} kWh) left. Charging will stop
+              automatically when your wallet is used up.
+            </Notice>
+          )}
         </div>
       )}
 
-      {/* Gateway alarm banner (e.g. plug switched on/off out-of-band, cutoffs) */}
-      {recentAlarm && (
-        <div
-          className="flex items-center gap-2"
-          style={{
-            padding: '0.75rem 1rem',
-            borderRadius: 'var(--radius-md)',
-            background: 'hsla(0, 80%, 50%, 0.12)',
-            border: '1px solid hsla(0, 80%, 50%, 0.4)',
-            color: 'var(--color-danger)',
-            fontSize: '0.9rem',
-          }}
-        >
-          <span style={{ fontSize: '1.1rem' }}>🚨</span>
-          <span>{recentAlarm.detail || `Charger alarm: ${recentAlarm.event_type}`}</span>
-        </div>
-      )}
-
-      {/* Low-balance warning */}
-      {lowBalance && (
-        <div
-          className="flex items-center gap-2"
-          style={{
-            padding: '0.75rem 1rem',
-            borderRadius: 'var(--radius-md)',
-            background: 'hsla(38, 90%, 50%, 0.12)',
-            border: '1px solid hsla(38, 90%, 50%, 0.4)',
-            color: 'var(--color-warning, #f0a020)',
-            fontSize: '0.9rem',
-          }}
-        >
-          <span style={{ fontSize: '1.1rem' }}>🔋</span>
-          <span>
-            Low balance — about <strong>{Math.max(0, remainingCoins).toFixed(1)}</strong> coins
-            (≈ {Math.max(0, remainingCoins / rate).toFixed(2)} kWh) left. Charging will stop
-            automatically when your wallet is used up.
-          </span>
-        </div>
-      )}
-
-      {/* Charging-limit progress ("0.42 / 1.00 kWh · stops automatically"),
-          with an inline Edit to change the target mid-session. */}
-      {hasLimit && (
-        <div
-          className="flex items-center gap-2"
-          style={{
-            padding: '0.75rem 1rem',
-            borderRadius: 'var(--radius-md)',
-            background: 'hsla(73, 100%, 50%, 0.10)',
-            border: '1px solid hsla(73, 100%, 50%, 0.35)',
-            color: 'var(--color-text-secondary)',
-            fontSize: '0.9rem',
-          }}
-        >
-          <span style={{ fontSize: '1.1rem' }}>🎯</span>
-          <span style={{ flex: 1 }}>
+      {/* Auto-stop target ("0.42 / 1.00 kWh · stops automatically") with an
+          inline Edit to change the target mid-session. */}
+      {hasLimit && !editingLimit && (
+        <div className="session-alert sa-target">
+          <span className="sa-icon">🎯</span>
+          <span className="sa-text">
             Limit:{' '}
             {limitMaxKwh != null && (
-              <strong style={{ color: 'var(--color-text-primary)' }}>
+              <strong>
                 {energyNum.toFixed(2)} / {Number(limitMaxKwh).toFixed(2)} kWh
               </strong>
             )}
             {limitMaxKwh != null && limitMaxDurationSec != null && ' · '}
             {limitMaxDurationSec != null && (
-              <strong style={{ color: 'var(--color-text-primary)' }}>
+              <strong>
                 {formatTime(elapsedSec)} / {formatTime(limitMaxDurationSec)}
               </strong>
             )}
             {' · stops automatically'}
           </span>
-          {isActive && updateLimits && !editingLimit && (
+          {isActive && updateLimits && (
             <button
               type="button"
               className="btn btn-ghost btn-sm"
@@ -410,29 +352,20 @@ const SessionMonitor = () => {
         </div>
       )}
 
-      {/* Stats Grid */}
-      <div className="stat-grid">
-        <StatBox label="Charging Speed" value={powerW} unit="W" colorVar="--color-primary" />
-        <StatBox label="Energy Added" value={energyKwh} unit="kWh" colorVar="--color-accent" />
-        <StatBox label="Current Drawn" value={current} unit="A" colorVar="--color-text-primary" />
-        <StatBox label="Session Cost" value={cost} unit="Coins" colorVar="--color-danger" />
-      </div>
-
-      {/* Secondary line: voltage + actual relay state */}
-      <div
-        className="flex items-center gap-4"
-        style={{ color: 'var(--color-text-muted)', fontSize: '0.85rem', flexWrap: 'wrap' }}
-      >
-        {voltage && <span>Voltage: <strong style={{ color: 'var(--color-text-secondary)' }}>{voltage} V</strong></span>}
+      {/* Live readings — instantaneous meter values (power / current / voltage
+          / relay / rate). Live but secondary to the summary above. */}
+      <div className="meter-strip">
+        <MeterPill label="Power"><b>{powerW} W</b></MeterPill>
+        <MeterPill label="Current"><b>{current} A</b></MeterPill>
+        {voltage && <MeterPill label="Voltage"><b>{voltage} V</b></MeterPill>}
         {relayOn !== undefined && (
-          <span>
-            Relay:{' '}
-            <strong style={{ color: relayOn ? 'var(--color-success)' : 'var(--color-text-muted)' }}>
+          <MeterPill label="Relay">
+            <b style={{ color: relayOn ? 'var(--color-success)' : 'var(--color-text-muted)' }}>
               {relayOn ? 'ON' : 'OFF'}
-            </strong>
-          </span>
+            </b>
+          </MeterPill>
         )}
-        <span style={{ color: 'var(--color-text-muted)' }}>Rate: {coins_per_kwh} coins / kWh</span>
+        <MeterPill label="Rate"><b>{coins_per_kwh}/kWh</b></MeterPill>
       </div>
 
       {/* Stop button */}
@@ -440,7 +373,7 @@ const SessionMonitor = () => {
         <button
           className="btn btn-danger btn-lg btn-full"
           onClick={stopSession}
-          style={{ marginTop: '0.5rem' }}
+          style={{ marginTop: '0.25rem' }}
         >
           Stop Charging
         </button>

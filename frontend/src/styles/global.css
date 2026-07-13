@@ -521,6 +521,153 @@ p {
   .plug-grid { grid-template-columns: 1fr; }
 }
 
+/* ===========================================================================
+   Session monitor — regrouped telemetry (layout redesign 2026-07-14)
+   ===========================================================================
+   The live screen was one tall stack: header + big elapsed, then up to four
+   multi-line warning banners, then a 4-up grid mixing accumulated totals
+   (energy, cost) with instantaneous readings (power, current). Regrouped so
+   the session SUMMARY (cost / energy / elapsed) leads in a hero band, the
+   instantaneous readings drop to a compact meter strip, and warnings collapse
+   to single-line notices. Structure only — every color is an existing token. */
+
+.session-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: var(--color-text-muted);
+}
+
+.session-status .dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+/* Hero band — the accumulated totals a driver actually glances at. */
+.session-hero {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1rem;
+  padding: 1.15rem 1.4rem;
+  border-radius: var(--radius-md);
+  background: hsla(74, 14%, 14%, 0.5);
+  border: 1px solid var(--color-surface-border);
+}
+
+.session-hero-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+.session-hero-label {
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--color-text-muted);
+}
+
+.session-hero-value {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  font-size: 1.9rem;
+  line-height: 1.05;
+  letter-spacing: -0.02em;
+  color: var(--color-text-primary);
+  white-space: nowrap;
+}
+
+.session-hero-value small {
+  font-size: 0.5em;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  margin-left: 0.3rem;
+  letter-spacing: 0;
+}
+
+/* Meter strip — instantaneous readings (was the lower grid + voltage line). */
+.meter-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.meter-pill {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.45rem;
+  padding: 0.4rem 0.75rem;
+  border-radius: 999px;
+  background: hsla(74, 14%, 14%, 0.45);
+  border: 1px solid var(--color-surface-border);
+}
+
+.meter-pill-label {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--color-text-muted);
+}
+
+.meter-pill b {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  font-size: 0.9rem;
+  color: var(--color-text-primary);
+}
+
+/* One-line session notice — replaces the stacked multi-line banners. Tone
+   classes reuse the existing semantic tokens (amber warn, vermilion danger,
+   amp-lime target). */
+.session-alert {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.6rem 0.85rem;
+  border-radius: var(--radius-sm);
+  font-size: 0.85rem;
+  line-height: 1.4;
+}
+
+.session-alert .sa-icon { flex-shrink: 0; font-size: 1rem; line-height: 1; }
+.session-alert .sa-text { flex: 1; min-width: 0; }
+.session-alert strong { color: var(--color-text-primary); font-weight: 700; }
+
+.session-alert.sa-warn {
+  background: hsla(38, 90%, 50%, 0.12);
+  border: 1px solid hsla(38, 90%, 50%, 0.35);
+  color: var(--color-warning);
+}
+
+.session-alert.sa-danger {
+  background: var(--color-danger-glow);
+  border: 1px solid hsla(6, 100%, 62%, 0.4);
+  color: var(--color-danger);
+}
+
+.session-alert.sa-target {
+  background: var(--color-primary-glow);
+  border: 1px solid var(--color-surface-border-hover);
+  color: var(--color-text-secondary);
+}
+
+@media (max-width: 480px) {
+  .session-hero {
+    grid-template-columns: 1fr 1fr;
+    row-gap: 1rem;
+    padding: 1rem;
+  }
+  .session-hero-value { font-size: 1.6rem; }
+}
+
 /* --- Animations --- */
 
 @keyframes pulse {
