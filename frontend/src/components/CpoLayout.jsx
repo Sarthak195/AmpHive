@@ -23,6 +23,7 @@ const NAV_ITEMS = [
   { path: '/cpo/plugs', label: 'Plugs', icon: '🔌' },
   { path: '/cpo/groups', label: 'Groups', icon: '👥' },
   { path: '/cpo/sessions', label: 'Sessions', icon: '⚡' },
+  { path: '/cpo/reservations', label: 'Reservations', icon: '📅' },
   { path: '/cpo/earnings', label: 'Earnings', icon: '🪙' },
   { path: '/cpo/faults', label: 'Faults', icon: '🛠️' },
 ];

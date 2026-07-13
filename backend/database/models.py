@@ -872,6 +872,14 @@ class Reservation(Base):
     status: Mapped[ReservationStatus] = mapped_column(SQLEnum(ReservationStatus, name="reservation_status", values_callable=lambda x: [e.value for e in x]), default=ReservationStatus.BOOKED, nullable=False)
     session_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("charging_sessions.id", ondelete="SET NULL"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+    # When the reservation-start janitor first processed this booking's window
+    # opening — nudged the holder that their plug is ready and force-stopped
+    # any non-holder session still running on it (the walk-up overrun the
+    # booking gate can't touch, since that session started legally BEFORE the
+    # window). NULL until then; stamped once so the sweep is idempotent across
+    # its 60 s ticks and across a restart (services/session_reaper.py
+    # reap_reservation_starts_once — the follow-up the module header foretold).
+    started_notified_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (
         # The hot shape: "reservations on this plug around time T" — the

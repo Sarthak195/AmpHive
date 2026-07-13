@@ -343,6 +343,51 @@ async def start_charging_session(
         },
     )
 
+    # [Reservations] Advance warning: if another member has this plug booked
+    # SOON, this walk-up session will be force-stopped when that window opens
+    # (services/session_reaper.py reap_reservation_starts_once). Tell the driver
+    # up front so the stop isn't a surprise. A capped session only runs into
+    # bookings before its own end; an uncapped one uses the policy lookahead.
+    # Best-effort and fully non-blocking — a successful start must never fail on
+    # this warning path (local imports: this router's shared header is a merge
+    # hot-spot across the parallel feature branches, same as the gate above).
+    try:
+        from backend.services import reservations as reservation_policy
+        from backend.services.reservations import next_conflicting_reservation
+
+        if req.max_duration_seconds:
+            # A duration-capped session can't run past its own cap, so it can
+            # only collide with a booking starting before then — use the cap as
+            # the horizon (it's the default 4 h since 2026-07-12 unless the
+            # driver set a shorter limit).
+            horizon_min = req.max_duration_seconds / 60
+        else:
+            # No cap (legacy / explicit null) — no known end, so fall back to
+            # the policy heuristic horizon.
+            horizon_min = reservation_policy.RESERVATION_WALKUP_WARN_LOOKAHEAD_MIN
+        upcoming = await next_conflicting_reservation(
+            db, plug.id, user.id,
+            horizon=now_utc + timedelta(minutes=horizon_min),
+            now=now_utc,
+        )
+        if upcoming is not None:
+            from backend.services.notifications import notify
+            await notify(
+                user.id,
+                "reservation_ahead",
+                "Heads up — this plug is reserved soon",
+                (
+                    f"{plug.name} is reserved from "
+                    f"{upcoming.start_at.astimezone(timezone.utc):%H:%M} UTC by "
+                    "another member — your session will be stopped then."
+                ),
+                severity="warning",
+                plug_id=plug.id,
+                session_id=session.id,
+            )
+    except Exception:
+        logger.warning("Walk-up reservation warning failed", exc_info=True)
+
     return {
         "status": "started",
         "session_id": session.id,

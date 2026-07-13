@@ -27,6 +27,7 @@ import CpoGateways from './pages/cpo/CpoGateways';
 import CpoPlugs from './pages/cpo/CpoPlugs';
 import CpoGroups from './pages/cpo/CpoGroups';
 import CpoSessions from './pages/cpo/CpoSessions';
+import CpoReservations from './pages/cpo/CpoReservations';
 import CpoFaults from './pages/cpo/CpoFaults';
 import CpoEarnings from './pages/cpo/CpoEarnings';
 
@@ -74,6 +75,9 @@ function App() {
           } />
           <Route path="/cpo/sessions" element={
             <CpoProtectedRoute><CpoSessions /></CpoProtectedRoute>
+          } />
+          <Route path="/cpo/reservations" element={
+            <CpoProtectedRoute><CpoReservations /></CpoProtectedRoute>
           } />
           <Route path="/cpo/faults" element={
             <CpoProtectedRoute><CpoFaults /></CpoProtectedRoute>

@@ -40,6 +40,16 @@ MAX_UPCOMING_RESERVATIONS_PER_USER = int(os.getenv("MAX_UPCOMING_RESERVATIONS_PE
 # after start_at lazily flips to EXPIRED and stops blocking anyone.
 RESERVATION_NO_SHOW_GRACE_MIN = float(os.getenv("RESERVATION_NO_SHOW_GRACE_MIN") or "15")
 
+# Advance-warning lookahead for a walk-up: when a driver starts a session on a
+# plug another member has booked SOON, warn them it will be force-stopped when
+# that window opens (the reservation-start janitor in
+# services/session_reaper.py). A session with no duration cap could run
+# indefinitely, so we warn about bookings within this horizon; a capped session
+# uses its own cap when that reaches further. Env-tunable, in minutes.
+RESERVATION_WALKUP_WARN_LOOKAHEAD_MIN = float(
+    os.getenv("RESERVATION_WALKUP_WARN_LOOKAHEAD_MIN") or "180"
+)
+
 # Not env-tunable: the floor on a booking's length, and the small tolerance
 # that lets "book starting now" survive clock skew / form-submit latency.
 RESERVATION_MIN_MINUTES = 15
@@ -132,3 +142,36 @@ def format_window(start_at: datetime, end_at: datetime) -> str:
     if start_utc.date() == end_utc.date():
         return f"{start_utc:%Y-%m-%d %H:%M}–{end_utc:%H:%M} UTC"
     return f"{start_utc:%Y-%m-%d %H:%M}–{end_utc:%Y-%m-%d %H:%M} UTC"
+
+
+async def next_conflicting_reservation(
+    db: AsyncSession,
+    plug_id: int,
+    exclude_user_id: int,
+    *,
+    horizon: datetime,
+    now: Optional[datetime] = None,
+) -> Optional[Reservation]:
+    """The soonest BOOKED reservation on this plug held by someone OTHER than
+    exclude_user_id that starts in (now, horizon] — i.e. one a session starting
+    now would run into and be force-stopped for when the window opens (see
+    services/session_reaper.py reap_reservation_starts_once). Returns the
+    Reservation or None. Read-only and lock-free: the session-start path calls
+    it only to warn the walk-up driver up front, off the plug-locked critical
+    section, so it must never take a lock or block the start."""
+    now = now or datetime.now(timezone.utc)
+    result = await db.execute(
+        select(Reservation)
+        .where(
+            and_(
+                Reservation.plug_id == plug_id,
+                Reservation.status == ReservationStatus.BOOKED,
+                Reservation.user_id != exclude_user_id,
+                Reservation.start_at > now,
+                Reservation.start_at <= horizon,
+            )
+        )
+        .order_by(Reservation.start_at)
+        .limit(1)
+    )
+    return result.scalar_one_or_none()

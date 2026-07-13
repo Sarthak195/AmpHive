@@ -50,6 +50,18 @@ REAP_REASON = "auto-stopped: telemetry lost"
 TIME_LIMIT_REAP_REASON = "auto-stopped: time limit reached"
 AUTO_STOP_ON_LIMITS = os.getenv("AUTO_STOP_ON_LIMITS", "true").lower() in ("1", "true", "yes")
 
+# [Reservations] When a booking's window opens, force-stop any session still
+# running on that plug under a DIFFERENT user — the walk-up overrun the
+# session-start booking gate can't catch (the gate only blocks NEW non-holder
+# starts once the window covers now; a session already in progress started
+# legally before it). Without this the holder arrives to a plug pinned
+# OCCUPIED by a stranger. The reason string routes finalize's stop
+# notification to the "plug reserved" title (services/session_lifecycle.py).
+RESERVATION_REAP_REASON = "auto-stopped: plug reserved"
+FORCE_STOP_WALKUP_ON_RESERVATION = os.getenv(
+    "RESERVATION_FORCE_STOP_WALKUP", "true"
+).lower() in ("1", "true", "yes")
+
 
 class SessionReaperService:
     """Owns a background task (started/stopped by the app lifespan) that
@@ -102,6 +114,10 @@ class SessionReaperService:
                 await self.reap_time_limited_once()
             except Exception:
                 logger.exception("Session reaper time-limit sweep failed")
+            try:
+                await self.reap_reservation_starts_once()
+            except Exception:
+                logger.exception("Reservation-start sweep failed")
 
     def _stale_session_ids_query(self, cutoff: datetime):
         from backend.database.models import ChargingSession, SessionStatus
@@ -205,3 +221,134 @@ class SessionReaperService:
             except Exception:
                 logger.exception(f"Failed to reap time-limited session {session_id}")
         return reaped
+
+    async def reap_reservation_starts_once(self) -> int:
+        """[Reservations] Process each booking whose window has just opened
+        (start_at <= now < end_at, still BOOKED, not yet processed): nudge the
+        holder that their reserved plug is ready, and force-stop any session
+        still running on that plug under a DIFFERENT user. That walk-up started
+        legally before the window (the session-start gate only blocks NEW
+        non-holder starts once the window covers now), so it's the one overrun
+        the gate can't catch — leaving it would pin the plug OCCUPIED by a
+        stranger just as the holder arrives.
+
+        Idempotent per reservation via started_notified_at (stamped under a row
+        lock), so the nudge and the force-stop each fire exactly once across the
+        60 s ticks and across a restart. The force-stop half is gated by
+        RESERVATION_FORCE_STOP_WALKUP (default on); the holder nudge fires
+        regardless. One reservation's failure never aborts the sweep. Returns
+        the number of reservations activated this sweep."""
+        from backend.database.models import (
+            ChargingSession, Plug, Reservation, ReservationStatus, SessionStatus,
+        )
+        from backend.services.notifications import notify
+
+        now = datetime.now(timezone.utc)
+
+        # 1. Candidates: opened, still-BOOKED, not-yet-processed windows.
+        #    Read-only, no locks.
+        async with self.db_session_factory() as db:
+            result = await db.execute(
+                select(
+                    Reservation.id, Reservation.plug_id, Reservation.user_id,
+                    Reservation.end_at, Plug.name,
+                )
+                .join(Plug, Plug.id == Reservation.plug_id)
+                .where(
+                    and_(
+                        Reservation.status == ReservationStatus.BOOKED,
+                        Reservation.started_notified_at.is_(None),
+                        Reservation.start_at <= now,
+                        Reservation.end_at > now,
+                    )
+                )
+            )
+            candidates = list(result.all())
+
+        activated = 0
+        for res_id, plug_id, holder_id, end_at, plug_name in candidates:
+            # 2. Claim the reservation atomically: win it only if still BOOKED
+            #    and unprocessed. skip_locked so a racing holder-start that is
+            #    fulfilling this very row (it locks the plug, then updates the
+            #    reservation) never blocks the janitor — we skip and it drops
+            #    out of next sweep's candidates as FULFILLED. The overrunning
+            #    session is read here but finalized in its OWN txn below, so the
+            #    session-row lock is never nested under this reservation lock.
+            overrun = None
+            async with self.db_session_factory() as db:
+                locked = await db.execute(
+                    select(Reservation)
+                    .where(
+                        and_(
+                            Reservation.id == res_id,
+                            Reservation.status == ReservationStatus.BOOKED,
+                            Reservation.started_notified_at.is_(None),
+                        )
+                    )
+                    .with_for_update(skip_locked=True)
+                )
+                reservation = locked.scalar_one_or_none()
+                if reservation is None:
+                    continue
+                reservation.started_notified_at = now
+                other = await db.execute(
+                    select(ChargingSession.id, ChargingSession.user_id)
+                    .where(
+                        and_(
+                            ChargingSession.plug_id == plug_id,
+                            ChargingSession.status == SessionStatus.ACTIVE,
+                            ChargingSession.user_id != holder_id,
+                        )
+                    )
+                    .limit(1)
+                )
+                overrun = other.first()
+                await db.commit()
+
+            activated += 1
+
+            # 3. Force-stop the overrun in its own txn: finalize locks the
+            #    session row, bills persisted energy, frees the plug, and emits
+            #    the walk-up driver's own "plug reserved" stop notification — so
+            #    we don't notify them a second time here.
+            freed = False
+            if overrun is not None and FORCE_STOP_WALKUP_ON_RESERVATION:
+                overrun_session_id, overrun_user_id = overrun
+                try:
+                    async with self.db_session_factory() as db:
+                        outcome = await self.finalize(
+                            db, overrun_session_id, reason=RESERVATION_REAP_REASON
+                        )
+                    if outcome is not None:
+                        freed = True
+                        logger.warning(
+                            f"Force-stopped walk-up session {overrun_session_id} "
+                            f"(user {overrun_user_id}) on plug {plug_id}: "
+                            f"reservation {res_id} window opened"
+                        )
+                except Exception:
+                    logger.exception(
+                        f"Failed to force-stop session {overrun_session_id} for "
+                        f"reservation {res_id}"
+                    )
+
+            # 4. Nudge the holder their plug is ready (best-effort — notify
+            #    never raises). Mention the clear-out only when we freed it.
+            body = (
+                f"{plug_name} is ready — you can start charging now. "
+                f"Reserved for you until {end_at.astimezone(timezone.utc):%H:%M} UTC."
+            )
+            if freed:
+                body += " (the plug was just freed for you)"
+            await notify(
+                holder_id,
+                "reservation_started",
+                "Your reservation has started",
+                body,
+                severity="info",
+                plug_id=plug_id,
+            )
+
+        if activated:
+            logger.info(f"Reservation-start sweep activated {activated} booking(s)")
+        return activated

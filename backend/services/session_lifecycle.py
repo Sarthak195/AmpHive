@@ -301,6 +301,12 @@ async def finalize_charging_session(
         # expected, driver-chosen outcome, so informational; the specific
         # limit type rides into the body via the reason string below.
         n_title, n_severity = "Charging stopped — your limit was reached", "info"
+    elif reason and "reserved" in reason:
+        # [Reservations] A walk-up whose session overran into another
+        # member's booked window — force-stopped by the reservation-start
+        # janitor (services/session_reaper.py). Still a real, billed stop, so
+        # this is the driver's receipt too; the reason rides into the body.
+        n_title, n_severity = "Charging stopped — plug reserved", "warning"
     else:
         n_title, n_severity = "Charging complete", "info"
     minutes = (duration_sec or 0) // 60
@@ -308,7 +314,7 @@ async def finalize_charging_session(
         f"{plug.name}: {final_energy:.3f} kWh in {minutes} min — "
         f"{actual_debit:.2f} coins charged, {new_balance:.2f} left."
     )
-    if reason and (n_severity == "critical" or "limit reached" in reason):
+    if reason and (n_severity == "critical" or "limit reached" in reason or "reserved" in reason):
         n_body += f" ({reason})"
     await notify(
         session.user_id,
