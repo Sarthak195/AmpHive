@@ -266,7 +266,17 @@ gcloud compute ssh --quiet $VM_NAME --zone=$VM_ZONE --command="tr -d '\r' < /tmp
 
 # ---- Step 4: Rebuild and restart containers ----
 Write-Host "`n[4/4] Extracting application and restarting Docker Compose on VM..." -ForegroundColor Cyan
-gcloud compute ssh --quiet $VM_NAME --zone=$VM_ZONE --command="cd $REMOTE_DIR && tar -xzf amphive_app.tar.gz && rm amphive_app.tar.gz && sudo docker-compose up -d --build"
+# Extract into a STAGING dir and swap, rather than `tar -xzf` straight over the
+# live tree. Plain extraction only overlays files — it never removes ones you
+# DELETED or RENAMED locally, so their stale copies linger in the VM's build
+# context and `docker-compose --build` bakes them back into the image via COPY.
+# That bit us on 2026-07-13: a renamed migration left both files on the VM ->
+# two Alembic heads -> backend crash-loop (see deploy/docs + prod-vm-ops notes).
+# The `&&` chain also means a corrupt/short tarball fails BEFORE the old
+# backend/frontend are removed, so a bad transfer never wipes the live tree
+# (and the running containers keep serving until the new image builds cleanly).
+$deploy_cmd = "cd $REMOTE_DIR && rm -rf .deploy_stage && mkdir .deploy_stage && tar -xzf amphive_app.tar.gz -C .deploy_stage && rm -rf backend frontend && mv .deploy_stage/backend .deploy_stage/frontend . && rm -rf .deploy_stage amphive_app.tar.gz && sudo docker-compose up -d --build"
+gcloud compute ssh --quiet $VM_NAME --zone=$VM_ZONE --command=$deploy_cmd
 
 # compose won't restart caddy for a config-only change (the Caddyfile is a
 # bind-mounted volume, not part of the service definition), so reload it
