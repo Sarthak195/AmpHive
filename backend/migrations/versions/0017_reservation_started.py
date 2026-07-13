@@ -16,13 +16,18 @@ Idempotent add (ADD COLUMN IF NOT EXISTS): a create_all-built database
 (init_db() stamps a pre-Alembic DB at the baseline, then upgrades to head)
 already has this column from the current models.py.
 
-Revision ID: 0017_reservation_started_notified
+NOTE the revision id is deliberately short: alembic_version.version_num is
+VARCHAR(32), so a longer id (the original "0017_reservation_started_notified"
+was 33 chars) fails to record with StringDataRightTruncationError and the
+whole migration rolls back. Keep every revision id <= 32 characters.
+
+Revision ID: 0017_reservation_started
 Revises: 0016_reservations
 Create Date: 2026-07-13
 """
 from alembic import op
 
-revision = "0017_reservation_started_notified"
+revision = "0017_reservation_started"
 down_revision = "0016_reservations"
 branch_labels = None
 depends_on = None
