@@ -827,6 +827,33 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
                         publish_ota_event("OTA_START_FAILED");
                     }
                 }
+            } else if (action && strcmp(action, "SET_LIMITS") == 0 && cmd_plug_id >= 0) {
+                // Update a RUNNING session's watchdog thresholds in place. Unlike
+                // ON, this MUST NOT re-read the meter baseline or touch
+                // start_energy_kwh / start_time_s / session_active / session_id —
+                // re-baselining mid-session would corrupt billing.
+                uint32_t duration = 14400;  // 4 hours default
+                float    kwh_limit = 30.0f;
+                const cJSON *dur = cJSON_GetObjectItemCaseSensitive(root, "max_duration_seconds");
+                if (cJSON_IsNumber(dur)) duration = (uint32_t)dur->valuedouble;
+                const cJSON *kwh = cJSON_GetObjectItemCaseSensitive(root, "max_kwh");
+                if (cJSON_IsNumber(kwh)) kwh_limit = (float)kwh->valuedouble;
+
+                xSemaphoreTake(plugs_mutex, portMAX_DELAY);
+                plug_slot_t *s = slot_get_locked(cmd_plug_id, cmd_ip);
+                if (s && s->session_active) {
+                    // Thresholds only — start_energy_kwh/start_time_s/
+                    // session_active/session_id are left untouched (NO re-baseline).
+                    s->max_duration_s = duration;
+                    s->max_kwh = kwh_limit;
+                    persist_sessions_locked();
+                    xSemaphoreGive(plugs_mutex);
+                    ESP_LOGI(TAG, "Plug %d limits updated: %lu s, %.3f kWh (session preserved)",
+                             cmd_plug_id, duration, kwh_limit);
+                } else {
+                    xSemaphoreGive(plugs_mutex);
+                    ESP_LOGI(TAG, "SET_LIMITS for plug %d ignored: no active session.", cmd_plug_id);
+                }
             }
 
             cJSON_Delete(root);

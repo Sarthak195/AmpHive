@@ -34,7 +34,7 @@
 
 | Direction | Topic | QoS | Retained | Payload |
 |-----------|-------|-----|----------|---------|
-| backend → gateway | `amphive/gateways/{gateway_id}/plugs/{plug_id}/commands` | 1 | no | `{"action":"ON"\|"OFF","max_duration_seconds":<int>,"max_kwh":<float>,"session_id":"<str>","local_ip":"<str>"}` OR `{"action":"SET_INTERVAL","interval_ms":<int>}` OR `{"action":"OTA","url":"<http(s)>"}` |
+| backend → gateway | `amphive/gateways/{gateway_id}/plugs/{plug_id}/commands` | 1 | no | `{"action":"ON"\|"OFF","max_duration_seconds":<int>,"max_kwh":<float>,"session_id":"<str>","local_ip":"<str>"}` OR `{"action":"SET_LIMITS","max_kwh":<float>,"max_duration_seconds":<int>,"local_ip":"<str>"}` OR `{"action":"SET_INTERVAL","interval_ms":<int>}` OR `{"action":"OTA","url":"<http(s)>"}` |
 | gateway → backend | `amphive/gateways/{gateway_id}/telemetry` | 0 | no | `{"plug_id":<int>,"watts":<f>,"kwh":<f>,"voltage":<f>,"current":<f>,"relay":<bool>,"status":"occupied"\|"available","session_id":"<str>"}` |
 | gateway → backend | `amphive/gateways/{gateway_id}/status` | 1 | yes | `{"status":"online","fw":"<ver>"}` (on connect) / `{"status":"offline"}` (LWT) |
 | gateway → backend | `amphive/gateways/{gateway_id}/alarms` | 1 | no | `{"error":"THERMAL_CUTOFF"\|"OVERCURRENT_CUTOFF"\|"UNAUTHORIZED_ON","plug_id":<int>}` or `{"event":"OTA_STARTED"\|"OTA_OK_REBOOTING"\|"OTA_FAILED"\|"OTA_REFUSED_SESSION_ACTIVE"\|...}` |
@@ -88,6 +88,17 @@ Tapo app / stale NVS resume) is forced OFF locally and alarmed.
 > `session_id` (the compact NVS ring-buffer entry has no room), so replayed
 > readings still attribute by `plug_id`.
 
+> **`SET_LIMITS` re-caps a running session without re-baselining.** To change a
+> live session's watchdog thresholds (energy + duration caps) mid-charge, the
+> backend sends `SET_LIMITS` — **not** a second `ON`. The firmware's `ON` handler
+> re-reads the meter baseline on *every* `ON`, so re-sending `ON` mid-session
+> would reset `start_energy_kwh` and re-bill from zero. `SET_LIMITS` updates
+> **only** `max_kwh` and `max_duration_s` (then re-persists to NVS) and leaves
+> `start_energy_kwh`, `start_time_s`, `session_active`, and `session_id`
+> untouched, so accumulated billing is unaffected. It is a **no-op when no
+> session is active** on the addressed plug (logged and ignored). `local_ip`
+> targets the physical plug on a multi-plug gateway (TD#20), exactly as ON/OFF.
+
 > **`local_ip` targets the plug (multi-plug, TD#20).** One ESP32 gateway can
 > drive several P110s, so ON/OFF carry the target plug's LAN IP (the backend
 > stores it as `plugs.local_ip` and now ships it on every ON/OFF —
@@ -123,6 +134,11 @@ Tapo app / stale NVS resume) is forced OFF locally and alarmed.
   blocking broker-ack wait.
 - `MQTTManager.send_plug_interval(gateway_id, plug_id, interval_ms)`
   publishes the `SET_INTERVAL` command at QoS 1 to configure the gateway's telemetry reporting interval.
+- `MQTTManager.send_plug_limits(gateway_id, plug_id, max_kwh, max_duration_seconds, local_ip=None)`
+  publishes the `SET_LIMITS` command at QoS 1 (blocking `wait_for_publish(timeout=3.0)`,
+  returns `is_published()`) to re-cap a **running** session's energy/duration
+  watchdog thresholds without re-baselining (see the `SET_LIMITS` note above).
+  Intended to be wired **best-effort** into `PATCH /api/sessions/{id}/limits`.
 - `MQTTManager.send_gateway_ota(gateway_id, plug_id, firmware_url)`
   publishes an `OTA` command at QoS 1. Triggered by
   `POST /api/cpo/gateways/{id}/ota` (RBAC + tenant-scoped; requires the
