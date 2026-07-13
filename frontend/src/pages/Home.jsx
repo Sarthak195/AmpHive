@@ -355,12 +355,13 @@ const Home = () => {
     return (
       <div
         key={plug.id}
-        className="glass glass-card flex justify-between items-center animate-slide-up"
+        className="glass glass-card animate-slide-up"
         style={{
+          position: 'relative',
+          overflow: 'hidden',
           animationDelay: `${index * 0.06}s`,
           cursor: startable ? 'pointer' : 'default',
           opacity: unreachable ? 0.6 : 1,
-          gap: '0.75rem',
         }}
         onClick={() => {
           if (startable) {
@@ -368,102 +369,100 @@ const Home = () => {
           }
         }}
       >
-        <div style={{ minWidth: 0 }}>
-          <div className="flex items-center gap-2" style={{ marginBottom: '0.25rem', flexWrap: 'wrap' }}>
-            <span style={{ fontWeight: 600 }}>{plug.name}</span>
-            <span className={`badge ${unreachable ? 'badge-danger' : statusColor(plug.status)}`}>
-              {unreachable ? 'charger offline' : plug.status}
+        {/* Cost as a corner ribbon — glanceable, no text line spent on it. */}
+        {plug.price_per_kwh != null && (
+          <span className="price-ribbon">{plug.price_per_kwh}<small>/kWh</small></span>
+        )}
+
+        {/* Row 1: name + hardware status + reservation state. Reserve the
+            top-right corner (paddingRight) so nothing slides under the ribbon. */}
+        <div className="flex items-center gap-2" style={{ marginBottom: '0.6rem', flexWrap: 'wrap', paddingRight: '3.5rem' }}>
+          <span style={{ fontWeight: 600 }}>{plug.name}</span>
+          <span className={`badge ${unreachable ? 'badge-danger' : statusColor(plug.status)}`}>
+            {unreachable ? 'charger offline' : plug.status}
+          </span>
+          {/* Reservation badge — deliberately distinct from "occupied": the
+              plug is free hardware-wise but time-claimed. The holder sees
+              "Reserved for you" and the card stays startable. */}
+          {plug.reserved_now && (
+            <span className="badge badge-primary">
+              {plug.reserved_now_by_me
+                ? 'Reserved for you'
+                : plug.reserved_until
+                  ? `Reserved until ${fmtTime(plug.reserved_until)}`
+                  : 'Reserved'}
             </span>
-            {/* Reservation badge — deliberately distinct from "occupied":
-                the plug is free hardware-wise but time-claimed. The holder
-                sees "Reserved for you" and the card stays startable. */}
-            {plug.reserved_now && (
-              <span className="badge badge-primary">
-                {plug.reserved_now_by_me
-                  ? 'Reserved for you'
-                  : plug.reserved_until
-                    ? `Reserved until ${fmtTime(plug.reserved_until)}`
-                    : 'Reserved'}
-              </span>
-            )}
-          </div>
-          <div className="flex items-center gap-3" style={{ fontSize: '0.85rem', color: 'var(--color-text-secondary)', flexWrap: 'wrap' }}>
-            <span>ID: {plug.id}</span>
-            <span>•</span>
-            <span>{plug.plug_model}</span>
-            {plug.group_name && (
-              <>
-                <span>•</span>
-                <span>{plug.group_name}</span>
-              </>
-            )}
-            {plug.price_per_kwh != null && (
-              <>
-                <span>•</span>
-                <span>{plug.price_per_kwh} coins/kWh</span>
-              </>
-            )}
-          </div>
+          )}
         </div>
-        <div className="flex flex-col items-end gap-2" style={{ flexShrink: 0 }}>
-          {startable ? (
-            <span style={{ color: 'var(--color-primary)', fontWeight: 600, fontSize: '0.9rem' }}>
-              Charge →
-            </span>
-          ) : (
-            <div className="flex items-center gap-2">
-              {unreachable && (
-                <span style={{ color: 'var(--color-text-muted)', fontSize: '0.8rem' }}>
-                  Unreachable
-                </span>
-              )}
-              {/* Bell only when the plug is hardware-unavailable (in use /
-                  offline / maintenance): the watch endpoint 409s a plug that
-                  is startable right now, and a merely-reserved plug frees
-                  itself when the window ends — nothing to watch. */}
-              {!hardwareAvailable && (
-                <button
-                  type="button"
-                  className="btn btn-ghost btn-sm"
-                  aria-pressed={!!plug.watching}
-                  aria-label={
-                    plug.watching
-                      ? `Stop watching ${plug.name}`
-                      : `Notify me when ${plug.name} is free`
-                  }
-                  title={
-                    plug.watching
-                      ? "Watching — you'll be notified when it's free"
-                      : 'Notify me when this plug is free'
-                  }
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    toggleWatch(plug);
-                  }}
-                  style={{
-                    whiteSpace: 'nowrap',
-                    fontSize: '0.8rem',
-                    color: plug.watching ? 'var(--color-primary)' : 'var(--color-text-muted)',
-                  }}
-                >
-                  {plug.watching ? '🔔 Watching' : '🔔 Notify me'}
-                </button>
-              )}
-            </div>
-          )}
-          {/* Book a future slot — any accessible plug except one an operator
-              took out of service (the server 409s MAINTENANCE bookings). */}
-          {plug.status !== 'maintenance' && (
-            <button
-              className="btn btn-ghost btn-sm"
-              onClick={(e) => {
-                e.stopPropagation();
-                setReservePlug(plug);
-              }}
-            >
-              Reserve
-            </button>
-          )}
+
+        {/* Row 2: type/id/group as icon chips (was a text sentence), with the
+            start / watch / reserve actions on the right — below the ribbon. */}
+        <div className="flex justify-between items-center gap-2" style={{ flexWrap: 'wrap' }}>
+          <div className="chip-row">
+            <span className="chip" title={plug.plug_model}>🔌 {plug.plug_model}</span>
+            <span className="chip">#{plug.id}</span>
+            {plug.group_name && <span className="chip">{plug.group_name}</span>}
+          </div>
+          <div className="flex items-center gap-2" style={{ flexShrink: 0 }}>
+            {startable ? (
+              <span style={{ color: 'var(--color-primary)', fontWeight: 600, fontSize: '0.9rem' }}>
+                Charge →
+              </span>
+            ) : (
+              <>
+                {unreachable && (
+                  <span style={{ color: 'var(--color-text-muted)', fontSize: '0.8rem' }}>
+                    Unreachable
+                  </span>
+                )}
+                {/* Bell only when the plug is hardware-unavailable (in use /
+                    offline / maintenance): the watch endpoint 409s a plug that
+                    is startable right now, and a merely-reserved plug frees
+                    itself when the window ends — nothing to watch. */}
+                {!hardwareAvailable && (
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-sm"
+                    aria-pressed={!!plug.watching}
+                    aria-label={
+                      plug.watching
+                        ? `Stop watching ${plug.name}`
+                        : `Notify me when ${plug.name} is free`
+                    }
+                    title={
+                      plug.watching
+                        ? "Watching — you'll be notified when it's free"
+                        : 'Notify me when this plug is free'
+                    }
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      toggleWatch(plug);
+                    }}
+                    style={{
+                      whiteSpace: 'nowrap',
+                      fontSize: '0.8rem',
+                      color: plug.watching ? 'var(--color-primary)' : 'var(--color-text-muted)',
+                    }}
+                  >
+                    {plug.watching ? '🔔 Watching' : '🔔 Notify me'}
+                  </button>
+                )}
+              </>
+            )}
+            {/* Book a future slot — any accessible plug except one an operator
+                took out of service (the server 409s MAINTENANCE bookings). */}
+            {plug.status !== 'maintenance' && (
+              <button
+                className="btn btn-ghost btn-sm"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setReservePlug(plug);
+                }}
+              >
+                Reserve
+              </button>
+            )}
+          </div>
         </div>
       </div>
     );
@@ -496,7 +495,7 @@ const Home = () => {
           className="glass animate-slide-up"
           style={{
             padding: '1rem 1.25rem',
-            background: 'rgba(235, 94, 40, 0.15)',
+            background: 'var(--color-primary-glow)',
             border: '1px solid var(--color-primary)',
             borderRadius: 'var(--radius-md)',
             marginBottom: '1rem',

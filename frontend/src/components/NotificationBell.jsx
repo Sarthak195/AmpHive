@@ -211,7 +211,7 @@ const NotificationBell = () => {
                   style={{
                     padding: '0.55rem 0.7rem',
                     borderRadius: 'var(--radius-md)',
-                    background: n.read ? 'transparent' : 'hsla(210, 60%, 50%, 0.10)',
+                    background: n.read ? 'transparent' : 'hsla(73, 100%, 50%, 0.08)',
                     border: '1px solid var(--color-surface-border)',
                     cursor: n.read ? 'default' : 'pointer',
                   }}

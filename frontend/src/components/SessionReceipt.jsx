@@ -54,7 +54,7 @@ const SessionReceipt = () => {
       <div className="flex flex-col items-center gap-2" style={{ textAlign: 'center' }}>
         <div style={{
           width: '52px', height: '52px', borderRadius: '50%',
-          background: 'hsla(150, 70%, 45%, 0.15)',
+          background: 'hsla(73, 100%, 50%, 0.12)',
           border: '2px solid var(--color-success)',
           display: 'flex', alignItems: 'center', justifyContent: 'center',
           fontSize: '1.6rem',
