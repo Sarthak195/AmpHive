@@ -25,7 +25,7 @@ from backend.schemas import (
     CpoSetupRequest, CreateOrderRequest, CreateOrderResponse,
     DirectPlugRequest, DisputeCreateRequest, DisputeResponse,
     GatewayRegisterRequest, GroupResponse, JoinGroupRequest, LoginRequest,
-    PlugRegisterRequest, PlugResponse, RegisterRequest,
+    PlugRegisterRequest, PlugResponse, QueueChargeRequest, RegisterRequest,
     SessionLimitsUpdateRequest, SessionStartRequest,
     SessionStopRequest, UserResponse, VerifyPaymentRequest,
 )
@@ -34,12 +34,21 @@ from backend.services.auth import (
     create_access_token, decode_access_token, get_current_user,
     hash_password, verify_password,
 )
-from backend.services.money import ZERO_MONEY, energy_cost, to_money
-from backend.services.pricing import max_rate_over_window, resolve_rate_window
+from backend.services.money import energy_cost, to_money
+from backend.services.pricing import max_rate_over_window
 from backend.services.rbac import require_role
 from backend.services.session_lifecycle import (
     check_and_speed_up_active_session, finalize_charging_session,
     gateway_is_live, plug_is_powered, set_plug_telemetry_interval,
+)
+# [Session start refactor] The ACTIVE-session start body (caps -> rate -> hold
+# -> create -> claim -> publish -> rollback) lives in one shared helper so the
+# reaper's queued-charge auto-start bills identically to a walk-up start
+# (docs/proposals/queued-charge-offline-plug.md §4). MIN_START_BALANCE_COINS is
+# re-exported here — it moved to session_start so the queue endpoint and the
+# auto-start share one floor — so main.py's GET /api/config import still works.
+from backend.services.session_start import (
+    MIN_START_BALANCE_COINS, begin_active_session,
 )
 from backend.services.wallet import available_balance
 
@@ -51,18 +60,11 @@ router = APIRouter()
 # needs no code change.
 MAX_ACTIVE_SESSIONS_PER_USER = int(os.getenv("MAX_ACTIVE_SESSIONS_PER_USER", "2"))
 
-# Minimum wallet balance (coins) required to START a session — a float so a
-# session can't begin with too little credit to cover meaningful charging. Also
-# exposed via GET /api/config so the UI shows the same number it enforces.
-# [Auth holds] Checked against the session's AVAILABLE balance (coin_balance
-# minus what other ACTIVE sessions already hold — services/wallet.py
-# available_balance()), not the raw wallet balance: a driver with plenty of
-# coins but most of it held by another running session must not be allowed
-# to start a third session past what's actually left to reserve.
-# `or "50"` (not a getenv default): compose passes the var through with plain
-# ${VAR} interpolation, so an unset .env entry arrives as an EMPTY string —
-# float("") would crash-loop the container (the GST_RATE_PCT lesson).
-MIN_START_BALANCE_COINS = float(os.getenv("MIN_START_BALANCE_COINS") or "50")
+# [Queued charge] How many WAITING queued charges a driver may hold at once —
+# small, matching the active-session cap; the concurrent-session cap itself is
+# enforced at auto-start, not here, so a driver can queue while at their active
+# cap (docs/proposals/queued-charge-offline-plug.md).
+MAX_QUEUED_CHARGES_PER_USER = int(os.getenv("MAX_QUEUED_CHARGES_PER_USER", "2"))
 
 # ===========================================================================
 # Charging Session Endpoints
@@ -241,148 +243,21 @@ async def start_charging_session(
             detail="This charger has no power right now. Try again once power is restored.",
         )
 
-    # [Caps] Circuit admission: refuse the start if the plug's group is at its
-    # shared current capacity (Σ active plug caps + this plug's cap > line max).
-    # Under the plug lock; the helper locks the group row so concurrent starts
-    # on the same circuit serialize. No-op for an ungrouped plug or a group with
-    # no cap configured. This is where the "Request capacity" flow will hook in.
-    from backend.services.caps import check_circuit_admission
-    await check_circuit_admission(db, plug)
-
-    # Resolve the coins-per-kWh rate for this plug (plug's own tariff -> its
-    # group's tariff -> the tenant's default tariff -> the global
-    # COINS_PER_KWH env fallback) and SNAPSHOT it onto the session now, so a
-    # tariff edit or reassignment made mid-session never retroactively
-    # changes what this session bills (see services/pricing.py).
-    #
-    # [Pricing v2] resolve_rate_window also returns rate_valid_until: the
-    # wall-clock instant this rate could next change at a TOD slot boundary
-    # (None for a flat tariff → the session stays one segment and bills exactly
-    # as before). Snapshotted below so MQTTManager._persist_telemetry can close
-    # out the segment forward-only when the boundary passes.
-    now = datetime.now(timezone.utc)
-    rate_coins_per_kwh, rate_valid_until = await resolve_rate_window(db, plug, at=now)
-
-    # Size the session's authorization hold (MARKET_GAP_ANALYSIS.md §3): the
-    # old flat MIN_START_BALANCE_COINS floor let a session start with just
-    # enough to *begin*, then finalize forgave any overage past the wallet
-    # (min(final_cost, balance) — the revenue leak SECURITY.md §5 flags).
-    # Instead, reserve this session's worst-case cost up front: the smaller
-    # of (a) what's actually left to spend right now — coin_balance net of
-    # whatever this user's OTHER active sessions already hold, so two
-    # concurrent starts (serialized on the user-row lock taken in step 0)
-    # can never double-reserve the same coins — and (b) the most this
-    # session could possibly bill, its own max_kwh cap at the resolved rate.
-    # The 402 floor now gates on this AVAILABLE figure, not the raw balance:
-    # a driver with plenty of coins but most of it held by another running
-    # session must not be allowed to reserve past what's actually left.
-    available = await available_balance(db, user.id)
-    # The floor gates the driver's AVAILABLE balance, not the hold: the hold is
-    # capped by the session's own max_kwh, so a small session (e.g. 5 kWh at
-    # 5/kWh = 25 coins) legitimately reserves less than the floor — rejecting
-    # on the hold would block modest sessions for fully-funded wallets (found
-    # live in prod 2026-07-12). The floor's job is only to keep dust wallets
-    # from starting; the hold's job is to bound what this session can bill.
-    if available < MIN_START_BALANCE_COINS:
-        raise HTTPException(
-            status_code=402,
-            detail=(
-                f"Insufficient available balance. You have {available} coins "
-                f"available for this session (wallet balance "
-                f"{user.coin_balance} coins; the difference, if any, is held "
-                f"by another active session). Minimum {MIN_START_BALANCE_COINS:g} "
-                "required to start."
-            ),
-        )
-    # [Pricing v2] Size the hold at the WORST-CASE rate the session could hit
-    # over its own max_duration window, not just the start rate: if a TOD
-    # boundary raises the rate mid-charge, finalize's min(final_cost, hold) must
-    # not forgive the overage (the SECURITY.md §5 leak the hold closes). With no
-    # slots configured max_rate_over_window returns the flat rate, so this is
-    # identical to the old energy_cost(max_kwh, rate) sizing. A session with no
-    # duration cap could run into any slot → the >=24h worst-case over all slots.
-    max_rate = await max_rate_over_window(
-        db, plug, now, req.max_duration_seconds or 24 * 3600
-    )
-    hold = to_money(min(available, energy_cost(req.max_kwh, max_rate)))
-
-    session = ChargingSession(
-        tenant_id=gateway.tenant_id,
-        user_id=user.id,
-        plug_id=plug.id,
-        status=SessionStatus.ACTIVE,
-        rate_coins_per_kwh=rate_coins_per_kwh,
-        hold_coins=hold,
-        # [Pricing v2] Open the first billing segment: nothing settled yet, the
-        # segment starts at 0 kWh, and it stays in effect until rate_valid_until
-        # (None for a flat tariff = never reprices). services/billing.py
-        # session_cost then bills settled + open-segment energy at the current
-        # rate; a flat session's settled=0/start=0 makes that identical to the
-        # old single-rate formula.
-        settled_cost_coins=ZERO_MONEY,
-        rate_segment_start_kwh=0.0,
-        rate_valid_until=rate_valid_until,
-        # [Session limits] Snapshot the request's stop conditions (always,
-        # including the schema defaults) — the firmware enforces these
-        # locally from the MQTT ON payload below but publishes no alarm on
-        # the cutoff, so the backend mirrors the enforcement from these
-        # persisted values (MQTTManager._maybe_auto_stop_on_limits + the
-        # reaper's duration backstop). Note the hold sizing above already
-        # uses req.max_kwh, so a smaller user limit automatically shrinks
-        # the auth hold too.
+    # [Session start refactor] Steps 3-5 — circuit admission, rate resolve +
+    # snapshot, authorization-hold sizing (incl. the MIN_START_BALANCE_COINS
+    # 402 floor), create the ACTIVE session, claim the plug OCCUPIED (fulfilling
+    # any covering reservation), commit, publish the MQTT ON (rolling the claim
+    # back on failure), and start the telemetry stream — all run in the shared
+    # begin_active_session helper so the reaper's queued-charge auto-start bills
+    # identically to this walk-up start (docs/proposals/queued-charge-offline-plug.md
+    # §4). It raises the same typed failures (402 balance / 409 caps / 500
+    # publish) this path always did.
+    session = await begin_active_session(
+        db, user, plug, gateway,
         max_kwh=req.max_kwh,
         max_duration_seconds=req.max_duration_seconds,
+        covering_reservation=covering_reservation,
     )
-    db.add(session)
-    if covering_reservation is not None:
-        # [Reservations] The holder is starting inside their own window:
-        # fulfil the booking and link the session (flush first so session.id
-        # exists). Same transaction as the plug claim, so a crash can never
-        # leave a FULFILLED reservation pointing at no session.
-        await db.flush()
-        covering_reservation.status = ReservationStatus.FULFILLED
-        covering_reservation.session_id = session.id
-    plug.status = PlugStatus.OCCUPIED
-    # Commit the claim + session BEFORE touching hardware, releasing the lock.
-    await db.commit()
-    await db.refresh(session)
-
-    # Broadcast the claim so other clients' plug lists flip to OCCUPIED live.
-    from backend.services.socketio_manager import emit_plug_status
-    await emit_plug_status(plug.id, PlugStatus.OCCUPIED.value)
-
-    # 4. Now command the gateway. If this fails, undo the claim so the plug
-    #    doesn't stay OCCUPIED with a live ACTIVE session nobody can drive.
-    success = state.mqtt_manager.send_plug_command(
-        gateway_id=plug.gateway_id,
-        plug_id=plug.id,
-        action="ON",
-        max_duration=req.max_duration_seconds,
-        max_kwh=req.max_kwh,
-        session_id=session.id,
-        local_ip=plug.local_ip,
-    )
-    if not success:
-        session.status = SessionStatus.CANCELLED
-        session.ended_at = datetime.now(timezone.utc)
-        plug.status = PlugStatus.AVAILABLE
-        if covering_reservation is not None:
-            # [Reservations] The start never actually happened — give the
-            # holder their window back instead of burning it as FULFILLED.
-            covering_reservation.status = ReservationStatus.BOOKED
-            covering_reservation.session_id = None
-        await db.commit()
-        await emit_plug_status(plug.id, PlugStatus.AVAILABLE.value)
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to publish start command to the gateway. The gateway may be offline.",
-        )
-
-    # 5. Initialize the telemetry stream for this plug, seeded with the same
-    #    snapshotted rate so the live cost_coins preview matches what
-    #    finalize_charging_session will actually bill.
-    state.telemetry_store.start_session(plug.id, rate_coins_per_kwh=rate_coins_per_kwh)
-    await set_plug_telemetry_interval(db, plug.id, 1000)
 
     logger.info(
         "Session started",
@@ -692,6 +567,293 @@ async def get_session_history(
         }
         for s in sessions
     ]
+
+
+# ===========================================================================
+# Queued Charge Endpoints (queue a charge during an outage → the reaper
+# auto-starts it when line power returns — services/session_reaper.py
+# reap_queued_starts_once. See docs/proposals/queued-charge-offline-plug.md.)
+# ===========================================================================
+
+def _queued_charge_response(qc) -> dict:
+    """The 201 body for a WAITING queued charge (POST /queue) — the exact shape
+    a frontend agent depends on."""
+    return {
+        "id": qc.id,
+        "plug_id": qc.plug_id,
+        "status": qc.status.value,
+        "created_at": qc.created_at.isoformat() if qc.created_at else None,
+        "expires_at": qc.expires_at.isoformat() if qc.expires_at else None,
+        "max_kwh": qc.max_kwh,
+        "max_duration_seconds": qc.max_duration_seconds,
+    }
+
+
+@router.post("/api/sessions/queue", status_code=201)
+async def queue_charge(
+    req: QueueChargeRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    [Queued charge] Queue an auto-start on a plug whose gateway is ONLINE but
+    whose line power is out (the plug stopped reporting telemetry while its
+    gateway stays up). When power returns and holds for the CPO's debounce, the
+    session reaper starts the session with the snapshotted stop conditions.
+
+    Validates (structured 409 `detail.code` on each reject, like the caps
+    `circuit_full` block, so the UI can branch): the plug exists and is
+    accessible; its gateway is live (`gateway_offline`); it is currently
+    UNpowered (`plug_powered` — a powered plug should just be started); the CPO
+    has queued charging enabled for it (`queue_disabled`); the driver's
+    AVAILABLE balance clears the start floor (402 `insufficient_balance` — funds
+    are NOT locked, only re-checked at auto-start); the driver is under the
+    per-user queue cap (`queue_limit`); and no WAITING queue already exists for
+    this (driver, plug) (`already_queued`, also a DB partial-unique backstop).
+    """
+    from backend.database.models import QueuedCharge, QueuedChargeStatus
+    from backend.services.session_start import queue_ttl, queued_charging_enabled
+
+    result = await db.execute(select(Plug).where(Plug.id == req.plug_id))
+    plug = result.scalar_one_or_none()
+    if not plug:
+        raise HTTPException(status_code=404, detail=f"Plug {req.plug_id} not found.")
+
+    # Access check for private groups — a driver must not queue a plug they
+    # can't see (mirrors the start path's membership gate).
+    if plug.group_id:
+        group_result = await db.execute(
+            select(ChargerGroup).where(ChargerGroup.id == plug.group_id)
+        )
+        group = group_result.scalar_one_or_none()
+        if group and not group.is_public:
+            membership_result = await db.execute(
+                select(GroupMembership).where(
+                    and_(
+                        GroupMembership.user_id == user.id,
+                        GroupMembership.group_id == group.id,
+                    )
+                )
+            )
+            if not membership_result.scalar_one_or_none():
+                raise HTTPException(
+                    status_code=403,
+                    detail="You don't have access to this plug. Join the group first.",
+                )
+
+    gw_result = await db.execute(select(Gateway).where(Gateway.id == plug.gateway_id))
+    gateway = gw_result.scalar_one()
+    tenant = (
+        await db.execute(select(Tenant).where(Tenant.id == gateway.tenant_id))
+    ).scalar_one()
+
+    # Queueing only makes sense while the gateway can still relay the eventual
+    # ON — a dead gateway can't be commanded when power returns.
+    if not gateway_is_live(gateway):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "gateway_offline",
+                "message": "This charger's gateway is offline — nothing can start it later. Try again once it reconnects.",
+            },
+        )
+    # The whole point is an UNpowered plug. A powered one should just be started.
+    if plug_is_powered(plug):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "plug_powered",
+                "message": "This charger has power right now — just start charging instead of queueing.",
+            },
+        )
+    if not queued_charging_enabled(tenant, plug):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "queue_disabled",
+                "message": "Queued charging isn't enabled for this charger.",
+            },
+        )
+
+    # Balance floor (funds are NOT locked — re-checked at auto-start), gated on
+    # the AVAILABLE balance like the start path.
+    available = await available_balance(db, user.id)
+    if available < MIN_START_BALANCE_COINS:
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "code": "insufficient_balance",
+                "message": (
+                    f"Insufficient available balance. You have {available} coins available; "
+                    f"minimum {MIN_START_BALANCE_COINS:g} required to queue a charge."
+                ),
+            },
+        )
+
+    waiting_count = (await db.execute(
+        select(func.count())
+        .select_from(QueuedCharge)
+        .where(
+            and_(
+                QueuedCharge.user_id == user.id,
+                QueuedCharge.status == QueuedChargeStatus.WAITING,
+            )
+        )
+    )).scalar_one()
+    if waiting_count >= MAX_QUEUED_CHARGES_PER_USER:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "queue_limit",
+                "message": (
+                    f"You already have {waiting_count} queued charge(s) "
+                    f"(limit {MAX_QUEUED_CHARGES_PER_USER})."
+                ),
+            },
+        )
+
+    existing = (await db.execute(
+        select(QueuedCharge.id).where(
+            and_(
+                QueuedCharge.plug_id == plug.id,
+                QueuedCharge.user_id == user.id,
+                QueuedCharge.status == QueuedChargeStatus.WAITING,
+            )
+        )
+    )).scalar_one_or_none()
+    if existing is not None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "already_queued",
+                "message": "You've already queued a charge on this plug.",
+            },
+        )
+
+    now = datetime.now(timezone.utc)
+    qc = QueuedCharge(
+        tenant_id=gateway.tenant_id,
+        user_id=user.id,
+        plug_id=plug.id,
+        max_kwh=req.max_kwh,
+        max_duration_seconds=req.max_duration_seconds,
+        status=QueuedChargeStatus.WAITING,
+        expires_at=now + timedelta(minutes=queue_ttl(tenant, plug)),
+    )
+    db.add(qc)
+    try:
+        await db.commit()
+    except IntegrityError:
+        # Lost a double-submit race to the partial unique index — already queued.
+        await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "already_queued",
+                "message": "You've already queued a charge on this plug.",
+            },
+        )
+    await db.refresh(qc)
+
+    logger.info(
+        "Charge queued",
+        extra={
+            "queued_charge_id": qc.id, "user_id": user.id,
+            "plug_id": plug.id, "gateway_id": plug.gateway_id,
+        },
+    )
+
+    # Notify the driver their charge is queued (best-effort — never raises).
+    from backend.services.notifications import notify
+    await notify(
+        user.id,
+        "queued",
+        "Charge queued",
+        (
+            f"{plug.name} has no power right now — your charge is queued and will "
+            "start automatically when power returns."
+        ),
+        severity="info",
+        plug_id=plug.id,
+    )
+
+    return _queued_charge_response(qc)
+
+
+@router.get("/api/sessions/queued")
+async def get_queued_charges(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """[Queued charge] The driver's WAITING queued charges (soonest-created
+    first), with the plug name and the expiry the UI counts down to."""
+    from backend.database.models import QueuedCharge, QueuedChargeStatus
+
+    result = await db.execute(
+        select(QueuedCharge, Plug.name)
+        .join(Plug, Plug.id == QueuedCharge.plug_id)
+        .where(
+            and_(
+                QueuedCharge.user_id == user.id,
+                QueuedCharge.status == QueuedChargeStatus.WAITING,
+            )
+        )
+        .order_by(QueuedCharge.created_at)
+    )
+    return [
+        {
+            "id": qc.id,
+            "plug_id": qc.plug_id,
+            "plug_name": plug_name,
+            "status": qc.status.value,
+            "created_at": qc.created_at.isoformat() if qc.created_at else None,
+            "expires_at": qc.expires_at.isoformat() if qc.expires_at else None,
+            "max_kwh": qc.max_kwh,
+            "max_duration_seconds": qc.max_duration_seconds,
+        }
+        for qc, plug_name in result.all()
+    ]
+
+
+@router.delete("/api/sessions/queue/{queued_charge_id}")
+async def cancel_queued_charge(
+    queued_charge_id: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """[Queued charge] Cancel a WAITING queued charge (owner only). Row-locked +
+    re-checked WAITING so a cancel racing the reaper's auto-start settles once:
+    if the reaper already started/expired it, this is a 409, not a spurious
+    cancel. Idempotent-ish — a missing/foreign row is a 404."""
+    from backend.database.models import QueuedCharge, QueuedChargeStatus
+
+    result = await db.execute(
+        select(QueuedCharge)
+        .where(
+            and_(
+                QueuedCharge.id == queued_charge_id,
+                QueuedCharge.user_id == user.id,
+            )
+        )
+        .with_for_update()
+    )
+    qc = result.scalar_one_or_none()
+    if qc is None:
+        raise HTTPException(status_code=404, detail="Queued charge not found.")
+    if qc.status != QueuedChargeStatus.WAITING:
+        raise HTTPException(
+            status_code=409,
+            detail=f"This queued charge is no longer waiting ({qc.status.value}).",
+        )
+
+    qc.status = QueuedChargeStatus.CANCELLED
+    await db.commit()
+
+    logger.info(
+        "Queued charge cancelled",
+        extra={"queued_charge_id": qc.id, "user_id": user.id, "plug_id": qc.plug_id},
+    )
+    return {"status": "cancelled"}
 
 
 # ===========================================================================

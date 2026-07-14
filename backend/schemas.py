@@ -55,6 +55,17 @@ class SessionStartRequest(BaseModel):
     max_kwh: float = Field(default=30.0, gt=0, le=100.0)              # 30 kWh default, 100 kWh cap
 
 
+class QueueChargeRequest(BaseModel):
+    """[Queued charge] Body for POST /api/sessions/queue — queue an auto-start
+    on a plug whose gateway is online but line power is out. Same stop-condition
+    bounds/defaults as SessionStartRequest (snapshotted onto the QueuedCharge so
+    the eventual auto-start bills like a walk-up); both limits optional so a
+    driver can queue with just a plug_id."""
+    plug_id: int
+    max_duration_seconds: int = Field(default=14400, gt=0, le=86400)  # 4 h default, 24 h cap
+    max_kwh: float = Field(default=30.0, gt=0, le=100.0)              # 30 kWh default, 100 kWh cap
+
+
 class SessionLimitsUpdateRequest(BaseModel):
     """PATCH a RUNNING session's stop conditions ("start now, set the target
     later"). Both optional — send whichever you're changing; the same bounds as
@@ -121,6 +132,12 @@ class PlugResponse(BaseModel):
     # on a live gateway yet have lost mains/relay power; the driver UI uses this
     # to warn before a start, which the same-message 409 also enforces.
     plug_powered: bool = True
+    # [Queued charge] Whether the driver can QUEUE a charge on this plug right
+    # now: gateway online AND plug NOT powered AND the CPO has queued charging
+    # enabled for it (services/session_start.py queued_charging_enabled). The
+    # Home card shows a "Queue charge" CTA instead of the "notify me when free"
+    # bell when true. Populated on GET /api/plugs/available and /api/plugs/{id}.
+    queue_available: bool = False
     # The resolved coins-per-kWh rate this plug would bill a session at right
     # now (services/pricing.py resolve_rate_for_plug: plug tariff -> group
     # tariff -> tenant default -> the global COINS_PER_KWH env fallback).
@@ -310,6 +327,12 @@ class CpoPlugUpdateRequest(BaseModel):
     # [Caps] Per-plug current cap in amps for circuit admission. Send 0 to clear
     # it back to the default hardware cutoff; omit to leave unchanged.
     max_current_a: Optional[float] = Field(default=None, ge=0, le=100)
+    # [Queued charge] Per-plug overrides of the tenant queued-charge defaults
+    # (omit to leave unchanged, mirroring max_current_a). queued_charging_enabled
+    # sets the plug's explicit on/off override; auto_start_delay_min is the
+    # debounce (minutes) — send 0 to clear it back to the tenant default (NULL).
+    queued_charging_enabled: Optional[bool] = None
+    auto_start_delay_min: Optional[int] = Field(default=None, ge=0, le=1440)
 
 
 class CpoPlugMaintenanceRequest(BaseModel):
@@ -321,6 +344,18 @@ class CpoPlugMaintenanceRequest(BaseModel):
     """
     action: str  # "enter" | "clear"
     note: Optional[str] = Field(default=None, max_length=255)
+
+
+class CpoProfileUpdateRequest(BaseModel):
+    """[Queued charge] Update the CPO's tenant-level settings — the queued-charge
+    defaults every plug inherits unless it carries its own override
+    (CpoPlugUpdateRequest). All optional; omitted fields are left unchanged."""
+    # Master on/off default for queued charging across the tenant's plugs.
+    queued_charging_enabled: Optional[bool] = None
+    # Continuous-power debounce (minutes) before a queued charge auto-starts.
+    auto_start_delay_min: Optional[int] = Field(default=None, ge=0, le=1440)
+    # How long a WAITING queued charge lives (minutes) before it expires.
+    queue_ttl_min: Optional[int] = Field(default=None, ge=1, le=43200)  # up to 30 days
 
 
 class CpoGroupCreateRequest(BaseModel):

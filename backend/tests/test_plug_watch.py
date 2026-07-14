@@ -56,6 +56,9 @@ def _plug(plug_id=7, status=PlugStatus.OCCUPIED, group_id=None, name="Bay 1",
     p.latitude = None
     p.longitude = None
     p.last_telemetry_at = None  # [Plug power] plug_powered = False for these tests
+    # [Queued charge] No per-plug override -> inherits the tenant default.
+    p.queued_charging_enabled = None
+    p.auto_start_delay_min = None
     return p
 
 
@@ -551,11 +554,13 @@ async def test_available_plugs_carry_watching_via_one_extra_query():
     plug_a = _plug(plug_id=1, status=PlugStatus.AVAILABLE, name="Plug A")
     plug_b = _plug(plug_id=2, status=PlugStatus.OCCUPIED, name="Plug B")
     gateway = MagicMock(latitude=None, longitude=None)
+    # [Queued charge] The list query now also joins Tenant (for queue_available).
+    tenant = MagicMock(queued_charging_enabled=False)
 
     rows_result = MagicMock()
     rows_result.all.return_value = [
-        (plug_a, None, None, gateway),
-        (plug_b, None, None, gateway),
+        (plug_a, None, None, gateway, tenant),
+        (plug_b, None, None, gateway, tenant),
     ]
     watched_result = MagicMock()
     watched_result.scalars.return_value.all.return_value = [2]  # watching plug B

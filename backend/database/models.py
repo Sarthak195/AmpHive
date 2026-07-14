@@ -106,6 +106,20 @@ class Tenant(Base):
     # so every existing row backfills to India's zone at migration time; a
     # bad/blank value falls back to "Asia/Kolkata" (then UTC) at resolve time.
     timezone: Mapped[str] = mapped_column(String(64), nullable=False, default="Asia/Kolkata", server_default=text("'Asia/Kolkata'"))
+    # [Queued charge] Tenant-level defaults for the queue-charge-during-outage
+    # feature (docs/proposals/queued-charge-offline-plug.md). Per-plug overrides
+    # live on Plug (NULL = inherit these); resolved by services/session_start.py
+    # queued_charging_enabled()/auto_start_delay()/queue_ttl(). Mirrors the
+    # Tenant-default + Plug-override precedent of tariffs and current caps.
+    #   - queued_charging_enabled: gate the feature per CPO (off by default).
+    #   - auto_start_delay_min: continuous-power debounce (minutes) before the
+    #     reaper auto-starts a queued charge — a brief line-test blip never
+    #     energizes the plug.
+    #   - queue_ttl_min: how long a WAITING queued charge lives before it
+    #     EXPIRES (default 12 h) rather than lingering forever.
+    queued_charging_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"), nullable=False)
+    auto_start_delay_min: Mapped[int] = mapped_column(Integer, default=2, server_default=text("2"), nullable=False)
+    queue_ttl_min: Mapped[int] = mapped_column(Integer, default=720, server_default=text("720"), nullable=False)
 
     # Relationships
     users: Mapped[List["User"]] = relationship("User", back_populates="tenant", cascade="all, delete-orphan")
@@ -219,6 +233,12 @@ class Plug(Base):
     # payload; the firmware watchdog enforcing a SUB-16A cap is a pending OTA,
     # so today a sub-default value is admission-advisory (hard at the default).
     max_current_a: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # [Queued charge] Per-plug overrides of the tenant queued-charge defaults
+    # (NULL = inherit Tenant.queued_charging_enabled / auto_start_delay_min).
+    # Resolved by services/session_start.py queued_charging_enabled() /
+    # auto_start_delay(). Mirrors the max_current_a override precedent above.
+    queued_charging_enabled: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    auto_start_delay_min: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
     # Relationships
     gateway: Mapped[Gateway] = relationship("Gateway", back_populates="plugs")
@@ -1060,4 +1080,77 @@ class CapacityRequest(Base):
     __table_args__ = (
         UniqueConstraint("user_id", "plug_id", name="uq_capacity_requests_user_plug"),
         Index("idx_capacity_requests_group", "group_id"),
+    )
+
+
+# --- Queued Charge (queue a charge during an outage → auto-start on power) ---
+
+class QueuedChargeStatus(str, enum.Enum):
+    WAITING = "waiting"        # armed; the reaper auto-starts it once power returns + debounce elapses
+    STARTED = "started"        # the reaper began an ACTIVE session (started_session_id links it)
+    CANCELLED = "cancelled"    # withdrawn by the owner before it started
+    EXPIRED = "expired"        # power never returned (TTL lapsed) or balance floor no longer met
+    FAILED = "failed"          # auto-start refused (caps / plug out of service / publish failure)
+
+
+class QueuedCharge(Base):
+    """
+    A driver's request to auto-start a charge on a plug that has NO line power
+    right now but whose gateway is still online (the mains feeding the plug is
+    out while the ESP32/agent runs on battery). Separate table on purpose — a
+    QUEUED value is deliberately NOT added to SessionStatus (that would thread a
+    new state through billing, holds, analytics, and the reaper's ACTIVE-only
+    queries), exactly the lower-risk pattern Reservation / PlugWatch use. See
+    docs/proposals/queued-charge-offline-plug.md.
+
+    Lifecycle: WAITING -> STARTED (services/session_reaper.py
+    reap_queued_starts_once calls services/session_start.py begin_active_session
+    once the plug is powered continuously for auto_start_delay; started_session_id
+    links the session) | CANCELLED (owner) | EXPIRED (TTL lapsed, or the balance
+    floor no longer clears at auto-start) | FAILED (caps/plug-state/publish
+    failure at auto-start). max_kwh / max_duration_seconds snapshot the driver's
+    requested stop conditions so the auto-start bills exactly what a manual start
+    would.
+
+    A partial unique index over (plug_id, user_id) WHERE status = 'waiting'
+    caps a driver to one LIVE queue per plug (a double-enqueue race hits the
+    constraint; the endpoint pre-checks and the reaper re-checks anyway).
+    tenant_id is denormalized from plug -> gateway -> tenant (mirrors
+    Reservation/SessionDispute) so any CPO-scoped read is a single indexed
+    equality. No relationship() back-refs — call sites resolve via explicit
+    select()s, matching Reservation/PlugWatch/CapacityRequest.
+    """
+    __tablename__ = "queued_charges"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    plug_id: Mapped[int] = mapped_column(Integer, ForeignKey("plugs.id", ondelete="CASCADE"), nullable=False)
+    # Snapshot of the driver's requested stop conditions (Float kWh like
+    # ChargingSession.max_kwh — an energy measurement, not money).
+    max_kwh: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    max_duration_seconds: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    status: Mapped[QueuedChargeStatus] = mapped_column(SQLEnum(QueuedChargeStatus, name="queued_charge_status", values_callable=lambda x: [e.value for e in x]), default=QueuedChargeStatus.WAITING, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+    # created_at + queue_ttl; a queued charge that never sees restored power
+    # EXPIRES here rather than lingering (services/session_reaper.py).
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # Linked once the reaper starts the session; SET NULL keeps the queue
+    # history row if the session is later deleted.
+    started_session_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("charging_sessions.id", ondelete="SET NULL"), nullable=True)
+
+    __table_args__ = (
+        # "At most one WAITING queued charge per (driver, plug)" as a DB
+        # constraint, not just app-level check-then-insert: a partial unique
+        # index over rows where status = 'waiting'. Terminal rows fall outside
+        # the predicate, so a driver can re-queue a plug after a prior one
+        # cancels/expires — only a second simultaneously-WAITING one collides
+        # (the router catches the IntegrityError and returns 409).
+        Index(
+            "ix_queued_charges_one_waiting_per_user_plug",
+            "plug_id",
+            "user_id",
+            unique=True,
+            postgresql_where=text("status = 'waiting'"),
+        ),
     )
