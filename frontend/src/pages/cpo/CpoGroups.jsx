@@ -30,7 +30,7 @@ const CpoGroups = () => {
   const [createForm, setCreateForm] = useState({ name: '', is_public: false });
 
   // Edit form
-  const [editForm, setEditForm] = useState({ name: '', is_public: false });
+  const [editForm, setEditForm] = useState({ name: '', is_public: false, max_current_a: '' });
 
   // Clipboard feedback
   const [copiedId, setCopiedId] = useState(null);
@@ -98,7 +98,11 @@ const CpoGroups = () => {
    */
   const openEditModal = (group) => {
     setEditingGroup(group);
-    setEditForm({ name: group.name, is_public: group.is_public });
+    setEditForm({
+      name: group.name,
+      is_public: group.is_public,
+      max_current_a: group.max_current_a ?? '',
+    });
     setFormError('');
     setShowEditModal(true);
   };
@@ -117,6 +121,11 @@ const CpoGroups = () => {
       const body = {};
       if (editForm.name !== editingGroup.name) body.name = editForm.name;
       if (editForm.is_public !== editingGroup.is_public) body.is_public = editForm.is_public;
+      // [Caps] Circuit capacity (amps). Blank -> 0, which the backend reads as
+      // "clear the limit". Only sent when changed.
+      if (String(editForm.max_current_a) !== String(editingGroup.max_current_a ?? '')) {
+        body.max_current_a = editForm.max_current_a === '' ? 0 : Number(editForm.max_current_a);
+      }
 
       await api.put(`/api/cpo/groups/${editingGroup.id}`, body);
       setShowEditModal(false);
@@ -213,6 +222,15 @@ const CpoGroups = () => {
                     <span style={{ color: 'var(--color-text-muted)', fontSize: '0.78rem' }}>Members</span>
                     <p style={{ color: 'var(--color-text-primary)', fontWeight: 600, margin: '0.1rem 0 0', fontSize: '1.1rem' }}>
                       {group.member_count}
+                    </p>
+                  </div>
+                )}
+                {/* [Caps] Live circuit load vs limit, when a limit is set. */}
+                {group.max_current_a != null && (
+                  <div>
+                    <span style={{ color: 'var(--color-text-muted)', fontSize: '0.78rem' }}>Circuit</span>
+                    <p className="num" style={{ color: 'var(--color-text-primary)', fontWeight: 600, margin: '0.1rem 0 0', fontSize: '1.1rem' }}>
+                      {group.current_load_a ?? 0} / {group.max_current_a} A
                     </p>
                   </div>
                 )}
@@ -389,6 +407,23 @@ const CpoGroups = () => {
                       🌐 Public
                     </label>
                   </div>
+                </div>
+
+                <div className="input-group">
+                  <label>Circuit capacity (A)</label>
+                  <input
+                    type="number"
+                    className="input"
+                    min="0"
+                    step="1"
+                    placeholder="No limit"
+                    value={editForm.max_current_a}
+                    onChange={(e) => setEditForm({ ...editForm, max_current_a: e.target.value })}
+                  />
+                  <small style={{ color: 'var(--color-text-muted)', fontSize: '0.78rem' }}>
+                    Total amps this group's chargers share. A start is blocked when
+                    the sum of active charger caps would exceed it. Blank = no limit.
+                  </small>
                 </div>
               </div>
 
