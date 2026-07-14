@@ -54,6 +54,14 @@ AUTO_STOP_ON_LIMITS = os.getenv("AUTO_STOP_ON_LIMITS", "true").lower() in ("1", 
 # on by default.
 AUTO_MAINTENANCE_ON_CRITICAL_ALARM = os.getenv("AUTO_MAINTENANCE_ON_CRITICAL_ALARM", "true").lower() in ("1", "true", "yes")
 
+# [Plug power] A plug counts as powered only while its firmware keeps reporting
+# telemetry: last_telemetry_at is stamped on every inbound frame, and a gap
+# longer than this window re-baselines powered_since (a mains/relay power-cycle).
+# plug_is_powered() (services/session_lifecycle.py) reads the same window as the
+# freshness threshold. Healthy plugs report every ~1-10 s, so ~90 s tolerates a
+# few missed frames without flapping. Env-overridable.
+PLUG_POWER_STALE_SEC = int(os.getenv("PLUG_POWER_STALE_SEC", "90"))
+
 
 class MQTTManager:
     _instance: Optional["MQTTManager"] = None
@@ -676,6 +684,17 @@ class MQTTManager:
                         },
                     )
                     return
+
+                # [Plug power] Stamp the per-plug liveness clock. powered_since
+                # re-baselines to now whenever telemetry resumes after a gap
+                # longer than PLUG_POWER_STALE_SEC (a mains/relay power-cycle);
+                # last_telemetry_at is the freshness signal plug_is_powered()
+                # reads. Distinct from the never-written plugs.last_seen_at.
+                now = datetime.now(timezone.utc)
+                prev = plug.last_telemetry_at
+                if prev is None or (now - prev).total_seconds() > PLUG_POWER_STALE_SEC:
+                    plug.powered_since = now
+                plug.last_telemetry_at = now
 
                 # Update plug's current power reading
                 plug.current_power_w = watts

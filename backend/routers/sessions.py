@@ -39,7 +39,7 @@ from backend.services.pricing import max_rate_over_window, resolve_rate_window
 from backend.services.rbac import require_role
 from backend.services.session_lifecycle import (
     check_and_speed_up_active_session, finalize_charging_session,
-    gateway_is_live, set_plug_telemetry_interval,
+    gateway_is_live, plug_is_powered, set_plug_telemetry_interval,
 )
 from backend.services.wallet import available_balance
 
@@ -224,6 +224,17 @@ async def start_charging_session(
         raise HTTPException(
             status_code=409,
             detail="This charger's gateway is offline. Try again once it reconnects.",
+        )
+
+    # [Plug power] A live gateway can still front a plug that has no power (mains
+    # or relay power lost, or its plug agent down) — it stops reporting telemetry
+    # while the gateway itself stays online. Starting there pins the plug
+    # OCCUPIED with no draw and bills nothing, so refuse it, same shape as the
+    # gateway gate above.
+    if not plug_is_powered(plug):
+        raise HTTPException(
+            status_code=409,
+            detail="This charger has no power right now. Try again once power is restored.",
         )
 
     # [Caps] Circuit admission: refuse the start if the plug's group is at its

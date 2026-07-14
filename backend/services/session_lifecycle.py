@@ -79,6 +79,26 @@ def gateway_is_live(gateway: Gateway, now: Optional[datetime] = None) -> bool:
     return (now - last_seen).total_seconds() <= GATEWAY_LIVENESS_WINDOW_SEC
 
 
+def plug_is_powered(plug: Plug, now: Optional[datetime] = None) -> bool:
+    """
+    Whether a plug is actually drawing power right now, judged by telemetry
+    freshness. True iff last_telemetry_at is within PLUG_POWER_STALE_SEC — a
+    plug whose firmware stopped reporting (mains/relay power lost, or its agent
+    down) reads False. Mirrors gateway_is_live: NULL (never reported) is False,
+    and a legacy-naive timestamp is treated as UTC.
+    """
+    from backend.services.mqtt_manager import PLUG_POWER_STALE_SEC
+
+    last = plug.last_telemetry_at
+    if last is None:
+        return False
+    if last.tzinfo is None:
+        # Legacy rows written by an old naive-datetime hook.
+        last = last.replace(tzinfo=timezone.utc)
+    now = now or datetime.now(timezone.utc)
+    return (now - last).total_seconds() <= PLUG_POWER_STALE_SEC
+
+
 async def check_and_speed_up_active_session(db: AsyncSession, user_id: int):
     """
     Check if the user has active charging sessions, and if so, speed up the

@@ -773,6 +773,7 @@ async def test_persist_telemetry_forwards_session_limits_into_the_check():
     MQTTManager._instance = None
     plug = MagicMock()
     plug.gateway_id = "gw-1"
+    plug.last_telemetry_at = None  # [Plug power] first frame stamps the clock
     started = datetime.now(timezone.utc) - timedelta(minutes=10)
     sess_row = MagicMock()
     sess_row.id = 42

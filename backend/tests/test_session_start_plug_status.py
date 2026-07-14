@@ -8,6 +8,8 @@ OCCUPIED and billed nothing.
 
 DB-free: uses the mocked-AsyncSession pattern from test_max_active_sessions.
 """
+from datetime import datetime, timezone
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
@@ -88,6 +90,35 @@ async def test_start_rejected_on_occupied_plug_keeps_in_use_message():
 
     assert exc_info.value.status_code == 409
     assert "in use" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_start_rejected_on_unpowered_plug():
+    """[Plug power] A plug on a LIVE gateway that has lost power (no fresh
+    telemetry -> last_telemetry_at NULL) is refused with its own 409, distinct
+    from the gateway-offline message. Starting there pins OCCUPIED and bills
+    nothing."""
+    user = _user()
+    gateway = MagicMock()
+    gateway.status = GatewayStatus.ONLINE
+    gateway.last_seen_at = datetime.now(timezone.utc)  # gateway IS live
+    plug = _plug(PlugStatus.AVAILABLE)
+    plug.last_telemetry_at = None  # never reported -> not powered
+    db = _db(
+        _scalar_one(user),
+        _scalar_one(0),
+        _scalar_one_or_none(plug),
+        MagicMock(),                          # [Reservations] lazy-expiry UPDATE
+        _scalar_one_or_none(None),            # [Reservations] no covering booking
+        _scalar_one(gateway),                 # gateway lookup (live)
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await start_charging_session(SessionStartRequest(plug_id=1), user, db)
+
+    assert exc_info.value.status_code == 409
+    assert "no power" in exc_info.value.detail
+    assert "gateway is offline" not in exc_info.value.detail
 
 
 @pytest.mark.asyncio

@@ -15,6 +15,7 @@ thread.
 import asyncio
 import json
 import threading
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -724,6 +725,7 @@ async def test_persist_telemetry_accepts_own_plug_and_enqueues_sample():
     MQTTManager._instance = None
     plug = MagicMock()
     plug.gateway_id = "gw-1"
+    plug.last_telemetry_at = None
     session = _FakeSession([
         _FakeResult(scalar=plug),   # plug lookup: owned
         _FakeResult(scalar=None),   # no ACTIVE session on the plug
@@ -745,6 +747,7 @@ def _owned_plug():
     plug = MagicMock()
     plug.gateway_id = "gw-1"
     plug.local_ip = "10.0.0.5"
+    plug.last_telemetry_at = None  # first frame — powered_since re-baselines
     return plug
 
 
@@ -869,6 +872,70 @@ async def test_persist_telemetry_relay_off_no_session_does_not_republish():
                                  session_id=None, sample=None, relay_on=False)
 
     mgr.send_plug_command.assert_not_called()
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_persist_telemetry_stamps_first_frame_power_clock():
+    """[Plug power] The first frame (last_telemetry_at NULL) sets both
+    powered_since and last_telemetry_at."""
+    MQTTManager._instance = None
+    plug = _owned_plug()  # last_telemetry_at = None
+    session = _FakeSession([
+        _FakeResult(scalar=plug),
+        _FakeResult(scalar=None),   # no ACTIVE session
+    ])
+    mgr = MQTTManager(db_session_factory=lambda: session)
+
+    await mgr._persist_telemetry("gw-1", 5, 100.0, 1.0, None, None)
+
+    assert plug.powered_since is not None
+    assert plug.last_telemetry_at is not None
+    assert plug.last_telemetry_at == plug.powered_since
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_persist_telemetry_keeps_powered_since_within_window():
+    """[Plug power] A frame following soon after the last one refreshes the
+    freshness clock but keeps powered_since (no power gap)."""
+    MQTTManager._instance = None
+    plug = _owned_plug()
+    recent = datetime.now(timezone.utc) - timedelta(seconds=5)
+    plug.last_telemetry_at = recent
+    plug.powered_since = recent
+    session = _FakeSession([
+        _FakeResult(scalar=plug),
+        _FakeResult(scalar=None),
+    ])
+    mgr = MQTTManager(db_session_factory=lambda: session)
+
+    await mgr._persist_telemetry("gw-1", 5, 100.0, 1.0, None, None)
+
+    assert plug.powered_since == recent          # no gap -> unchanged
+    assert plug.last_telemetry_at > recent       # freshness refreshed
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_persist_telemetry_rebaselines_powered_since_after_gap():
+    """[Plug power] Telemetry resuming after a gap longer than
+    PLUG_POWER_STALE_SEC re-baselines powered_since (a power-cycle)."""
+    MQTTManager._instance = None
+    plug = _owned_plug()
+    old = datetime.now(timezone.utc) - timedelta(seconds=600)
+    plug.last_telemetry_at = old
+    plug.powered_since = old
+    session = _FakeSession([
+        _FakeResult(scalar=plug),
+        _FakeResult(scalar=None),
+    ])
+    mgr = MQTTManager(db_session_factory=lambda: session)
+
+    await mgr._persist_telemetry("gw-1", 5, 100.0, 1.0, None, None)
+
+    assert plug.powered_since > old              # power resumed after a gap
+    assert plug.last_telemetry_at > old
     MQTTManager._instance = None
 
 

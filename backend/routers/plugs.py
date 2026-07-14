@@ -38,7 +38,7 @@ from backend.services.pricing import resolve_price_display
 from backend.services.rbac import require_role
 from backend.services.session_lifecycle import (
     check_and_speed_up_active_session, finalize_charging_session,
-    gateway_is_live, set_plug_telemetry_interval,
+    gateway_is_live, plug_is_powered, set_plug_telemetry_interval,
 )
 from backend.services.telemetry import COINS_PER_KWH
 
@@ -219,6 +219,7 @@ async def get_available_plugs(
                 latitude=plug.latitude if plug.latitude is not None else gateway.latitude,
                 longitude=plug.longitude if plug.longitude is not None else gateway.longitude,
                 gateway_online=gateway_is_live(gateway, now),
+                plug_powered=plug_is_powered(plug, now),
                 price_per_kwh=float(rate),
                 price_next_per_kwh=float(next_rate) if next_rate is not None else None,
                 price_changes_at=changes_at.isoformat() if changes_at is not None else None,
@@ -290,6 +291,7 @@ async def get_plug(
         latitude=plug.latitude if plug.latitude is not None else gw_lat,
         longitude=plug.longitude if plug.longitude is not None else gw_lng,
         gateway_online=gateway_is_live(gateway) if gateway else False,
+        plug_powered=plug_is_powered(plug, now),
         price_per_kwh=float(rate),
         price_next_per_kwh=float(next_rate) if next_rate is not None else None,
         price_changes_at=changes_at.isoformat() if changes_at is not None else None,
