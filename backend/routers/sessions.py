@@ -533,6 +533,12 @@ async def update_session_limits(
             detail="This session is not active — its limits can no longer change.",
         )
 
+    # Load the plug once — needed for the TOD hold re-sizing below and to push
+    # the updated watchdogs to the firmware after the commit.
+    plug = (
+        await db.execute(select(Plug).where(Plug.id == session.plug_id))
+    ).scalar_one()
+
     if "max_duration_seconds" in updates:
         session.max_duration_seconds = updates["max_duration_seconds"]
     if "max_kwh" in updates:
@@ -547,9 +553,6 @@ async def update_session_limits(
             # whose price rises later can't leave the hold under-covering and
             # forgive overage — matches the start path. Flat tariff => the flat
             # rate => unchanged from the old single-rate sizing.
-            plug = (
-                await db.execute(select(Plug).where(Plug.id == session.plug_id))
-            ).scalar_one()
             max_rate = await max_rate_over_window(
                 db, plug, datetime.now(timezone.utc),
                 session.max_duration_seconds or 24 * 3600,
@@ -561,6 +564,28 @@ async def update_session_limits(
 
     await db.commit()
     await db.refresh(session)
+
+    # [Firmware SET_LIMITS] Push the updated watchdog thresholds to the gateway
+    # so RAISING a limit above the value baked into the original ON payload
+    # actually takes effect on-device. The firmware's SET_LIMITS handler updates
+    # max_kwh/max_duration in place WITHOUT re-baselining energy (PR #35), so
+    # billing is unaffected and re-pushing ON (which would re-baseline) is
+    # avoided. Best-effort: the telemetry-path backend mirror already enforces
+    # the new limit within ~1 s regardless, so a failed publish never fails this
+    # request; a gateway that lacks SET_LIMITS (pre-1.x fw) simply ignores it.
+    # Legacy NULL-limit sessions never carried firmware limits — skip them.
+    if (
+        state.mqtt_manager is not None
+        and session.max_kwh is not None
+        and session.max_duration_seconds is not None
+    ):
+        state.mqtt_manager.send_plug_limits(
+            gateway_id=plug.gateway_id,
+            plug_id=plug.id,
+            max_kwh=session.max_kwh,
+            max_duration_seconds=session.max_duration_seconds,
+            local_ip=plug.local_ip,
+        )
 
     logger.info(
         "Session limits updated",

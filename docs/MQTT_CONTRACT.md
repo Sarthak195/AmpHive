@@ -138,7 +138,13 @@ Tapo app / stale NVS resume) is forced OFF locally and alarmed.
   publishes the `SET_LIMITS` command at QoS 1 (blocking `wait_for_publish(timeout=3.0)`,
   returns `is_published()`) to re-cap a **running** session's energy/duration
   watchdog thresholds without re-baselining (see the `SET_LIMITS` note above).
-  Intended to be wired **best-effort** into `PATCH /api/sessions/{id}/limits`.
+  **Wired best-effort into `PATCH /api/sessions/{id}/limits` (2026-07-14):** after
+  the limit change commits, the route pushes the session's current `max_kwh` +
+  `max_duration_seconds` (both, always) so RAISING a limit above the value baked
+  into the original `ON` takes effect on-device; a failed publish never fails the
+  request (the telemetry-path backend mirror still enforces within ~1 s), and
+  legacy NULL-limit sessions are skipped. On-device effect awaits an OTA to
+  firmware that handles `SET_LIMITS`.
 - `MQTTManager.send_gateway_ota(gateway_id, plug_id, firmware_url)`
   publishes an `OTA` command at QoS 1. Triggered by
   `POST /api/cpo/gateways/{id}/ota` (RBAC + tenant-scoped; requires the

@@ -355,6 +355,62 @@ async def test_patch_updates_limits_and_echoes(factory):
 
 @db_gated
 @pytest.mark.asyncio
+async def test_patch_pushes_set_limits_to_firmware(factory, monkeypatch):
+    """A limit PATCH pushes the updated watchdogs to the gateway (SET_LIMITS)
+    with BOTH current values, so raising a limit above the on-device value
+    takes effect. A duration-only edit still sends the (unchanged) max_kwh."""
+    from unittest.mock import MagicMock
+
+    from backend import state as state_module
+
+    tenant_id = await _seed_tenant(factory)
+    gw = await _seed_gateway(factory, tenant_id, "gw-patch-fw")
+    plug_id = await _seed_plug(factory, gw)
+    uid = await _seed_user(factory, "500.00", tenant_id)
+    sid = await _seed_active_session(
+        factory, tenant_id=tenant_id, user_id=uid, plug_id=plug_id,
+        max_kwh=1.0, max_duration=1800,
+    )
+
+    fake_mgr = MagicMock()
+    monkeypatch.setattr(state_module, "mqtt_manager", fake_mgr)
+
+    await _patch_limits(factory, session_id=sid, user_id=uid, max_duration=3600)
+
+    fake_mgr.send_plug_limits.assert_called_once()
+    kwargs = fake_mgr.send_plug_limits.call_args.kwargs
+    assert kwargs["max_kwh"] == 1.0            # unchanged, still pushed
+    assert kwargs["max_duration_seconds"] == 3600  # the raised value
+
+
+@db_gated
+@pytest.mark.asyncio
+async def test_patch_legacy_null_limit_session_skips_firmware_push(factory, monkeypatch):
+    """A legacy session with NULL limits never carried firmware limits — a PATCH
+    that leaves one side NULL doesn't push SET_LIMITS."""
+    from unittest.mock import MagicMock
+
+    from backend import state as state_module
+
+    tenant_id = await _seed_tenant(factory)
+    gw = await _seed_gateway(factory, tenant_id, "gw-patch-legacy")
+    plug_id = await _seed_plug(factory, gw)
+    uid = await _seed_user(factory, "500.00", tenant_id)
+    sid = await _seed_active_session(
+        factory, tenant_id=tenant_id, user_id=uid, plug_id=plug_id,
+        max_kwh=None, max_duration=None,
+    )
+
+    fake_mgr = MagicMock()
+    monkeypatch.setattr(state_module, "mqtt_manager", fake_mgr)
+
+    # Set only duration — max_kwh stays NULL, so the firmware push is skipped.
+    await _patch_limits(factory, session_id=sid, user_id=uid, max_duration=3600)
+    fake_mgr.send_plug_limits.assert_not_called()
+
+
+@db_gated
+@pytest.mark.asyncio
 async def test_patch_only_updates_the_field_provided(factory):
     """A duration-only PATCH leaves max_kwh (and its hold) untouched."""
     from sqlalchemy import select
