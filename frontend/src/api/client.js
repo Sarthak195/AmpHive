@@ -101,6 +101,18 @@ export const api = {
       method: 'DELETE',
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     }),
+
+  // --- Queued charges ---
+  // Queue a charge on an unpowered plug (gateway online, no line power). The
+  // backend auto-starts it, after a CPO debounce, once power returns. Body:
+  // { plug_id, max_kwh?, max_duration_seconds? }.
+  queueCharge: (body) =>
+    apiRequest('/api/sessions/queue', { method: 'POST', body: JSON.stringify(body) }),
+  // The signed-in driver's WAITING queued charges (with expiry).
+  listQueuedCharges: () => apiRequest('/api/sessions/queued', { method: 'GET' }),
+  // Cancel a WAITING queued charge (owner-only).
+  cancelQueuedCharge: (id) =>
+    apiRequest(`/api/sessions/queue/${id}`, { method: 'DELETE' }),
 };
 
 export default api;

@@ -23,7 +23,10 @@ import { useConfig } from '../contexts/ConfigContext';
 import { fmtTime, fmtWindow } from '../utils/reservationTime';
 
 vi.mock('../api/client', () => ({
-  default: { get: vi.fn(), post: vi.fn(), put: vi.fn(), delete: vi.fn() },
+  default: {
+    get: vi.fn(), post: vi.fn(), put: vi.fn(), delete: vi.fn(),
+    queueCharge: vi.fn(), listQueuedCharges: vi.fn(), cancelQueuedCharge: vi.fn(),
+  },
 }));
 vi.mock('../contexts/AuthContext', () => ({ useAuth: vi.fn() }));
 vi.mock('../contexts/SessionContext', () => ({ useSession: vi.fn() }));
@@ -516,6 +519,140 @@ describe('Home — "notify me when free" bell', () => {
       screen.queryByRole('button', { name: /Stop watching Garage Plug/ })
     ).not.toBeInTheDocument();
     expect(screen.getAllByText('Charge →').length).toBeGreaterThan(1);
+  });
+});
+
+describe('Home — queued charge (unpowered plug)', () => {
+  // Gateway online but the plug has no line power, and the CPO allows queuing
+  // → the card offers "Queue charge" instead of the notify bell. Private so
+  // it lands on the default "Your chargers" tab.
+  const UNPOWERED_PLUG = {
+    id: 7, name: 'Carport Plug', status: 'available', current_power_w: 0,
+    plug_model: 'tapo_p110', group_name: 'Sunrise Apartments',
+    latitude: 12.93, longitude: 77.63, gateway_online: true, is_private: true,
+    plug_powered: false, queue_available: true,
+  };
+
+  const renderWithSessionRoute = () =>
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <Routes>
+          <Route path="/" element={<Home />} />
+          <Route path="/session" element={<div>session page</div>} />
+        </Routes>
+      </MemoryRouter>
+    );
+
+  beforeEach(() => {
+    useAuth.mockReturnValue({ user: DRIVER });
+  });
+
+  it('shows a "Queue charge" CTA (not the notify bell) on an unpowered, queueable plug', async () => {
+    api.get.mockResolvedValue([UNPOWERED_PLUG]);
+    renderHome('/');
+    await screen.findByText('Carport Plug');
+
+    // Distinct "no power" badge, not "charger offline".
+    expect(screen.getByText('no power')).toBeInTheDocument();
+    // Queue CTA present; the notify bell is not (queue supersedes it).
+    expect(
+      screen.getByRole('button', { name: /Queue a charge on Carport Plug/ })
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: /Notify me when Carport Plug is free/ })
+    ).not.toBeInTheDocument();
+    // Not startable — no "Charge →".
+    expect(screen.queryByText('Charge →')).not.toBeInTheDocument();
+  });
+
+  it('falls back to the notify bell when the CPO has not enabled queuing', async () => {
+    api.get.mockResolvedValue([{ ...UNPOWERED_PLUG, queue_available: false }]);
+    renderHome('/');
+    await screen.findByText('Carport Plug');
+
+    expect(
+      screen.queryByRole('button', { name: /Queue a charge on Carport Plug/ })
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: /Notify me when Carport Plug is free/ })
+    ).toBeInTheDocument();
+  });
+
+  it('opens the setup modal from "Queue charge" and POSTs to the queue endpoint', async () => {
+    api.get.mockResolvedValue([UNPOWERED_PLUG]);
+    api.queueCharge.mockResolvedValue({ id: 20, plug_id: 7, status: 'waiting' });
+    renderWithSessionRoute();
+    await screen.findByText('Carport Plug');
+
+    await userEvent.click(screen.getByRole('button', { name: /Queue a charge on Carport Plug/ }));
+
+    // Reuses ChargeSetupModal for the optional kWh/timer inputs.
+    await screen.findByRole('heading', { name: /Set up your charge/i });
+    await userEvent.type(screen.getByLabelText(/kWh to dispense/i), '5');
+    await userEvent.click(screen.getByRole('button', { name: /Start charging/ }));
+
+    expect(api.queueCharge).toHaveBeenCalledWith({ plug_id: 7, max_kwh: 5 });
+  });
+
+  it('surfaces a 409 { code } rejection inline in the modal', async () => {
+    api.get.mockResolvedValue([UNPOWERED_PLUG]);
+    const err = new Error('rejected');
+    err.status = 409;
+    err.code = 'already_queued';
+    api.queueCharge.mockRejectedValue(err);
+    renderWithSessionRoute();
+    await screen.findByText('Carport Plug');
+
+    await userEvent.click(screen.getByRole('button', { name: /Queue a charge on Carport Plug/ }));
+    await screen.findByRole('heading', { name: /Set up your charge/i });
+    await userEvent.click(screen.getByRole('button', { name: /Start charging/ }));
+
+    expect(
+      await screen.findByText('You already have a queued charge for this plug.')
+    ).toBeInTheDocument();
+  });
+
+  it('renders the "Your queued charges" strip and cancels via its button', async () => {
+    api.get.mockResolvedValue([UNPOWERED_PLUG]);
+    api.listQueuedCharges.mockResolvedValue([
+      {
+        id: 20, plug_id: 7, plug_name: 'Carport Plug', status: 'waiting',
+        created_at: '2030-01-01T10:00:00+00:00', expires_at: '2030-01-01T22:00:00+00:00',
+        max_kwh: null, max_duration_seconds: null,
+      },
+    ]);
+    api.cancelQueuedCharge.mockResolvedValue({});
+    renderHome('/');
+
+    expect(await screen.findByText('Your queued charges')).toBeInTheDocument();
+    // Strip lists the plug name (also on its card) + a live expiry countdown.
+    expect(screen.getByText(/Expires in/)).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(api.cancelQueuedCharge).toHaveBeenCalledWith(20);
+  });
+
+  it('hides the strip when there are no queued charges', async () => {
+    api.get.mockResolvedValue([UNPOWERED_PLUG]);
+    api.listQueuedCharges.mockResolvedValue([]);
+    renderHome('/');
+    await screen.findByText('Carport Plug');
+    expect(screen.queryByText('Your queued charges')).not.toBeInTheDocument();
+  });
+
+  it('routes a typed unpowered-but-queueable Plug ID into the queue flow', async () => {
+    api.get.mockResolvedValue([UNPOWERED_PLUG]);
+    renderWithSessionRoute();
+    await screen.findByText('Carport Plug');
+
+    await userEvent.type(screen.getByPlaceholderText('Enter Plug ID (e.g. 1)'), '7');
+    await userEvent.click(screen.getByRole('button', { name: 'Set up' }));
+
+    // The queue modal (reused setup modal) opens; submitting queues, not starts.
+    await screen.findByRole('heading', { name: /Set up your charge/i });
+    api.queueCharge.mockResolvedValue({ id: 21 });
+    await userEvent.click(screen.getByRole('button', { name: /Start charging/ }));
+    expect(api.queueCharge).toHaveBeenCalledWith({ plug_id: 7 });
   });
 });
 
