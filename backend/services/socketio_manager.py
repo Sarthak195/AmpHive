@@ -44,6 +44,20 @@ async def emit_plug_status(plug_id: int, status: str) -> None:
         logger.error(f"Failed to emit plug_status for plug {plug_id}: {e}")
 
 
+async def emit_plug_connectivity(plug_id: int, gateway_online: bool) -> None:
+    """
+    Broadcast a plug's gateway-connectivity change to every connected client the
+    instant its gateway goes offline/online, so charger lists can flag a plug as
+    unreachable (and clear it on reconnect) without waiting on the telemetry
+    timeout. Global broadcast like emit_plug_status — connectivity isn't
+    sensitive, and clients only update plugs they already display.
+    """
+    try:
+        await sio.emit("plug_connectivity", {"plug_id": plug_id, "gateway_online": gateway_online})
+    except Exception as e:
+        logger.error(f"Failed to emit plug_connectivity for plug {plug_id}: {e}")
+
+
 async def emit_notification(user_id: int, notification: Dict[str, Any]) -> None:
     """
     Deliver a driver notification to that user's connected clients only

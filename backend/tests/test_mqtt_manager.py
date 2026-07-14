@@ -1023,3 +1023,92 @@ async def test_set_plug_telemetry_interval_noop_before_lifespan(monkeypatch):
     await session_lifecycle.set_plug_telemetry_interval(db, 7, 1000)
 
     assert MQTTManager._instance is None
+
+
+# ---------------------------------------------------------------------------
+# Gateway status restart-hygiene + connectivity push (REC-08/REC-09 + Lever 1)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_no_duplicate_offline_notify_on_repeated_offline_status():
+    """
+    Subscriptions re-issue on every connect, so a backend/broker reconnect
+    replays the retained LWT `offline`. _notify_drivers_gateway_offline must
+    fire only on a real ONLINE->OFFLINE transition: once on the first offline,
+    never again while the gateway is already stored OFFLINE (REC-08).
+    """
+    from backend.database.models import GatewayStatus
+
+    MQTTManager._instance = None
+    gateway = MagicMock()
+    gateway.status = GatewayStatus.ONLINE
+    session = _FakeSession([_FakeResult(scalar=gateway), _FakeResult(scalar=gateway)])
+    mgr = MQTTManager(db_session_factory=lambda: session)
+    mgr._notify_drivers_gateway_offline = AsyncMock()
+    mgr._broadcast_plug_connectivity = AsyncMock()
+
+    # First offline is a real ONLINE->OFFLINE transition → notify once.
+    await mgr._persist_gateway_status("gw-1", "offline")
+    # gateway.status is now OFFLINE; a replayed retained offline must NOT re-notify.
+    await mgr._persist_gateway_status("gw-1", "offline")
+
+    mgr._notify_drivers_gateway_offline.assert_awaited_once_with("gw-1")
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_status_online_does_not_bump_last_seen_at():
+    """
+    A retained `online` replayed on reconnect must not refresh liveness for a
+    possibly-wedged gateway: _persist_gateway_status writes the status but must
+    NOT stamp last_seen_at — telemetry (the real heartbeat) does that (REC-09).
+    """
+    from backend.database.models import GatewayStatus
+
+    MQTTManager._instance = None
+    sentinel = object()
+    gateway = MagicMock()
+    gateway.status = GatewayStatus.OFFLINE
+    gateway.last_seen_at = sentinel
+    session = _FakeSession([_FakeResult(scalar=gateway)])
+    mgr = MQTTManager(db_session_factory=lambda: session)
+    mgr._republish_off_for_orphaned_plugs = AsyncMock()
+    mgr._broadcast_plug_connectivity = AsyncMock()
+
+    await mgr._persist_gateway_status("gw-1", "online", firmware_version="1.8.0-direct")
+
+    assert gateway.last_seen_at is sentinel  # untouched by the status message
+    assert gateway.status == GatewayStatus.ONLINE  # the status write itself is kept
+    assert gateway.firmware_version == "1.8.0-direct"
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_plug_connectivity_emitted_on_transition():
+    """
+    On a real online<->offline transition, plug_connectivity is broadcast for
+    each of the gateway's plugs with the {plug_id, gateway_online} contract the
+    frontend consumes (Faster-offline Lever 1).
+    """
+    from backend.database.models import GatewayStatus
+
+    MQTTManager._instance = None
+    gateway = MagicMock()
+    gateway.status = GatewayStatus.ONLINE
+    plug_result = MagicMock()
+    plug_result.scalars.return_value.all.return_value = [10, 11]
+    session = _FakeSession([_FakeResult(scalar=gateway), plug_result])
+    mgr = MQTTManager(db_session_factory=lambda: session)
+    mgr._notify_drivers_gateway_offline = AsyncMock()
+
+    emit_mock = AsyncMock()
+    with patch("backend.services.socketio_manager.emit_plug_connectivity", emit_mock):
+        await mgr._persist_gateway_status("gw-1", "offline")  # ONLINE->OFFLINE
+
+    assert emit_mock.await_count == 2
+    emit_mock.assert_any_await(10, False)
+    emit_mock.assert_any_await(11, False)
+    MQTTManager._instance = None
+
+
