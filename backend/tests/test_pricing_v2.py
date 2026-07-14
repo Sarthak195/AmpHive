@@ -318,6 +318,32 @@ async def test_reprice_at_boundary_same_rate_just_advances(monkeypatch):
     assert s.rate_valid_until == next_boundary         # advanced
 
 
+@pytest.mark.asyncio
+async def test_mark_tenant_sessions_for_reprice_gated_off_is_noop(monkeypatch):
+    """[Phase 3] With AUTO_REPRICE_ACTIVE_SESSIONS off, an operator edit issues
+    NO reprice UPDATE (edits then only affect sessions that start afterwards)."""
+    import backend.services.pricing as pricing_mod
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr(pricing_mod, "AUTO_REPRICE_ACTIVE_SESSIONS", False)
+    db = AsyncMock()
+    await pricing_mod.mark_tenant_sessions_for_reprice(db, tenant_id=1)
+    db.execute.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_mark_tenant_sessions_for_reprice_issues_update_when_on(monkeypatch):
+    """When on (default), it issues exactly one UPDATE (the frame hook/reaper do
+    the actual per-session reprice + notify — this only expires the segment)."""
+    import backend.services.pricing as pricing_mod
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr(pricing_mod, "AUTO_REPRICE_ACTIVE_SESSIONS", True)
+    db = AsyncMock()
+    await pricing_mod.mark_tenant_sessions_for_reprice(db, tenant_id=1)
+    db.execute.assert_awaited_once()
+
+
 # =============================================================================
 # 2c. DB-free: slot_overlaps (operator slot-CRUD validation core, Phase 4)
 # =============================================================================

@@ -1,15 +1,17 @@
 # Pricing v2 — Time-of-Day Tariffs & Forward-Only Segmented Billing
 
-*Design spec, drafted 2026-07-13. Status: **Phases 1, 2 & 4 BUILT (2026-07-14).**
+*Design spec, drafted 2026-07-13. Status: **ALL PHASES 1–4 BUILT (2026-07-14).**
 Phase 1 = schema + resolution + billing helpers; Phase 2 = billing wired to
 `session_cost` + forward-only reprice (telemetry frame hook + reaper backstop) +
 `rate_changed` notification + start-time hold at `max_rate_over_window`;
-Phase 4 = operator slot-editor (`/cpo/tariffs` + `tariff_slots` CRUD API with
-overlap validation) and driver current+next price (`resolve_price_display` →
-`PlugResponse.price_next_per_kwh`/`price_changes_at` → Home ribbon hint). Still
-open: **Phase 3** (operator-edit reprice trigger `AUTO_REPRICE_ACTIVE_SESSIONS`;
-PATCH-`/limits` hold-at-max-rate). Deployed-safe: a flat tariff resolves no
-boundary, so it bills byte-identically until a CPO adds a slot.*
+Phase 3 = operator-edit reprice trigger (`mark_tenant_sessions_for_reprice`,
+env `AUTO_REPRICE_ACTIVE_SESSIONS`) on tariff/slot edits + PATCH-`/limits`
+hold-at-`max_rate_over_window`; Phase 4 = operator slot-editor (`/cpo/tariffs` +
+`tariff_slots` CRUD API with overlap validation) and driver current+next price
+(`resolve_price_display` → `PlugResponse.price_next_per_kwh`/`price_changes_at`
+→ Home ribbon hint). Deployed-safe: a flat tariff resolves no boundary, so it
+bills byte-identically until a CPO adds a slot. Phases 1/2/4 are live in prod
+(main @ 3a54377); Phase 3 pending merge.*
 
 Related: [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) "Per-CPO/per-site
 tariff model" (🟡) · [MARKET_GAP_ANALYSIS.md](MARKET_GAP_ANALYSIS.md) §1.5/§3 ·
@@ -359,9 +361,15 @@ persist individually in this design — see §11 open decision on a segment log)
    Start-time auth hold sized at `max_rate_over_window` (§8 scheduled-TOD case)
    pulled forward here so a rising boundary can't forgive overage. *(Built
    2026-07-14, feat/pricing-v2-phase2.)*
-3. ⬜ **Operator edit trigger + hold sizing** (`AUTO_REPRICE_ACTIVE_SESSIONS`
-   on the `/api/cpo/tariffs*` edit/slot endpoints; grow the PATCH-`/limits` hold
-   at the max-rate-over-window for the remaining window).
+3. ✅ **Operator edit trigger + hold sizing.** `mark_tenant_sessions_for_reprice`
+   (env `AUTO_REPRICE_ACTIVE_SESSIONS`, default on) stamps `rate_valid_until=now`
+   on the tenant's ACTIVE sessions from the tariff update/delete + slot
+   create/update/delete endpoints, so the existing frame-hook/reaper reprice
+   them forward-only + notify where the rate moved; PATCH-`/limits` now sizes the
+   hold at `max_rate_over_window`. *(Built 2026-07-14, feat/pricing-v2-phase3-operator-reprice.)*
+   Not wired: tariff **reassignment** (plug/group/default → different tariff)
+   still uses the session's start snapshot by design — flag if a reassignment
+   should reprice in-flight sessions too.
 4. ✅ **API + frontend** — slot editor (`/cpo/tariffs` page + `tariff_slots`
    CRUD sub-resources, `slot_overlaps` validation, tenant tz shown read-only),
    driver current+next price (`resolve_price_display`, Home ribbon "→ 6 @ 18:00").

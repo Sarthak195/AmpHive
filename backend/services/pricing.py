@@ -36,11 +36,12 @@ boundary passes, called from the telemetry frame hook and the reaper backstop.
 A flat tariff still resolves ``(rate, None)`` — no boundary, one segment, billed
 exactly as before.
 """
+import os
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import and_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database.models import ChargerGroup, Gateway, Plug, Tariff, TariffSlot, Tenant
@@ -50,6 +51,13 @@ from backend.services.telemetry import COINS_PER_KWH
 # The zone a tenant's minute-of-day slots default to when Tenant.timezone is
 # unset/blank/invalid — India, matching the column's server_default.
 DEFAULT_TZ = "Asia/Kolkata"
+
+# [Pricing v2 Phase 3] When on (default), an operator pricing edit reprices the
+# tenant's ACTIVE sessions forward-only (mark_tenant_sessions_for_reprice). Set
+# false so an edit only affects sessions that START after it.
+AUTO_REPRICE_ACTIVE_SESSIONS = os.getenv(
+    "AUTO_REPRICE_ACTIVE_SESSIONS", "true"
+).lower() in ("1", "true", "yes")
 
 
 def default_rate() -> Decimal:
@@ -379,3 +387,38 @@ async def reprice_session_if_due(db: AsyncSession, session, plug: Plug, at: date
     # we don't re-resolve every frame until the day rolls over.
     session.rate_valid_until = boundary
     return None
+
+
+async def mark_tenant_sessions_for_reprice(db: AsyncSession, tenant_id: int) -> None:
+    """
+    [Pricing v2 Phase 3] After an operator changes pricing (a tariff's rate, its
+    TOD slots, or — on delete — the fallback a plug resolves to), expire the
+    current rate segment of EVERY ACTIVE session in the tenant by stamping
+    ``rate_valid_until = now``. The telemetry frame hook / reaper backstop then
+    run :func:`reprice_session_if_due`, which re-resolves each session and closes
+    a segment forward-only + notifies ONLY where the rate actually changed;
+    sessions the edit didn't affect re-resolve to the same rate and just advance
+    their boundary (a flat one back to NULL). This deliberately reverses the old
+    "an assignment/edit never touches an in-flight session" behavior for the rate
+    itself — past energy still keeps its price (forward-only).
+
+    One UPDATE, no per-session resolution here (that's deferred to the frame
+    hook). Marking the whole tenant — rather than only the plugs that resolve to
+    the edited tariff — is intentional: it needs no reverse-resolution and is
+    safe because an unaffected session is a no-op reprice. Gated by
+    ``AUTO_REPRICE_ACTIVE_SESSIONS``. The caller commits (same txn as the edit).
+    """
+    if not AUTO_REPRICE_ACTIVE_SESSIONS:
+        return
+    from backend.database.models import ChargingSession, SessionStatus
+
+    await db.execute(
+        update(ChargingSession)
+        .where(
+            and_(
+                ChargingSession.tenant_id == tenant_id,
+                ChargingSession.status == SessionStatus.ACTIVE,
+            )
+        )
+        .values(rate_valid_until=datetime.now(timezone.utc))
+    )

@@ -41,7 +41,6 @@ from backend.services.session_lifecycle import (
     check_and_speed_up_active_session, finalize_charging_session,
     gateway_is_live, set_plug_telemetry_interval,
 )
-from backend.services.telemetry import COINS_PER_KWH
 from backend.services.wallet import available_balance
 
 logger = logging.getLogger("amphive.api")
@@ -535,14 +534,21 @@ async def update_session_limits(
         # ACTIVE), so add it back to get what this session may reserve, then cap
         # by the new max_kwh * rate — the exact start-path sizing.
         if session.hold_coins is not None:
-            rate = (
-                session.rate_coins_per_kwh
-                if session.rate_coins_per_kwh is not None
-                else COINS_PER_KWH
+            # [Pricing v2] Size at the WORST-CASE rate over the session's window
+            # (not the current segment rate), so raising max_kwh on a TOD plug
+            # whose price rises later can't leave the hold under-covering and
+            # forgive overage — matches the start path. Flat tariff => the flat
+            # rate => unchanged from the old single-rate sizing.
+            plug = (
+                await db.execute(select(Plug).where(Plug.id == session.plug_id))
+            ).scalar_one()
+            max_rate = await max_rate_over_window(
+                db, plug, datetime.now(timezone.utc),
+                session.max_duration_seconds or 24 * 3600,
             )
             headroom = await available_balance(db, user.id) + session.hold_coins
             session.hold_coins = to_money(
-                min(headroom, energy_cost(session.max_kwh, rate))
+                min(headroom, energy_cost(session.max_kwh, max_rate))
             )
 
     await db.commit()
