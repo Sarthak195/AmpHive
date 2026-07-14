@@ -246,7 +246,7 @@ class AmpHiveAgent:
                 "watts": round(state.watts, 1),
                 "kwh": round(session_kwh, 4),
                 "voltage": round(state.voltage, 1),
-                "current": round(state.current, 2),
+                "current": round(state.effective_current(), 2),
                 "status": status,
                 "session_id": session_id,
             }),
@@ -325,3 +325,18 @@ if __name__ == "__main__":
     assert v == 6.0 and s["baseline_kwh"] == b, (v, s["baseline_kwh"])
 
     print("monotonic_session_kwh self-check: OK")
+
+    # PlugState.effective_current: measured amps win; derive only when omitted.
+    # Measured current is reported as-is even when it differs from power/voltage
+    # (power factor < 1 -> measured != P/V).
+    st = PlugState(on=True, watts=2200.0, voltage=230.0, current=10.5)
+    assert st.effective_current() == 10.5, st.effective_current()
+    # Device omits current (0.0): derive from measured voltage.
+    st = PlugState(on=True, watts=2300.0, voltage=230.0, current=0.0)
+    assert st.effective_current() == 10.0, st.effective_current()
+    # No current AND no voltage: fall back to nominal 230 V.
+    st = PlugState(on=True, watts=2300.0, voltage=0.0, current=0.0)
+    assert st.effective_current() == 10.0, st.effective_current()
+    # Idle plug draws nothing.
+    assert PlugState(on=False).effective_current() == 0.0
+    print("PlugState.effective_current self-check: OK")

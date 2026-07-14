@@ -1377,7 +1377,7 @@ class MQTTManager:
     # Outbound command publisher
     # -----------------------------------------------------------------------
 
-    def send_plug_command(self, gateway_id: str, plug_id: int, action: str, max_duration: int = 14400, max_kwh: float = 30.0, session_id: Optional[int] = None, local_ip: Optional[str] = None, wait: bool = True) -> bool:
+    def send_plug_command(self, gateway_id: str, plug_id: int, action: str, max_duration: int = 14400, max_kwh: float = 30.0, session_id: Optional[int] = None, local_ip: Optional[str] = None, max_current_a: Optional[float] = None, wait: bool = True) -> bool:
         """
         Sends an ON/OFF command to a specific plug registered under a gateway.
         Topic: amphive/gateways/{gateway_id}/plugs/{plug_id}/commands
@@ -1387,6 +1387,13 @@ class MQTTManager:
         The firmware persists it for crash recovery and echoes it back in
         telemetry so the backend can attribute a reading to the exact session
         rather than just "the active session on this plug".
+
+        When `max_current_a` is given (session start ON), it is included as the
+        plug's effective current cap (amps) for on-device enforcement — the plug
+        measures real current and can trip its relay if it exceeds this. The
+        caller resolves it via services/caps.py effective_plug_cap (the plug's
+        own cap, or DEFAULT_PLUG_CAP_A). Older firmware ignores the extra field,
+        so this is backward-safe; OFF/cleanup publishes omit it.
 
         When `local_ip` is given, it is included so a multi-plug gateway
         (TD#20) knows which physical plug to actuate — and can learn a plug it
@@ -1409,6 +1416,8 @@ class MQTTManager:
             payload["session_id"] = str(session_id)
         if local_ip:
             payload["local_ip"] = local_ip
+        if max_current_a is not None:
+            payload["max_current_a"] = max_current_a
 
         try:
             payload_str = json.dumps(payload)

@@ -959,6 +959,40 @@ def test_send_plug_command_includes_local_ip_in_payload():
     MQTTManager._instance = None
 
 
+def test_send_plug_command_includes_max_current_a_on_on():
+    """The ON payload carries max_current_a — the plug's effective current cap
+    (amps) — for on-device enforcement against the plug's measured current."""
+    MQTTManager._instance = None
+    mgr = MQTTManager(db_session_factory=lambda: None)
+    mgr.client = MagicMock()
+    mgr.client.publish.return_value.is_published.return_value = True
+
+    ok = mgr.send_plug_command("gw-1", 7, "ON", session_id=42,
+                               local_ip="10.0.0.7", max_current_a=16.0)
+
+    assert ok is True
+    args, _ = mgr.client.publish.call_args
+    payload = json.loads(args[1])
+    assert payload["action"] == "ON"
+    assert payload["max_current_a"] == 16.0
+    MQTTManager._instance = None
+
+
+def test_send_plug_command_omits_max_current_a_when_absent():
+    """OFF / cleanup publishes omit max_current_a (backward-safe for firmware
+    that doesn't read it)."""
+    MQTTManager._instance = None
+    mgr = MQTTManager(db_session_factory=lambda: None)
+    mgr.client = MagicMock()
+    mgr.client.publish.return_value.is_published.return_value = True
+
+    mgr.send_plug_command("gw-1", 7, "OFF")
+
+    args, _ = mgr.client.publish.call_args
+    assert "max_current_a" not in json.loads(args[1])
+    MQTTManager._instance = None
+
+
 def test_send_plug_command_omits_local_ip_when_absent():
     """Without local_ip the key is omitted, so old single-plug firmware falls
     back to its one provisioned target plug (backward-safe)."""

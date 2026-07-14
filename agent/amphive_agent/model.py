@@ -9,6 +9,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
+# Nominal mains voltage, used ONLY to derive current as a last-resort fallback
+# for a device that omits a measured current reading (see
+# PlugState.effective_current). Real measured voltage always wins when present.
+_NOMINAL_VOLTAGE = 230.0
+
 
 @dataclass
 class PlugState:
@@ -17,8 +22,23 @@ class PlugState:
     on: bool
     watts: float = 0.0
     energy_kwh: float = 0.0  # cumulative/lifetime kWh; 0.0 if unsupported
-    voltage: float = 0.0     # 0.0 if unsupported
-    current: float = 0.0     # 0.0 if unsupported
+    voltage: float = 0.0     # measured volts; 0.0 if unsupported
+    current: float = 0.0     # measured amps; 0.0 if unsupported
+
+    def effective_current(self) -> float:
+        """The current to report in telemetry (amps).
+
+        Prefer the device's MEASURED current — a Tapo P110 / Shelly exposes
+        real amps (~2 dp), and because active power factor is < 1 that measured
+        current is NOT power/voltage (apparent power != active power). Only when
+        the device omits a current reading (returns 0) do we fall back to a
+        value DERIVED from power / voltage, which assumes power factor 1 and so
+        slightly understates the true current — hence measured is preferred.
+        """
+        if self.current > 0.0:
+            return self.current
+        volts = self.voltage if self.voltage > 0.0 else _NOMINAL_VOLTAGE
+        return self.watts / volts if volts else 0.0
 
 
 @runtime_checkable
