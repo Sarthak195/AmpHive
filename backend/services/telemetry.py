@@ -187,6 +187,29 @@ class TelemetryStore:
         # Create or reset the event for this plug
         self._events[plug_id] = asyncio.Event()
 
+    def hydrate_session(self, plug_id: int, rate_coins_per_kwh=None,
+                        settled_cost_coins=None, rate_segment_start_kwh=None,
+                        started_at=None) -> None:
+        """[REC-11] Lazily rebuild this plug's live-cost mirror from its ACTIVE
+        ChargingSession row when the in-memory maps are empty for it — e.g.
+        after a backend restart mid-session, where start_session() ran only in
+        the now-dead process. Without this, update() bills the live stream at
+        the COINS_PER_KWH env default and the elapsed timer restarts from the
+        first post-restart frame (display-only; finalize reads the DB row).
+
+        Called by MQTTManager._persist_telemetry, which already holds the row,
+        so the store keeps no DB handle. A no-op once the plug is tracked (a
+        session started in-process, or a prior hydrate), so it never clobbers
+        live segment state pushed by set_segment_state()."""
+        if plug_id in self._session_segment_start:
+            return
+        if rate_coins_per_kwh is not None:
+            self._session_rates[plug_id] = rate_coins_per_kwh
+        self._session_settled[plug_id] = float(settled_cost_coins or 0.0)
+        self._session_segment_start[plug_id] = float(rate_segment_start_kwh or 0.0)
+        if started_at is not None:
+            self._session_start_times[plug_id] = started_at.timestamp()
+
     def set_segment_state(self, plug_id: int, settled_coins, segment_start_kwh,
                           rate_coins_per_kwh=None) -> None:
         """[Pricing v2] Push the live cost mirror to a session's current segment
