@@ -554,24 +554,28 @@ async def update_session_limits(
         session.max_duration_seconds = updates["max_duration_seconds"]
     if "max_kwh" in updates:
         session.max_kwh = updates["max_kwh"]
-        # Re-size the hold for a held session (skip legacy NULL-hold ones).
-        # available_balance() already nets out THIS session's own hold (it's
-        # ACTIVE), so add it back to get what this session may reserve, then cap
-        # by the new max_kwh * rate — the exact start-path sizing.
-        if session.hold_coins is not None:
-            # [Pricing v2] Size at the WORST-CASE rate over the session's window
-            # (not the current segment rate), so raising max_kwh on a TOD plug
-            # whose price rises later can't leave the hold under-covering and
-            # forgive overage — matches the start path. Flat tariff => the flat
-            # rate => unchanged from the old single-rate sizing.
-            max_rate = await max_rate_over_window(
-                db, plug, datetime.now(timezone.utc),
-                session.max_duration_seconds or 24 * 3600,
-            )
-            headroom = await available_balance(db, user.id) + session.hold_coins
-            session.hold_coins = to_money(
-                min(headroom, energy_cost(session.max_kwh, max_rate))
-            )
+    # Re-size the hold whenever max_kwh OR max_duration_seconds changes (skip
+    # legacy NULL-hold ones). available_balance() already nets out THIS session's
+    # own hold (it's ACTIVE), so add it back to get what this session may reserve,
+    # then cap by max_kwh * rate — the exact start-path sizing. A longer window
+    # can cross into a higher-rate TOD slot, so max_rate_over_window (and thus the
+    # hold) can change even when only max_duration_seconds is edited.
+    if (
+        "max_kwh" in updates or "max_duration_seconds" in updates
+    ) and session.hold_coins is not None:
+        # [Pricing v2] Size at the WORST-CASE rate over the session's window
+        # (not the current segment rate), so raising max_kwh on a TOD plug
+        # whose price rises later can't leave the hold under-covering and
+        # forgive overage — matches the start path. Flat tariff => the flat
+        # rate => unchanged from the old single-rate sizing.
+        max_rate = await max_rate_over_window(
+            db, plug, datetime.now(timezone.utc),
+            session.max_duration_seconds or 24 * 3600,
+        )
+        headroom = await available_balance(db, user.id) + session.hold_coins
+        session.hold_coins = to_money(
+            min(headroom, energy_cost(session.max_kwh, max_rate))
+        )
 
     await db.commit()
     await db.refresh(session)
