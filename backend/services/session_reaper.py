@@ -327,6 +327,7 @@ class SessionReaperService:
 
         # 1. Candidates: opened, still-BOOKED, not-yet-processed windows.
         #    Read-only, no locks.
+        # ponytail (REC-12, accepted gap): a full-window backend outage means end_at > now never holds after restart, so the holder never gets the started-nudge — left as-is, since a post-window "plug ready until <past time>" nudge would mislead and force-stopping a now-legal walk-up on a lapsed window would be wrong; no-show EXPIRY stays restart-safe (end_at <= now flip).
         async with self.db_session_factory() as db:
             result = await db.execute(
                 select(
