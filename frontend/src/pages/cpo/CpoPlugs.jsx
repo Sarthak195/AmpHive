@@ -68,7 +68,7 @@ const CpoPlugs = () => {
 
   // Edit form fields
   const [editForm, setEditForm] = useState({
-    name: '', group_id: '', status: '',
+    name: '', group_id: '', status: '', max_current_a: '',
   });
 
   const fetchData = useCallback(async () => {
@@ -139,6 +139,7 @@ const CpoPlugs = () => {
       name: plug.name,
       group_id: plug.group_id || '',
       status: plug.status,
+      max_current_a: plug.max_current_a ?? '',
     });
     setFormError('');
     setShowEditModal(true);
@@ -163,6 +164,12 @@ const CpoPlugs = () => {
       const newGroupId = editForm.group_id === '' ? 0 : parseInt(editForm.group_id);
       const oldGroupId = editingPlug.group_id || 0;
       if (newGroupId !== oldGroupId) body.group_id = newGroupId;
+
+      // [Caps] Per-plug current cap (amps). Blank -> 0 = clear to the default
+      // hardware cutoff. Only sent when changed.
+      if (String(editForm.max_current_a) !== String(editingPlug.max_current_a ?? '')) {
+        body.max_current_a = editForm.max_current_a === '' ? 0 : Number(editForm.max_current_a);
+      }
 
       await api.put(`/api/cpo/plugs/${editingPlug.id}`, body);
       setShowEditModal(false);
@@ -465,6 +472,23 @@ const CpoPlugs = () => {
                     <option value="offline">Offline</option>
                     <option value="maintenance">Maintenance</option>
                   </select>
+                </div>
+
+                <div className="input-group">
+                  <label>Max current (A)</label>
+                  <input
+                    type="number"
+                    className="input"
+                    min="0"
+                    step="1"
+                    placeholder="Default (16 A)"
+                    value={editForm.max_current_a}
+                    onChange={(e) => setEditForm({ ...editForm, max_current_a: e.target.value })}
+                  />
+                  <small style={{ color: 'var(--color-text-muted)', fontSize: '0.78rem' }}>
+                    This charger's current draw for circuit-capacity math. Blank = the
+                    default hardware cutoff.
+                  </small>
                 </div>
               </div>
 

@@ -77,3 +77,20 @@ describe('CpoPlugs — QR code action', () => {
     expect(screen.queryByText('QR Code')).not.toBeInTheDocument();
   });
 });
+
+describe('CpoPlugs — per-plug current cap', () => {
+  it('sends max_current_a in the update when the cap is edited', async () => {
+    api.put.mockResolvedValue({});
+    renderPlugs();
+
+    await userEvent.click(await screen.findByRole('button', { name: /Edit/ }));
+    const capInput = screen.getByPlaceholderText(/Default \(16 A\)/);
+    await userEvent.type(capInput, '10');
+    await userEvent.click(screen.getByRole('button', { name: /Save Changes/ }));
+
+    expect(api.put).toHaveBeenCalledWith(
+      '/api/cpo/plugs/5',
+      expect.objectContaining({ max_current_a: 10 }),
+    );
+  });
+});
