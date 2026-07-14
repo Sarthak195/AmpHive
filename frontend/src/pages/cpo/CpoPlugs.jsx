@@ -66,9 +66,12 @@ const CpoPlugs = () => {
     gateway_id: '', name: '', local_ip: '', plug_model: 'tapo_p110', group_id: '',
   });
 
-  // Edit form fields
+  // Edit form fields. queued_charging_enabled is a tri-state override select
+  // ('' = inherit tenant default, 'true' = on, 'false' = off);
+  // auto_start_delay_min blank = inherit.
   const [editForm, setEditForm] = useState({
     name: '', group_id: '', status: '', max_current_a: '',
+    queued_charging_enabled: '', auto_start_delay_min: '',
   });
 
   const fetchData = useCallback(async () => {
@@ -140,6 +143,10 @@ const CpoPlugs = () => {
       group_id: plug.group_id || '',
       status: plug.status,
       max_current_a: plug.max_current_a ?? '',
+      // null override → '' (inherit tenant); explicit bool → its string.
+      queued_charging_enabled:
+        plug.queued_charging_enabled == null ? '' : String(plug.queued_charging_enabled),
+      auto_start_delay_min: plug.auto_start_delay_min ?? '',
     });
     setFormError('');
     setShowEditModal(true);
@@ -169,6 +176,22 @@ const CpoPlugs = () => {
       // hardware cutoff. Only sent when changed.
       if (String(editForm.max_current_a) !== String(editingPlug.max_current_a ?? '')) {
         body.max_current_a = editForm.max_current_a === '' ? 0 : Number(editForm.max_current_a);
+      }
+
+      // [Queued charging] Per-plug override of the tenant default. The select
+      // is tri-state: '' = inherit (send null), else the boolean. Only sent
+      // when changed.
+      const origQueued =
+        editingPlug.queued_charging_enabled == null ? '' : String(editingPlug.queued_charging_enabled);
+      if (editForm.queued_charging_enabled !== origQueued) {
+        body.queued_charging_enabled =
+          editForm.queued_charging_enabled === '' ? null : editForm.queued_charging_enabled === 'true';
+      }
+      // Auto-start debounce (minutes). Blank -> null = inherit the tenant
+      // default. Only sent when changed.
+      if (String(editForm.auto_start_delay_min) !== String(editingPlug.auto_start_delay_min ?? '')) {
+        body.auto_start_delay_min =
+          editForm.auto_start_delay_min === '' ? null : Number(editForm.auto_start_delay_min);
       }
 
       await api.put(`/api/cpo/plugs/${editingPlug.id}`, body);
@@ -494,6 +517,46 @@ const CpoPlugs = () => {
                     admission math only — it is not yet enforced on the device (pending a
                     firmware OTA), so the plug can still draw up to 16 A. The hard
                     circuit-protection guarantee holds only at the default cap.
+                  </small>
+                </div>
+
+                {/* [Queued charging] Per-plug override of the tenant default:
+                    let drivers queue a charge while this plug has no line
+                    power; it auto-starts (after the debounce below) when power
+                    returns. Blank fields inherit the tenant setting. */}
+                <div className="input-group">
+                  <label>Queued charging</label>
+                  <select
+                    className="input"
+                    value={editForm.queued_charging_enabled}
+                    onChange={(e) => setEditForm({ ...editForm, queued_charging_enabled: e.target.value })}
+                    style={{ appearance: 'auto', WebkitAppearance: 'auto' }}
+                  >
+                    <option value="">Inherit tenant default</option>
+                    <option value="true">Enabled</option>
+                    <option value="false">Disabled</option>
+                  </select>
+                  <small style={{ color: 'var(--color-text-muted)', fontSize: '0.78rem' }}>
+                    Let drivers queue a charge when this plug loses line power; it
+                    auto-starts when power returns. Blank inherits the tenant default.
+                  </small>
+                </div>
+
+                <div className="input-group">
+                  <label>Auto-start delay (minutes)</label>
+                  <input
+                    type="number"
+                    className="input"
+                    min="0"
+                    step="1"
+                    placeholder="Inherit tenant default"
+                    value={editForm.auto_start_delay_min}
+                    onChange={(e) => setEditForm({ ...editForm, auto_start_delay_min: e.target.value })}
+                  />
+                  <small style={{ color: 'var(--color-text-muted)', fontSize: '0.78rem' }}>
+                    How long power must stay on continuously before a queued charge
+                    auto-starts (debounces a brief line-test blip). Blank inherits the
+                    tenant default.
                   </small>
                 </div>
               </div>

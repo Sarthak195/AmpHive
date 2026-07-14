@@ -1177,11 +1177,30 @@ class MQTTManager:
         received one — and its NVS crash recovery resumes the session on
         reboot with the relay ON and nobody billing (observed 2026-07-07).
         Idempotent: an OFF to an already-off plug is a no-op on the firmware.
+
+        [Queued charge] A WAITING queued charge is NOT an ACTIVE session, so
+        Scenario B (gateway + plug both lost power, power returns, the Tapo
+        auto-resumes its relay, the gateway reboots and reconnects) would see
+        "no ACTIVE session" and OFF the very plug the debounced auto-start is
+        pending on. Skip a plug that has a live WAITING queued charge which is
+        still MID-DEBOUNCE (not powered yet, or powered for < auto_start_delay):
+        it lost power so it's already off, and re-OFFing it here would fight the
+        pending auto-start. Leave it OFF and let the queue sweep
+        (services/session_reaper.py reap_queued_starts_once) own the actual
+        energize — a proper start with a hold, caps, and a fresh session_id once
+        the debounce elapses. Plugs with no queued charge (and eligible/past-
+        debounce ones the sweep is about to start) keep the existing orphan-OFF.
         """
-        from backend.database.models import ChargingSession, Plug, SessionStatus
+        from backend.database.models import (
+            ChargingSession, Plug, QueuedCharge, QueuedChargeStatus, SessionStatus,
+            Tenant,
+        )
+        from backend.services.session_lifecycle import plug_is_powered
+        from backend.services.session_start import auto_start_delay
 
         try:
             async with self.db_session_factory() as session:
+                from datetime import datetime, timedelta, timezone
                 from sqlalchemy import select
 
                 plug_result = await session.execute(
@@ -1201,6 +1220,34 @@ class MQTTManager:
                 )
                 active_plug_ids = set(active_result.scalars().all())
 
+                # [Queued charge] Plugs with a live WAITING queued charge that is
+                # still mid-debounce — leave these OFF for the queue sweep to
+                # energize properly, don't orphan-OFF them here. Computed BEFORE
+                # the synchronous publish loop so no await splits the snapshot.
+                now = datetime.now(timezone.utc)
+                queued_rows = await session.execute(
+                    select(Plug, Tenant)
+                    .join(QueuedCharge, QueuedCharge.plug_id == Plug.id)
+                    .join(Tenant, Tenant.id == QueuedCharge.tenant_id)
+                    .where(
+                        QueuedCharge.plug_id.in_(list(plug_ips.keys())),
+                        QueuedCharge.status == QueuedChargeStatus.WAITING,
+                    )
+                )
+                queued_hold_plug_ids = set()
+                for plug, tenant in queued_rows.all():
+                    powered_since = plug.powered_since
+                    if powered_since is not None and powered_since.tzinfo is None:
+                        powered_since = powered_since.replace(tzinfo=timezone.utc)
+                    mid_debounce = (
+                        not plug_is_powered(plug, now)
+                        or powered_since is None
+                        or (now - powered_since)
+                        < timedelta(minutes=auto_start_delay(tenant, plug))
+                    )
+                    if mid_debounce:
+                        queued_hold_plug_ids.add(plug.id)
+
                 # [REC-06] Publish each OFF INSIDE the same session, with no
                 # await between the ACTIVE snapshot above and these synchronous
                 # publishes: that leaves no yield point for a session started in
@@ -1208,7 +1255,7 @@ class MQTTManager:
                 # snapshot was taken, the session closed — an await boundary —
                 # and only then were OFFs published, racing a fresh start.)
                 for plug_id, local_ip in plug_ips.items():
-                    if plug_id not in active_plug_ids:
+                    if plug_id not in active_plug_ids and plug_id not in queued_hold_plug_ids:
                         # wait=False: we're on the event loop — don't block it on
                         # the broker ack for a best-effort cleanup publish.
                         self.send_plug_command(gateway_id, plug_id, "OFF", local_ip=local_ip, wait=False)
@@ -1330,7 +1377,7 @@ class MQTTManager:
     # Outbound command publisher
     # -----------------------------------------------------------------------
 
-    def send_plug_command(self, gateway_id: str, plug_id: int, action: str, max_duration: int = 14400, max_kwh: float = 30.0, session_id: Optional[int] = None, local_ip: Optional[str] = None, wait: bool = True) -> bool:
+    def send_plug_command(self, gateway_id: str, plug_id: int, action: str, max_duration: int = 14400, max_kwh: float = 30.0, session_id: Optional[int] = None, local_ip: Optional[str] = None, max_current_a: Optional[float] = None, wait: bool = True) -> bool:
         """
         Sends an ON/OFF command to a specific plug registered under a gateway.
         Topic: amphive/gateways/{gateway_id}/plugs/{plug_id}/commands
@@ -1340,6 +1387,13 @@ class MQTTManager:
         The firmware persists it for crash recovery and echoes it back in
         telemetry so the backend can attribute a reading to the exact session
         rather than just "the active session on this plug".
+
+        When `max_current_a` is given (session start ON), it is included as the
+        plug's effective current cap (amps) for on-device enforcement — the plug
+        measures real current and can trip its relay if it exceeds this. The
+        caller resolves it via services/caps.py effective_plug_cap (the plug's
+        own cap, or DEFAULT_PLUG_CAP_A). Older firmware ignores the extra field,
+        so this is backward-safe; OFF/cleanup publishes omit it.
 
         When `local_ip` is given, it is included so a multi-plug gateway
         (TD#20) knows which physical plug to actuate — and can learn a plug it
@@ -1362,6 +1416,8 @@ class MQTTManager:
             payload["session_id"] = str(session_id)
         if local_ip:
             payload["local_ip"] = local_ip
+        if max_current_a is not None:
+            payload["max_current_a"] = max_current_a
 
         try:
             payload_str = json.dumps(payload)

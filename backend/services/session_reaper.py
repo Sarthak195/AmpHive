@@ -119,6 +119,10 @@ class SessionReaperService:
             except Exception:
                 logger.exception("Reservation-start sweep failed")
             try:
+                await self.reap_queued_starts_once()
+            except Exception:
+                logger.exception("Queued-charge start sweep failed")
+            try:
                 await self.reap_reprice_once()
             except Exception:
                 logger.exception("Pricing-v2 reprice sweep failed")
@@ -433,3 +437,205 @@ class SessionReaperService:
         if activated:
             logger.info(f"Reservation-start sweep activated {activated} booking(s)")
         return activated
+
+    async def reap_queued_starts_once(self) -> int:
+        """[Queued charge] Process each WAITING queued charge: expire the ones
+        whose TTL lapsed, and auto-start the ones whose plug has been powered
+        continuously for the CPO's debounce. Mirrors the other sweeps' contract:
+        SELECT the WAITING ids read-only, then ONE txn per row — lock the row
+        (with_for_update) + re-check WAITING (race-safe against a driver cancel).
+
+        Per row:
+          - now >= expires_at            -> EXPIRED + notify.
+          - plug missing / out of service -> FAILED + notify.
+          - not powered yet, or powered for < auto_start_delay, or the plug is
+            momentarily OCCUPIED by someone else -> leave WAITING (retry next
+            tick); a blip that reset powered_since simply restarts the debounce.
+          - powered AND debounced AND plug AVAILABLE -> begin_active_session
+            (the SAME helper the walk-up start uses, so hold/caps/billing can't
+            diverge): success -> STARTED + link started_session_id + notify; a
+            402 balance floor -> EXPIRED + notify; caps/out-of-service/publish
+            failure -> FAILED + notify.
+
+        Funds are never locked (the locked decision), so the balance is
+        re-checked here inside begin_active_session and can legitimately fail an
+        auto-start that would have passed at queue time. Returns the number of
+        queued charges actually started this sweep."""
+        from fastapi import HTTPException
+
+        from backend.database.models import (
+            Gateway, Plug, PlugStatus, QueuedCharge, QueuedChargeStatus, Tenant,
+            User,
+        )
+        from backend.services.notifications import notify
+        from backend.services.session_lifecycle import plug_is_powered
+        from backend.services.session_start import (
+            auto_start_delay, begin_active_session,
+        )
+
+        now = datetime.now(timezone.utc)
+
+        async with self.db_session_factory() as db:
+            result = await db.execute(
+                select(QueuedCharge.id).where(
+                    QueuedCharge.status == QueuedChargeStatus.WAITING
+                )
+            )
+            waiting_ids = list(result.scalars().all())
+
+        started = 0
+        for qc_id in waiting_ids:
+            try:
+                async with self.db_session_factory() as db:
+                    locked = await db.execute(
+                        select(QueuedCharge)
+                        .where(
+                            and_(
+                                QueuedCharge.id == qc_id,
+                                QueuedCharge.status == QueuedChargeStatus.WAITING,
+                            )
+                        )
+                        .with_for_update()
+                    )
+                    qc = locked.scalar_one_or_none()
+                    if qc is None:
+                        continue  # cancelled/started by a racer since the scan
+
+                    # 1. TTL expiry — power never returned in time.
+                    expires_at = qc.expires_at
+                    if expires_at.tzinfo is None:
+                        expires_at = expires_at.replace(tzinfo=timezone.utc)
+                    if now >= expires_at:
+                        qc.status = QueuedChargeStatus.EXPIRED
+                        plug_id = qc.plug_id
+                        user_id = qc.user_id
+                        await db.commit()
+                        await notify(
+                            user_id, "queued_charge_expired",
+                            "Queued charge expired",
+                            "Power didn't return in time — your queued charge expired.",
+                            severity="warning", plug_id=plug_id,
+                        )
+                        continue
+
+                    # 2. Load the plug (locked, so a concurrent manual start on
+                    #    it serializes with us) + its tenant for the resolver.
+                    plug = (await db.execute(
+                        select(Plug).where(Plug.id == qc.plug_id).with_for_update()
+                    )).scalar_one_or_none()
+                    if plug is None:
+                        qc.status = QueuedChargeStatus.FAILED
+                        user_id = qc.user_id
+                        await db.commit()
+                        await notify(
+                            user_id, "queued_charge_failed",
+                            "Queued charge couldn't start",
+                            "The charger is no longer available.",
+                            severity="warning",
+                        )
+                        continue
+
+                    # 3. Powered continuously for the debounce? A gap reset
+                    #    powered_since (mqtt_manager._persist_telemetry), so a
+                    #    blip restarts the clock and never trips this early.
+                    powered_since = plug.powered_since
+                    if not plug_is_powered(plug, now) or powered_since is None:
+                        await db.commit()  # still dark — leave WAITING
+                        continue
+                    if powered_since.tzinfo is None:
+                        powered_since = powered_since.replace(tzinfo=timezone.utc)
+                    tenant = (await db.execute(
+                        select(Tenant).where(Tenant.id == qc.tenant_id)
+                    )).scalar_one()
+                    delay = timedelta(minutes=auto_start_delay(tenant, plug))
+                    if (now - powered_since) < delay:
+                        await db.commit()  # mid-debounce — leave WAITING
+                        continue
+
+                    # 4. Plug must actually be startable. OCCUPIED = someone
+                    #    else is on it right now (or a crashed prior auto-start
+                    #    left it claimed) — retry next tick, never double-start.
+                    #    OFFLINE/MAINTENANCE = the operator took it out of
+                    #    service while queued -> fail per the proposal edge case.
+                    if plug.status == PlugStatus.OCCUPIED:
+                        await db.commit()
+                        continue
+                    if plug.status != PlugStatus.AVAILABLE:
+                        qc.status = QueuedChargeStatus.FAILED
+                        user_id = qc.user_id
+                        plug_name = plug.name
+                        await db.commit()
+                        await notify(
+                            user_id, "queued_charge_failed",
+                            "Queued charge couldn't start",
+                            f"{plug_name} is out of service — your queued charge was cancelled.",
+                            severity="warning", plug_id=plug.id,
+                        )
+                        continue
+
+                    user = (await db.execute(
+                        select(User).where(User.id == qc.user_id)
+                    )).scalar_one_or_none()
+                    gateway = (await db.execute(
+                        select(Gateway).where(Gateway.id == plug.gateway_id)
+                    )).scalar_one()
+                    if user is None:
+                        qc.status = QueuedChargeStatus.FAILED
+                        await db.commit()
+                        continue
+
+                    # 5. Start via the shared helper (commits the session + plug
+                    #    claim itself). Then mark the queue STARTED + link it.
+                    try:
+                        session = await begin_active_session(
+                            db, user, plug, gateway,
+                            max_kwh=qc.max_kwh,
+                            max_duration_seconds=qc.max_duration_seconds,
+                        )
+                    except HTTPException as exc:
+                        # 402 = balance floor no longer met -> EXPIRED (funds were
+                        # never locked, the accepted trade-off); caps/publish
+                        # (409/500) -> FAILED. begin_active_session already rolled
+                        # back any partial claim, so the qc row is still WAITING.
+                        qc.status = (
+                            QueuedChargeStatus.EXPIRED
+                            if exc.status_code == 402
+                            else QueuedChargeStatus.FAILED
+                        )
+                        user_id = qc.user_id
+                        plug_name = plug.name
+                        await db.commit()
+                        await notify(
+                            user_id,
+                            "queued_charge_expired" if exc.status_code == 402
+                            else "queued_charge_failed",
+                            "Queued charge couldn't start",
+                            (
+                                f"{plug_name}: your queued charge couldn't start "
+                                "(insufficient balance)."
+                                if exc.status_code == 402 else
+                                f"{plug_name}: your queued charge couldn't start."
+                            ),
+                            severity="warning", plug_id=plug.id,
+                        )
+                        continue
+
+                    qc.status = QueuedChargeStatus.STARTED
+                    qc.started_session_id = session.id
+                    user_id = qc.user_id
+                    plug_name = plug.name
+                    await db.commit()
+                    started += 1
+                    await notify(
+                        user_id, "queued_charge_started",
+                        "Your queued charge started",
+                        f"Power is back on {plug_name} — your queued charge just started.",
+                        severity="info", plug_id=plug.id, session_id=session.id,
+                    )
+                    logger.info(
+                        f"Auto-started queued charge {qc_id} on plug {plug.id} "
+                        f"(session {session.id})"
+                    )
+            except Exception:
+                logger.exception(f"Failed to process queued charge {qc_id}")
+        return started

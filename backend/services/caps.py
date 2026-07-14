@@ -16,6 +16,8 @@ admission-advisory below it.
 """
 import logging
 import os
+import time
+from typing import Optional
 
 from fastapi import HTTPException
 from sqlalchemy import and_, select
@@ -59,6 +61,60 @@ async def circuit_load_a(db: AsyncSession, group_id: int, exclude_plug_id=None) 
         q = q.where(Plug.id != exclude_plug_id)
     rows = (await db.execute(q)).all()
     return sum((cap if cap is not None else DEFAULT_PLUG_CAP_A) for (cap,) in rows)
+
+
+def _fresh_measured_current_a(telemetry_store, plug_id: int) -> Optional[float]:
+    """The plug's latest MEASURED current (amps) from the live telemetry
+    snapshot, or None when unavailable/stale. A real plug reports current ~every
+    1 s during a session, so a snapshot older than the stream's staleness window
+    (the gateway link dropped) is treated as unavailable and the caller falls
+    back to the configured cap."""
+    if telemetry_store is None:
+        return None
+    snap = telemetry_store.get_latest(plug_id)
+    if snap is None or snap.current_a is None or snap.current_a <= 0:
+        return None
+    from backend.services.telemetry import TELEMETRY_STALE_AFTER_SEC
+    if (time.time() - snap.updated_at) > TELEMETRY_STALE_AFTER_SEC:
+        return None
+    return float(snap.current_a)
+
+
+async def measured_circuit_load_a(
+    db: AsyncSession, group_id: int, telemetry_store=None, exclude_plug_id=None
+) -> float:
+    """LIVE load figure for the operator's "X / Y A in use" display: Σ over the
+    group's ACTIVE plugs of each plug's MEASURED current when a fresh live
+    reading is available, else its configured effective cap.
+
+    Distinct from ``circuit_load_a`` (which sums configured caps): because active
+    power factor is < 1 the measured amps a plug actually draws run below its
+    cap, so this shows the operator the real committed load. Admission
+    (``check_circuit_admission``) must NOT use this — there is no measured
+    current before a plug starts, so start-time gating stays on configured caps.
+    """
+    q = (
+        select(Plug.id, Plug.max_current_a)
+        .join(ChargingSession, ChargingSession.plug_id == Plug.id)
+        .where(
+            and_(
+                Plug.group_id == group_id,
+                ChargingSession.status == SessionStatus.ACTIVE,
+            )
+        )
+    )
+    if exclude_plug_id is not None:
+        q = q.where(Plug.id != exclude_plug_id)
+    rows = (await db.execute(q)).all()
+
+    total = 0.0
+    for plug_id, cap in rows:
+        measured = _fresh_measured_current_a(telemetry_store, plug_id)
+        if measured is not None:
+            total += measured
+        else:
+            total += cap if cap is not None else DEFAULT_PLUG_CAP_A
+    return total
 
 
 async def check_circuit_admission(db: AsyncSession, plug: Plug) -> None:

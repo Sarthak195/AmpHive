@@ -90,6 +90,13 @@ DEFAULT_GROUP_ID = int(os.getenv("FAKE_PLUG_GROUP_ID", "1"))  # public group
 DEFAULT_WATTS = float(os.getenv("FAKE_PLUG_WATTS", "10000"))  # 10 kW constant load
 DEFAULT_VOLTAGE = float(os.getenv("FAKE_PLUG_VOLTAGE", "230"))
 DEFAULT_INTERVAL = float(os.getenv("FAKE_PLUG_INTERVAL", "5"))
+# Power factor of the simulated load. A real Tapo P110 reports MEASURED current
+# and voltage, and active power = V x A x PF with PF < 1 — so the measured
+# current is NOT power/voltage (apparent). Model that by deriving the reported
+# current as power / (voltage * PF): with PF 0.95 the measured amps run a few
+# percent ABOVE the naive power/voltage figure, exercising the
+# measured-vs-derived path end-to-end on the fake rig.
+POWER_FACTOR = float(os.getenv("FAKE_PLUG_POWER_FACTOR", "0.95"))
 DEFAULT_FW = "fake-1.0.0"
 
 # Match the firmware's SET_INTERVAL clamp (ms).
@@ -313,7 +320,10 @@ class FakePlug:
                 self.session_kwh += (self.watts / 1000.0) * (dt / 3600.0)
                 self._maybe_trip_watchdog(now)
             watts = self.watts if self.relay_on else 0.0
-            current = watts / self.voltage if self.voltage else 0.0
+            # MEASURED current, NOT power/voltage: fold in a power-factor fudge
+            # so the fake rig reports the same apparent!=active behaviour a real
+            # P110 does (see POWER_FACTOR).
+            current = watts / (self.voltage * POWER_FACTOR) if self.voltage else 0.0
             return {
                 "plug_id": self.plug_id,
                 "watts": round(watts, 1),
@@ -377,12 +387,21 @@ def _self_test(args) -> None:
     print("  " + json.dumps({"status": "offline"}))
     print("\nTelemetry while charging (constant %.0f W load):" % args.watts)
     kwh = (args.watts / 1000.0) * (args.interval / 3600.0)
+    # MEASURED current includes the power-factor fudge (see POWER_FACTOR), so it
+    # is deliberately NOT the naive power/voltage apparent figure.
+    measured_current = args.watts / (args.voltage * POWER_FACTOR) if args.voltage else 0.0
+    naive_current = args.watts / args.voltage if args.voltage else 0.0
+    assert measured_current > naive_current, (
+        "measured current should exceed naive power/voltage (PF < 1)"
+    )
     print("  " + json.dumps({
         "plug_id": args.plug_id or 1, "watts": round(args.watts, 1),
         "kwh": round(kwh, 4), "voltage": round(args.voltage, 1),
-        "current": round(args.watts / args.voltage, 2),
+        "current": round(measured_current, 2),
         "status": "occupied", "session_id": "42",
     }))
+    print("  (measured current %.2f A vs naive P/V %.2f A — power factor %.2f)"
+          % (measured_current, naive_current, POWER_FACTOR))
     print("Telemetry while idle:")
     print("  " + json.dumps({
         "plug_id": args.plug_id or 1, "watts": 0.0, "kwh": 0.0,
