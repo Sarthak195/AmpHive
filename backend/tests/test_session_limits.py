@@ -727,6 +727,11 @@ async def test_persist_telemetry_forwards_session_limits_into_the_check():
     sess_row.max_duration_seconds = 1800
     sess_row.started_at = started
     sess_row.peak_power_w = 0.0  # real float: compared against watts
+    # [Pricing v2] Flat session: no TOD boundary, no segment accrual — so the
+    # in-frame reprice hook is a clean no-op (rate_valid_until None).
+    sess_row.rate_valid_until = None
+    sess_row.settled_cost_coins = None
+    sess_row.rate_segment_start_kwh = None
 
     session = _FakeSession([
         _FakeResult(scalar=plug),      # ownership lookup

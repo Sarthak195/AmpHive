@@ -118,6 +118,10 @@ class SessionReaperService:
                 await self.reap_reservation_starts_once()
             except Exception:
                 logger.exception("Reservation-start sweep failed")
+            try:
+                await self.reap_reprice_once()
+            except Exception:
+                logger.exception("Pricing-v2 reprice sweep failed")
 
     def _stale_session_ids_query(self, cutoff: datetime):
         from backend.database.models import ChargingSession, SessionStatus
@@ -221,6 +225,82 @@ class SessionReaperService:
             except Exception:
                 logger.exception(f"Failed to reap time-limited session {session_id}")
         return reaped
+
+    async def reap_reprice_once(self) -> int:
+        """[Pricing v2] Backstop for the telemetry-path TOD reprice: close out
+        the current rate segment of any ACTIVE session whose rate_valid_until
+        has passed but no telemetry frame landed to trip it (a dropped/silent
+        gateway). Bills the gap energy forward-only against the last PERSISTED
+        energy_kwh — same helper (services/pricing.py reprice_session_if_due)
+        the telemetry hook uses, so the math is identical.
+
+        One txn per session, session row locked + ACTIVE re-checked (race-safe
+        against a user stop or a telemetry frame doing the same reprice — one
+        of them advances rate_valid_until, the other then no-ops). A boundary
+        that landed on the same rate just advances the check point silently;
+        only a real change emits one rate_changed notification. Returns the
+        number of sessions actually repriced."""
+        from backend.database.models import ChargingSession, Plug, SessionStatus
+        from backend.services.billing import rate_changed_body
+        from backend.services.notifications import notify
+        from backend.services.pricing import reprice_session_if_due
+
+        now = datetime.now(timezone.utc)
+
+        # Candidates: ACTIVE, on a TOD tariff (rate_valid_until set), overdue.
+        async with self.db_session_factory() as db:
+            result = await db.execute(
+                select(ChargingSession.id).where(
+                    and_(
+                        ChargingSession.status == SessionStatus.ACTIVE,
+                        ChargingSession.rate_valid_until.isnot(None),
+                        ChargingSession.rate_valid_until < now,
+                    )
+                )
+            )
+            due_ids = list(result.scalars().all())
+
+        repriced = 0
+        for session_id in due_ids:
+            try:
+                async with self.db_session_factory() as db:
+                    locked = await db.execute(
+                        select(ChargingSession)
+                        .where(
+                            and_(
+                                ChargingSession.id == session_id,
+                                ChargingSession.status == SessionStatus.ACTIVE,
+                            )
+                        )
+                        .with_for_update()
+                    )
+                    session = locked.scalar_one_or_none()
+                    if session is None:
+                        continue
+                    plug = (
+                        await db.execute(select(Plug).where(Plug.id == session.plug_id))
+                    ).scalar_one_or_none()
+                    if plug is None:
+                        await db.commit()
+                        continue
+                    change = await reprice_session_if_due(db, session, plug, at=now)
+                    user_id = session.user_id
+                    await db.commit()
+                if change is not None:
+                    new_rate, _boundary = change
+                    repriced += 1
+                    await notify(
+                        user_id, "rate_changed", "Charging rate changed",
+                        rate_changed_body(new_rate), severity="info",
+                        session_id=session_id,
+                    )
+                    logger.info(
+                        f"Repriced stale session {session_id} to {new_rate} coins/kWh "
+                        f"(telemetry silent past its TOD boundary)"
+                    )
+            except Exception:
+                logger.exception(f"Failed to reprice session {session_id}")
+        return repriced
 
     async def reap_reservation_starts_once(self) -> int:
         """[Reservations] Process each booking whose window has just opened

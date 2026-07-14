@@ -35,7 +35,9 @@ from backend.services.auth import (
     hash_password, verify_password,
 )
 from backend.services.money import ZERO_MONEY, energy_cost, to_money
-from backend.services.pricing import resolve_rate_for_plug
+from backend.services.pricing import (
+    max_rate_over_window, resolve_rate_for_plug, resolve_rate_window,
+)
 from backend.services.rbac import require_role
 from backend.services.session_lifecycle import (
     check_and_speed_up_active_session, finalize_charging_session,
@@ -232,7 +234,14 @@ async def start_charging_session(
     # COINS_PER_KWH env fallback) and SNAPSHOT it onto the session now, so a
     # tariff edit or reassignment made mid-session never retroactively
     # changes what this session bills (see services/pricing.py).
-    rate_coins_per_kwh = await resolve_rate_for_plug(db, plug)
+    #
+    # [Pricing v2] resolve_rate_window also returns rate_valid_until: the
+    # wall-clock instant this rate could next change at a TOD slot boundary
+    # (None for a flat tariff → the session stays one segment and bills exactly
+    # as before). Snapshotted below so MQTTManager._persist_telemetry can close
+    # out the segment forward-only when the boundary passes.
+    now = datetime.now(timezone.utc)
+    rate_coins_per_kwh, rate_valid_until = await resolve_rate_window(db, plug, at=now)
 
     # Size the session's authorization hold (MARKET_GAP_ANALYSIS.md §3): the
     # old flat MIN_START_BALANCE_COINS floor let a session start with just
@@ -265,7 +274,17 @@ async def start_charging_session(
                 "required to start."
             ),
         )
-    hold = to_money(min(available, energy_cost(req.max_kwh, rate_coins_per_kwh)))
+    # [Pricing v2] Size the hold at the WORST-CASE rate the session could hit
+    # over its own max_duration window, not just the start rate: if a TOD
+    # boundary raises the rate mid-charge, finalize's min(final_cost, hold) must
+    # not forgive the overage (the SECURITY.md §5 leak the hold closes). With no
+    # slots configured max_rate_over_window returns the flat rate, so this is
+    # identical to the old energy_cost(max_kwh, rate) sizing. A session with no
+    # duration cap could run into any slot → the >=24h worst-case over all slots.
+    max_rate = await max_rate_over_window(
+        db, plug, now, req.max_duration_seconds or 24 * 3600
+    )
+    hold = to_money(min(available, energy_cost(req.max_kwh, max_rate)))
 
     session = ChargingSession(
         tenant_id=gateway.tenant_id,
@@ -274,6 +293,15 @@ async def start_charging_session(
         status=SessionStatus.ACTIVE,
         rate_coins_per_kwh=rate_coins_per_kwh,
         hold_coins=hold,
+        # [Pricing v2] Open the first billing segment: nothing settled yet, the
+        # segment starts at 0 kWh, and it stays in effect until rate_valid_until
+        # (None for a flat tariff = never reprices). services/billing.py
+        # session_cost then bills settled + open-segment energy at the current
+        # rate; a flat session's settled=0/start=0 makes that identical to the
+        # old single-rate formula.
+        settled_cost_coins=ZERO_MONEY,
+        rate_segment_start_kwh=0.0,
+        rate_valid_until=rate_valid_until,
         # [Session limits] Snapshot the request's stop conditions (always,
         # including the schema defaults) — the firmware enforces these
         # locally from the MQTT ON payload below but publishes no alarm on

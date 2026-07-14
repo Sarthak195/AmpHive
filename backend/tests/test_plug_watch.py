@@ -405,6 +405,10 @@ def _finalize_fixtures():
     session.hold_coins = None
     session.energy_kwh = 1.0
     session.rate_coins_per_kwh = Decimal("5.00")
+    # [Pricing v2] Flat/legacy single-rate session: NULL segment accrual, so
+    # session_cost bills energy_cost(1.0, 5.00) = 5.00 (the legacy path).
+    session.settled_cost_coins = None
+    session.rate_segment_start_kwh = None
     session.peak_power_w = 0.0
     session.started_at = datetime.now(timezone.utc)
 

@@ -20,14 +20,31 @@ already-settled cost is frozen so a later rate change never re-prices past
 energy (same immutability rationale as the ``rate_coins_per_kwh`` snapshot).
 
 A session with ``rate_segment_start_kwh IS NULL`` is a LEGACY single-rate
-session — the only kind Phase 1 produces — and bills flat, exactly as before.
-Phase 1 does NOT call these from any live billing path; that wiring is a later
-phase.
+session (started before Pricing v2, or with no tariff slots) — it bills flat,
+exactly as before.
+
+Phase 2 wires ``session_cost`` into all three billing paths
+(``finalize_charging_session``, the balance-exhaustion auto-stop, the live
+``TelemetryStore``) and ``close_out_segment`` into the reprice triggers
+(``services/pricing.py reprice_session_if_due``, called from the telemetry
+frame hook and the reaper backstop). A flat tariff resolves no boundary, so
+its session has one segment and still bills identically.
 """
 from decimal import Decimal
 
 from backend.services.money import ZERO_MONEY, energy_cost, to_money
 from backend.services.telemetry import COINS_PER_KWH
+
+
+def rate_changed_body(new_rate) -> str:
+    """The forward-only ``rate_changed`` notification text, shared by the
+    telemetry-path reprice and the reaper backstop so both read identically.
+    Deliberately omits the boundary wall-clock (needs the tenant tz to format)
+    — the point the driver must grasp is that only future energy is affected."""
+    return (
+        f"Charging now costs {to_money(new_rate):g} coins/kWh. This applies only "
+        "to energy from now on — what you've already used stays at the old rate."
+    )
 
 
 def _current_rate(session):

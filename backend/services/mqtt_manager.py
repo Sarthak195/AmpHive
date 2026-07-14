@@ -647,6 +647,13 @@ class MQTTManager:
         updated_max_kwh: Optional[float] = None
         updated_max_duration: Optional[int] = None
         updated_started_at: Optional[datetime] = None
+        # [Pricing v2] Segment accrual state, captured AFTER an in-frame reprice
+        # so the exhaustion check and the live-cost mirror both see the new
+        # rate. `reprice` is (new_rate, boundary) when a TOD boundary closed a
+        # segment this frame, else None.
+        updated_settled: Optional[Decimal] = None
+        updated_segment_start: Optional[float] = None
+        reprice = None
 
         try:
             async with self.db_session_factory() as session:
@@ -699,9 +706,19 @@ class MQTTManager:
                         active_session.peak_power_w = watts
                     # Staleness signal read by the session reaper.
                     active_session.last_telemetry_at = datetime.now(timezone.utc)
+                    # [Pricing v2] Forward-only reprice if a TOD slot boundary
+                    # has passed. Cheap: a flat session (rate_valid_until None)
+                    # or one still inside its segment returns with no DB query;
+                    # only the crossing frame re-resolves the tariff and closes
+                    # out the segment in place, so the captures below — and the
+                    # same-frame exhaustion check — bill at the new rate.
+                    from backend.services.pricing import reprice_session_if_due
+                    reprice = await reprice_session_if_due(session, active_session, plug)
                     updated_session_id = active_session.id
                     updated_user_id = active_session.user_id
                     updated_rate = active_session.rate_coins_per_kwh
+                    updated_settled = active_session.settled_cost_coins
+                    updated_segment_start = active_session.rate_segment_start_kwh
                     updated_hold_coins = active_session.hold_coins
                     updated_max_kwh = active_session.max_kwh
                     updated_max_duration = active_session.max_duration_seconds
@@ -720,9 +737,25 @@ class MQTTManager:
         # drained wallet (the finalize path only clamps the debit — it doesn't
         # stop the session). Done in a separate txn after the persist commit.
         if updated_session_id is not None and updated_user_id is not None:
+            # [Pricing v2] A TOD boundary closed a segment this frame: keep the
+            # live-cost mirror exact and tell the driver (forward-only). Both
+            # best-effort, post-commit — the billing state already persisted.
+            if reprice is not None:
+                new_rate, _boundary = reprice
+                if self.telemetry_store is not None:
+                    self.telemetry_store.set_segment_state(
+                        plug_id, updated_settled, updated_segment_start, new_rate
+                    )
+                from backend.services.billing import rate_changed_body
+                from backend.services.notifications import notify
+                await notify(
+                    updated_user_id, "rate_changed", "Charging rate changed",
+                    rate_changed_body(new_rate), severity="info",
+                    plug_id=plug_id, session_id=updated_session_id,
+                )
             await self._maybe_auto_stop_on_exhaustion(
                 updated_session_id, updated_user_id, kwh, updated_rate,
-                updated_hold_coins,
+                updated_hold_coins, updated_settled, updated_segment_start,
             )
             # [Session limits] User-set stop conditions, mirrored backend-side
             # (see _maybe_auto_stop_on_limits). Sequenced AFTER the exhaustion
@@ -739,7 +772,9 @@ class MQTTManager:
 
     async def _maybe_auto_stop_on_exhaustion(self, session_id: int, user_id: int, energy_kwh: float,
                                               rate_coins_per_kwh: Optional[Decimal] = None,
-                                              hold_coins: Optional[Decimal] = None):
+                                              hold_coins: Optional[Decimal] = None,
+                                              settled_cost_coins: Optional[Decimal] = None,
+                                              rate_segment_start_kwh: Optional[float] = None):
         """Finalize an ACTIVE session once its accrued cost meets/exceeds its
         exhaustion threshold. No-op when disabled, when the threshold still
         covers the energy, or when the session is already gone (finalize
@@ -765,12 +800,25 @@ class MQTTManager:
         matching the pre-hold behavior exactly."""
         if not AUTO_STOP_ON_BALANCE_EXHAUSTED or not self.db_session_factory:
             return
-        from backend.services.money import energy_cost, to_money
+        from types import SimpleNamespace
+        from backend.services.billing import session_cost
+        from backend.services.money import to_money
         from backend.services.telemetry import COINS_PER_KWH
 
         try:
-            rate = rate_coins_per_kwh if rate_coins_per_kwh is not None else COINS_PER_KWH
-            accrued_cost = energy_cost(energy_kwh, rate)
+            # [Pricing v2] Accrue against the session's segment state (settled
+            # closed-segment coins + open segment at the current rate) so a
+            # session that crossed a TOD boundary stops at the RIGHT accrued
+            # cost, not a flat re-multiply. NULL segment fields (flat/legacy)
+            # collapse session_cost to energy_cost(energy_kwh, rate) exactly.
+            accrued_cost = session_cost(
+                SimpleNamespace(
+                    rate_coins_per_kwh=rate_coins_per_kwh,
+                    settled_cost_coins=settled_cost_coins,
+                    rate_segment_start_kwh=rate_segment_start_kwh,
+                ),
+                energy_kwh,
+            )
             if accrued_cost <= 0:
                 return
             if hold_coins is not None:

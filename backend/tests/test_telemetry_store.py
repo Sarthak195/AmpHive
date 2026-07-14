@@ -108,3 +108,39 @@ def test_end_session_clears_the_snapshotted_rate():
 
     snap = store.get_latest(6)
     assert snap.cost_coins == 1.0 * telemetry_mod.COINS_PER_KWH
+
+
+# --- Pricing v2: segment-aware live cost after a TOD reprice ------------------
+
+def test_update_live_cost_reflects_segment_state():
+    """After set_segment_state (a TOD boundary closed a segment), the live
+    running cost = settled coins + open-segment energy at the new rate — the
+    same figure services/billing.py session_cost bills."""
+    store = TelemetryStore()
+
+    store.start_session(7, rate_coins_per_kwh=Decimal("5.00"))
+    # Boundary crossed at 2.0 kWh: 10.00 settled, now charging at 8.00/kWh.
+    store.set_segment_state(7, settled_coins=Decimal("10.00"),
+                            segment_start_kwh=2.0, rate_coins_per_kwh=Decimal("8.00"))
+    store.update(plug_id=7, power_w=1000.0, current_a=4.0, energy_kwh=5.0,
+                 status="charging")
+
+    snap = store.get_latest(7)
+    assert snap.cost_coins == 10.0 + (5.0 - 2.0) * 8.0  # 34.0
+
+
+def test_start_session_resets_segment_state():
+    """A plug reused for a new flat session must not inherit the previous
+    session's settled/segment mirror (else its live cost would be inflated)."""
+    store = TelemetryStore()
+
+    store.start_session(8, rate_coins_per_kwh=Decimal("5.00"))
+    store.set_segment_state(8, settled_coins=Decimal("99.00"), segment_start_kwh=4.0)
+    store.end_session(8)
+
+    store.start_session(8, rate_coins_per_kwh=Decimal("5.00"))
+    store.update(plug_id=8, power_w=1000.0, current_a=4.0, energy_kwh=2.0,
+                 status="charging")
+
+    snap = store.get_latest(8)
+    assert snap.cost_coins == 2.0 * 5.0  # 10.0 — clean single segment, no leak
