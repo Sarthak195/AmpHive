@@ -518,3 +518,32 @@ describe('Home — "notify me when free" bell', () => {
     expect(screen.getAllByText('Charge →').length).toBeGreaterThan(1);
   });
 });
+
+describe('Home — time-of-day next-price ribbon', () => {
+  beforeEach(() => {
+    useAuth.mockReturnValue({ user: DRIVER });
+  });
+
+  it('previews the upcoming price when a TOD boundary changes it later today', async () => {
+    api.get.mockResolvedValue([
+      { ...PLUGS[0], price_per_kwh: 5, price_next_per_kwh: 6, price_changes_at: '2026-07-14T18:00:00+05:30' },
+    ]);
+    renderHome('/');
+    await screen.findByText('Lobby Plug');
+
+    // The "next price" hint renders (→ 6 @ <local time>); assert the price
+    // part, not the exact clock, to stay timezone-independent in CI.
+    expect(screen.getByText(/→\s*6\s*@/)).toBeInTheDocument();
+  });
+
+  it('omits the next-price line for a flat plug', async () => {
+    api.get.mockResolvedValue([
+      { ...PLUGS[0], price_per_kwh: 5, price_next_per_kwh: null, price_changes_at: null },
+    ]);
+    renderHome('/');
+    await screen.findByText('Lobby Plug');
+
+    // The "→ <price>" ribbon hint is absent (don't match the "Charge →" button).
+    expect(screen.queryByText(/→\s*\d/)).not.toBeInTheDocument();
+  });
+});

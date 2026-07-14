@@ -570,8 +570,8 @@ async def test_available_plugs_carry_watching_via_one_extra_query():
     db = _db(rows_result, watched_result, expire_result, reservations_result)
 
     with patch("backend.routers.plugs.gateway_is_live", return_value=True), \
-         patch("backend.routers.plugs.resolve_rate_for_plug",
-               AsyncMock(return_value=Decimal("5.00"))):
+         patch("backend.routers.plugs.resolve_price_display",
+               AsyncMock(return_value=(Decimal("5.00"), None, None))):
         responses = await get_available_plugs(user, db)
 
     # plugs+joins, the watches, then the reservation expiry+grouped pair —
@@ -601,8 +601,8 @@ async def test_get_plug_reports_watching_true():
         _scalar_one_or_none(101),         # a watch row id exists
     )
 
-    with patch("backend.routers.plugs.resolve_rate_for_plug",
-               AsyncMock(return_value=Decimal("5.00"))):
+    with patch("backend.routers.plugs.resolve_price_display",
+               AsyncMock(return_value=(Decimal("5.00"), None, None))):
         res = await get_plug(7, user, db)
 
     assert res.watching is True

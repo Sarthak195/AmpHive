@@ -244,6 +244,15 @@ const Home = () => {
     return price > 0 ? price : (coins_per_kwh || 5);
   };
 
+  // [Pricing v2] A rate-change ISO instant -> the viewer's local HH:MM (the
+  // backend sends it in the tenant's tz with offset, so this reads right for
+  // an on-site driver). Blank if unparseable.
+  const formatChangeTime = (iso) => {
+    if (!iso) return '';
+    const d = new Date(iso);
+    return isNaN(d) ? '' : d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
+  };
+
   // Tapping a charger (or hitting "Set up" on a typed Plug ID) opens the setup
   // modal for an optional timer/kWh — it no longer starts charging instantly.
   const openSetup = (plug) => {
@@ -330,9 +339,18 @@ const Home = () => {
           }
         }}
       >
-        {/* Cost as a corner ribbon — glanceable, no text line spent on it. */}
+        {/* Cost as a corner ribbon — glanceable, no text line spent on it.
+            [Pricing v2] When a time-of-day slot changes the price later today,
+            a second line previews it ("→ 6 @ 18:00", viewer-local time). */}
         {plug.price_per_kwh != null && (
-          <span className="price-ribbon">{plug.price_per_kwh}<small>/kWh</small></span>
+          <span className="price-ribbon">
+            {plug.price_per_kwh}<small>/kWh</small>
+            {plug.price_next_per_kwh != null && plug.price_changes_at && (
+              <small className="price-ribbon-next">
+                → {plug.price_next_per_kwh} @ {formatChangeTime(plug.price_changes_at)}
+              </small>
+            )}
+          </span>
         )}
 
         {/* Row 1: name + hardware status + reservation state. Reserve the
