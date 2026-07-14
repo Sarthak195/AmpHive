@@ -86,7 +86,7 @@ def _get_plug_ip(req_ip: Optional[str] = None) -> str:
 @router.post("/api/direct/plug/on")
 async def direct_plug_on(
     req: DirectPlugRequest = DirectPlugRequest(),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_role("admin")),
 ):
     """
     [Direct Mode] Turn the Tapo P110 plug ON.
@@ -119,7 +119,7 @@ async def direct_plug_on(
 @router.post("/api/direct/plug/off")
 async def direct_plug_off(
     req: DirectPlugRequest = DirectPlugRequest(),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_role("admin")),
 ):
     """
     [Direct Mode] Turn the Tapo P110 plug OFF.
