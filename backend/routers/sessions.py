@@ -353,6 +353,7 @@ async def start_charging_session(
 
     # 4. Now command the gateway. If this fails, undo the claim so the plug
     #    doesn't stay OCCUPIED with a live ACTIVE session nobody can drive.
+    from backend.services.caps import effective_plug_cap
     success = state.mqtt_manager.send_plug_command(
         gateway_id=plug.gateway_id,
         plug_id=plug.id,
@@ -361,6 +362,9 @@ async def start_charging_session(
         max_kwh=req.max_kwh,
         session_id=session.id,
         local_ip=plug.local_ip,
+        # Plug's effective current cap for on-device enforcement (the plug
+        # measures real current). Its own max_current_a, or DEFAULT_PLUG_CAP_A.
+        max_current_a=effective_plug_cap(plug),
     )
     if not success:
         session.status = SessionStatus.CANCELLED

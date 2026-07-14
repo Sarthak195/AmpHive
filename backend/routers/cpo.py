@@ -676,12 +676,16 @@ async def cpo_list_groups(
         )
         member_count = member_count_result.scalar() or 0
 
-        # [Caps] The circuit limit + the current committed load (Σ active plug
-        # caps), so the operator sees "24 / 32 A in use". One query per group,
-        # matching the per-group counts above (group counts are small).
+        # [Caps] The circuit limit + the current LIVE load, so the operator sees
+        # "24 / 32 A in use". Sums each active plug's MEASURED current (from the
+        # live telemetry snapshot) when available, else its configured cap — so
+        # the display reflects real draw (measured amps run below the cap at
+        # power factor < 1), while START-TIME admission still gates on configured
+        # caps (services/caps.py). One query per group, matching the per-group
+        # counts above (group counts are small).
         from backend.database.models import CapacityRequest
-        from backend.services.caps import circuit_load_a
-        load_a = await circuit_load_a(db, group.id)
+        from backend.services.caps import measured_circuit_load_a
+        load_a = await measured_circuit_load_a(db, group.id, state.telemetry_store)
         # Drivers waiting on "Request capacity" for this circuit — a nudge to
         # raise the cap.
         waiting = (await db.execute(

@@ -7,6 +7,7 @@ two queries check_circuit_admission runs (the locked group select, then the
 a start is admitted up to and including the exact circuit limit and rejected
 past it; and it's a clean no-op when ungrouped, uncapped, or disabled.
 """
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -117,6 +118,59 @@ async def test_admission_noop_when_disabled(monkeypatch):
     db = _FakeDb([])
     await caps.check_circuit_admission(db, _plug(cap=16.0))
     assert db.calls == 0
+
+
+class _FakeStore:
+    """Stand-in TelemetryStore exposing just get_latest for the live-load sum."""
+    def __init__(self, snaps):
+        self._snaps = snaps  # plug_id -> snapshot
+
+    def get_latest(self, plug_id):
+        return self._snaps.get(plug_id)
+
+
+def _snap(current_a, age_sec=0.0):
+    return SimpleNamespace(current_a=current_a, updated_at=time.time() - age_sec)
+
+
+@pytest.mark.asyncio
+async def test_measured_load_uses_measured_current_falls_back_to_cap(monkeypatch):
+    """The live figure sums MEASURED current when a fresh snapshot exists, and
+    falls back to each plug's configured cap otherwise. Two active plugs (caps
+    16 A / 10 A): plug 1 measures 8 A (below its cap, power factor), plug 2 has
+    no live reading -> 8 + 10 = 18 A."""
+    monkeypatch.setattr(caps, "DEFAULT_PLUG_CAP_A", 16.0)
+    db = _FakeDb([_Result(rows=[(1, 16.0), (2, 10.0)])])
+    store = _FakeStore({1: _snap(8.0)})
+
+    load = await caps.measured_circuit_load_a(db, 1, store)
+    assert load == 18.0
+    assert db.calls == 1  # single active-plugs query
+
+
+@pytest.mark.asyncio
+async def test_measured_load_ignores_stale_and_zero_snapshots(monkeypatch):
+    """A stale snapshot (gateway link dropped) or a non-positive current is
+    treated as unavailable -> the plug falls back to its cap. Plug 1 stale,
+    plug 2 reports 0 A -> both use caps (16 + 10 = 26 A)."""
+    monkeypatch.setattr(caps, "DEFAULT_PLUG_CAP_A", 16.0)
+    db = _FakeDb([_Result(rows=[(1, 16.0), (2, 10.0)])])
+    store = _FakeStore({1: _snap(9.0, age_sec=10_000.0), 2: _snap(0.0)})
+
+    load = await caps.measured_circuit_load_a(db, 1, store)
+    assert load == 26.0
+
+
+@pytest.mark.asyncio
+async def test_measured_load_no_store_uses_caps(monkeypatch):
+    """Without a telemetry store (e.g. no live data yet) every active plug falls
+    back to its configured cap, matching circuit_load_a. Uncapped plug uses the
+    default (16 A)."""
+    monkeypatch.setattr(caps, "DEFAULT_PLUG_CAP_A", 16.0)
+    db = _FakeDb([_Result(rows=[(1, 10.0), (2, None)])])
+
+    load = await caps.measured_circuit_load_a(db, 1, telemetry_store=None)
+    assert load == 26.0  # 10 (cap) + 16 (default)
 
 
 @pytest.mark.asyncio
