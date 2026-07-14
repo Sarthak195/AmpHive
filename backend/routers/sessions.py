@@ -226,12 +226,16 @@ async def start_charging_session(
             detail="This charger's gateway is offline. Try again once it reconnects.",
         )
 
-    # [Plug power] A live gateway can still front a plug that has no power (mains
+    # [Plug power] A live gateway can still front a plug that LOST power (mains
     # or relay power lost, or its plug agent down) — it stops reporting telemetry
-    # while the gateway itself stays online. Starting there pins the plug
-    # OCCUPIED with no draw and bills nothing, so refuse it, same shape as the
-    # gateway gate above.
-    if not plug_is_powered(plug):
+    # while the gateway itself stays online, leaving a STALE last_telemetry_at.
+    # Refuse the start on that positive evidence of power loss (same shape as the
+    # gateway gate above); starting there would pin the plug OCCUPIED with no draw
+    # and bill nothing. A plug that has simply never reported (last_telemetry_at
+    # NULL — freshly provisioned, or the brief post-migration backfill window) is
+    # NOT blocked: absence of a heartbeat isn't proof of no power, and the reaper
+    # closes out a session that never draws.
+    if plug.last_telemetry_at is not None and not plug_is_powered(plug):
         raise HTTPException(
             status_code=409,
             detail="This charger has no power right now. Try again once power is restored.",
@@ -561,8 +565,10 @@ async def update_session_limits(
     # can cross into a higher-rate TOD slot, so max_rate_over_window (and thus the
     # hold) can change even when only max_duration_seconds is edited.
     if (
-        "max_kwh" in updates or "max_duration_seconds" in updates
-    ) and session.hold_coins is not None:
+        ("max_kwh" in updates or "max_duration_seconds" in updates)
+        and session.hold_coins is not None
+        and session.max_kwh is not None  # no kWh limit → no energy_cost to size against
+    ):
         # [Pricing v2] Size at the WORST-CASE rate over the session's window
         # (not the current segment rate), so raising max_kwh on a TOD plug
         # whose price rises later can't leave the hold under-covering and
