@@ -55,6 +55,7 @@ def _plug(plug_id=7, status=PlugStatus.OCCUPIED, group_id=None, name="Bay 1",
     p.plug_model = "tapo_p110"
     p.latitude = None
     p.longitude = None
+    p.last_telemetry_at = None  # [Plug power] plug_powered = False for these tests
     return p
 
 

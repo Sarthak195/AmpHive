@@ -489,6 +489,12 @@ const CpoPlugs = () => {
                     This charger's current draw for circuit-capacity math. Blank = the
                     default hardware cutoff.
                   </small>
+                  <small style={{ color: 'var(--color-warning, #b8860b)', fontSize: '0.78rem', display: 'block', marginTop: '0.35rem' }}>
+                    Heads up: a cap below the 16 A hardware default is advisory for
+                    admission math only — it is not yet enforced on the device (pending a
+                    firmware OTA), so the plug can still draw up to 16 A. The hard
+                    circuit-protection guarantee holds only at the default cap.
+                  </small>
                 </div>
               </div>
 

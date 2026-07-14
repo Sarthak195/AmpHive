@@ -26,6 +26,40 @@ from .store import Store
 
 log = logging.getLogger(__name__)
 
+# Meter-reset / rounding tolerance (kWh). Telemetry ``kwh`` is published at 4
+# decimals, so a drop smaller than this is noise, not a power-cycle reset.
+_KWH_EPSILON = 1e-4
+
+
+def monotonic_session_kwh(session: dict, energy_kwh: float) -> tuple[float, bool]:
+    """Session-relative kWh that never regresses (mirrors the backend guard).
+
+    ``energy_kwh`` is the plug's cumulative/lifetime reading. If it drops below
+    the captured baseline (a power-cycle that reset the plug's meter), re-anchor
+    the baseline to the new lower reading so subsequent deltas stay correct, but
+    never emit a value below the last one reported for this session.
+
+    Mutates ``session`` in place (``baseline_kwh`` / ``last_kwh``) and returns
+    ``(session_kwh, changed)`` where ``changed`` is True if ``session`` needs to
+    be persisted.
+    """
+    baseline = float(session.get("baseline_kwh", 0.0))
+    last = float(session.get("last_kwh", 0.0))
+    changed = False
+
+    # Meter reset: cumulative reading fell below our baseline (power-cycle).
+    if energy_kwh < baseline - _KWH_EPSILON:
+        baseline = energy_kwh
+        session["baseline_kwh"] = baseline
+        changed = True
+
+    raw = energy_kwh - baseline
+    session_kwh = raw if raw > last else last  # never jump downward
+    if session_kwh != last:
+        session["last_kwh"] = session_kwh
+        changed = True
+    return session_kwh, changed
+
 
 class AmpHiveAgent:
     def __init__(self, config: Config):
@@ -195,7 +229,9 @@ class AmpHiveAgent:
     def _publish_telemetry(self, plug_id: int, state: PlugState):
         session = self.store.get_session(plug_id)
         if session and session.get("on"):
-            session_kwh = max(0.0, state.energy_kwh - float(session.get("baseline_kwh", 0.0)))
+            session_kwh, changed = monotonic_session_kwh(session, state.energy_kwh)
+            if changed:
+                self.store.set_session(plug_id, session)
             status = "occupied"
             session_id = str(session.get("session_id", ""))
         else:
@@ -260,3 +296,32 @@ class AmpHiveAgent:
             self.mqtt.disconnect()
         except Exception:
             pass
+
+
+if __name__ == "__main__":
+    # Self-check for the monotonic / re-anchor telemetry logic (no framework):
+    #   python -m amphive_agent.core
+    s = {"on": True, "baseline_kwh": 100.0, "session_id": "x"}
+
+    # Normal accumulation: session_kwh == cumulative - baseline, monotonic up.
+    v, changed = monotonic_session_kwh(s, 100.0); assert v == 0.0, v
+    v, changed = monotonic_session_kwh(s, 103.0); assert v == 3.0 and changed, v
+    v, changed = monotonic_session_kwh(s, 104.5); assert v == 4.5 and changed, v
+
+    # Power-cycle meter reset: cumulative drops far below baseline. Baseline
+    # re-anchors to the new low, but the reported value must NOT jump down.
+    v, changed = monotonic_session_kwh(s, 2.0)
+    assert v == 4.5, v                      # held at last, no downward jump
+    assert s["baseline_kwh"] == 2.0, s      # baseline re-anchored to new low
+
+    # After the reset, deltas resume from the new baseline and only surface
+    # once they exceed the held value.
+    v, _ = monotonic_session_kwh(s, 5.0); assert v == 4.5, v   # raw 3.0 < 4.5, still held
+    v, _ = monotonic_session_kwh(s, 8.0); assert v == 6.0, v   # raw 6.0 > 4.5, resumes
+
+    # Sub-epsilon dip is noise, not a reset: no re-anchor, value holds.
+    b = s["baseline_kwh"]
+    v, _ = monotonic_session_kwh(s, 8.0 - 5e-5)
+    assert v == 6.0 and s["baseline_kwh"] == b, (v, s["baseline_kwh"])
+
+    print("monotonic_session_kwh self-check: OK")

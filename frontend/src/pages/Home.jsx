@@ -164,9 +164,29 @@ const Home = () => {
         )
       );
     };
+    // Gateway connectivity push: when a plug's gateway goes offline/online
+    // (faster than waiting on the next poll), flip that plug's gateway_online
+    // in place so the card's offline/online state stays live.
+    const handlePlugConnectivity = ({ plug_id, gateway_online }) => {
+      setPlugs((prev) =>
+        prev.map((p) => (p.id === plug_id ? { ...p, gateway_online } : p))
+      );
+    };
     socket.on('plug_status', handlePlugStatus);
-    return () => socket.off('plug_status', handlePlugStatus);
+    socket.on('plug_connectivity', handlePlugConnectivity);
+    return () => {
+      socket.off('plug_status', handlePlugStatus);
+      socket.off('plug_connectivity', handlePlugConnectivity);
+    };
   }, [socket]);
+
+  // Low-frequency poll backstop: refetch the plug list every 30s as a
+  // catch-all for missed connectivity/status events or a dropped socket.
+  useEffect(() => {
+    if (!user) return;
+    const id = setInterval(fetchPlugs, 30000);
+    return () => clearInterval(id);
+  }, [user]);
 
   // QR / deep-link start: prefill the Plug ID input from `?plug=<id>` and
   // bring the Start Charging card into view/focus so a driver arriving via

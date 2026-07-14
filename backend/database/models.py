@@ -196,6 +196,15 @@ class Plug(Base):
     latitude: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     longitude: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+    # [Plug power] Per-plug liveness, distinct from the never-written
+    # last_seen_at above. last_telemetry_at is stamped on every inbound frame by
+    # MQTTManager._persist_telemetry; powered_since re-baselines to "now"
+    # whenever telemetry resumes after a PLUG_POWER_STALE_SEC gap (a power
+    # cycle). Both NULL until the first frame. plug_is_powered()
+    # (services/session_lifecycle.py) reads last_telemetry_at as the freshness
+    # signal for the session-start power gate.
+    last_telemetry_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    powered_since: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
     # [P2] Link each plug to a charger group. NULL = ungrouped/legacy (visible to all users).
     group_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("charger_groups.id", ondelete="SET NULL"), nullable=True)

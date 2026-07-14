@@ -116,6 +116,11 @@ class PlugResponse(BaseModel):
     # driver UI uses this to warn that a plug is unreachable before a start is
     # attempted, instead of only discovering it via a 409 at session start.
     gateway_online: bool = True
+    # [Plug power] Whether the plug is reporting fresh telemetry (drawing power)
+    # right now — services/session_lifecycle.py plug_is_powered. A plug can be
+    # on a live gateway yet have lost mains/relay power; the driver UI uses this
+    # to warn before a start, which the same-message 409 also enforces.
+    plug_powered: bool = True
     # The resolved coins-per-kWh rate this plug would bill a session at right
     # now (services/pricing.py resolve_rate_for_plug: plug tariff -> group
     # tariff -> tenant default -> the global COINS_PER_KWH env fallback).

@@ -54,6 +54,14 @@ AUTO_STOP_ON_LIMITS = os.getenv("AUTO_STOP_ON_LIMITS", "true").lower() in ("1", 
 # on by default.
 AUTO_MAINTENANCE_ON_CRITICAL_ALARM = os.getenv("AUTO_MAINTENANCE_ON_CRITICAL_ALARM", "true").lower() in ("1", "true", "yes")
 
+# [Plug power] A plug counts as powered only while its firmware keeps reporting
+# telemetry: last_telemetry_at is stamped on every inbound frame, and a gap
+# longer than this window re-baselines powered_since (a mains/relay power-cycle).
+# plug_is_powered() (services/session_lifecycle.py) reads the same window as the
+# freshness threshold. Healthy plugs report every ~1-10 s, so ~90 s tolerates a
+# few missed frames without flapping. Env-overridable.
+PLUG_POWER_STALE_SEC = int(os.getenv("PLUG_POWER_STALE_SEC", "90"))
+
 
 class MQTTManager:
     _instance: Optional["MQTTManager"] = None
@@ -93,6 +101,11 @@ class MQTTManager:
         # Session ids already sent a low-balance warning (once per session).
         # Only touched on the event loop. Bounded by an occasional full clear —
         # worst case a long-running session gets one repeat warning.
+        # ponytail: this is in-memory, so a mid-session restart re-fires the
+        # warning once (same tolerated worst case as the clear above). The
+        # auto-stop itself re-reads the DB under lock and stays exact — only
+        # the advisory nudge repeats — so a persisted dedupe query isn't worth
+        # a column/migration here.
         self._low_balance_warned: set = set()
 
         self.client = mqtt.Client(client_id="amphive_backend_server", callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
@@ -339,7 +352,7 @@ class MQTTManager:
         # --- 3. Persist authoritative session totals (async, fire-and-forget) ---
         if self.db_session_factory and self.event_loop:
             asyncio.run_coroutine_threadsafe(
-                self._persist_telemetry(gateway_id, plug_id, watts, kwh, session_id, sample),
+                self._persist_telemetry(gateway_id, plug_id, watts, kwh, session_id, sample, relay_on),
                 self.event_loop,
             )
             # Telemetry proves the gateway is alive — refresh its liveness
@@ -615,7 +628,8 @@ class MQTTManager:
 
     async def _persist_telemetry(self, gateway_id: str, plug_id: int, watts: float, kwh: float,
                                  session_id: Optional[int] = None,
-                                 sample: Optional[Dict[str, Any]] = None):
+                                 sample: Optional[Dict[str, Any]] = None,
+                                 relay_on: bool = False):
         """
         Persist the latest telemetry snapshot to the database:
         - Verify the claimed plug actually belongs to the publishing gateway
@@ -676,6 +690,17 @@ class MQTTManager:
                     )
                     return
 
+                # [Plug power] Stamp the per-plug liveness clock. powered_since
+                # re-baselines to now whenever telemetry resumes after a gap
+                # longer than PLUG_POWER_STALE_SEC (a mains/relay power-cycle);
+                # last_telemetry_at is the freshness signal plug_is_powered()
+                # reads. Distinct from the never-written plugs.last_seen_at.
+                now = datetime.now(timezone.utc)
+                prev = plug.last_telemetry_at
+                if prev is None or (now - prev).total_seconds() > PLUG_POWER_STALE_SEC:
+                    plug.powered_since = now
+                plug.last_telemetry_at = now
+
                 # Update plug's current power reading
                 plug.current_power_w = watts
 
@@ -695,12 +720,27 @@ class MQTTManager:
                         ChargingSession.plug_id == plug_id,
                         ChargingSession.status == SessionStatus.ACTIVE,
                     )
+                # [REC-04] Lock the row the way the reaper reprice does
+                # (session_reaper.py) so the forward-only reprice + rate_changed
+                # emit below can't race a concurrent frame or the reaper's sweep.
                 sess_result = await session.execute(
-                    select(ChargingSession).where(where_clause)
+                    select(ChargingSession).where(where_clause).with_for_update()
                 )
                 active_session = sess_result.scalar_one_or_none()
-                if active_session:
-                    active_session.energy_kwh = kwh
+
+                # [REC-05] An idle frame — no session_id AND relay off (firmware
+                # emits session_id="" + session_kwh=0 when its session_active is
+                # false) — reached an ACTIVE session only via the plug-id
+                # fallback. It must NOT be attributed to that session: overwriting
+                # its energy (with 0) or refreshing its staleness clock would
+                # zero/keep-alive a freshly-started session this frame predates.
+                # Require a matching session_id or a live relay to touch it.
+                frame_is_idle = session_id is None and not relay_on
+                if active_session is not None and not frame_is_idle:
+                    # [REC-01] Energy is monotonic: never bill down. A reading
+                    # below the stored total (meter reset) re-baselines to the
+                    # max, matching the guard already on the peak-power write.
+                    active_session.energy_kwh = max(active_session.energy_kwh or 0.0, kwh)
                     # Track peak power — only update if this reading is higher
                     if watts > active_session.peak_power_w:
                         active_session.peak_power_w = watts
@@ -724,6 +764,22 @@ class MQTTManager:
                     updated_max_duration = active_session.max_duration_seconds
                     updated_started_at = active_session.started_at
 
+                # [REC-02] Level-triggered OFF reconciliation. The relay is
+                # reported ON but no ACTIVE session owns this plug — a prior OFF
+                # was lost/failed while the gateway stayed connected, so the
+                # reconnect-only _republish_off_for_orphaned_plugs never fired.
+                # Re-send OFF (idempotent — a no-op on an already-off plug),
+                # using the same best-effort wait=False publish the reconnect
+                # path uses so we don't block the loop on the broker ack.
+                elif active_session is None and relay_on:
+                    self.send_plug_command(
+                        gateway_id, plug_id, "OFF", local_ip=plug.local_ip, wait=False
+                    )
+                    logger.info(
+                        "Republished OFF for relay-on plug with no ACTIVE session",
+                        extra={"gateway_id": gateway_id, "plug_id": plug_id},
+                    )
+
                 await session.commit()
         except Exception as e:
             logger.error(
@@ -737,6 +793,16 @@ class MQTTManager:
         # drained wallet (the finalize path only clamps the debit — it doesn't
         # stop the session). Done in a separate txn after the persist commit.
         if updated_session_id is not None and updated_user_id is not None:
+            # [REC-11] After a restart the live-cost mirror is empty (start_session
+            # ran in the now-dead process), so update() billed this frame at the
+            # env default and restarted the elapsed timer. Rebuild the mirror from
+            # the row we just loaded so subsequent frames stream the session's real
+            # rate/segment/started_at. No-op once the plug is already tracked.
+            if self.telemetry_store is not None:
+                self.telemetry_store.hydrate_session(
+                    plug_id, updated_rate, updated_settled,
+                    updated_segment_start, updated_started_at,
+                )
             # [Pricing v2] A TOD boundary closed a segment this frame: keep the
             # live-cost mirror exact and tell the driver (forward-only). Both
             # best-effort, post-commit — the billing state already persisted.
@@ -984,6 +1050,13 @@ class MQTTManager:
         """Persist gateway online/offline status (+ reported fw) to the database."""
         from backend.database.models import Gateway, GatewayStatus
 
+        # Whether this message flipped the stored liveness state. Subscriptions
+        # re-issue on every connect, so a backend/broker reconnect replays the
+        # retained status message; keying the offline-notify and the socket push
+        # off a *transition* (rather than the raw status) keeps a retained replay
+        # from re-notifying drivers or re-broadcasting (REC-08).
+        became_online = False
+        became_offline = False
         try:
             async with self.db_session_factory() as session:
                 from sqlalchemy import select
@@ -993,8 +1066,15 @@ class MQTTManager:
                 )
                 gateway = result.scalar_one_or_none()
                 if gateway:
-                    gateway.status = GatewayStatus.ONLINE if status == "online" else GatewayStatus.OFFLINE
-                    gateway.last_seen_at = datetime.now(timezone.utc)
+                    is_online = status == "online"
+                    was_offline = gateway.status == GatewayStatus.OFFLINE
+                    became_online = is_online and was_offline
+                    became_offline = not is_online and not was_offline
+                    gateway.status = GatewayStatus.ONLINE if is_online else GatewayStatus.OFFLINE
+                    # Do NOT stamp last_seen_at from a status message: a retained
+                    # `online` replayed on reconnect would falsely refresh
+                    # liveness for a possibly-wedged gateway. Telemetry — the real
+                    # heartbeat — is what stamps last_seen_at (REC-09).
                     # Only overwrite the recorded fw when the payload carried one
                     # (the LWT/offline message has no fw — don't clobber it).
                     if firmware_version:
@@ -1018,8 +1098,15 @@ class MQTTManager:
 
         if status == "online":
             await self._republish_off_for_orphaned_plugs(gateway_id)
-        else:
+        elif became_offline:
+            # Only on a real ONLINE->OFFLINE transition — not a retained replay.
             await self._notify_drivers_gateway_offline(gateway_id)
+
+        # Push connectivity to clients on both transition directions so charger
+        # lists flip reachable/unreachable immediately, ahead of the
+        # telemetry-timeout path (Faster-offline Lever 1).
+        if became_online or became_offline:
+            await self._broadcast_plug_connectivity(gateway_id, became_online)
 
     async def _notify_drivers_gateway_offline(self, gateway_id: str):
         """
@@ -1060,6 +1147,28 @@ class MQTTManager:
                 session_id=session_id,
             )
 
+    async def _broadcast_plug_connectivity(self, gateway_id: str, gateway_online: bool):
+        """
+        On a gateway online<->offline transition, emit plug_connectivity for each
+        of its plugs so the frontend flags/clears the plug as unreachable at once,
+        without waiting on the telemetry-timeout path (Faster-offline Lever 1).
+        """
+        from backend.database.models import Plug
+        from sqlalchemy import select
+
+        try:
+            async with self.db_session_factory() as session:
+                plug_ids = (await session.execute(
+                    select(Plug.id).where(Plug.gateway_id == gateway_id)
+                )).scalars().all()
+        except Exception:
+            logger.exception(f"plug_connectivity query failed for gateway {gateway_id}")
+            return
+
+        from backend.services.socketio_manager import emit_plug_connectivity
+        for plug_id in plug_ids:
+            await emit_plug_connectivity(plug_id, gateway_online)
+
     async def _republish_off_for_orphaned_plugs(self, gateway_id: str):
         """
         On gateway reconnect, re-send OFF to each of its plugs that has no
@@ -1092,15 +1201,21 @@ class MQTTManager:
                 )
                 active_plug_ids = set(active_result.scalars().all())
 
-            for plug_id, local_ip in plug_ips.items():
-                if plug_id not in active_plug_ids:
-                    # wait=False: we're on the event loop — don't block it on
-                    # the broker ack for a best-effort cleanup publish.
-                    self.send_plug_command(gateway_id, plug_id, "OFF", local_ip=local_ip, wait=False)
-                    logger.info(
-                        "Republished OFF on reconnect (no ACTIVE session)",
-                        extra={"gateway_id": gateway_id, "plug_id": plug_id},
-                    )
+                # [REC-06] Publish each OFF INSIDE the same session, with no
+                # await between the ACTIVE snapshot above and these synchronous
+                # publishes: that leaves no yield point for a session started in
+                # the gap to commit and then be wrongly killed. (Previously the
+                # snapshot was taken, the session closed — an await boundary —
+                # and only then were OFFs published, racing a fresh start.)
+                for plug_id, local_ip in plug_ips.items():
+                    if plug_id not in active_plug_ids:
+                        # wait=False: we're on the event loop — don't block it on
+                        # the broker ack for a best-effort cleanup publish.
+                        self.send_plug_command(gateway_id, plug_id, "OFF", local_ip=local_ip, wait=False)
+                        logger.info(
+                            "Republished OFF on reconnect (no ACTIVE session)",
+                            extra={"gateway_id": gateway_id, "plug_id": plug_id},
+                        )
         except Exception as e:
             logger.error(
                 "OFF republish on reconnect failed",

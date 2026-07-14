@@ -520,6 +520,57 @@ async def test_patch_shrinks_hold_when_max_kwh_lowered(factory):
 
 @db_gated
 @pytest.mark.asyncio
+async def test_patch_resizes_hold_when_only_max_duration_raised_into_higher_rate(factory):
+    """REC-07: a PATCH raising ONLY max_duration into a window that crosses a
+    higher-rate TOD slot must re-size the hold — max_rate_over_window rises with
+    the longer window, so the hold can't be left under-covering."""
+    from sqlalchemy import select
+
+    from backend.database.models import (
+        ChargingSession, Plug, Tariff as TariffModel, TariffSlot,
+    )
+
+    tenant_id = await _seed_tenant(factory)
+    gw = await _seed_gateway(factory, tenant_id, "gw-patch-tod")
+    plug_id = await _seed_plug(factory, gw)
+    uid = await _seed_user(factory, "500.00", tenant_id)
+
+    # Base 5.00 tariff + an all-week slot at 10.00. A >=24h window necessarily
+    # touches the slot, so max_rate_over_window returns 10.00 for the raised
+    # window (vs 5.00 base) — the whole point of the resize.
+    async with factory() as db:
+        tariff = TariffModel(tenant_id=tenant_id, name="TOD", price_per_kwh=Decimal("5.00"))
+        db.add(tariff)
+        await db.commit()
+        tariff_id = tariff.id
+        db.add(TariffSlot(
+            tariff_id=tariff_id, start_min=540, end_min=1020,
+            price_per_kwh=Decimal("10.00"), days_mask=127,
+        ))
+        plug = (await db.execute(select(Plug).where(Plug.id == plug_id))).scalar_one()
+        plug.tariff_id = tariff_id
+        await db.commit()
+
+    # Seeded hold is the short-window sizing (1 kWh * 5.00 base = 5.00).
+    sid = await _seed_active_session(
+        factory, tenant_id=tenant_id, user_id=uid, plug_id=plug_id,
+        max_kwh=1.0, max_duration=1800, hold="5.00", rate="5.00",
+    )
+
+    # Raise ONLY max_duration to a full day → window now crosses the 10.00 slot.
+    await _patch_limits(factory, session_id=sid, user_id=uid, max_duration=24 * 3600)
+
+    async with factory() as db:
+        session = (await db.execute(
+            select(ChargingSession).where(ChargingSession.id == sid)
+        )).scalar_one()
+    assert session.max_duration_seconds == 24 * 3600
+    assert session.max_kwh == 1.0                     # unchanged
+    assert session.hold_coins == Decimal("10.00")     # 1 kWh * 10.00 worst-case
+
+
+@db_gated
+@pytest.mark.asyncio
 async def test_patch_409_when_session_not_active(factory):
     from fastapi import HTTPException
 
@@ -773,6 +824,7 @@ async def test_persist_telemetry_forwards_session_limits_into_the_check():
     MQTTManager._instance = None
     plug = MagicMock()
     plug.gateway_id = "gw-1"
+    plug.last_telemetry_at = None  # [Plug power] first frame stamps the clock
     started = datetime.now(timezone.utc) - timedelta(minutes=10)
     sess_row = MagicMock()
     sess_row.id = 42
@@ -782,6 +834,7 @@ async def test_persist_telemetry_forwards_session_limits_into_the_check():
     sess_row.max_kwh = 1.0
     sess_row.max_duration_seconds = 1800
     sess_row.started_at = started
+    sess_row.energy_kwh = 0.0    # real float: monotonic max() reads it
     sess_row.peak_power_w = 0.0  # real float: compared against watts
     # [Pricing v2] Flat session: no TOD boundary, no segment accrual — so the
     # in-frame reprice hook is a clean no-op (rate_valid_until None).
@@ -797,7 +850,9 @@ async def test_persist_telemetry_forwards_session_limits_into_the_check():
     mgr._maybe_auto_stop_on_exhaustion = AsyncMock()
     mgr._maybe_auto_stop_on_limits = AsyncMock()
 
-    await mgr._persist_telemetry("gw-1", 5, 100.0, 1.2, None, None)
+    # relay_on=True: a real charging frame reports the relay on, so this is
+    # attributed to the ACTIVE session (not treated as an idle frame).
+    await mgr._persist_telemetry("gw-1", 5, 100.0, 1.2, None, None, relay_on=True)
 
     assert session.committed is True
     mgr._maybe_auto_stop_on_limits.assert_awaited_once_with(

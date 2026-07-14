@@ -55,9 +55,12 @@ async def set_plug_telemetry_interval(db: AsyncSession, plug_id: int, interval_m
 
     state.telemetry_store.set_interval(plug_id, interval_ms)
 
-    from backend.services.mqtt_manager import MQTTManager
-    manager = MQTTManager()
-    if hasattr(manager, "client") and manager.client:
+    # Use the singleton lifespan built, not a fresh no-arg MQTTManager():
+    # constructing one before lifespan runs would pin a localhost/no-factory
+    # instance and make lifespan's real config a no-op (REC-13). None until
+    # lifespan binds it.
+    manager = state.mqtt_manager
+    if manager is not None and getattr(manager, "client", None):
         manager.send_plug_interval(plug.gateway_id, plug_id, interval_ms)
 
 
@@ -77,6 +80,26 @@ def gateway_is_live(gateway: Gateway, now: Optional[datetime] = None) -> bool:
         last_seen = last_seen.replace(tzinfo=timezone.utc)
     now = now or datetime.now(timezone.utc)
     return (now - last_seen).total_seconds() <= GATEWAY_LIVENESS_WINDOW_SEC
+
+
+def plug_is_powered(plug: Plug, now: Optional[datetime] = None) -> bool:
+    """
+    Whether a plug is actually drawing power right now, judged by telemetry
+    freshness. True iff last_telemetry_at is within PLUG_POWER_STALE_SEC — a
+    plug whose firmware stopped reporting (mains/relay power lost, or its agent
+    down) reads False. Mirrors gateway_is_live: NULL (never reported) is False,
+    and a legacy-naive timestamp is treated as UTC.
+    """
+    from backend.services.mqtt_manager import PLUG_POWER_STALE_SEC
+
+    last = plug.last_telemetry_at
+    if last is None:
+        return False
+    if last.tzinfo is None:
+        # Legacy rows written by an old naive-datetime hook.
+        last = last.replace(tzinfo=timezone.utc)
+    now = now or datetime.now(timezone.utc)
+    return (now - last).total_seconds() <= PLUG_POWER_STALE_SEC
 
 
 async def check_and_speed_up_active_session(db: AsyncSession, user_id: int):
@@ -134,12 +157,15 @@ async def finalize_charging_session(
     plug = plug_result.scalar_one()
 
     # 1. Send MQTT OFF command (best-effort — the gateway may be gone; its
-    #    on-device watchdogs bound the hardware side)
+    #    on-device watchdogs bound the hardware side). wait=False: this runs on
+    #    the event loop, so don't block it up to 3 s on the broker ack for a
+    #    best-effort publish (the reconnect/orphan OFF path already uses this).
     success = state.mqtt_manager.send_plug_command(
         gateway_id=plug.gateway_id,
         plug_id=plug.id,
         action="OFF",
         local_ip=plug.local_ip,
+        wait=False,
     )
 
     if not success:

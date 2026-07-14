@@ -5,6 +5,7 @@ drops instead of freezing on stale values.
 """
 import asyncio
 import time
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
@@ -144,3 +145,53 @@ def test_start_session_resets_segment_state():
 
     snap = store.get_latest(8)
     assert snap.cost_coins == 2.0 * 5.0  # 10.0 — clean single segment, no leak
+
+
+# --- REC-11: rehydrate the mirror after a restart -----------------------------
+
+def test_hydrate_session_rebuilds_rate_and_start_from_db(monkeypatch):
+    """After a restart the maps are empty, so the first frame bills at the env
+    default and the elapsed timer restarts. hydrate_session (fed the ACTIVE
+    ChargingSession row by the caller) must restore the session's real rate and
+    started_at so the NEXT frame streams DB-accurate cost/duration."""
+    monkeypatch.setattr(telemetry_mod, "COINS_PER_KWH", 5.0)
+    store = TelemetryStore()
+
+    # First frame after restart: no start_session ran this process, so cost is
+    # computed at the env default and the timer starts "now".
+    store.update(plug_id=9, power_w=1000.0, current_a=4.0, energy_kwh=2.0,
+                 status="charging")
+    assert store.get_latest(9).cost_coins == 2.0 * 5.0  # env default, wrong rate
+
+    # Caller hydrates from the row it just loaded: real rate 8.00/kWh, session
+    # began 100s ago.
+    started_at = datetime.now(timezone.utc) - timedelta(seconds=100)
+    store.hydrate_session(9, rate_coins_per_kwh=Decimal("8.00"),
+                          settled_cost_coins=Decimal("0"), rate_segment_start_kwh=0.0,
+                          started_at=started_at)
+
+    # Next frame now bills at the DB rate and the elapsed timer reflects
+    # started_at, not the post-restart frame.
+    store.update(plug_id=9, power_w=1000.0, current_a=4.0, energy_kwh=2.0,
+                 status="charging")
+    snap = store.get_latest(9)
+    assert snap.cost_coins == 2.0 * 8.0  # DB rate, not the env default
+    assert snap.duration_sec >= 100
+
+
+def test_hydrate_session_no_op_when_already_tracked():
+    """A session started in-process is already in the maps; hydrate_session must
+    not clobber its live segment/rate state with the row snapshot."""
+    store = TelemetryStore()
+
+    store.start_session(10, rate_coins_per_kwh=Decimal("5.00"))
+    store.set_segment_state(10, settled_coins=Decimal("10.00"),
+                            segment_start_kwh=2.0, rate_coins_per_kwh=Decimal("8.00"))
+    # A late hydrate with stale row values must be ignored.
+    store.hydrate_session(10, rate_coins_per_kwh=Decimal("5.00"),
+                          settled_cost_coins=Decimal("0"), rate_segment_start_kwh=0.0)
+
+    store.update(plug_id=10, power_w=1000.0, current_a=4.0, energy_kwh=5.0,
+                 status="charging")
+    snap = store.get_latest(10)
+    assert snap.cost_coins == 10.0 + (5.0 - 2.0) * 8.0  # live segment state preserved
