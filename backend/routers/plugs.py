@@ -15,9 +15,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend import state
 from backend.database.db import async_session_factory, get_db
 from backend.database.models import (
-    ChargerGroup, ChargingSession, Gateway, GatewayStatus, GroupMembership,
-    LedgerTransaction, Plug, PlugStatus, PlugWatch, SessionStatus,
-    TelemetryReading, Tenant, TransactionType, User, UserRole,
+    CapacityRequest, ChargerGroup, ChargingSession, Gateway, GatewayStatus,
+    GroupMembership, LedgerTransaction, Plug, PlugStatus, PlugWatch,
+    SessionStatus, TelemetryReading, Tenant, TransactionType, User, UserRole,
 )
 from backend.schemas import (
     AuthResponse, CpoGatewayCreateRequest, CpoGroupCreateRequest,
@@ -378,6 +378,72 @@ async def unwatch_plug(
     )
     await db.commit()
     return {"status": "not_watching", "plug_id": plug_id, "watching": False}
+
+
+# ===========================================================================
+# Request capacity — a start blocked by a full circuit (caps + circuits)
+# ===========================================================================
+
+@router.post("/api/plugs/{plug_id}/request-capacity")
+async def request_capacity(
+    plug_id: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Arm a one-shot "request capacity" when a plug's shared circuit is at its
+    current cap (the `circuit_full` 409 from a start). When the circuit next
+    has room — a session on it ends or the operator raises the cap — the driver
+    gets a `capacity_available` notification and this row clears itself
+    (services/capacity.py).
+
+    Idempotent (UNIQUE user+plug). Rejects (400) a plug that isn't on a capped
+    circuit, or a circuit that actually has room right now (nothing to wait for
+    — just start). Access follows GET /api/plugs/{id} (403 for a private group
+    the user hasn't joined).
+    """
+    plug = (await db.execute(select(Plug).where(Plug.id == plug_id))).scalar_one_or_none()
+    if not plug:
+        raise HTTPException(status_code=404, detail=f"Plug with ID {plug_id} not found.")
+
+    await ensure_plug_group_access(db, plug, user)
+
+    if plug.group_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail="This charger isn't on a shared circuit — there's nothing to wait for.",
+        )
+    group = (
+        await db.execute(select(ChargerGroup).where(ChargerGroup.id == plug.group_id))
+    ).scalar_one_or_none()
+    if group is None or group.max_current_a is None:
+        raise HTTPException(
+            status_code=400,
+            detail="This charger's circuit has no capacity limit — just start charging.",
+        )
+
+    from backend.services.caps import circuit_load_a, effective_plug_cap
+    load = await circuit_load_a(db, plug.group_id)
+    if load + effective_plug_cap(plug) <= group.max_current_a + 1e-6:
+        raise HTTPException(
+            status_code=400,
+            detail="There's capacity available right now — just tap Start.",
+        )
+
+    existing = (await db.execute(
+        select(CapacityRequest).where(
+            and_(CapacityRequest.user_id == user.id, CapacityRequest.plug_id == plug_id)
+        )
+    )).scalar_one_or_none()
+    if not existing:
+        db.add(CapacityRequest(user_id=user.id, plug_id=plug_id, group_id=plug.group_id))
+        try:
+            await db.commit()
+        except IntegrityError:
+            # Double-tap race on UNIQUE(user_id, plug_id) — already requested.
+            await db.rollback()
+
+    return {"status": "requested", "plug_id": plug_id}
 
 
 

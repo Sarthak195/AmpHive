@@ -7,6 +7,11 @@ import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent, act } from '@testing-library/react';
 
 import ChargeSetupModal from './ChargeSetupModal';
+import api from '../api/client';
+
+vi.mock('../api/client', () => ({
+  default: { get: vi.fn(), post: vi.fn(), put: vi.fn(), delete: vi.fn() },
+}));
 
 const PLUG = { id: 7, name: 'Tower B — P2', price_per_kwh: 5 };
 
@@ -64,5 +69,27 @@ describe('ChargeSetupModal', () => {
     renderModal(onStart);
     await clickStart();
     expect(await screen.findByText(/Insufficient balance/)).toBeInTheDocument();
+  });
+
+  it('offers "Request capacity" on a circuit_full block and posts the request', async () => {
+    const err = new Error('This circuit is at capacity.');
+    err.code = 'circuit_full';
+    const onStart = vi.fn().mockRejectedValue(err);
+    api.post.mockResolvedValue({ status: 'requested' });
+    renderModal(onStart);
+    await clickStart();
+
+    const reqBtn = await screen.findByRole('button', { name: 'Request capacity' });
+    await act(async () => { fireEvent.click(reqBtn); });
+
+    expect(api.post).toHaveBeenCalledWith('/api/plugs/7/request-capacity');
+    expect(await screen.findByText(/notification when this circuit has room/i)).toBeInTheDocument();
+  });
+
+  it('does not offer "Request capacity" for an ordinary start error', async () => {
+    const onStart = vi.fn().mockRejectedValue(new Error('Insufficient balance'));
+    renderModal(onStart);
+    await clickStart();
+    expect(screen.queryByRole('button', { name: 'Request capacity' })).not.toBeInTheDocument();
   });
 });

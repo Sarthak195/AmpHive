@@ -20,15 +20,22 @@ def _plug(group_id=1, cap=16.0):
 
 
 class _Result:
-    def __init__(self, scalar=None, rows=None):
+    def __init__(self, scalar=None, rows=None, scalar_list=None):
         self._scalar = scalar
         self._rows = rows or []
+        self._scalar_list = scalar_list or []
 
     def scalar_one_or_none(self):
         return self._scalar
 
+    def scalar(self):
+        return self._scalar
+
     def all(self):
         return self._rows
+
+    def scalars(self):
+        return SimpleNamespace(all=lambda: self._scalar_list)
 
 
 class _FakeDb:
@@ -41,6 +48,12 @@ class _FakeDb:
         r = self._results[self.calls]
         self.calls += 1
         return r
+
+    async def commit(self):
+        pass
+
+    async def rollback(self):
+        pass
 
 
 def test_effective_plug_cap_uses_default_when_unset(monkeypatch):
@@ -74,7 +87,8 @@ async def test_admission_rejects_over_capacity(monkeypatch):
     with pytest.raises(HTTPException) as ei:
         await caps.check_circuit_admission(db, _plug(cap=16.0))
     assert ei.value.status_code == 409
-    assert "capacity" in ei.value.detail.lower()
+    assert ei.value.detail["code"] == "circuit_full"
+    assert "capacity" in ei.value.detail["message"].lower()
 
 
 @pytest.mark.asyncio
@@ -103,3 +117,57 @@ async def test_admission_noop_when_disabled(monkeypatch):
     db = _FakeDb([])
     await caps.check_circuit_admission(db, _plug(cap=16.0))
     assert db.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_notify_capacity_available_notifies_fitting_request(monkeypatch):
+    """A freed circuit (load 16 A of 32 A) notifies the waiting driver whose
+    16 A plug now fits, and clears their request row (one-shot)."""
+    import backend.services.capacity as capacity
+
+    monkeypatch.setattr(caps, "DEFAULT_PLUG_CAP_A", 16.0)
+    group = SimpleNamespace(id=1, max_current_a=32.0)
+    plug = SimpleNamespace(id=99, name="Bay 9", max_current_a=16.0)
+    db = _FakeDb([
+        _Result(scalar=group),                # group load
+        _Result(rows=[(50, 7, 99)]),          # requests: (id, user_id, plug_id)
+        _Result(rows=[(16.0,)]),              # circuit_load_a -> 16 A committed
+        _Result(scalar_list=[plug]),          # the requested plugs
+        _Result(),                            # delete of fired rows
+    ])
+    notified = []
+
+    async def fake_notify(user_id, ntype, title, body, **kw):
+        notified.append((user_id, ntype))
+
+    monkeypatch.setattr("backend.services.notifications.notify", fake_notify)
+
+    n = await capacity.notify_capacity_available(db, group_id=1)
+    assert n == 1
+    assert notified == [(7, "capacity_available")]
+
+
+@pytest.mark.asyncio
+async def test_notify_capacity_skips_request_that_still_wont_fit(monkeypatch):
+    """A circuit still full (30 A of 32 A) can't fit a 16 A plug -> no notify,
+    the request stays armed (no delete)."""
+    import backend.services.capacity as capacity
+
+    monkeypatch.setattr(caps, "DEFAULT_PLUG_CAP_A", 16.0)
+    group = SimpleNamespace(id=1, max_current_a=32.0)
+    plug = SimpleNamespace(id=99, name="Bay 9", max_current_a=16.0)
+    db = _FakeDb([
+        _Result(scalar=group),
+        _Result(rows=[(50, 7, 99)]),
+        _Result(rows=[(30.0,)]),              # 30 A committed; 30+16 > 32
+        _Result(scalar_list=[plug]),
+    ])
+    notified = []
+    monkeypatch.setattr(
+        "backend.services.notifications.notify",
+        lambda *a, **k: notified.append(a),
+    )
+
+    n = await capacity.notify_capacity_available(db, group_id=1)
+    assert n == 0
+    assert notified == []
