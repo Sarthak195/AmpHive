@@ -29,7 +29,7 @@ from backend.schemas import (
     AuthResponse, CpoDisputeResolveRequest, CpoGatewayCreateRequest,
     CpoGatewayOtaRequest, CpoGroupCreateRequest, CpoGroupUpdateRequest,
     CpoPlugCreateRequest, CpoPlugMaintenanceRequest, CpoPlugUpdateRequest,
-    CpoSetupRequest, CreateOrderRequest, CreateOrderResponse,
+    CpoProfileUpdateRequest, CpoSetupRequest, CreateOrderRequest, CreateOrderResponse,
     DirectPlugRequest, DisputeResponse, GatewayEventResponse,
     GatewayRegisterRequest, GroupResponse, JoinGroupRequest, LoginRequest,
     PlugRegisterRequest, PlugResponse, RegisterRequest,
@@ -204,12 +204,54 @@ async def cpo_profile(
             # interpreted in (services/pricing.py). Shown read-only on the
             # tariff editor so "peak 18:00–22:00" is unambiguous.
             "timezone": tenant.timezone,
+            # [Queued charge] Tenant-level queued-charge defaults (per-plug
+            # overrides live on the plug). Editable via PUT /api/cpo/profile.
+            "queued_charging_enabled": tenant.queued_charging_enabled,
+            "auto_start_delay_min": tenant.auto_start_delay_min,
+            "queue_ttl_min": tenant.queue_ttl_min,
         },
         "stats": {
             "gateway_count": gateway_count,
             "plug_count": plug_count,
             "group_count": group_count,
         },
+    }
+
+
+@router.put("/api/cpo/profile")
+async def cpo_update_profile(
+    req: CpoProfileUpdateRequest,
+    user: User = Depends(require_role("cpo", "admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    [Queued charge] Update the CPO's tenant-level settings — the queued-charge
+    defaults every plug inherits unless it carries its own override. All fields
+    optional; omitted ones are left unchanged.
+    """
+    tenant = (
+        await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))
+    ).scalar_one_or_none()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found.")
+
+    if req.queued_charging_enabled is not None:
+        tenant.queued_charging_enabled = req.queued_charging_enabled
+    if req.auto_start_delay_min is not None:
+        tenant.auto_start_delay_min = req.auto_start_delay_min
+    if req.queue_ttl_min is not None:
+        tenant.queue_ttl_min = req.queue_ttl_min
+
+    await db.commit()
+    await db.refresh(tenant)
+
+    logger.info(f"CPO tenant settings updated: {tenant.id} by {user.email}")
+
+    return {
+        "status": "updated",
+        "queued_charging_enabled": tenant.queued_charging_enabled,
+        "auto_start_delay_min": tenant.auto_start_delay_min,
+        "queue_ttl_min": tenant.queue_ttl_min,
     }
 
 
@@ -397,6 +439,10 @@ async def cpo_list_plugs(
             "longitude": plug.longitude,
             # [Caps] The per-plug current cap (None = default hardware cutoff).
             "max_current_a": plug.max_current_a,
+            # [Queued charge] Per-plug overrides (None = inherit the tenant
+            # default) — pre-fill the edit form.
+            "queued_charging_enabled": plug.queued_charging_enabled,
+            "auto_start_delay_min": plug.auto_start_delay_min,
             "last_seen_at": plug.last_seen_at.isoformat() if plug.last_seen_at else None,
             "created_at": plug.created_at.isoformat() if plug.created_at else None,
         }
@@ -527,6 +573,12 @@ async def cpo_update_plug(
     if req.max_current_a is not None:
         # [Caps] 0 clears the cap back to the default hardware cutoff (NULL).
         plug.max_current_a = req.max_current_a or None
+    if req.queued_charging_enabled is not None:
+        # [Queued charge] Explicit per-plug on/off override of the tenant default.
+        plug.queued_charging_enabled = req.queued_charging_enabled
+    if req.auto_start_delay_min is not None:
+        # [Queued charge] 0 clears the override back to the tenant default (NULL).
+        plug.auto_start_delay_min = req.auto_start_delay_min or None
 
     await db.commit()
     await db.refresh(plug)

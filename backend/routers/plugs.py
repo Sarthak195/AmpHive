@@ -40,6 +40,10 @@ from backend.services.session_lifecycle import (
     check_and_speed_up_active_session, finalize_charging_session,
     gateway_is_live, plug_is_powered, set_plug_telemetry_interval,
 )
+# [Queued charge] queue_available on PlugResponse = gateway online + plug
+# unpowered + the CPO's queued-charging resolver says yes (Plug override ->
+# Tenant default).
+from backend.services.session_start import queued_charging_enabled
 from backend.services.telemetry import COINS_PER_KWH
 
 logger = logging.getLogger("amphive.api")
@@ -169,8 +173,9 @@ async def get_available_plugs(
     )
 
     rows = await db.execute(
-        select(Plug, ChargerGroup.name, ChargerGroup.is_public, Gateway)
+        select(Plug, ChargerGroup.name, ChargerGroup.is_public, Gateway, Tenant)
         .join(Gateway, Gateway.id == Plug.gateway_id)
+        .join(Tenant, Tenant.id == Gateway.tenant_id)
         .outerjoin(ChargerGroup, ChargerGroup.id == Plug.group_id)
         .where(
             or_(
@@ -196,11 +201,13 @@ async def get_available_plugs(
     # [Reservations] reserved_now / next_reservation etc. for every listed
     # plug in one grouped query — NOT per-plug (this endpoint stays N+1-free).
     reservation_fields = await _reservation_fields_for_plugs(
-        db, [plug.id for plug, _, _, _ in all_rows], user.id, now
+        db, [plug.id for plug, _, _, _, _ in all_rows], user.id, now
     )
 
     responses = []
-    for plug, group_name, group_is_public, gateway in all_rows:
+    for plug, group_name, group_is_public, gateway, tenant in all_rows:
+        gw_online = gateway_is_live(gateway, now)
+        powered = plug_is_powered(plug, now)
         # Resolved effective rate + [Pricing v2] the next TOD price and when it
         # changes (plug tariff -> group tariff -> tenant default -> env fallback;
         # services/pricing.py). resolve_price_display loads the tariff+slots ONCE
@@ -218,8 +225,12 @@ async def get_available_plugs(
                 group_name=group_name,
                 latitude=plug.latitude if plug.latitude is not None else gateway.latitude,
                 longitude=plug.longitude if plug.longitude is not None else gateway.longitude,
-                gateway_online=gateway_is_live(gateway, now),
-                plug_powered=plug_is_powered(plug, now),
+                gateway_online=gw_online,
+                plug_powered=powered,
+                queue_available=(
+                    gw_online and not powered
+                    and queued_charging_enabled(tenant, plug)
+                ),
                 price_per_kwh=float(rate),
                 price_next_per_kwh=float(next_rate) if next_rate is not None else None,
                 price_changes_at=changes_at.isoformat() if changes_at is not None else None,
@@ -261,6 +272,13 @@ async def get_plug(
     gateway = gw_row.scalar_one_or_none()
     gw_lat = gateway.latitude if gateway else None
     gw_lng = gateway.longitude if gateway else None
+    # [Queued charge] The tenant carries the queued-charging default the plug
+    # override falls back to.
+    tenant = None
+    if gateway is not None:
+        tenant = (
+            await db.execute(select(Tenant).where(Tenant.id == gateway.tenant_id))
+        ).scalar_one_or_none()
 
     # Resolved effective rate + [Pricing v2] next TOD price and its change time
     # (plug tariff -> group tariff -> tenant default -> env fallback;
@@ -281,6 +299,8 @@ async def get_plug(
         )
     )).scalar_one_or_none() is not None
 
+    gw_online = gateway_is_live(gateway) if gateway else False
+    powered = plug_is_powered(plug, now)
     return PlugResponse(
         id=plug.id,
         name=plug.name,
@@ -290,8 +310,12 @@ async def get_plug(
         group_name=group_name,
         latitude=plug.latitude if plug.latitude is not None else gw_lat,
         longitude=plug.longitude if plug.longitude is not None else gw_lng,
-        gateway_online=gateway_is_live(gateway) if gateway else False,
-        plug_powered=plug_is_powered(plug, now),
+        gateway_online=gw_online,
+        plug_powered=powered,
+        queue_available=(
+            gw_online and not powered and tenant is not None
+            and queued_charging_enabled(tenant, plug)
+        ),
         price_per_kwh=float(rate),
         price_next_per_kwh=float(next_rate) if next_rate is not None else None,
         price_changes_at=changes_at.isoformat() if changes_at is not None else None,

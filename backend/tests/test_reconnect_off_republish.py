@@ -51,6 +51,7 @@ async def test_online_republishes_off_only_to_plugs_without_active_session():
         _result_scalar_one(MagicMock()),                      # gateway row lookup
         _result_rows([(1, "10.0.0.11"), (2, "10.0.0.12")]),   # (plug_id, local_ip)
         _result_scalars([2]),                                 # plug 2 has an ACTIVE session
+        _result_rows([]),                                     # [queued charge] no WAITING rows
     ])
 
     await mgr._persist_gateway_status("gw-1", "online")
