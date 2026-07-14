@@ -782,6 +782,7 @@ async def test_persist_telemetry_forwards_session_limits_into_the_check():
     sess_row.max_kwh = 1.0
     sess_row.max_duration_seconds = 1800
     sess_row.started_at = started
+    sess_row.energy_kwh = 0.0    # real float: monotonic max() reads it
     sess_row.peak_power_w = 0.0  # real float: compared against watts
     # [Pricing v2] Flat session: no TOD boundary, no segment accrual — so the
     # in-frame reprice hook is a clean no-op (rate_valid_until None).
@@ -797,7 +798,9 @@ async def test_persist_telemetry_forwards_session_limits_into_the_check():
     mgr._maybe_auto_stop_on_exhaustion = AsyncMock()
     mgr._maybe_auto_stop_on_limits = AsyncMock()
 
-    await mgr._persist_telemetry("gw-1", 5, 100.0, 1.2, None, None)
+    # relay_on=True: a real charging frame reports the relay on, so this is
+    # attributed to the ACTIVE session (not treated as an idle frame).
+    await mgr._persist_telemetry("gw-1", 5, 100.0, 1.2, None, None, relay_on=True)
 
     assert session.committed is True
     mgr._maybe_auto_stop_on_limits.assert_awaited_once_with(

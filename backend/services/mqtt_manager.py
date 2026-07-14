@@ -339,7 +339,7 @@ class MQTTManager:
         # --- 3. Persist authoritative session totals (async, fire-and-forget) ---
         if self.db_session_factory and self.event_loop:
             asyncio.run_coroutine_threadsafe(
-                self._persist_telemetry(gateway_id, plug_id, watts, kwh, session_id, sample),
+                self._persist_telemetry(gateway_id, plug_id, watts, kwh, session_id, sample, relay_on),
                 self.event_loop,
             )
             # Telemetry proves the gateway is alive — refresh its liveness
@@ -615,7 +615,8 @@ class MQTTManager:
 
     async def _persist_telemetry(self, gateway_id: str, plug_id: int, watts: float, kwh: float,
                                  session_id: Optional[int] = None,
-                                 sample: Optional[Dict[str, Any]] = None):
+                                 sample: Optional[Dict[str, Any]] = None,
+                                 relay_on: bool = False):
         """
         Persist the latest telemetry snapshot to the database:
         - Verify the claimed plug actually belongs to the publishing gateway
@@ -695,12 +696,27 @@ class MQTTManager:
                         ChargingSession.plug_id == plug_id,
                         ChargingSession.status == SessionStatus.ACTIVE,
                     )
+                # [REC-04] Lock the row the way the reaper reprice does
+                # (session_reaper.py) so the forward-only reprice + rate_changed
+                # emit below can't race a concurrent frame or the reaper's sweep.
                 sess_result = await session.execute(
-                    select(ChargingSession).where(where_clause)
+                    select(ChargingSession).where(where_clause).with_for_update()
                 )
                 active_session = sess_result.scalar_one_or_none()
-                if active_session:
-                    active_session.energy_kwh = kwh
+
+                # [REC-05] An idle frame — no session_id AND relay off (firmware
+                # emits session_id="" + session_kwh=0 when its session_active is
+                # false) — reached an ACTIVE session only via the plug-id
+                # fallback. It must NOT be attributed to that session: overwriting
+                # its energy (with 0) or refreshing its staleness clock would
+                # zero/keep-alive a freshly-started session this frame predates.
+                # Require a matching session_id or a live relay to touch it.
+                frame_is_idle = session_id is None and not relay_on
+                if active_session is not None and not frame_is_idle:
+                    # [REC-01] Energy is monotonic: never bill down. A reading
+                    # below the stored total (meter reset) re-baselines to the
+                    # max, matching the guard already on the peak-power write.
+                    active_session.energy_kwh = max(active_session.energy_kwh or 0.0, kwh)
                     # Track peak power — only update if this reading is higher
                     if watts > active_session.peak_power_w:
                         active_session.peak_power_w = watts
@@ -723,6 +739,22 @@ class MQTTManager:
                     updated_max_kwh = active_session.max_kwh
                     updated_max_duration = active_session.max_duration_seconds
                     updated_started_at = active_session.started_at
+
+                # [REC-02] Level-triggered OFF reconciliation. The relay is
+                # reported ON but no ACTIVE session owns this plug — a prior OFF
+                # was lost/failed while the gateway stayed connected, so the
+                # reconnect-only _republish_off_for_orphaned_plugs never fired.
+                # Re-send OFF (idempotent — a no-op on an already-off plug),
+                # using the same best-effort wait=False publish the reconnect
+                # path uses so we don't block the loop on the broker ack.
+                elif active_session is None and relay_on:
+                    self.send_plug_command(
+                        gateway_id, plug_id, "OFF", local_ip=plug.local_ip, wait=False
+                    )
+                    logger.info(
+                        "Republished OFF for relay-on plug with no ACTIVE session",
+                        extra={"gateway_id": gateway_id, "plug_id": plug_id},
+                    )
 
                 await session.commit()
         except Exception as e:
@@ -1092,15 +1124,21 @@ class MQTTManager:
                 )
                 active_plug_ids = set(active_result.scalars().all())
 
-            for plug_id, local_ip in plug_ips.items():
-                if plug_id not in active_plug_ids:
-                    # wait=False: we're on the event loop — don't block it on
-                    # the broker ack for a best-effort cleanup publish.
-                    self.send_plug_command(gateway_id, plug_id, "OFF", local_ip=local_ip, wait=False)
-                    logger.info(
-                        "Republished OFF on reconnect (no ACTIVE session)",
-                        extra={"gateway_id": gateway_id, "plug_id": plug_id},
-                    )
+                # [REC-06] Publish each OFF INSIDE the same session, with no
+                # await between the ACTIVE snapshot above and these synchronous
+                # publishes: that leaves no yield point for a session started in
+                # the gap to commit and then be wrongly killed. (Previously the
+                # snapshot was taken, the session closed — an await boundary —
+                # and only then were OFFs published, racing a fresh start.)
+                for plug_id, local_ip in plug_ips.items():
+                    if plug_id not in active_plug_ids:
+                        # wait=False: we're on the event loop — don't block it on
+                        # the broker ack for a best-effort cleanup publish.
+                        self.send_plug_command(gateway_id, plug_id, "OFF", local_ip=local_ip, wait=False)
+                        logger.info(
+                            "Republished OFF on reconnect (no ACTIVE session)",
+                            extra={"gateway_id": gateway_id, "plug_id": plug_id},
+                        )
         except Exception as e:
             logger.error(
                 "OFF republish on reconnect failed",

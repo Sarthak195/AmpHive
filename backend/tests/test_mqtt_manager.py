@@ -120,7 +120,8 @@ async def test_session_id_parsed_and_forwarded_to_persist(reported_sid, expected
 
     captured = {}
 
-    async def fake_persist(gateway_id, plug_id, watts, kwh, session_id=None, sample=None):
+    async def fake_persist(gateway_id, plug_id, watts, kwh, session_id=None,
+                           sample=None, relay_on=False):
         captured.update(gateway_id=gateway_id, plug_id=plug_id, watts=watts,
                         kwh=kwh, session_id=session_id)
 
@@ -737,6 +738,137 @@ async def test_persist_telemetry_accepts_own_plug_and_enqueues_sample():
     assert session.committed is True
     assert plug.current_power_w == 100.0
     fake_tp.enqueue.assert_called_once_with(sample)
+    MQTTManager._instance = None
+
+
+def _owned_plug():
+    plug = MagicMock()
+    plug.gateway_id = "gw-1"
+    plug.local_ip = "10.0.0.5"
+    return plug
+
+
+@pytest.mark.asyncio
+async def test_persist_telemetry_energy_is_monotonic():
+    """[REC-01] A reading below the stored total (a meter reset / re-baseline)
+    must NOT lower the session's billed energy — energy only ever climbs."""
+    MQTTManager._instance = None
+    active = MagicMock()
+    active.id = 10
+    active.user_id = 1
+    active.energy_kwh = 5.0
+    active.peak_power_w = 0.0
+    session = _FakeSession([
+        _FakeResult(scalar=_owned_plug()),
+        _FakeResult(scalar=active),
+    ])
+    mgr = MQTTManager(db_session_factory=lambda: session)
+    mgr._maybe_auto_stop_on_exhaustion = AsyncMock()
+    mgr._maybe_auto_stop_on_limits = AsyncMock()
+
+    with patch("backend.services.pricing.reprice_session_if_due",
+               AsyncMock(return_value=None)):
+        # session_id matches the ACTIVE row → attributed; kwh drops 5.0 -> 2.0.
+        await mgr._persist_telemetry("gw-1", 5, 100.0, 2.0,
+                                     session_id=10, sample=None, relay_on=True)
+
+    assert active.energy_kwh == 5.0
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_persist_telemetry_energy_climbs_on_higher_reading():
+    """The monotonic guard still lets a genuinely higher reading through."""
+    MQTTManager._instance = None
+    active = MagicMock()
+    active.id = 10
+    active.user_id = 1
+    active.energy_kwh = 5.0
+    active.peak_power_w = 0.0
+    session = _FakeSession([
+        _FakeResult(scalar=_owned_plug()),
+        _FakeResult(scalar=active),
+    ])
+    mgr = MQTTManager(db_session_factory=lambda: session)
+    mgr._maybe_auto_stop_on_exhaustion = AsyncMock()
+    mgr._maybe_auto_stop_on_limits = AsyncMock()
+
+    with patch("backend.services.pricing.reprice_session_if_due",
+               AsyncMock(return_value=None)):
+        await mgr._persist_telemetry("gw-1", 100.0, 100.0, 7.5,
+                                     session_id=10, sample=None, relay_on=True)
+
+    assert active.energy_kwh == 7.5
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_persist_telemetry_idle_frame_not_attributed_to_active_session():
+    """[REC-05] An idle frame (no session_id, relay off) reaches an ACTIVE
+    session only via the plug-id fallback. It must not zero the session's
+    energy or refresh its staleness clock — those belong to the real session
+    this frame predates."""
+    MQTTManager._instance = None
+    active = MagicMock()
+    active.energy_kwh = 5.0
+    active.last_telemetry_at = "SENTINEL"
+    session = _FakeSession([
+        _FakeResult(scalar=_owned_plug()),
+        _FakeResult(scalar=active),
+    ])
+    mgr = MQTTManager(db_session_factory=lambda: session)
+    mgr._maybe_auto_stop_on_exhaustion = AsyncMock()
+    mgr._maybe_auto_stop_on_limits = AsyncMock()
+    mgr.send_plug_command = MagicMock()
+
+    await mgr._persist_telemetry("gw-1", 5, 0.0, 0.0,
+                                 session_id=None, sample=None, relay_on=False)
+
+    assert active.energy_kwh == 5.0                 # not zeroed
+    assert active.last_telemetry_at == "SENTINEL"   # staleness clock untouched
+    mgr._maybe_auto_stop_on_exhaustion.assert_not_awaited()
+    mgr.send_plug_command.assert_not_called()        # there IS an ACTIVE session
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_persist_telemetry_relay_on_no_session_republishes_off():
+    """[REC-02] A frame reporting the relay ON for a plug with NO ACTIVE
+    session re-sends OFF (level-triggered cleanup of a lost/failed OFF while
+    the gateway stayed connected)."""
+    MQTTManager._instance = None
+    session = _FakeSession([
+        _FakeResult(scalar=_owned_plug()),
+        _FakeResult(scalar=None),   # no ACTIVE session
+    ])
+    mgr = MQTTManager(db_session_factory=lambda: session)
+    mgr.send_plug_command = MagicMock()
+
+    await mgr._persist_telemetry("gw-1", 7, 50.0, 0.0,
+                                 session_id=None, sample=None, relay_on=True)
+
+    mgr.send_plug_command.assert_called_once_with(
+        "gw-1", 7, "OFF", local_ip="10.0.0.5", wait=False
+    )
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_persist_telemetry_relay_off_no_session_does_not_republish():
+    """The level-triggered OFF is scoped to relay_on frames — an idle/off frame
+    with no session must not spam OFF publishes."""
+    MQTTManager._instance = None
+    session = _FakeSession([
+        _FakeResult(scalar=_owned_plug()),
+        _FakeResult(scalar=None),   # no ACTIVE session
+    ])
+    mgr = MQTTManager(db_session_factory=lambda: session)
+    mgr.send_plug_command = MagicMock()
+
+    await mgr._persist_telemetry("gw-1", 7, 0.0, 0.0,
+                                 session_id=None, sample=None, relay_on=False)
+
+    mgr.send_plug_command.assert_not_called()
     MQTTManager._instance = None
 
 

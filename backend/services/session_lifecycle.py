@@ -134,12 +134,15 @@ async def finalize_charging_session(
     plug = plug_result.scalar_one()
 
     # 1. Send MQTT OFF command (best-effort — the gateway may be gone; its
-    #    on-device watchdogs bound the hardware side)
+    #    on-device watchdogs bound the hardware side). wait=False: this runs on
+    #    the event loop, so don't block it up to 3 s on the broker ack for a
+    #    best-effort publish (the reconnect/orphan OFF path already uses this).
     success = state.mqtt_manager.send_plug_command(
         gateway_id=plug.gateway_id,
         plug_id=plug.id,
         action="OFF",
         local_ip=plug.local_ip,
+        wait=False,
     )
 
     if not success:
