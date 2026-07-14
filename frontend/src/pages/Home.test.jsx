@@ -519,6 +519,77 @@ describe('Home — "notify me when free" bell', () => {
   });
 });
 
+describe('Home — live connectivity + poll backstop', () => {
+  beforeEach(() => {
+    useAuth.mockReturnValue({ user: DRIVER });
+    api.get.mockResolvedValue(PLUGS);
+  });
+
+  it('flips a plug card offline live on a plug_connectivity push', async () => {
+    const handlers = {};
+    const socket = {
+      on: (event, fn) => { handlers[event] = fn; },
+      off: vi.fn(),
+    };
+    useSession.mockReturnValue({
+      startSession: vi.fn(),
+      activeSessions: [],
+      switchSession: vi.fn(),
+      error: null,
+      socket,
+    });
+    renderHome('/');
+    await screen.findByText('Lobby Plug');
+
+    // Lobby (id 1) starts available + gateway online → startable, no free bell.
+    expect(screen.getByText('Charge →')).toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: /Notify me when Lobby Plug is free/ })
+    ).not.toBeInTheDocument();
+
+    // Its gateway drops → the card goes offline in place: no longer startable,
+    // and the "notify me when free" bell appears — all without a refetch.
+    act(() => handlers.plug_connectivity({ plug_id: 1, gateway_online: false }));
+
+    expect(screen.queryByText('Charge →')).not.toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: /Notify me when Lobby Plug is free/ })
+    ).toBeInTheDocument();
+
+    // Gateway recovers via the same push → back to a startable card.
+    act(() => handlers.plug_connectivity({ plug_id: 1, gateway_online: true }));
+    expect(screen.getByText('Charge →')).toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: /Notify me when Lobby Plug is free/ })
+    ).not.toBeInTheDocument();
+  });
+
+  it('polls the plug fetcher every 30s as a backstop', async () => {
+    vi.useFakeTimers();
+    try {
+      renderHome('/');
+      // Initial load fetch (available) + reservations.
+      const initialCalls = api.get.mock.calls.filter(
+        ([url]) => url === '/api/plugs/available'
+      ).length;
+
+      await act(async () => { vi.advanceTimersByTime(30000); });
+      const afterOne = api.get.mock.calls.filter(
+        ([url]) => url === '/api/plugs/available'
+      ).length;
+      expect(afterOne).toBe(initialCalls + 1);
+
+      await act(async () => { vi.advanceTimersByTime(30000); });
+      const afterTwo = api.get.mock.calls.filter(
+        ([url]) => url === '/api/plugs/available'
+      ).length;
+      expect(afterTwo).toBe(initialCalls + 2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe('Home — time-of-day next-price ribbon', () => {
   beforeEach(() => {
     useAuth.mockReturnValue({ user: DRIVER });
