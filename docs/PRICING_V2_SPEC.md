@@ -1,12 +1,14 @@
 # Pricing v2 — Time-of-Day Tariffs & Forward-Only Segmented Billing
 
-*Design spec, drafted 2026-07-13. Status: **Phases 1–2 BUILT (2026-07-14).**
+*Design spec, drafted 2026-07-13. Status: **Phases 1, 2 & 4 BUILT (2026-07-14).**
 Phase 1 = schema + resolution + billing helpers; Phase 2 = billing wired to
 `session_cost` + forward-only reprice (telemetry frame hook + reaper backstop) +
-`rate_changed` notification + start-time hold at `max_rate_over_window`. Still
+`rate_changed` notification + start-time hold at `max_rate_over_window`;
+Phase 4 = operator slot-editor (`/cpo/tariffs` + `tariff_slots` CRUD API with
+overlap validation) and driver current+next price (`resolve_price_display` →
+`PlugResponse.price_next_per_kwh`/`price_changes_at` → Home ribbon hint). Still
 open: **Phase 3** (operator-edit reprice trigger `AUTO_REPRICE_ACTIVE_SESSIONS`;
-PATCH-`/limits` hold-at-max-rate) and **Phase 4** (operator slot-editor API + UI,
-driver current+next price). Deployed-safe now: a flat tariff resolves no
+PATCH-`/limits` hold-at-max-rate). Deployed-safe: a flat tariff resolves no
 boundary, so it bills byte-identically until a CPO adds a slot.*
 
 Related: [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) "Per-CPO/per-site
@@ -360,5 +362,11 @@ persist individually in this design — see §11 open decision on a segment log)
 3. ⬜ **Operator edit trigger + hold sizing** (`AUTO_REPRICE_ACTIVE_SESSIONS`
    on the `/api/cpo/tariffs*` edit/slot endpoints; grow the PATCH-`/limits` hold
    at the max-rate-over-window for the remaining window).
-4. ⬜ **API + frontend** — slot editor, driver current+next price, session
-   reprice notice.
+4. ✅ **API + frontend** — slot editor (`/cpo/tariffs` page + `tariff_slots`
+   CRUD sub-resources, `slot_overlaps` validation, tenant tz shown read-only),
+   driver current+next price (`resolve_price_display`, Home ribbon "→ 6 @ 18:00").
+   *(Built 2026-07-14, feat/pricing-v2-phase4-slot-editor.)* Deferred within P4:
+   per-weekday `days_mask` UI (schema carries it; UI ships all-days), a
+   `Tenant.timezone` edit endpoint (default Asia/Kolkata, shown read-only), and
+   the session-monitor inline "rate is now" notice (the `rate_changed` bell
+   notification already delivers it).

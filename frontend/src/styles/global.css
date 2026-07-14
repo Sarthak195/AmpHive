@@ -882,6 +882,19 @@ p {
 
 .price-ribbon small { font-weight: 700; opacity: 0.7; font-size: 0.72em; }
 
+/* [Pricing v2] The upcoming time-of-day price, on a second ribbon line
+   ("5/kWh" then "→ 6 @ 18:00"). Shown only when a slot boundary changes the
+   price later today. */
+.price-ribbon-next {
+  display: block;
+  font-weight: 600;
+  font-size: 0.64rem;
+  opacity: 0.82;
+  margin-top: 1px;
+  text-align: right;
+  white-space: nowrap;
+}
+
 .chip-row { display: flex; flex-wrap: wrap; gap: 6px; }
 
 .chip {

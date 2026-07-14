@@ -35,9 +35,7 @@ from backend.services.auth import (
     hash_password, verify_password,
 )
 from backend.services.money import ZERO_MONEY, energy_cost, to_money
-from backend.services.pricing import (
-    max_rate_over_window, resolve_rate_for_plug, resolve_rate_window,
-)
+from backend.services.pricing import max_rate_over_window, resolve_rate_window
 from backend.services.rbac import require_role
 from backend.services.session_lifecycle import (
     check_and_speed_up_active_session, finalize_charging_session,

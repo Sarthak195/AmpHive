@@ -30,6 +30,7 @@ import CpoSessions from './pages/cpo/CpoSessions';
 import CpoReservations from './pages/cpo/CpoReservations';
 import CpoFaults from './pages/cpo/CpoFaults';
 import CpoEarnings from './pages/cpo/CpoEarnings';
+import CpoTariffs from './pages/cpo/CpoTariffs';
 
 function App() {
   return (
@@ -75,6 +76,9 @@ function App() {
           } />
           <Route path="/cpo/sessions" element={
             <CpoProtectedRoute><CpoSessions /></CpoProtectedRoute>
+          } />
+          <Route path="/cpo/tariffs" element={
+            <CpoProtectedRoute><CpoTariffs /></CpoProtectedRoute>
           } />
           <Route path="/cpo/reservations" element={
             <CpoProtectedRoute><CpoReservations /></CpoProtectedRoute>

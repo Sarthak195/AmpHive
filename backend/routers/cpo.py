@@ -200,6 +200,10 @@ async def cpo_profile(
             "id": tenant.id,
             "name": tenant.name,
             "created_at": tenant.created_at.isoformat() if tenant.created_at else None,
+            # [Pricing v2] The wall-clock zone the operator's TOD slots are
+            # interpreted in (services/pricing.py). Shown read-only on the
+            # tariff editor so "peak 18:00–22:00" is unambiguous.
+            "timezone": tenant.timezone,
         },
         "stats": {
             "gateway_count": gateway_count,
@@ -1632,10 +1636,12 @@ async def cpo_cancel_payout(
 # Appended at the end of the file (feat/tariff-pricing) to avoid touching the
 # shared header import block above, which another concurrent change also
 # edits. Local imports here are intentional, not an oversight.
-from backend.database.models import Tariff  # noqa: E402
+from backend.database.models import Tariff, TariffSlot  # noqa: E402
 from backend.schemas import (  # noqa: E402
-    CpoTariffAssignRequest, CpoTariffCreateRequest, CpoTariffUpdateRequest,
+    CpoTariffAssignRequest, CpoTariffCreateRequest,
+    CpoTariffSlotCreateRequest, CpoTariffSlotUpdateRequest, CpoTariffUpdateRequest,
 )
+from backend.services.pricing import slot_overlaps  # noqa: E402
 
 
 async def _load_tenant_tariff(db: AsyncSession, tariff_id: int, tenant_id: int) -> Tariff:
@@ -1756,6 +1762,154 @@ async def cpo_delete_tariff(
     logger.info(f"CPO tariff deleted: '{tariff_name}' (id={tariff_id}) by {user.email}")
 
     return {"status": "deleted", "tariff_id": tariff_id, "name": tariff_name}
+
+
+# --- Time-of-day slots on a tariff (Pricing v2 Phase 4) --------------------
+
+def _fmt_min(m: int) -> str:
+    """A minute-of-day as HH:MM (1440 -> 24:00) for operator-facing messages."""
+    return f"{int(m) // 60:02d}:{int(m) % 60:02d}"
+
+
+def _slot_dict(s: TariffSlot) -> dict:
+    return {
+        "id": s.id,
+        "tariff_id": s.tariff_id,
+        "start_min": s.start_min,
+        "end_min": s.end_min,
+        "price_per_kwh": float(s.price_per_kwh),
+        "days_mask": s.days_mask,
+    }
+
+
+async def _load_tenant_slot(db: AsyncSession, tariff_id: int, slot_id: int) -> TariffSlot:
+    """Load a slot, enforcing it belongs to `tariff_id` (whose tenant the caller
+    already proved via _load_tenant_tariff)."""
+    result = await db.execute(
+        select(TariffSlot).where(
+            and_(TariffSlot.id == slot_id, TariffSlot.tariff_id == tariff_id)
+        )
+    )
+    slot = result.scalar_one_or_none()
+    if not slot:
+        raise HTTPException(status_code=404, detail="Slot not found on this tariff.")
+    return slot
+
+
+async def _validate_slot_window(db, tariff_id, start_min, end_min, days_mask, exclude_id):
+    """Reject an invalid or overlapping window (400 / 409). A wrap-around window
+    must be entered as two slots, so start<end is required; overlap is checked
+    against the tariff's other slots via services/pricing.py slot_overlaps."""
+    if start_min >= end_min:
+        raise HTTPException(
+            status_code=400,
+            detail="Slot start must be before its end. Enter a wrap-around "
+                   "window (e.g. 22:00–06:00) as two slots.",
+        )
+    existing = (
+        await db.execute(select(TariffSlot).where(TariffSlot.tariff_id == tariff_id))
+    ).scalars().all()
+    for s in existing:
+        if exclude_id is not None and s.id == exclude_id:
+            continue
+        if slot_overlaps(start_min, end_min, days_mask, s.start_min, s.end_min, s.days_mask):
+            raise HTTPException(
+                status_code=409,
+                detail=f"That window overlaps an existing slot "
+                       f"({_fmt_min(s.start_min)}–{_fmt_min(s.end_min)}).",
+            )
+
+
+@router.get("/api/cpo/tariffs/{tariff_id}/slots")
+async def cpo_list_tariff_slots(
+    tariff_id: int,
+    user: User = Depends(require_role("cpo", "admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """List a tariff's time-of-day slots (tenant-scoped via the parent tariff)."""
+    await _load_tenant_tariff(db, tariff_id, user.tenant_id)
+    result = await db.execute(
+        select(TariffSlot)
+        .where(TariffSlot.tariff_id == tariff_id)
+        .order_by(TariffSlot.start_min)
+    )
+    return [_slot_dict(s) for s in result.scalars().all()]
+
+
+@router.post("/api/cpo/tariffs/{tariff_id}/slots")
+async def cpo_create_tariff_slot(
+    tariff_id: int,
+    req: CpoTariffSlotCreateRequest,
+    user: User = Depends(require_role("cpo", "admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Add a TOD slot to a tariff. Validates the window + non-overlap first."""
+    await _load_tenant_tariff(db, tariff_id, user.tenant_id)
+    await _validate_slot_window(
+        db, tariff_id, req.start_min, req.end_min, req.days_mask, exclude_id=None
+    )
+    slot = TariffSlot(
+        tariff_id=tariff_id,
+        start_min=req.start_min,
+        end_min=req.end_min,
+        price_per_kwh=to_money(req.price_per_kwh),
+        days_mask=req.days_mask,
+    )
+    db.add(slot)
+    await db.commit()
+    await db.refresh(slot)
+    logger.info(
+        f"CPO tariff slot created on tariff {tariff_id} "
+        f"({_fmt_min(slot.start_min)}–{_fmt_min(slot.end_min)} @ {slot.price_per_kwh}) "
+        f"by {user.email}"
+    )
+    return {"status": "created", **_slot_dict(slot)}
+
+
+@router.put("/api/cpo/tariffs/{tariff_id}/slots/{slot_id}")
+async def cpo_update_tariff_slot(
+    tariff_id: int,
+    slot_id: int,
+    req: CpoTariffSlotUpdateRequest,
+    user: User = Depends(require_role("cpo", "admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update a slot's window / rate / days. Re-validates the resulting window
+    (omitted fields keep their current value)."""
+    await _load_tenant_tariff(db, tariff_id, user.tenant_id)
+    slot = await _load_tenant_slot(db, tariff_id, slot_id)
+
+    new_start = req.start_min if req.start_min is not None else slot.start_min
+    new_end = req.end_min if req.end_min is not None else slot.end_min
+    new_days = req.days_mask if req.days_mask is not None else slot.days_mask
+    await _validate_slot_window(db, tariff_id, new_start, new_end, new_days, exclude_id=slot_id)
+
+    slot.start_min = new_start
+    slot.end_min = new_end
+    slot.days_mask = new_days
+    if req.price_per_kwh is not None:
+        slot.price_per_kwh = to_money(req.price_per_kwh)
+    await db.commit()
+    await db.refresh(slot)
+    logger.info(f"CPO tariff slot {slot_id} updated on tariff {tariff_id} by {user.email}")
+    return {"status": "updated", **_slot_dict(slot)}
+
+
+@router.delete("/api/cpo/tariffs/{tariff_id}/slots/{slot_id}")
+async def cpo_delete_tariff_slot(
+    tariff_id: int,
+    slot_id: int,
+    user: User = Depends(require_role("cpo", "admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete a TOD slot. The parent tariff's flat price then applies to that
+    window again (slots are a strict refinement)."""
+    await _load_tenant_tariff(db, tariff_id, user.tenant_id)
+    slot = await _load_tenant_slot(db, tariff_id, slot_id)
+    await db.delete(slot)
+    await db.commit()
+    logger.info(f"CPO tariff slot {slot_id} deleted from tariff {tariff_id} by {user.email}")
+    return {"status": "deleted", "slot_id": slot_id, "tariff_id": tariff_id}
 
 
 @router.put("/api/cpo/plugs/{plug_id}/tariff")

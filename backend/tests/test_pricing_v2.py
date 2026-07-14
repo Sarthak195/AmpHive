@@ -319,6 +319,39 @@ async def test_reprice_at_boundary_same_rate_just_advances(monkeypatch):
 
 
 # =============================================================================
+# 2c. DB-free: slot_overlaps (operator slot-CRUD validation core, Phase 4)
+# =============================================================================
+
+def test_slot_overlaps_same_days_intersecting_windows():
+    from backend.services.pricing import slot_overlaps
+    # 09:00–17:00 vs 10:00–11:40, all days -> overlap.
+    assert slot_overlaps(540, 1020, 127, 600, 700, 127) is True
+
+
+def test_slot_overlaps_touching_boundary_is_not_overlap():
+    from backend.services.pricing import slot_overlaps
+    # Half-open: 09:00–17:00 and 17:00–20:00 touch but don't overlap.
+    assert slot_overlaps(540, 1020, 127, 1020, 1200, 127) is False
+
+
+def test_slot_overlaps_disjoint_windows():
+    from backend.services.pricing import slot_overlaps
+    assert slot_overlaps(540, 1020, 127, 1100, 1200, 127) is False
+
+
+def test_slot_overlaps_intersecting_windows_but_no_shared_day():
+    from backend.services.pricing import slot_overlaps
+    # Same clock window, but one is Mon-only (bit0) and the other Tue-only (bit1).
+    assert slot_overlaps(540, 1020, 0b0000001, 600, 700, 0b0000010) is False
+
+
+def test_slot_overlaps_shared_day_subset_conflicts():
+    from backend.services.pricing import slot_overlaps
+    # Mon+Tue vs Tue-only, overlapping windows -> conflict on Tue.
+    assert slot_overlaps(540, 1020, 0b0000011, 600, 700, 0b0000010) is True
+
+
+# =============================================================================
 # 3. DB-gated: resolve_rate_window against a real schema (needs TEST_DATABASE_URL)
 # =============================================================================
 
@@ -504,3 +537,34 @@ async def test_resolve_rate_for_plug_still_returns_window_scalar(factory):
         window_rate, _ = await resolve_rate_window(db, plug)
     assert scalar == Decimal("4.25")
     assert scalar == window_rate
+
+
+@db_gated
+@pytest.mark.asyncio
+async def test_resolve_price_display_current_next_and_boundary(factory):
+    """[Phase 4] A plug's tariff is flat 5.00 with a 09:00–17:00 @ 8.00 slot.
+    Before the slot: current=flat, next=slot @ its start. Inside: current=slot,
+    next=flat @ its end. After (no more slots today): no next price at all."""
+    from backend.services.pricing import resolve_price_display
+
+    tenant_id = await _seed_tenant(factory, tz="UTC")
+    gw = await _seed_gateway(factory, tenant_id, "gw-v2-disp")
+    tariff_id = await _seed_tariff(factory, tenant_id, "5.00", "Base")
+    await _seed_slot(factory, tariff_id, 540, 1020, "8.00")  # 09:00–17:00 @ 8.00
+    plug_id = await _seed_plug(factory, gw, tariff_id=tariff_id)
+    plug = await _load_plug(factory, plug_id)
+
+    before = datetime(2026, 7, 13, 8, 0, tzinfo=timezone.utc)
+    inside = datetime(2026, 7, 13, 12, 0, tzinfo=timezone.utc)
+    after = datetime(2026, 7, 13, 20, 0, tzinfo=timezone.utc)
+
+    async with factory() as db:
+        r0, at0, nx0 = await resolve_price_display(db, plug, at=before)
+        r1, at1, nx1 = await resolve_price_display(db, plug, at=inside)
+        r2, at2, nx2 = await resolve_price_display(db, plug, at=after)
+
+    assert (r0, nx0) == (Decimal("5.00"), Decimal("8.00"))
+    assert at0 == datetime(2026, 7, 13, 9, 0, tzinfo=timezone.utc)
+    assert (r1, nx1) == (Decimal("8.00"), Decimal("5.00"))
+    assert at1 == datetime(2026, 7, 13, 17, 0, tzinfo=timezone.utc)
+    assert (r2, at2, nx2) == (Decimal("5.00"), None, None)

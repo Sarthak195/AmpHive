@@ -121,6 +121,13 @@ class PlugResponse(BaseModel):
     # tariff -> tenant default -> the global COINS_PER_KWH env fallback).
     # Always populated by the router; Optional only for schema forward-safety.
     price_per_kwh: Optional[float] = None
+    # [Pricing v2] The NEXT coins-per-kWh rate and the wall-clock instant it
+    # takes effect, when a time-of-day slot boundary changes the price later
+    # today (services/pricing.py resolve_price_display). BOTH None for a flat
+    # tariff or when the next boundary keeps the same rate — so the driver UI
+    # shows "5 now · 6 from 18:00" only on a real, imminent change.
+    price_next_per_kwh: Optional[float] = None
+    price_changes_at: Optional[str] = None
     # True when the plug belongs to a non-public group — which, given the
     # accessibility filter, the requesting user must have joined. Ungrouped
     # and public-group plugs are False. The driver Home page uses this to
@@ -347,6 +354,29 @@ class CpoTariffAssignRequest(BaseModel):
     the resolution chain — see services/pricing.py resolve_rate_for_plug).
     """
     tariff_id: Optional[int] = None
+
+
+class CpoTariffSlotCreateRequest(BaseModel):
+    """[Pricing v2] A time-of-day pricing window on a tariff. Half-open
+    [start_min, end_min) minute-of-day in the tenant's local timezone; a
+    wrap-around window (e.g. 22:00–06:00) is modeled as TWO slots. days_mask is
+    a Mon=bit0..Sun=bit6 weekday bitmask (default: all days). start<end and
+    non-overlap are enforced in the router (services/pricing.py slot_overlaps).
+    price_per_kwh is normalized via services/money.to_money before it hits the
+    Numeric(12,2) column, same as the parent tariff."""
+    start_min: int = Field(ge=0, le=1439)
+    end_min: int = Field(ge=1, le=1440)
+    price_per_kwh: float = Field(gt=0, le=1000)
+    days_mask: int = Field(default=127, ge=1, le=127)
+
+
+class CpoTariffSlotUpdateRequest(BaseModel):
+    """Update a TOD slot — every field optional; omitted fields keep their
+    current value, and the router re-validates the resulting window."""
+    start_min: Optional[int] = Field(default=None, ge=0, le=1439)
+    end_min: Optional[int] = Field(default=None, ge=1, le=1440)
+    price_per_kwh: Optional[float] = Field(default=None, gt=0, le=1000)
+    days_mask: Optional[int] = Field(default=None, ge=1, le=127)
 
 # --- Session Dispute / Refund Schemas ---
 

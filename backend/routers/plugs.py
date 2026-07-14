@@ -34,7 +34,7 @@ from backend.services.auth import (
     hash_password, verify_password,
 )
 from backend.services.money import ZERO_MONEY, to_money
-from backend.services.pricing import resolve_rate_for_plug
+from backend.services.pricing import resolve_price_display
 from backend.services.rbac import require_role
 from backend.services.session_lifecycle import (
     check_and_speed_up_active_session, finalize_charging_session,
@@ -201,11 +201,13 @@ async def get_available_plugs(
 
     responses = []
     for plug, group_name, group_is_public, gateway in all_rows:
-        # Resolved effective rate (plug tariff -> group tariff -> tenant
-        # default -> env fallback; services/pricing.py). One lookup per plug
-        # — tolerable N+1 for typical per-site plug counts; batch this if the
-        # cross-tenant available-plugs list ever grows large enough to matter.
-        price_per_kwh = await resolve_rate_for_plug(db, plug)
+        # Resolved effective rate + [Pricing v2] the next TOD price and when it
+        # changes (plug tariff -> group tariff -> tenant default -> env fallback;
+        # services/pricing.py). resolve_price_display loads the tariff+slots ONCE
+        # — same per-plug cost as the old resolve_rate_for_plug, so this adds no
+        # query. Still one lookup per plug (tolerable N+1 for per-site plug
+        # counts; batch this if the cross-tenant list ever grows large).
+        rate, changes_at, next_rate = await resolve_price_display(db, plug)
         responses.append(
             PlugResponse(
                 id=plug.id,
@@ -217,7 +219,9 @@ async def get_available_plugs(
                 latitude=plug.latitude if plug.latitude is not None else gateway.latitude,
                 longitude=plug.longitude if plug.longitude is not None else gateway.longitude,
                 gateway_online=gateway_is_live(gateway, now),
-                price_per_kwh=float(price_per_kwh),
+                price_per_kwh=float(rate),
+                price_next_per_kwh=float(next_rate) if next_rate is not None else None,
+                price_changes_at=changes_at.isoformat() if changes_at is not None else None,
                 # group_is_public is None for ungrouped plugs (outer join) —
                 # only an explicit False marks a private group.
                 is_private=group_is_public is False,
@@ -257,9 +261,10 @@ async def get_plug(
     gw_lat = gateway.latitude if gateway else None
     gw_lng = gateway.longitude if gateway else None
 
-    # Resolved effective rate: plug tariff -> group tariff -> tenant default
-    # -> env fallback (services/pricing.py resolve_rate_for_plug).
-    price_per_kwh = await resolve_rate_for_plug(db, plug)
+    # Resolved effective rate + [Pricing v2] next TOD price and its change time
+    # (plug tariff -> group tariff -> tenant default -> env fallback;
+    # services/pricing.py resolve_price_display).
+    rate, changes_at, next_rate = await resolve_price_display(db, plug)
 
     # [Reservations] Same grouped helper the list uses, over this one plug.
     now = datetime.now(timezone.utc)
@@ -285,7 +290,9 @@ async def get_plug(
         latitude=plug.latitude if plug.latitude is not None else gw_lat,
         longitude=plug.longitude if plug.longitude is not None else gw_lng,
         gateway_online=gateway_is_live(gateway) if gateway else False,
-        price_per_kwh=float(price_per_kwh),
+        price_per_kwh=float(rate),
+        price_next_per_kwh=float(next_rate) if next_rate is not None else None,
+        price_changes_at=changes_at.isoformat() if changes_at is not None else None,
         is_private=is_private,
         watching=watching,
         **reservation_fields.get(plug.id, {}),

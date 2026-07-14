@@ -287,6 +287,60 @@ async def max_rate_over_window(
     return max(rates)
 
 
+def slot_overlaps(start_a, end_a, days_a, start_b, end_b, days_b) -> bool:
+    """PURE, DB-FREE: do two TOD slots conflict? They overlap iff they share at
+    least one weekday (``days_mask`` AND is non-zero) AND their half-open
+    ``[start, end)`` minute windows intersect. Touching at a boundary
+    (``a.end == b.start``) is NOT an overlap — same half-open convention as the
+    resolver. The operator slot-CRUD validation core (routers/cpo.py)."""
+    if not (int(days_a) & int(days_b)):
+        return False
+    return int(start_a) < int(end_b) and int(start_b) < int(end_a)
+
+
+async def resolve_price_display(db: AsyncSession, plug: Plug, at: datetime = None):
+    """
+    [Pricing v2 — driver transparency] Resolve ``(rate, boundary, next_rate)``
+    for a plug's price display: the rate in effect at ``at`` (default now), the
+    wall-clock instant it next changes at a TOD slot boundary, and the rate on
+    the far side of that boundary. Loads the tariff + slots ONCE — same DB cost
+    as :func:`resolve_rate_for_plug`, so swapping the plug list/detail endpoints
+    onto it adds NO query over the rate they already resolve.
+
+    ``boundary`` and ``next_rate`` are BOTH ``None`` for a flat tariff (no
+    slots), when no boundary remains today, or when the rate doesn't actually
+    change across the next boundary (adjacent slots repeating a price) — so a
+    caller renders a "next price" hint only on a real, imminent change.
+    ``boundary`` is tz-aware in the tenant's local zone (``isoformat`` carries
+    the offset). Read-only — snapshots nothing.
+    """
+    tariff, tz_name = await _resolve_tariff_and_tz(db, plug)
+    if tariff is None:
+        return default_rate(), None, None
+
+    if at is None:
+        at = datetime.now(timezone.utc)
+    at_local = _to_local(at, _zone(tz_name))
+    slots = (
+        await db.execute(select(TariffSlot).where(TariffSlot.tariff_id == tariff.id))
+    ).scalars().all()
+    flat = to_money(tariff.price_per_kwh)
+
+    slot_rate, boundary = _slot_rate_and_bound(slots, at_local)
+    rate = slot_rate if slot_rate is not None else flat
+    if boundary is None:
+        return rate, None, None
+
+    # The rate just past the boundary: a pure re-resolve over the SAME slots at
+    # the boundary instant (half-open [start, end) means the ending slot no
+    # longer covers there, so the next slot — or the flat base in a gap — wins).
+    next_slot_rate, _ = _slot_rate_and_bound(slots, boundary)
+    next_rate = next_slot_rate if next_slot_rate is not None else flat
+    if next_rate == rate:
+        return rate, None, None
+    return rate, boundary, next_rate
+
+
 async def reprice_session_if_due(db: AsyncSession, session, plug: Plug, at: datetime = None):
     """
     [Pricing v2] Forward-only reprice for one ACTIVE session at ``at`` (default
