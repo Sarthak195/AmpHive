@@ -1019,6 +1019,11 @@ class PlugWatch(Base):
     plug_id: Mapped[int] = mapped_column(Integer, ForeignKey("plugs.id", ondelete="CASCADE"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
 
+    __table_args__ = (
+        UniqueConstraint("user_id", "plug_id", name="uq_plug_watches_user_plug"),
+        Index("idx_plug_watches_plug", "plug_id"),
+    )
+
 
 class CapacityRequest(Base):
     """
@@ -1040,13 +1045,10 @@ class CapacityRequest(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     plug_id: Mapped[int] = mapped_column(Integer, ForeignKey("plugs.id", ondelete="CASCADE"), nullable=False)
-    # UNIQUE(user_id, plug_id) + idx_capacity_requests_group are created by the
-    # migration (0020) and intentionally NOT declared here — mirrors PlugWatch,
-    # whose test_migrations diff tolerates the migration-owned index/constraint.
     group_id: Mapped[int] = mapped_column(Integer, ForeignKey("charger_groups.id", ondelete="CASCADE"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
 
     __table_args__ = (
-        UniqueConstraint("user_id", "plug_id", name="uq_plug_watches_user_plug"),
-        Index("idx_plug_watches_plug", "plug_id"),
+        UniqueConstraint("user_id", "plug_id", name="uq_capacity_requests_user_plug"),
+        Index("idx_capacity_requests_group", "group_id"),
     )
