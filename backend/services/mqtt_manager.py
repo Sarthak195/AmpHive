@@ -984,6 +984,13 @@ class MQTTManager:
         """Persist gateway online/offline status (+ reported fw) to the database."""
         from backend.database.models import Gateway, GatewayStatus
 
+        # Whether this message flipped the stored liveness state. Subscriptions
+        # re-issue on every connect, so a backend/broker reconnect replays the
+        # retained status message; keying the offline-notify and the socket push
+        # off a *transition* (rather than the raw status) keeps a retained replay
+        # from re-notifying drivers or re-broadcasting (REC-08).
+        became_online = False
+        became_offline = False
         try:
             async with self.db_session_factory() as session:
                 from sqlalchemy import select
@@ -993,8 +1000,15 @@ class MQTTManager:
                 )
                 gateway = result.scalar_one_or_none()
                 if gateway:
-                    gateway.status = GatewayStatus.ONLINE if status == "online" else GatewayStatus.OFFLINE
-                    gateway.last_seen_at = datetime.now(timezone.utc)
+                    is_online = status == "online"
+                    was_offline = gateway.status == GatewayStatus.OFFLINE
+                    became_online = is_online and was_offline
+                    became_offline = not is_online and not was_offline
+                    gateway.status = GatewayStatus.ONLINE if is_online else GatewayStatus.OFFLINE
+                    # Do NOT stamp last_seen_at from a status message: a retained
+                    # `online` replayed on reconnect would falsely refresh
+                    # liveness for a possibly-wedged gateway. Telemetry — the real
+                    # heartbeat — is what stamps last_seen_at (REC-09).
                     # Only overwrite the recorded fw when the payload carried one
                     # (the LWT/offline message has no fw — don't clobber it).
                     if firmware_version:
@@ -1018,8 +1032,15 @@ class MQTTManager:
 
         if status == "online":
             await self._republish_off_for_orphaned_plugs(gateway_id)
-        else:
+        elif became_offline:
+            # Only on a real ONLINE->OFFLINE transition — not a retained replay.
             await self._notify_drivers_gateway_offline(gateway_id)
+
+        # Push connectivity to clients on both transition directions so charger
+        # lists flip reachable/unreachable immediately, ahead of the
+        # telemetry-timeout path (Faster-offline Lever 1).
+        if became_online or became_offline:
+            await self._broadcast_plug_connectivity(gateway_id, became_online)
 
     async def _notify_drivers_gateway_offline(self, gateway_id: str):
         """
@@ -1059,6 +1080,28 @@ class MQTTManager:
                 plug_id=plug_id,
                 session_id=session_id,
             )
+
+    async def _broadcast_plug_connectivity(self, gateway_id: str, gateway_online: bool):
+        """
+        On a gateway online<->offline transition, emit plug_connectivity for each
+        of its plugs so the frontend flags/clears the plug as unreachable at once,
+        without waiting on the telemetry-timeout path (Faster-offline Lever 1).
+        """
+        from backend.database.models import Plug
+        from sqlalchemy import select
+
+        try:
+            async with self.db_session_factory() as session:
+                plug_ids = (await session.execute(
+                    select(Plug.id).where(Plug.gateway_id == gateway_id)
+                )).scalars().all()
+        except Exception:
+            logger.exception(f"plug_connectivity query failed for gateway {gateway_id}")
+            return
+
+        from backend.services.socketio_manager import emit_plug_connectivity
+        for plug_id in plug_ids:
+            await emit_plug_connectivity(plug_id, gateway_online)
 
     async def _republish_off_for_orphaned_plugs(self, gateway_id: str):
         """
