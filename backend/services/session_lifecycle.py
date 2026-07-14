@@ -55,9 +55,12 @@ async def set_plug_telemetry_interval(db: AsyncSession, plug_id: int, interval_m
 
     state.telemetry_store.set_interval(plug_id, interval_ms)
 
-    from backend.services.mqtt_manager import MQTTManager
-    manager = MQTTManager()
-    if hasattr(manager, "client") and manager.client:
+    # Use the singleton lifespan built, not a fresh no-arg MQTTManager():
+    # constructing one before lifespan runs would pin a localhost/no-factory
+    # instance and make lifespan's real config a no-op (REC-13). None until
+    # lifespan binds it.
+    manager = state.mqtt_manager
+    if manager is not None and getattr(manager, "client", None):
         manager.send_plug_interval(plug.gateway_id, plug_id, interval_ms)
 
 

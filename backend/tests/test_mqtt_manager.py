@@ -773,3 +773,54 @@ def test_send_plug_command_omits_local_ip_when_absent():
     args, _ = mgr.client.publish.call_args
     assert "local_ip" not in json.loads(args[1])
     MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_set_plug_telemetry_interval_uses_lifespan_singleton(monkeypatch):
+    """REC-13: set_plug_telemetry_interval must send through the singleton that
+    lifespan built (state.mqtt_manager), never construct a fresh no-arg
+    MQTTManager() that would pin a localhost/no-factory instance."""
+    from types import SimpleNamespace
+
+    from backend import state
+    from backend.services import session_lifecycle
+
+    MQTTManager._instance = None
+
+    ts = MagicMock()
+    ts.get_interval.return_value = 10000  # differs from target -> proceeds
+    monkeypatch.setattr(state, "telemetry_store", ts)
+
+    built = MagicMock()
+    built.client = object()  # truthy client -> publish path taken
+    monkeypatch.setattr(state, "mqtt_manager", built)
+
+    db = _FakeDB(SimpleNamespace(id=7, gateway_id="gw-1"))
+    await session_lifecycle.set_plug_telemetry_interval(db, 7, 1000)
+
+    built.send_plug_interval.assert_called_once_with("gw-1", 7, 1000)
+    # No fresh instance was pinned as the process singleton.
+    assert MQTTManager._instance is None
+
+
+@pytest.mark.asyncio
+async def test_set_plug_telemetry_interval_noop_before_lifespan(monkeypatch):
+    """REC-13: before lifespan binds state.mqtt_manager (None), the interval
+    push is skipped gracefully rather than instantiating the singleton."""
+    from types import SimpleNamespace
+
+    from backend import state
+    from backend.services import session_lifecycle
+
+    MQTTManager._instance = None
+
+    ts = MagicMock()
+    ts.get_interval.return_value = 10000
+    monkeypatch.setattr(state, "telemetry_store", ts)
+    monkeypatch.setattr(state, "mqtt_manager", None)
+
+    db = _FakeDB(SimpleNamespace(id=7, gateway_id="gw-1"))
+    # Must not raise and must not pin a singleton.
+    await session_lifecycle.set_plug_telemetry_interval(db, 7, 1000)
+
+    assert MQTTManager._instance is None
