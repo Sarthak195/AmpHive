@@ -397,7 +397,7 @@ const Home = () => {
     try {
       await api.queueCharge(body);
     } catch (err) {
-      throw new Error(queueErrorMessage(err));
+      throw new Error(queueErrorMessage(err), { cause: err });
     }
     setQueuePlug(null);
     await fetchQueued();
