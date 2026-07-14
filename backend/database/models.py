@@ -229,13 +229,17 @@ class ChargingSession(Base):
     last_telemetry_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     # Money: NUMERIC(12,2) → Decimal (energy_kwh/peak_power_w stay Float — measurements).
     coins_spent: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal("0.00"), nullable=False)
-    # [Tariffs] The coins-per-kWh rate resolved (services/pricing.py
-    # resolve_rate_for_plug) and SNAPSHOTTED at session start. Every billing
-    # path (finalize_charging_session, the mqtt_manager balance-exhaustion
-    # auto-stop, the live TelemetryStore cost calc) must read this instead of
-    # re-resolving, so a tariff edit or reassignment mid-session never
-    # retroactively changes what an in-flight or already-billed session is
-    # charged. NULL only for legacy sessions started before this column
+    # [Tariffs] The CURRENT-segment coins-per-kWh rate. Resolved
+    # (services/pricing.py resolve_rate_window) and snapshotted at session
+    # start; a manual tariff edit or reassignment mid-session still never
+    # retroactively re-prices this session. [Pricing v2] What it is NOT anymore:
+    # a single frozen rate for the whole session. Under a time-of-day tariff it
+    # is re-resolved when the session crosses a slot boundary (rate_valid_until,
+    # below) and forward-only re-pointed by services/billing.py
+    # close_out_segment — energy already metered stays billed at the old rate
+    # (frozen into settled_cost_coins), only future energy uses the new one.
+    # Every billing path reads the segment state (session_cost), never a bare
+    # re-resolve. NULL only for legacy sessions started before this column
     # existed — those fall back to the global COINS_PER_KWH env var.
     rate_coins_per_kwh: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
     # [Auth holds] Authorization hold: coins RESERVED (logically, never
@@ -292,9 +296,11 @@ class ChargingSession(Base):
 
     # [Pricing v2 — docs/PRICING_V2_SPEC.md] Segment-accrual state for
     # time-of-day tariffs, written by services/billing.py close_out_segment
-    # each time a session crosses a slot boundary mid-charge. All three are
-    # NULL for a legacy SINGLE-rate session (the only kind that exists in
-    # Phase 1): billing then reads rate_coins_per_kwh flat over the whole
+    # each time a session crosses a slot boundary mid-charge (triggered by
+    # services/pricing.py reprice_session_if_due from the telemetry frame hook
+    # and the reaper backstop — Phase 2). All three are NULL for a legacy
+    # SINGLE-rate session (started before Pricing v2, or on a flat tariff with
+    # no slots): billing then reads rate_coins_per_kwh flat over the whole
     # energy, exactly as before. A NON-NULL rate_segment_start_kwh flips the
     # session into segmented mode:
     #   - settled_cost_coins: coins already accrued for CLOSED segments (the
@@ -307,9 +313,9 @@ class ChargingSession(Base):
     #     only rises), so the open-segment energy is never negative.
     #   - rate_valid_until: wall-clock instant the current rate stops applying
     #     (the covering slot's boundary from resolve_rate_window) — a cheap
-    #     "recompute the rate at/after this time" trigger for the later
-    #     boundary-crossing wiring. Phase 1 never reads these on any live
-    #     billing path.
+    #     "recompute the rate at/after this time" trigger the reprice hooks
+    #     compare against each frame (a timestamp check, no DB query, until it
+    #     passes). NULL for a flat tariff → the session never reprices.
     settled_cost_coins: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
     rate_segment_start_kwh: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     rate_valid_until: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)

@@ -81,6 +81,14 @@ class TelemetryStore:
             # resolve_rate_for_plug via routers/sessions.py). Cleared in
             # end_session() so a reused plug_id can't inherit a stale rate.
             cls._instance._session_rates: Dict[int, Decimal] = {}
+            # [Pricing v2] Segment accrual mirror so the live running cost matches
+            # services/billing.py session_cost after a TOD slot boundary: coins
+            # already settled for closed segments + the energy reading at which
+            # the current segment began. Pushed by set_segment_state() on a
+            # reprice; 0/0 (the start_session default) makes a flat session's
+            # calc identical to the old single-rate multiply.
+            cls._instance._session_settled: Dict[int, float] = {}
+            cls._instance._session_segment_start: Dict[int, float] = {}
         return cls._instance
 
     def increment_listeners(self, plug_id: int) -> int:
@@ -120,10 +128,16 @@ class TelemetryStore:
         start_session), falling back to the global COINS_PER_KWH env default
         when no rate was snapshotted for this plug.
         """
-        # Auto-calculate cost if not explicitly provided
+        # Auto-calculate cost if not explicitly provided. [Pricing v2] Mirror
+        # services/billing.py session_cost: settled (closed-segment) coins plus
+        # the open segment's energy above its start, at the current rate. With
+        # the start_session default (settled=0, segment_start=0) this collapses
+        # to the old flat energy_cost(energy_kwh, rate).
         if cost_coins is None:
             rate = self._session_rates.get(plug_id, COINS_PER_KWH)
-            cost_coins = float(energy_cost(energy_kwh, rate))
+            settled = self._session_settled.get(plug_id, 0.0)
+            open_energy = max(0.0, energy_kwh - self._session_segment_start.get(plug_id, 0.0))
+            cost_coins = settled + float(energy_cost(open_energy, rate))
 
         # Calculate session duration from start time
         if plug_id not in self._session_start_times:
@@ -163,11 +177,27 @@ class TelemetryStore:
             self._session_rates[plug_id] = rate_coins_per_kwh
         elif plug_id in self._session_rates:
             del self._session_rates[plug_id]
+        # [Pricing v2] A fresh session starts on one open segment: nothing
+        # settled, segment begins at 0 kWh (matches ChargingSession init).
+        self._session_settled[plug_id] = 0.0
+        self._session_segment_start[plug_id] = 0.0
         self._data[plug_id] = TelemetrySnapshot(
             plug_id=plug_id, status="starting"
         )
         # Create or reset the event for this plug
         self._events[plug_id] = asyncio.Event()
+
+    def set_segment_state(self, plug_id: int, settled_coins, segment_start_kwh,
+                          rate_coins_per_kwh=None) -> None:
+        """[Pricing v2] Push the live cost mirror to a session's current segment
+        state after a TOD reprice (MQTTManager._persist_telemetry), so the
+        streamed running cost keeps matching services/billing.py session_cost.
+        A no-op for a plug with no live session is harmless — the next
+        start_session() resets these anyway."""
+        self._session_settled[plug_id] = float(settled_coins or 0.0)
+        self._session_segment_start[plug_id] = float(segment_start_kwh or 0.0)
+        if rate_coins_per_kwh is not None:
+            self._session_rates[plug_id] = rate_coins_per_kwh
 
     def end_session(self, plug_id: int) -> None:
         """Clean up session tracking when a session ends."""
@@ -175,6 +205,8 @@ class TelemetryStore:
             del self._session_start_times[plug_id]
         if plug_id in self._session_rates:
             del self._session_rates[plug_id]
+        self._session_settled.pop(plug_id, None)
+        self._session_segment_start.pop(plug_id, None)
         if plug_id in self._data:
             self._data[plug_id].status = "completed"
         if plug_id in self._events:

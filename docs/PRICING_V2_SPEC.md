@@ -1,8 +1,13 @@
 # Pricing v2 — Time-of-Day Tariffs & Forward-Only Segmented Billing
 
-*Design spec, drafted 2026-07-13. Status: **proposed / not built.** This is the
-paper design for the risky part of the "pricing" feature ask — it deliberately
-**reverses a documented billing invariant**, so it is specced before code.*
+*Design spec, drafted 2026-07-13. Status: **Phases 1–2 BUILT (2026-07-14).**
+Phase 1 = schema + resolution + billing helpers; Phase 2 = billing wired to
+`session_cost` + forward-only reprice (telemetry frame hook + reaper backstop) +
+`rate_changed` notification + start-time hold at `max_rate_over_window`. Still
+open: **Phase 3** (operator-edit reprice trigger `AUTO_REPRICE_ACTIVE_SESSIONS`;
+PATCH-`/limits` hold-at-max-rate) and **Phase 4** (operator slot-editor API + UI,
+driver current+next price). Deployed-safe now: a flat tariff resolves no
+boundary, so it bills byte-identically until a CPO adds a slot.*
 
 Related: [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) "Per-CPO/per-site
 tariff model" (🟡) · [MARKET_GAP_ANALYSIS.md](MARKET_GAP_ANALYSIS.md) §1.5/§3 ·
@@ -342,13 +347,18 @@ persist individually in this design — see §11 open decision on a segment log)
 
 ### Phasing suggestion
 
-1. **Schema + resolution v2** (tariff_slots, session columns, time-aware
+1. ✅ **Schema + resolution v2** (tariff_slots, session columns, time-aware
    `resolve_rate_for_plug`, `session_cost`/`close_out_segment` helpers) — pure
    backend, fully unit-testable, no behavior change yet (no slots exist).
-2. **Wire the billing paths** to `session_cost` + the frame-hook boundary
-   trigger + reaper backstop + `rate_changed` notification — behavior change
-   behind "a tariff has slots".
-3. **Operator edit trigger + hold sizing** (`AUTO_REPRICE_ACTIVE_SESSIONS`,
-   max-rate-over-window hold).
-4. **API + frontend** — slot editor, driver current+next price, session reprice
-   notice.
+   *(Built: PR #34.)*
+2. ✅ **Wire the billing paths** to `session_cost` + the frame-hook boundary
+   trigger (`reprice_session_if_due`) + reaper backstop (`reap_reprice_once`) +
+   `rate_changed` notification — behavior change behind "a tariff has slots".
+   Start-time auth hold sized at `max_rate_over_window` (§8 scheduled-TOD case)
+   pulled forward here so a rising boundary can't forgive overage. *(Built
+   2026-07-14, feat/pricing-v2-phase2.)*
+3. ⬜ **Operator edit trigger + hold sizing** (`AUTO_REPRICE_ACTIVE_SESSIONS`
+   on the `/api/cpo/tariffs*` edit/slot endpoints; grow the PATCH-`/limits` hold
+   at the max-rate-over-window for the remaining window).
+4. ⬜ **API + frontend** — slot editor, driver current+next price, session
+   reprice notice.

@@ -21,7 +21,7 @@ from backend.database.models import (
     ChargingSession, Gateway, GatewayStatus, LedgerTransaction, Plug,
     PlugStatus, SessionStatus, TransactionType,
 )
-from backend.services.money import energy_cost
+from backend.services.billing import session_cost
 from backend.services.telemetry import COINS_PER_KWH
 from backend.services.wallet import debit_wallet_clamped
 
@@ -168,7 +168,11 @@ async def finalize_charging_session(
     live_energy = latest.energy_kwh if latest else 0.0
     final_energy = max(live_energy, persisted_energy)
     rate = session.rate_coins_per_kwh if session.rate_coins_per_kwh is not None else COINS_PER_KWH
-    final_cost = energy_cost(final_energy, rate)  # Decimal, 2 dp
+    # [Pricing v2] Segment-aware total: the frozen cost of any closed segments
+    # (energy metered under an earlier TOD rate) plus the open segment's energy
+    # at the current rate. A flat-tariff / legacy session has one segment and
+    # this is exactly energy_cost(final_energy, rate) — identical to pre-v2.
+    final_cost = session_cost(session, final_energy)  # Decimal, 2 dp
 
     # 3. Finalize session
     session.status = SessionStatus.COMPLETED
@@ -336,7 +340,16 @@ async def finalize_charging_session(
         # The coins-per-kWh rate this session was actually billed at (its
         # snapshot, or the env default for a legacy pre-snapshot session) —
         # surfaced on the receipt so a driver can see what they paid per kWh.
+        # Under a TOD tariff this is the CURRENT (last) segment's rate; the
+        # per-rate split is reconstructable from settled_cost_coins below.
         "price_per_kwh": float(rate),
+        # [Pricing v2] Coins accrued under earlier TOD rate segments (None for a
+        # flat/legacy single-rate session) — lets the receipt show a per-rate
+        # breakdown when the session spanned a slot boundary.
+        "settled_cost_coins": (
+            float(session.settled_cost_coins)
+            if session.settled_cost_coins is not None else None
+        ),
         "coins_spent": round(actual_debit, 2),
         "shortfall_coins": round(shortfall, 2),
         # debit_wallet_clamped guarantees new_balance = prev_balance - actual_debit

@@ -27,9 +27,14 @@ still applies whenever no slot covers the moment. :func:`resolve_rate_window`
 returns both the applicable rate AND the wall-clock boundary at which it could
 next change; :func:`max_rate_over_window` gives the worst-case rate across a
 future interval (for auth-hold sizing). The pure, DB-free core is
-:func:`_slot_rate_and_bound`. Phase 1 wires NONE of this into billing — no
-slots exist yet, so :func:`resolve_rate_for_plug` (now a thin wrapper over
-:func:`resolve_rate_window`) resolves exactly the flat rate it always did.
+:func:`_slot_rate_and_bound`.
+
+Phase 2 wires this into billing: session start snapshots ``rate_valid_until``
+from :func:`resolve_rate_window` and sizes the hold off :func:`max_rate_over_window`;
+:func:`reprice_session_if_due` (below) closes out the current segment when that
+boundary passes, called from the telemetry frame hook and the reaper backstop.
+A flat tariff still resolves ``(rate, None)`` — no boundary, one segment, billed
+exactly as before.
 """
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -280,3 +285,43 @@ async def max_rate_over_window(
                 rates.append(to_money(s.price_per_kwh))
         day = day + timedelta(days=1)
     return max(rates)
+
+
+async def reprice_session_if_due(db: AsyncSession, session, plug: Plug, at: datetime = None):
+    """
+    [Pricing v2] Forward-only reprice for one ACTIVE session at ``at`` (default
+    now). Returns ``(new_rate, boundary)`` when the rate actually changed (the
+    caller then emits a ``rate_changed`` notification), else ``None``.
+
+    Cheap by design: a flat session (``rate_valid_until`` is None) or one whose
+    current segment has not yet expired (``at < rate_valid_until``) returns
+    immediately with **no DB query** — only the crossing frame re-resolves the
+    tariff. On a real change it delegates to
+    :func:`services.billing.close_out_segment`, which freezes the just-consumed
+    energy at the old rate and repoints the open segment at the session's
+    current ``energy_kwh`` / the new rate (so past energy is never re-priced).
+    A boundary that lands on the SAME rate (adjacent slots repeating a price)
+    just advances ``rate_valid_until`` to the next boundary — no segment churn,
+    no notification. Mutates ``session`` in place; the caller commits.
+    """
+    from backend.services.billing import close_out_segment
+
+    valid_until = session.rate_valid_until
+    if valid_until is None:
+        return None
+    if at is None:
+        at = datetime.now(timezone.utc)
+    if valid_until.tzinfo is None:          # legacy naive row -> treat as UTC
+        valid_until = valid_until.replace(tzinfo=timezone.utc)
+    if at < valid_until:
+        return None
+
+    new_rate, boundary = await resolve_rate_window(db, plug, at=at)
+    at_energy = session.energy_kwh or 0.0
+    if new_rate != session.rate_coins_per_kwh:
+        close_out_segment(session, new_rate, at_energy, boundary)
+        return new_rate, boundary
+    # Same rate across the boundary — just move the next check point forward so
+    # we don't re-resolve every frame until the day rolls over.
+    session.rate_valid_until = boundary
+    return None

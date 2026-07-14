@@ -228,6 +228,97 @@ def test_close_out_segment_legacy_first_touch_init():
 
 
 # =============================================================================
+# 2b. DB-free: reprice_session_if_due branching (resolve_rate_window patched)
+# =============================================================================
+
+def _live_session(rate, valid_until, energy_kwh, settled="0.00", seg_start=0.0):
+    """An ACTIVE segmented session stub for reprice_session_if_due — the DB
+    resolver is patched out, so db/plug are never touched."""
+    return SimpleNamespace(
+        rate_coins_per_kwh=Decimal(str(rate)),
+        settled_cost_coins=Decimal(str(settled)),
+        rate_segment_start_kwh=seg_start,
+        rate_valid_until=valid_until,
+        energy_kwh=energy_kwh,
+    )
+
+
+def _patch_resolve(monkeypatch, rate, boundary):
+    """Force resolve_rate_window to a fixed (rate, boundary), and flag if it
+    was called — so a test can assert the cheap no-op paths never hit the DB."""
+    called = {"n": 0}
+
+    async def _fake(db, plug, at=None):
+        called["n"] += 1
+        return Decimal(str(rate)), boundary
+
+    monkeypatch.setattr("backend.services.pricing.resolve_rate_window", _fake)
+    return called
+
+
+@pytest.mark.asyncio
+async def test_reprice_flat_session_is_noop_without_resolving(monkeypatch):
+    """rate_valid_until is None (flat tariff) -> no reprice, no DB resolve."""
+    from backend.services.pricing import reprice_session_if_due
+
+    called = _patch_resolve(monkeypatch, "9.00", None)
+    s = _live_session("5.00", valid_until=None, energy_kwh=3.0)
+    assert await reprice_session_if_due(None, s, None) is None
+    assert called["n"] == 0
+    assert s.rate_coins_per_kwh == Decimal("5.00")
+
+
+@pytest.mark.asyncio
+async def test_reprice_before_boundary_is_noop_without_resolving(monkeypatch):
+    """at < rate_valid_until -> segment still open, no resolve, no change."""
+    from backend.services.pricing import reprice_session_if_due
+
+    called = _patch_resolve(monkeypatch, "9.00", None)
+    future = datetime(2026, 7, 14, 18, 0, tzinfo=timezone.utc)
+    s = _live_session("5.00", valid_until=future, energy_kwh=3.0)
+    at = datetime(2026, 7, 14, 17, 0, tzinfo=timezone.utc)
+    assert await reprice_session_if_due(None, s, None, at=at) is None
+    assert called["n"] == 0
+    assert s.rate_coins_per_kwh == Decimal("5.00")
+
+
+@pytest.mark.asyncio
+async def test_reprice_at_boundary_rate_changed_closes_segment(monkeypatch):
+    """Boundary passed and the rate actually changed -> close out the segment
+    forward-only, repoint at the current energy, return (new_rate, boundary)."""
+    from backend.services.pricing import reprice_session_if_due
+
+    next_boundary = datetime(2026, 7, 14, 22, 0, tzinfo=timezone.utc)
+    _patch_resolve(monkeypatch, "8.00", next_boundary)
+    boundary = datetime(2026, 7, 14, 18, 0, tzinfo=timezone.utc)
+    s = _live_session("5.00", valid_until=boundary, energy_kwh=2.0)
+
+    out = await reprice_session_if_due(None, s, None, at=boundary)
+    assert out == (Decimal("8.00"), next_boundary)
+    assert s.settled_cost_coins == Decimal("10.00")   # (2.0-0.0)*5.00 frozen
+    assert s.rate_segment_start_kwh == 2.0
+    assert s.rate_coins_per_kwh == Decimal("8.00")
+    assert s.rate_valid_until == next_boundary
+
+
+@pytest.mark.asyncio
+async def test_reprice_at_boundary_same_rate_just_advances(monkeypatch):
+    """Adjacent slots repeating a price: no segment churn, no notification —
+    only the next check point moves forward."""
+    from backend.services.pricing import reprice_session_if_due
+
+    next_boundary = datetime(2026, 7, 14, 22, 0, tzinfo=timezone.utc)
+    _patch_resolve(monkeypatch, "5.00", next_boundary)   # same as current rate
+    boundary = datetime(2026, 7, 14, 18, 0, tzinfo=timezone.utc)
+    s = _live_session("5.00", valid_until=boundary, energy_kwh=2.0)
+
+    assert await reprice_session_if_due(None, s, None, at=boundary) is None
+    assert s.settled_cost_coins == Decimal("0.00")     # unchanged
+    assert s.rate_segment_start_kwh == 0.0             # unchanged
+    assert s.rate_valid_until == next_boundary         # advanced
+
+
+# =============================================================================
 # 3. DB-gated: resolve_rate_window against a real schema (needs TEST_DATABASE_URL)
 # =============================================================================
 
