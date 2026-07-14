@@ -94,3 +94,26 @@ describe('CpoPlugs — per-plug current cap', () => {
     );
   });
 });
+
+describe('CpoPlugs — per-plug queued charging', () => {
+  it('sends the queued-charging override + auto-start delay when edited', async () => {
+    api.put.mockResolvedValue({});
+    renderPlugs();
+
+    await userEvent.click(await screen.findByRole('button', { name: /Edit/ }));
+
+    // Tri-state override select ('' inherit / 'true' / 'false') — grab it via
+    // its "Inherit tenant default" option (no associated label element).
+    const queuedSelect = screen
+      .getByRole('option', { name: 'Inherit tenant default' })
+      .closest('select');
+    await userEvent.selectOptions(queuedSelect, 'true');
+    await userEvent.type(screen.getByPlaceholderText('Inherit tenant default'), '3');
+    await userEvent.click(screen.getByRole('button', { name: /Save Changes/ }));
+
+    expect(api.put).toHaveBeenCalledWith(
+      '/api/cpo/plugs/5',
+      expect.objectContaining({ queued_charging_enabled: true, auto_start_delay_min: 3 }),
+    );
+  });
+});

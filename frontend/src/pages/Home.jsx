@@ -57,12 +57,44 @@ import { fmtTime, fmtWindow } from '../utils/reservationTime';
 const UNGROUPED = '__ungrouped__';
 
 // Live per-status counts for a plug list — drives the section-header summary
-// dots and the map legend.
+// dots and the map legend. Seeded from AVAILABILITY_STATES so every bucket
+// (including 'unpowered') starts at 0 rather than NaN.
 const countByAvailability = (list) => {
-  const counts = { available: 0, in_use: 0, offline: 0 };
+  const counts = Object.fromEntries(AVAILABILITY_STATES.map((s) => [s, 0]));
   for (const p of list) counts[getPlugAvailability(p)] += 1;
   return counts;
 };
+
+// "Expires in 2h 5m" / "Expires in 4m 12s" for a queued charge's expiry,
+// relative to `nowMs` so the strip counts down live. Blank if unparseable.
+const fmtCountdown = (iso, nowMs) => {
+  const ms = new Date(iso).getTime() - nowMs;
+  if (Number.isNaN(ms)) return '';
+  if (ms <= 0) return 'Expiring…';
+  const totalMin = Math.floor(ms / 60000);
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  if (h > 0) return `Expires in ${h}h ${m}m`;
+  const s = Math.floor((ms % 60000) / 1000);
+  return `Expires in ${m}m ${s}s`;
+};
+
+// Friendly inline copy for a queue-charge rejection. The backend tags 409s
+// with a structured { code } and uses 402 for balance; fall back to whatever
+// message the API surfaced.
+const QUEUE_ERROR_MESSAGES = {
+  already_queued: 'You already have a queued charge for this plug.',
+  queue_disabled: "Queued charging isn't available for this charger.",
+  plug_powered: 'This charger has power now — start charging directly.',
+  gateway_offline: 'This charger is offline right now.',
+  queue_cap: "You've reached the limit of queued charges.",
+  balance_too_low: 'Add coins to your wallet to queue a charge.',
+};
+const queueErrorMessage = (err) =>
+  QUEUE_ERROR_MESSAGES[err?.code] ||
+  (err?.status === 402 ? 'Add coins to your wallet to queue a charge.' : null) ||
+  err?.message ||
+  'Could not queue this charge.';
 
 const Home = () => {
   const { user } = useAuth();
@@ -86,6 +118,15 @@ const Home = () => {
   const [reservePlug, setReservePlug] = useState(null);
   const [cancellingId, setCancellingId] = useState(null);
   const [reservationError, setReservationError] = useState('');
+
+  // Queued charges: the plug being queued (ChargeSetupModal open in queue
+  // mode when non-null), the driver's WAITING queued charges (the strip),
+  // and cancel-in-flight/error state. `nowMs` ticks the expiry countdowns.
+  const [queuePlug, setQueuePlug] = useState(null);
+  const [myQueued, setMyQueued] = useState([]);
+  const [cancellingQueuedId, setCancellingQueuedId] = useState(null);
+  const [queuedError, setQueuedError] = useState('');
+  const [nowMs, setNowMs] = useState(() => Date.now());
 
   // Map/list filters (shared state — both the list and MapComponent's
   // markers read from the same filteredPlugs).
@@ -141,12 +182,46 @@ const Home = () => {
     }
   };
 
-  // Fetch available plugs + the driver's reservations when logged in
+  const fetchQueued = async () => {
+    try {
+      const data = await api.listQueuedCharges();
+      // Defensive shape guard (mirrors fetchReservations): a non-array
+      // response just leaves the strip empty rather than crashing Home.
+      setMyQueued(Array.isArray(data) ? data : []);
+    } catch (err) {
+      console.error('Failed to fetch queued charges:', err);
+    }
+  };
+
+  const cancelQueued = async (id) => {
+    setQueuedError('');
+    setCancellingQueuedId(id);
+    try {
+      await api.cancelQueuedCharge(id);
+      await fetchQueued();
+    } catch (err) {
+      setQueuedError(err.message);
+    } finally {
+      setCancellingQueuedId(null);
+    }
+  };
+
+  // Fetch available plugs + the driver's reservations + queued charges when
+  // logged in.
   useEffect(() => {
     if (!user) return;
     fetchPlugs();
     fetchReservations();
+    fetchQueued();
   }, [user]);
+
+  // Tick the queued-charge expiry countdowns once a second — only while the
+  // strip is actually showing, so an idle Home page isn't re-rendering.
+  useEffect(() => {
+    if (myQueued.length === 0) return;
+    const id = setInterval(() => setNowMs(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [myQueued.length]);
 
   // Live plug-availability: when any plug flips OCCUPIED/AVAILABLE (someone
   // else started/stopped a session), update its badge in place so the list
@@ -289,6 +364,17 @@ const Home = () => {
     if (e) e.preventDefault();
     const pid = plugId.trim();
     if (!pid) return;
+    // Availability gate for the typed-ID path (it did none before): a known
+    // plug that's unpowered-but-queueable routes into the queue flow rather
+    // than a start the server would 409. Everything else (unknown ids,
+    // occupied/offline plugs) still opens the setup modal — the server
+    // validates at start, same as tapping a card.
+    const known = plugs.find((p) => String(p.id) === String(pid));
+    if (known && getPlugAvailability(known) === 'unpowered' && known.queue_available) {
+      setStartError('');
+      setQueuePlug(known);
+      return;
+    }
     openSetup(plugForId(pid));
   };
 
@@ -297,6 +383,24 @@ const Home = () => {
   const doStart = async (pid, limits) => {
     await startSession(pid, limits);
     navigate('/session');
+  };
+
+  // Queue a charge on an unpowered plug, from the (reused) setup modal. Same
+  // (id, limits) shape as doStart; POSTs to /api/sessions/queue and surfaces
+  // a 409 { code } / 402 balance rejection inline by re-throwing a friendly
+  // message (the modal renders err.message). On success closes the modal and
+  // refreshes the "Your queued charges" strip.
+  const doQueue = async (pid, limits) => {
+    const body = { plug_id: Number(pid) };
+    if (limits?.max_kwh) body.max_kwh = limits.max_kwh;
+    if (limits?.max_duration_seconds) body.max_duration_seconds = limits.max_duration_seconds;
+    try {
+      await api.queueCharge(body);
+    } catch (err) {
+      throw new Error(queueErrorMessage(err));
+    }
+    setQueuePlug(null);
+    await fetchQueued();
   };
 
   // "Notify me when free" (one-shot watch) bell toggle — optimistic: flip
@@ -338,10 +442,16 @@ const Home = () => {
   // plug (in use / offline / maintenance) gets a "Notify when free" bell —
   // a one-shot watch that pings the driver (feed + push) when it frees up.
   const renderPlugCard = (plug, index) => {
+    const availability = getPlugAvailability(plug);
     const unreachable = plug.gateway_online === false;
     const reservedByOther = plug.reserved_now === true && plug.reserved_now_by_me !== true;
-    const hardwareAvailable = getPlugAvailability(plug) === 'available';
+    const hardwareAvailable = availability === 'available';
     const startable = hardwareAvailable && !reservedByOther;
+    // Gateway is up but the plug has no line power. When the CPO has queued
+    // charging enabled (queue_available), the card offers "Queue charge"
+    // instead of the notify bell — the charge auto-starts when power returns.
+    const unpowered = availability === 'unpowered';
+    const queueable = unpowered && plug.queue_available === true;
     return (
       <div
         key={plug.id}
@@ -377,8 +487,8 @@ const Home = () => {
             top-right corner (paddingRight) so nothing slides under the ribbon. */}
         <div className="flex items-center gap-2" style={{ marginBottom: '0.6rem', flexWrap: 'wrap', paddingRight: '3.5rem' }}>
           <span style={{ fontWeight: 600 }}>{plug.name}</span>
-          <span className={`badge ${unreachable ? 'badge-danger' : statusColor(plug.status)}`}>
-            {unreachable ? 'charger offline' : plug.status}
+          <span className={`badge ${unreachable ? 'badge-danger' : unpowered ? 'badge-warning' : statusColor(plug.status)}`}>
+            {unreachable ? 'charger offline' : unpowered ? 'no power' : plug.status}
           </span>
           {/* Reservation badge — deliberately distinct from "occupied": the
               plug is free hardware-wise but time-claimed. The holder sees
@@ -414,11 +524,32 @@ const Home = () => {
                     Unreachable
                   </span>
                 )}
+                {/* No line power + CPO queuing enabled → offer "Queue charge"
+                    (reuses ChargeSetupModal for the kWh/timer inputs) instead
+                    of the notify bell: the charge auto-starts when power
+                    returns. */}
+                {queueable && (
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-sm"
+                    aria-label={`Queue a charge on ${plug.name}`}
+                    title="No power right now — queue a charge to start automatically when power returns"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setStartError('');
+                      setQueuePlug(plug);
+                    }}
+                    style={{ whiteSpace: 'nowrap', fontSize: '0.8rem', color: 'var(--color-primary)', fontWeight: 600 }}
+                  >
+                    ⏳ Queue charge
+                  </button>
+                )}
                 {/* Bell only when the plug is hardware-unavailable (in use /
-                    offline / maintenance): the watch endpoint 409s a plug that
-                    is startable right now, and a merely-reserved plug frees
-                    itself when the window ends — nothing to watch. */}
-                {!hardwareAvailable && (
+                    offline / maintenance) and not already offering a queue:
+                    the watch endpoint 409s a plug that is startable right now,
+                    and a merely-reserved plug frees itself when the window
+                    ends — nothing to watch. */}
+                {!hardwareAvailable && !queueable && (
                   <button
                     type="button"
                     className="btn btn-ghost btn-sm"
@@ -783,6 +914,41 @@ const Home = () => {
                 {reservationError && <div className="error-text mt-2">{reservationError}</div>}
               </div>
             )}
+
+            {/* Queued charges — mirrors the reservations strip: plug name, a
+                live expiry countdown, and a cancel button. Fed by
+                GET /api/sessions/queued; each auto-starts when its plug's
+                power returns (after the CPO debounce). */}
+            {myQueued.length > 0 && (
+              <div className="glass glass-panel animate-slide-up">
+                <h3 style={{ marginBottom: '0.75rem' }}>Your queued charges</h3>
+                <div className="flex flex-col gap-3">
+                  {myQueued.map((q) => (
+                    <div
+                      key={q.id}
+                      className="flex justify-between items-center"
+                      style={{ gap: '0.75rem', flexWrap: 'wrap' }}
+                    >
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ fontWeight: 600 }}>{q.plug_name || `Plug ${q.plug_id}`}</div>
+                        <div style={{ fontSize: '0.85rem', color: 'var(--color-text-secondary)' }}>
+                          Waiting for power · {fmtCountdown(q.expires_at, nowMs)}
+                        </div>
+                      </div>
+                      <button
+                        className="btn btn-ghost btn-sm"
+                        style={{ flexShrink: 0 }}
+                        disabled={cancellingQueuedId === q.id}
+                        onClick={() => cancelQueued(q.id)}
+                      >
+                        {cancellingQueuedId === q.id ? '...' : 'Cancel'}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+                {queuedError && <div className="error-text mt-2">{queuedError}</div>}
+              </div>
+            )}
           </aside>
         </div>
       )}
@@ -796,6 +962,20 @@ const Home = () => {
           balance={user?.coin_balance}
           onStart={doStart}
           onClose={() => setSetupPlug(null)}
+        />
+      )}
+
+      {/* Queue-charge modal — reuses ChargeSetupModal for the optional
+          kWh/timer inputs; onStart routes to doQueue (POST /api/sessions/queue)
+          instead of an immediate start. Inline 409/402 errors surface via the
+          modal's own error line. */}
+      {queuePlug && (
+        <ChargeSetupModal
+          plug={queuePlug}
+          rate={rateForPlug(queuePlug.id)}
+          balance={user?.coin_balance}
+          onStart={doQueue}
+          onClose={() => setQueuePlug(null)}
         />
       )}
 
