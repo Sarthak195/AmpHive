@@ -432,6 +432,12 @@ const CpoGroups = () => {
                     Total amps this group's chargers share. A start is blocked when
                     the sum of active charger caps would exceed it. Blank = no limit.
                   </small>
+                  <small style={{ color: 'var(--color-warning, #b8860b)', fontSize: '0.78rem', display: 'block', marginTop: '0.35rem' }}>
+                    Note: admission math assumes each charger draws no more than its
+                    per-plug cap, but a sub-default cap (below 16 A) is not yet enforced
+                    on the device (pending a firmware OTA). The circuit-protection
+                    guarantee is hard only when every charger sits at the 16 A default.
+                  </small>
                 </div>
               </div>
 
