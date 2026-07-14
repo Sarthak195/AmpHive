@@ -793,6 +793,16 @@ class MQTTManager:
         # drained wallet (the finalize path only clamps the debit — it doesn't
         # stop the session). Done in a separate txn after the persist commit.
         if updated_session_id is not None and updated_user_id is not None:
+            # [REC-11] After a restart the live-cost mirror is empty (start_session
+            # ran in the now-dead process), so update() billed this frame at the
+            # env default and restarted the elapsed timer. Rebuild the mirror from
+            # the row we just loaded so subsequent frames stream the session's real
+            # rate/segment/started_at. No-op once the plug is already tracked.
+            if self.telemetry_store is not None:
+                self.telemetry_store.hydrate_session(
+                    plug_id, updated_rate, updated_settled,
+                    updated_segment_start, updated_started_at,
+                )
             # [Pricing v2] A TOD boundary closed a segment this frame: keep the
             # live-cost mirror exact and tell the driver (forward-only). Both
             # best-effort, post-commit — the billing state already persisted.
