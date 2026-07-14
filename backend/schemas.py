@@ -302,6 +302,9 @@ class CpoPlugUpdateRequest(BaseModel):
     status: Optional[str] = None
     latitude: Optional[float] = Field(default=None, ge=-90, le=90)
     longitude: Optional[float] = Field(default=None, ge=-180, le=180)
+    # [Caps] Per-plug current cap in amps for circuit admission. Send 0 to clear
+    # it back to the default hardware cutoff; omit to leave unchanged.
+    max_current_a: Optional[float] = Field(default=None, ge=0, le=100)
 
 
 class CpoPlugMaintenanceRequest(BaseModel):
@@ -326,6 +329,9 @@ class CpoGroupUpdateRequest(BaseModel):
     name: Optional[str] = None
     is_public: Optional[bool] = None
     regenerate_access_code: bool = False
+    # [Caps] The group's shared circuit capacity in amps (session-start
+    # admission). Send 0 to clear it (no limit); omit to leave unchanged.
+    max_current_a: Optional[float] = Field(default=None, ge=0, le=1000)
 
 
 # --- Tariff (per-CPO/per-site pricing) Schemas ---

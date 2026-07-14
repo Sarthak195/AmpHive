@@ -395,6 +395,8 @@ async def cpo_list_plugs(
             "group_name": group_name,
             "latitude": plug.latitude,
             "longitude": plug.longitude,
+            # [Caps] The per-plug current cap (None = default hardware cutoff).
+            "max_current_a": plug.max_current_a,
             "last_seen_at": plug.last_seen_at.isoformat() if plug.last_seen_at else None,
             "created_at": plug.created_at.isoformat() if plug.created_at else None,
         }
@@ -522,6 +524,9 @@ async def cpo_update_plug(
         plug.latitude = req.latitude
     if req.longitude is not None:
         plug.longitude = req.longitude
+    if req.max_current_a is not None:
+        # [Caps] 0 clears the cap back to the default hardware cutoff (NULL).
+        plug.max_current_a = req.max_current_a or None
 
     await db.commit()
     await db.refresh(plug)
@@ -671,6 +676,12 @@ async def cpo_list_groups(
         )
         member_count = member_count_result.scalar() or 0
 
+        # [Caps] The circuit limit + the current committed load (Σ active plug
+        # caps), so the operator sees "24 / 32 A in use". One query per group,
+        # matching the per-group counts above (group counts are small).
+        from backend.services.caps import circuit_load_a
+        load_a = await circuit_load_a(db, group.id)
+
         response.append({
             "id": group.id,
             "name": group.name,
@@ -678,6 +689,8 @@ async def cpo_list_groups(
             "access_code": group.access_code if not group.is_public else None,
             "plug_count": plug_count,
             "member_count": member_count,
+            "max_current_a": group.max_current_a,
+            "current_load_a": load_a,
             "created_at": group.created_at.isoformat() if group.created_at else None,
         })
 
@@ -762,6 +775,10 @@ async def cpo_update_group(
 
     if req.regenerate_access_code and not group.is_public:
         group.access_code = await generate_unique_access_code(db)
+
+    if req.max_current_a is not None:
+        # [Caps] 0 clears the circuit limit (no admission cap).
+        group.max_current_a = req.max_current_a or None
 
     await db.commit()
     await db.refresh(group)

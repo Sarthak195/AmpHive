@@ -226,6 +226,14 @@ async def start_charging_session(
             detail="This charger's gateway is offline. Try again once it reconnects.",
         )
 
+    # [Caps] Circuit admission: refuse the start if the plug's group is at its
+    # shared current capacity (Σ active plug caps + this plug's cap > line max).
+    # Under the plug lock; the helper locks the group row so concurrent starts
+    # on the same circuit serialize. No-op for an ungrouped plug or a group with
+    # no cap configured. This is where the "Request capacity" flow will hook in.
+    from backend.services.caps import check_circuit_admission
+    await check_circuit_admission(db, plug)
+
     # Resolve the coins-per-kWh rate for this plug (plug's own tariff -> its
     # group's tariff -> the tenant's default tariff -> the global
     # COINS_PER_KWH env fallback) and SNAPSHOT it onto the session now, so a

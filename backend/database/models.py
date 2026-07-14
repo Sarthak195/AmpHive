@@ -204,6 +204,12 @@ class Plug(Base):
     # var — see services/pricing.py resolve_rate_for_plug(). ON DELETE SET
     # NULL so deleting a Tariff just drops this plug back a link in the chain.
     tariff_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("tariffs.id", ondelete="SET NULL"), nullable=True)
+    # [Caps] Operator-set per-plug current cap (amps). NULL = the default
+    # hardware cutoff (env DEFAULT_PLUG_CAP_A, 16 A on a P110). Feeds circuit
+    # admission control (services/caps.py) and is forwarded in the MQTT ON
+    # payload; the firmware watchdog enforcing a SUB-16A cap is a pending OTA,
+    # so today a sub-default value is admission-advisory (hard at the default).
+    max_current_a: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
     # Relationships
     gateway: Mapped[Gateway] = relationship("Gateway", back_populates="plugs")
@@ -368,6 +374,13 @@ class ChargerGroup(Base):
     # then the global COINS_PER_KWH env var — see services/pricing.py
     # resolve_rate_for_plug(). ON DELETE SET NULL, same rationale as Plug.tariff_id.
     tariff_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("tariffs.id", ondelete="SET NULL"), nullable=True)
+    # [Caps] The shared circuit/line capacity (amps) for this group's plugs.
+    # NULL = no admission limit (pre-caps behaviour). Session start is admitted
+    # only if Σ(effective caps of the group's already-active plugs) + the new
+    # plug's cap ≤ this value (services/caps.py). Here a group models one
+    # electrical circuit — fits the one-society-one-line primary case; a group
+    # spanning multiple lines wants a dedicated Circuit entity (upgrade path).
+    max_current_a: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
 
     # Relationships
