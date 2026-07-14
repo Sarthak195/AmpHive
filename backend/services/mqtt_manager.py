@@ -101,6 +101,11 @@ class MQTTManager:
         # Session ids already sent a low-balance warning (once per session).
         # Only touched on the event loop. Bounded by an occasional full clear —
         # worst case a long-running session gets one repeat warning.
+        # ponytail: this is in-memory, so a mid-session restart re-fires the
+        # warning once (same tolerated worst case as the clear above). The
+        # auto-stop itself re-reads the DB under lock and stays exact — only
+        # the advisory nudge repeats — so a persisted dedupe query isn't worth
+        # a column/migration here.
         self._low_balance_warned: set = set()
 
         self.client = mqtt.Client(client_id="amphive_backend_server", callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
