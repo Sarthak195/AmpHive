@@ -1641,7 +1641,9 @@ from backend.schemas import (  # noqa: E402
     CpoTariffAssignRequest, CpoTariffCreateRequest,
     CpoTariffSlotCreateRequest, CpoTariffSlotUpdateRequest, CpoTariffUpdateRequest,
 )
-from backend.services.pricing import slot_overlaps  # noqa: E402
+from backend.services.pricing import (  # noqa: E402
+    mark_tenant_sessions_for_reprice, slot_overlaps,
+)
 
 
 async def _load_tenant_tariff(db: AsyncSession, tariff_id: int, tenant_id: int) -> Tariff:
@@ -1729,6 +1731,10 @@ async def cpo_update_tariff(
     if req.price_per_kwh is not None:
         tariff.price_per_kwh = to_money(req.price_per_kwh)
 
+    # [Pricing v2 Phase 3] Reprice in-flight sessions forward-only if the rate
+    # moved (a rename alone is a no-op reprice, so this is safe to always call).
+    if req.price_per_kwh is not None:
+        await mark_tenant_sessions_for_reprice(db, user.tenant_id)
     await db.commit()
     await db.refresh(tariff)
 
@@ -1757,6 +1763,9 @@ async def cpo_delete_tariff(
 
     tariff_name = tariff.name
     await db.delete(tariff)
+    # [Pricing v2 Phase 3] Sessions billing on this tariff fall back to the next
+    # rule (its FKs are ON DELETE SET NULL) — reprice them forward-only.
+    await mark_tenant_sessions_for_reprice(db, user.tenant_id)
     await db.commit()
 
     logger.info(f"CPO tariff deleted: '{tariff_name}' (id={tariff_id}) by {user.email}")
@@ -1856,6 +1865,7 @@ async def cpo_create_tariff_slot(
         days_mask=req.days_mask,
     )
     db.add(slot)
+    await mark_tenant_sessions_for_reprice(db, user.tenant_id)  # [Phase 3]
     await db.commit()
     await db.refresh(slot)
     logger.info(
@@ -1889,6 +1899,7 @@ async def cpo_update_tariff_slot(
     slot.days_mask = new_days
     if req.price_per_kwh is not None:
         slot.price_per_kwh = to_money(req.price_per_kwh)
+    await mark_tenant_sessions_for_reprice(db, user.tenant_id)  # [Phase 3]
     await db.commit()
     await db.refresh(slot)
     logger.info(f"CPO tariff slot {slot_id} updated on tariff {tariff_id} by {user.email}")
@@ -1907,6 +1918,7 @@ async def cpo_delete_tariff_slot(
     await _load_tenant_tariff(db, tariff_id, user.tenant_id)
     slot = await _load_tenant_slot(db, tariff_id, slot_id)
     await db.delete(slot)
+    await mark_tenant_sessions_for_reprice(db, user.tenant_id)  # [Phase 3]
     await db.commit()
     logger.info(f"CPO tariff slot {slot_id} deleted from tariff {tariff_id} by {user.email}")
     return {"status": "deleted", "slot_id": slot_id, "tariff_id": tariff_id}
