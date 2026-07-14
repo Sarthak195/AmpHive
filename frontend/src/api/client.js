@@ -59,6 +59,7 @@ export async function apiRequest(endpoint, options = {}) {
 
   if (!response.ok) {
     let errorMessage = data?.detail;
+    let errorCode;
     // FastAPI validation errors (422) send `detail` as a list of
     // {loc, msg, ...} objects — flatten to "field: message" lines so the UI
     // shows something readable instead of "[object Object]".
@@ -70,8 +71,19 @@ export async function apiRequest(endpoint, options = {}) {
         })
         .filter(Boolean)
         .join('; ');
+    } else if (errorMessage && typeof errorMessage === 'object') {
+      // Structured error detail {code, message, ...} — surface the code so
+      // callers can branch (e.g. "circuit_full" → offer "Request capacity").
+      errorCode = errorMessage.code;
+      errorMessage = errorMessage.message || JSON.stringify(errorMessage);
     }
-    throw new Error(errorMessage || `Request failed with status ${response.status}`);
+    const err = new Error(errorMessage || `Request failed with status ${response.status}`);
+    err.status = response.status;
+    if (errorCode) err.code = errorCode;
+    if (data?.detail && typeof data.detail === 'object' && !Array.isArray(data.detail)) {
+      err.detail = data.detail; // full structured payload (e.g. plug_id)
+    }
+    throw err;
   }
 
   return data;

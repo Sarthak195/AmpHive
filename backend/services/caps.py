@@ -90,12 +90,19 @@ async def check_circuit_admission(db: AsyncSession, plug: Plug) -> None:
     # Small epsilon so a load that foots EXACTLY to the cap (float sums) admits.
     if projected > group.max_current_a + 1e-6:
         available = max(0.0, group.max_current_a - load)
+        # Structured detail so the driver UI can offer "Request capacity" on this
+        # specific block (frontend api client surfaces detail.code). The plain
+        # message still reads fine for any client that only shows detail.message.
         raise HTTPException(
             status_code=409,
-            detail=(
-                f"This circuit is at capacity: {load:g} A of {group.max_current_a:g} A "
-                f"in use, and this charger needs {effective_plug_cap(plug):g} A "
-                f"({available:g} A free). Wait for a session to finish, or ask the "
-                "operator to raise the limit."
-            ),
+            detail={
+                "code": "circuit_full",
+                "plug_id": plug.id,
+                "message": (
+                    f"This circuit is at capacity: {load:g} A of {group.max_current_a:g} A "
+                    f"in use, and this charger needs {effective_plug_cap(plug):g} A "
+                    f"({available:g} A free). Wait for a session to finish, or tap "
+                    "'Request capacity' to ask the operator."
+                ),
+            },
         )

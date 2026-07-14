@@ -1023,3 +1023,32 @@ class PlugWatch(Base):
         UniqueConstraint("user_id", "plug_id", name="uq_plug_watches_user_plug"),
         Index("idx_plug_watches_plug", "plug_id"),
     )
+
+
+class CapacityRequest(Base):
+    """
+    A one-shot "request capacity" when a driver's start is refused because the
+    plug's circuit is at capacity (services/caps.py check_circuit_admission).
+    Armed via POST /api/plugs/{id}/request-capacity; when the circuit next has
+    room — a session on it ends (finalize_charging_session) or the operator
+    raises the cap (PUT /api/cpo/groups) — services/capacity.py notifies every
+    requester whose plug would now be admitted and DELETES their rows (one-shot,
+    same contract as PlugWatch). group_id is the circuit at request time
+    (denormalized, so the fan-out is a plain per-group read).
+
+    UNIQUE(user_id, plug_id): idempotent arming. idx_capacity_requests_group:
+    per-circuit fan-out. Both FKs CASCADE — transient state, not history; no
+    relationship() back-refs (same rationale as PlugWatch/GatewayEvent).
+    """
+    __tablename__ = "capacity_requests"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    plug_id: Mapped[int] = mapped_column(Integer, ForeignKey("plugs.id", ondelete="CASCADE"), nullable=False)
+    group_id: Mapped[int] = mapped_column(Integer, ForeignKey("charger_groups.id", ondelete="CASCADE"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "plug_id", name="uq_capacity_requests_user_plug"),
+        Index("idx_capacity_requests_group", "group_id"),
+    )

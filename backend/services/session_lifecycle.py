@@ -269,6 +269,13 @@ async def finalize_charging_session(
     from backend.services.plug_watch import notify_watchers_plug_available
     await notify_watchers_plug_available(db, plug, exclude_user_id=session.user_id)
 
+    # [Caps] This session leaving the circuit may have freed enough current for
+    # a driver waiting on a "Request capacity" — notify any whose plug now fits
+    # (excluding the driver who just finished). Best-effort, never raises into
+    # the billing path (services/capacity.py).
+    from backend.services.capacity import notify_capacity_available
+    await notify_capacity_available(db, plug.group_id, exclude_user_id=session.user_id)
+
     # 6. End telemetry stream
     state.telemetry_store.end_session(plug.id)
     await set_plug_telemetry_interval(db, plug.id, 10000)

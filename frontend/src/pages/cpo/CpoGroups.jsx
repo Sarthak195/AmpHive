@@ -236,6 +236,14 @@ const CpoGroups = () => {
                 )}
               </div>
 
+              {/* [Caps] Drivers waiting on "Request capacity" — a nudge to raise
+                  the cap (or free a plug). Raising it notifies them automatically. */}
+              {group.pending_capacity_requests > 0 && (
+                <div className="badge badge-warning" style={{ marginBottom: '0.75rem' }}>
+                  ⚡ {group.pending_capacity_requests} waiting for capacity
+                </div>
+              )}
+
               {/* Access Code (private groups only) */}
               {!group.is_public && group.access_code && (
                 <div style={{ marginBottom: '1rem' }}>

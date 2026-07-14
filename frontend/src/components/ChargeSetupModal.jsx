@@ -12,12 +12,17 @@
  * button classes in styles/global.css — no new colours.
  */
 import { useState } from 'react';
+import api from '../api/client';
 
 const ChargeSetupModal = ({ plug, rate, balance, onStart, onClose }) => {
   const [hours, setHours] = useState('');
   const [kwh, setKwh] = useState('');
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState('');
+  // [Caps] Set when the start was refused because the circuit is full — offers
+  // the driver a "Request capacity" action instead of a dead end.
+  const [circuitFull, setCircuitFull] = useState(false);
+  const [capacityRequested, setCapacityRequested] = useState(false);
 
   if (!plug) return null;
 
@@ -35,12 +40,27 @@ const ChargeSetupModal = ({ plug, rate, balance, onStart, onClose }) => {
 
     setStarting(true);
     setError('');
+    setCircuitFull(false);
     try {
       await onStart(plug.id, Object.keys(limits).length ? limits : null);
       // On success the caller navigates away (this modal unmounts).
     } catch (err) {
       setError(err?.message || 'Could not start charging.');
+      // [Caps] The backend tags a full-circuit block with code "circuit_full"
+      // (services/caps.py) — surface the "Request capacity" action for it.
+      setCircuitFull(err?.code === 'circuit_full');
       setStarting(false);
+    }
+  };
+
+  const handleRequestCapacity = async () => {
+    setError('');
+    try {
+      await api.post(`/api/plugs/${plug.id}/request-capacity`);
+      setCapacityRequested(true);
+      setCircuitFull(false);
+    } catch (err) {
+      setError(err?.message || 'Could not send the request.');
     }
   };
 
@@ -81,6 +101,20 @@ const ChargeSetupModal = ({ plug, rate, balance, onStart, onClose }) => {
         </div>
 
         {error && <div className="error-text mt-2">{error}</div>}
+
+        {/* [Caps] Full-circuit block → let the driver queue a request rather
+            than hit a dead end. On success they get a notification when the
+            circuit frees (a session ends or the operator raises the cap). */}
+        {circuitFull && !capacityRequested && (
+          <button className="btn btn-ghost mt-2" onClick={handleRequestCapacity}>
+            Request capacity
+          </button>
+        )}
+        {capacityRequested && (
+          <div className="mt-2" style={{ fontSize: '0.85rem', color: 'var(--color-text-secondary)' }}>
+            Requested — you'll get a notification when this circuit has room. You can close this and come back.
+          </div>
+        )}
 
         <div className="modal-actions">
           <button className="btn btn-ghost" onClick={onClose} disabled={starting}>Cancel</button>

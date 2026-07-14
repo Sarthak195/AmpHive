@@ -679,8 +679,14 @@ async def cpo_list_groups(
         # [Caps] The circuit limit + the current committed load (Σ active plug
         # caps), so the operator sees "24 / 32 A in use". One query per group,
         # matching the per-group counts above (group counts are small).
+        from backend.database.models import CapacityRequest
         from backend.services.caps import circuit_load_a
         load_a = await circuit_load_a(db, group.id)
+        # Drivers waiting on "Request capacity" for this circuit — a nudge to
+        # raise the cap.
+        waiting = (await db.execute(
+            select(func.count(CapacityRequest.id)).where(CapacityRequest.group_id == group.id)
+        )).scalar() or 0
 
         response.append({
             "id": group.id,
@@ -691,6 +697,7 @@ async def cpo_list_groups(
             "member_count": member_count,
             "max_current_a": group.max_current_a,
             "current_load_a": load_a,
+            "pending_capacity_requests": waiting,
             "created_at": group.created_at.isoformat() if group.created_at else None,
         })
 
@@ -782,6 +789,13 @@ async def cpo_update_group(
 
     await db.commit()
     await db.refresh(group)
+
+    # [Caps] Raising (or clearing) the circuit cap may make room for drivers
+    # waiting on a "Request capacity" — notify any whose plug now fits. No-op if
+    # the cap was lowered (nothing new fits). Best-effort; never raises.
+    if req.max_current_a is not None:
+        from backend.services.capacity import notify_capacity_available
+        await notify_capacity_available(db, group.id)
 
     logger.info(f"CPO group updated: '{group.name}' (id={group.id}) by {user.email}")
 
