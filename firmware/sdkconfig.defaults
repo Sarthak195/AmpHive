@@ -39,6 +39,13 @@ CONFIG_LWIP_IPV4=y
 CONFIG_LWIP_IP4_FRAG=y
 CONFIG_LWIP_IP4_REASSEMBLY=y
 
+# Captive-portal HTTP server: a phone browser's request headers (User-Agent,
+# Accept-*, plus Origin/Referer added on the POST) overflow the 512-byte
+# default, so httpd rejects POST /save with "header fields are too long" (hit
+# provisioning gateway 1cc3abb4fb54 on 2026-07-15; had to fall back to a curl
+# POST). Double the cap so phone-browser provisioning works out of the box.
+CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
+
 # Stack size - increased significantly
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=32768
 
