@@ -58,9 +58,11 @@ Hard-coded constants: `AMPHIVE_DIRECT_MQTT 1` → `MQTT_BROKER_URL
 embedded via `EMBED_TXTFILES "certs/mqtt_ca.crt"` and validated by mbedTLS:
 chain + IP SAN, no date check). The legacy build (`AMPHIVE_DIRECT_MQTT 0`) keeps
 `SERVER_VPN_IP "100.87.241.70"` + plaintext `mqtt://100.87.241.70:1883` inside
-the WireGuard tunnel. `TARGET_PLUG_ID 1`. SSID, WiFi password, auth key,
-device name, gateway id, target plug IP, and MQTT credentials all come from
-NVS (namespace `storage`) populated by the captive portal.
+the WireGuard tunnel. SSID, WiFi password, auth key,
+device name, gateway id, and MQTT credentials all come from
+NVS (namespace `storage`) populated by the captive portal. Plug IPs are **not**
+stored on-device (fw ≥ 2.0.0-direct) — they arrive from the backend's retained
+roster (§3).
 
 ## 2. Captive portal (✅ implemented; locked down fw 1.6.0)
 
@@ -68,10 +70,11 @@ If WiFi config is missing or the STA connection fails, the device starts SoftAP
 `AmpHive_Setup_XXXX` — **WPA2-protected since fw 1.6.0** (passphrase = the
 per-device **setup code**, see below) — and runs `esp_http_server` on
 `192.168.4.1` in **AP-only mode** (no STA interface, so the portal is reachable
-exclusively via the setup AP). The form collects the setup code plus **6 config
-fields** (WiFi SSID/password, target plug IP, **Tapo account email + password**,
-per-gateway MQTT password); `gateway_id`, `device_name`, and `mqtt_user` are
-derived from the STA MAC, not typed. POST `/save` verifies the setup code
+exclusively via the setup AP). The form collects the setup code plus **5 config
+fields** (WiFi SSID/password, **Tapo account email + password**, per-gateway MQTT
+password); `gateway_id`, `device_name`, and `mqtt_user` are derived from the STA
+MAC, not typed, and plug IPs come from the backend's retained roster (§3), not
+the portal. POST `/save` verifies the setup code
 (constant-time compare; wrong code → 1 s throttle + 403, nothing written),
 URL-decodes the fields, writes them to NVS, and reboots. The Tapo credentials
 are used by the KLAP driver's auth hash (see §4).
@@ -97,22 +100,22 @@ are used by the KLAP driver's auth hash (see §4).
   `plugs_mutex`): its DB `plug_id` (from the command topic), LAN IP, a **per-plug
   KLAP driver context** (`tapo_plug_t` — its own handshake/session + energy meter,
   so plug B's command can never actuate plug A), and its own session/watchdog
-  state. `ON`/`OFF` carry the target `local_ip` (see [MQTT_CONTRACT.md](MQTT_CONTRACT.md)),
-  so the gateway learns and drives the right plug without a static on-device
-  roster; an empty `local_ip` falls back to the one provisioned `target_plug_ip`
-  (single-plug back-compat). Slots are added, never freed at runtime, so the
-  telemetry task can read them without holding the lock across a KLAP call.
-- **Boot-time provisional slot (fw 1.7.1).** At boot the gateway pre-registers a
-  slot for its provisioned `target_plug_ip` (provisional id `1`) so **idle
-  telemetry flows from boot** — this keeps the backend's session-start liveness
-  gate fresh before any command arrives. Without it a session-less gateway polls
-  nothing, publishes no telemetry, and drops out of the liveness window, so
-  session starts get a 409 "gateway offline" (a real regression the 1.7.0 build
-  shipped and the 2026-07-12 on-device test caught). The backend's **real**
-  `plug_id` is adopted into the same slot by matching IP on the first command for
-  that plug (`slot_get_locked` → `tapo_plug_reassign_id` re-points the NVS energy
-  key), so no duplicate slot is created when the real id differs from the
-  provisional one.
+  state. The slot table is built from the backend's **retained plug roster**
+  (`/config`, fw ≥ 2.0.0-direct — see [MQTT_CONTRACT.md](MQTT_CONTRACT.md));
+  `ON`/`OFF` also carry the target `local_ip` as a live refresh/fallback. A slot
+  is **freed** only when the roster drops the plug: `handle_plug_roster` flags it
+  and the telemetry task — the sole owner of per-plug KLAP I/O — frees the context
+  (`tapo_plug_destroy`) at the top of its next sweep, so a handle is never freed
+  mid-call and an **active session is never reaped**.
+- **Idle telemetry from boot via the retained roster (fw ≥ 2.0.0-direct).** The
+  gateway subscribes to `amphive/gateways/{gw}/config` on connect and builds its
+  slot table from the retained roster, so **idle telemetry flows for every plug
+  from boot** — keeping the backend's session-start liveness gate fresh before any
+  command arrives. This **replaced** the fw-1.7.1 boot-time "provisional slot"
+  (which pre-registered a single provisioned `target_plug_ip` under id `1` to fix
+  a 1.7.0 liveness regression): with no provisioned plug IP on-device anymore, the
+  retained roster does that job for all plugs at once. Crash-recovered sessions
+  still repopulate their own slots.
 - Commands parsed with **cJSON** (`"action":"ON"`/`"OFF"`/`"SET_INTERVAL"`, optional
   `max_duration_seconds` / `max_kwh` / `session_id` / `local_ip`, `interval_ms`);
   topic/data buffers 256/512 B with an oversized/fragmented-payload guard.

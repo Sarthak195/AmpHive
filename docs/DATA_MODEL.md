@@ -61,9 +61,16 @@ freshly seen.
 
 ### `plugs`
 `id` PK · `gateway_id` → gateways (CASCADE) · `name` · `local_ip` ·
-`plug_model` (default `tapo_p110`) · `status` (default `offline`) ·
-`current_power_w` float · `last_seen_at` · `created_at` ·
-`group_id` → charger_groups (SET NULL, nullable).
+`plug_model` (default `tapo_p110`) · `unique_id` VARCHAR(128) nullable, indexed
+(stable device identity from AmpHive-Agent discovery, e.g. `kasa:AA:BB:…`; NULL
+for ESP-gateway / manually-provisioned plugs — the `(gateway_id, unique_id)`
+discovery-upsert key) · `status` (default `offline`) · `current_power_w` float ·
+`last_seen_at` · `created_at` · `group_id` → charger_groups (SET NULL, nullable).
+
+The backend's **retained plug roster** (`amphive/gateways/{gw}/config`, see
+[MQTT_CONTRACT.md](MQTT_CONTRACT.md)) is derived from these rows — one
+`{plug_id, local_ip, max_current_a}` entry per plug on the gateway — and
+republished whenever a plug is created/updated or the gateway reconnects.
 
 ### `charging_sessions`
 `id` PK · `tenant_id` → tenants (CASCADE) · `user_id` → users (CASCADE) ·

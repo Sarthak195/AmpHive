@@ -450,6 +450,26 @@ async def cpo_list_plugs(
     ]
 
 
+async def _publish_gateway_roster(db: AsyncSession, gateway_id: str) -> None:
+    """
+    Republish the retained plug roster (amphive/gateways/{gw}/config) for a
+    gateway after a plug create/update so the firmware reconciles its slot table
+    (add / re-IP / remove). Built from the current request session, so it must
+    run AFTER commit. No-op when the MQTT manager isn't up (tests / pre-startup).
+    """
+    if not state.mqtt_manager:
+        return
+    rows = (await db.execute(
+        select(Plug.id, Plug.local_ip, Plug.max_current_a)
+        .where(Plug.gateway_id == gateway_id)
+    )).all()
+    roster = [
+        {"plug_id": pid, "local_ip": ip, "max_current_a": cap}
+        for pid, ip, cap in rows
+    ]
+    state.mqtt_manager.publish_plug_roster(gateway_id, roster)
+
+
 @router.post("/api/cpo/plugs")
 async def cpo_create_plug(
     req: CpoPlugCreateRequest,
@@ -511,6 +531,10 @@ async def cpo_create_plug(
         detail=f"name={plug.name}, gateway_id={plug.gateway_id}",
     )
 
+    # Retained roster push so the gateway starts tracking the new plug now,
+    # without waiting for the first ON/OFF command.
+    await _publish_gateway_roster(db, req.gateway_id)
+
     return {
         "status": "registered",
         "plug_id": plug.id,
@@ -570,6 +594,8 @@ async def cpo_update_plug(
         plug.latitude = req.latitude
     if req.longitude is not None:
         plug.longitude = req.longitude
+    if req.local_ip is not None:
+        plug.local_ip = req.local_ip
     if req.max_current_a is not None:
         # [Caps] 0 clears the cap back to the default hardware cutoff (NULL).
         plug.max_current_a = req.max_current_a or None
@@ -595,6 +621,10 @@ async def cpo_update_plug(
             target_id=plug.id,
             detail=f"{old_status.value} -> {plug.status.value}",
         )
+
+    # Retained roster push — picks up a changed local_ip / name / max_current_a
+    # so the gateway re-IPs or re-caps the plug's slot.
+    await _publish_gateway_roster(db, plug.gateway_id)
 
     return {
         "status": "updated",

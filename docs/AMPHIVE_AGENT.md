@@ -248,7 +248,7 @@ persisted across the run.
    auto-dedupe.** The ESP gateway and the Agent are *alternative* gateways for a
    given plug; a client uses one or the other per physical device. Running both
    against the **same** plug is unsupported — it double-represents the device
-   (the ESP drives it by `target_plug` IP with no stored MAC; the Agent
+   (the ESP drives it by its `plugs.local_ip` with no stored MAC; the Agent
    discovers it as `unique_id "kasa:<MAC>"` — different `plugs` rows), so it
    could double-bill. Automatic dedupe isn't possible today because ESP-driven
    plug rows don't record the device MAC. Future enhancement: store the plug MAC

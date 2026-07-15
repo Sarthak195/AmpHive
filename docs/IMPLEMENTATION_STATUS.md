@@ -78,8 +78,8 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 | **Unauthorized physical-on guard (fw ≥ 1.5.0)** | ✅ | The relay ON with no active session (physical button / Tapo app / stale NVS resume) is forced OFF locally every poll and alarmed once per episode (`UNAUTHORIZED_ON`, rising-edge). Uses the plug's real `device_on` (previously read but discarded). **Live on the real gateway 2026-07-10** (OTA'd to `1.5.0-direct`); the backend ingests the alarm end-to-end (verified in prod). The remote out-of-band physical-press trigger itself is unit-tested + by-construction (no LAN path to press the button remotely). |
 | **Richer telemetry: relay state + trapezoidal energy (fw ≥ 1.5.0)** | ✅ | Telemetry now carries the actual `relay` (device_on) state alongside derived `current`/nominal `voltage`; the driver-side kWh integrator switched from left-rectangle to the **trapezoidal rule** (averages consecutive power samples) for lower error on ramping loads at the 10 s cadence. **Verified on the wire 2026-07-10** (real gateway telemetry shows `"relay":false`). |
 | `microlink` Tailscale client (Noise/ts2021, DERP, DISCO, STUN, WG) | 🟡 | **Demoted to legacy transport** (`AMPHIVE_DIRECT_MQTT=0`): works for full-cone NATs, but symmetric NAT defeats DISCO hole-punching (root-caused 2026-07-09) — the reason for the direct-MQTT pivot. Kept compilable for rollback/comparison. |
-| MQTT control loop + topic contract | ✅ | Matches backend topics. **Multi-plug (TD#20), shipped fw 1.7.1-direct, verified on-device 2026-07-12**: `main.c` keeps a `plugs_mutex`-guarded per-plug slot table (each slot = DB `plug_id` + LAN IP + per-plug `tapo_plug_t` KLAP context + its own session/watchdog state) and `tapo_protocol.c` moved the KLAP session and energy integrator into that per-plug context, so a command for plug B can no longer actuate plug A and telemetry is published under each plug's own id. The gateway learns each plug's IP from the `local_ip` the backend ships on ON/OFF (no on-device roster), and pre-registers its provisioned plug at boot so idle telemetry flows immediately (the liveness gate stays fresh — a 1.7.0 regression fixed in 1.7.1). **Single-plug charging regression verified end-to-end on the real gateway** (OTA to 1.7.1, billed session: 0.014 kWh → 0.07 coins, ledger reconciled); two-real-plug validation still needs a second unit. (§3.50, TD#20, SEC §8.5) |
-| Captive portal provisioning | ✅ | `AmpHive_Setup_XXXX` → NVS → reboot. **Locked down fw 1.6.0** (SEC §8.1 closed): WPA2 AP + `/save` gated by a per-device setup code (NVS-persisted, printed over serial for the unit label), AP-only interface, 10-min idle timeout → reboot/STA retry. **Live on the real gateway 2026-07-11** (OTA `1.5.0-direct` → signed `1.6.0-direct`, rollback cancelled); the locked portal itself is verified by construction/build only — exercising it needs physical access to force a Wi-Fi-loss fallback. |
+| MQTT control loop + topic contract | ✅ | Matches backend topics. **Multi-plug (TD#20), shipped fw 1.7.1-direct, verified on-device 2026-07-12**: `main.c` keeps a `plugs_mutex`-guarded per-plug slot table (each slot = DB `plug_id` + LAN IP + per-plug `tapo_plug_t` KLAP context + its own session/watchdog state) and `tapo_protocol.c` moved the KLAP session and energy integrator into that per-plug context, so a command for plug B can no longer actuate plug A and telemetry is published under each plug's own id. As of **fw 2.0.0-direct** the gateway learns each plug's IP from the backend's **retained plug roster** on `amphive/gateways/{gw}/config` (`handle_plug_roster` builds/reconciles the slot table on connect; the ON/OFF `local_ip` is now a refresh/fallback), so idle telemetry flows for every plug with no provisioned plug IP and no boot-time provisional slot (the removed slot's old job of keeping the liveness gate fresh — a 1.7.0 regression once fixed in 1.7.1 — is now the roster's). **Single-plug charging regression verified end-to-end on the real gateway** (OTA to 1.7.1, billed session: 0.014 kWh → 0.07 coins, ledger reconciled); the 2.0.0-direct roster path is code-complete, on-device verify + two-real-plug validation pending. (§3.50, §3.57, TD#20, SEC §8.5) |
+| Captive portal provisioning | ✅ | `AmpHive_Setup_XXXX` → NVS → reboot. **As of fw 2.0.0-direct** it collects only Wi-Fi + Tapo account + per-gateway MQTT password — the "Target Plug IP" field was removed; plug IPs now arrive from the backend's retained roster (§3.57). **Locked down fw 1.6.0** (SEC §8.1 closed): WPA2 AP + `/save` gated by a per-device setup code (NVS-persisted, printed over serial for the unit label), AP-only interface, 10-min idle timeout → reboot/STA retry. **Live on the real gateway 2026-07-11** (OTA `1.5.0-direct` → signed `1.6.0-direct`, rollback cancelled); the locked portal itself is verified by construction/build only — exercising it needs physical access to force a Wi-Fi-loss fallback. |
 | Edge watchdogs (duration/energy/thermal/over-current) | ✅ | Thermal + over-current now use the plug's `overheat_status`/`overcurrent_status` flags (the P110 has no °C sensor) |
 | Over-current cutoff | ✅ | Enforced via the plug's `overcurrent_status` flag → local OFF + `OVERCURRENT_CUTOFF` alarm |
 | Tapo P110 driver (KLAP/AES) | ✅ | **Real KLAP v2** (mbedTLS SHA/AES + `esp_http_client`); fully verified on-device; builds on **ESP-IDF v5.3** (not v6) |
@@ -432,7 +432,8 @@ audit merged; statuses below are as of 2026-07-11.*
     **all** per-plug sessions (one atomic blob, each carrying `plug_id` +
     `local_ip`) so crash recovery restores every plug. The gateway learns a
     plug's IP from the `local_ip` the backend now ships on ON/OFF
-    (`send_plug_command(..., local_ip=…)`) — no on-device roster, keeping the
+    (`send_plug_command(..., local_ip=…)`) — no on-device roster *then* (later
+    superseded by the backend-pushed retained roster, §3.57), keeping the
     per-gateway broker ACLs and the backend `plug.gateway_id` check intact
     (SEC §8.5). **Regression caught + fixed on-device 2026-07-12:** the first
     build (1.7.0) dropped the pre-multi-plug "poll the provisioned plug from
@@ -527,3 +528,28 @@ audit merged; statuses below are as of 2026-07-11.*
     sibling session's balance isn't this session's to spend past). Legacy
     sessions (`hold_coins IS NULL`) keep the old behavior exactly — this is
     forward-only. Tests: `backend/tests/test_auth_holds.py`.
+57. **[Resolved 2026-07-15 — code-complete; backend deploy + firmware OTA
+    pending] Multi-plug was implicit — the captive portal collected one "Target
+    Plug IP".** A gateway drives up to 4 P110s, but provisioning asked for a
+    single plug IP and the firmware only learned additional plugs lazily from the
+    `local_ip` on an ON/OFF command (plus a boot-time provisional slot for idle
+    telemetry) — so multi-plug read as one-plug-per-ESP and duplicated
+    `plugs.local_ip` on-device, going stale on a DHCP change. Fixed by a
+    **backend-pushed retained plug roster** on `amphive/gateways/{gw}/config`
+    (`{plug_id, local_ip, max_current_a}`, no name — keeps 4 plugs under the
+    512 B inbound buffer): `MQTTManager.publish_plug_roster` /
+    `_publish_roster_for_gateway` publish it on gateway `online`, after a plug
+    create/update (`routers/cpo.py _publish_gateway_roster`), and after an agent
+    discovery upsert. The firmware (`2.0.0-direct`) subscribes on connect and
+    reconciles its slot table (`handle_plug_roster`: add / re-IP / flag-remove;
+    the telemetry task frees a dropped plug via the new `tapo_plug_destroy`, never
+    an active session), and the captive-portal plug-IP field, the `target_plug`
+    NVS key, and the provisional boot slot were removed. Operators can now fix a
+    plug's IP after DHCP drift (`local_ip` added to `PUT /api/cpo/plugs/{id}`).
+    No broker ACL change (the topic is inside `amphive/gateways/%u/#`) and no DB
+    migration. **Rollout is ordered: the backend must be deployed before the
+    firmware OTA** — the firmware now relies on the retained roster for idle
+    telemetry, the job the removed provisional boot slot used to do (OTA target
+    `1cc3abb4fb54`, currently 1.9.0-direct). Tests:
+    `backend/tests/test_plug_roster.py` + the roster cases in
+    `test_mqtt_manager.py`. (TD#20, SEC §8.5)

@@ -322,6 +322,10 @@ class CpoPlugUpdateRequest(BaseModel):
     group_id: Optional[int] = None
     # Status string matching PlugStatus enum values: available, occupied, offline, maintenance
     status: Optional[str] = None
+    # The plug's LAN IP. Lets an operator fix it after a DHCP change without
+    # re-provisioning; on change the backend republishes the retained roster so
+    # the gateway re-IPs the plug's slot (omit to leave unchanged).
+    local_ip: Optional[str] = None
     latitude: Optional[float] = Field(default=None, ge=-90, le=90)
     longitude: Optional[float] = Field(default=None, ge=-180, le=180)
     # [Caps] Per-plug current cap in amps for circuit admission. Send 0 to clear

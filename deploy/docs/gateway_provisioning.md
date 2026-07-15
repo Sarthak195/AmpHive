@@ -32,12 +32,15 @@ The setup form now asks for only:
 | Field | Notes |
 |-------|-------|
 | Wi-Fi SSID / Password | the site network |
-| Target Plug IP | the Tapo plug's LAN IP (static/DHCP-reserved recommended) |
 | Tapo Account Email / Password | for the local KLAP handshake to the plug |
 | **MQTT Password** | the per-gateway broker password from step B below |
 
 `gateway_id`, `device_name`, and the MQTT **username** are all derived from the
-MAC — not entered. (Tailscale/overlay fields are gone.)
+MAC — not entered. **Plug IPs are no longer entered here** (fw ≥ 2.0.0-direct):
+the operator registers each plug (with its LAN IP) in the backend (CPO dashboard
+/ `POST /api/cpo/plugs`), and the gateway receives the full plug roster over MQTT
+(retained `amphive/gateways/{gw}/config` topic). (Tailscale/overlay fields are
+gone.)
 
 ---
 

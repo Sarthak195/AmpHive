@@ -188,7 +188,7 @@ On a board with no stored config (factory-fresh or after `erase-flash`):
    code — re-label.
 2. Join that Wi-Fi network from a laptop/phone (password = setup code).
 3. Browse to **`http://192.168.4.1`**.
-4. Fill in the form — the setup code + **6 config fields** (`gateway_id`,
+4. Fill in the form — the setup code + **5 config fields** (`gateway_id`,
    device name, and MQTT username are derived from the MAC, not typed; the
    auto-detected Gateway ID is shown at the top of the form — give it to the
    AmpHive operator to get the per-gateway MQTT password):
@@ -197,7 +197,6 @@ On a board with no stored config (factory-fresh or after `erase-flash`):
    | Setup Code | `x7kq2m9pfw` | from the unit label / serial log; gates `/save` |
    | WiFi SSID | `HomeNet` | 2.4 GHz network the plug is on |
    | WiFi Password | | |
-   | Target Plug IP | `192.168.1.5` | the Tapo plug's LAN IP (see tip below) |
    | **Tapo Account Email** | `you@example.com` | Tapo cloud login; used for KLAP auth |
    | **Tapo Account Password** | | stored in NVS (plaintext, prototype) |
    | MQTT Password | | the per-gateway broker credential (`add_gateway_user.ps1`); username == gateway id |
@@ -206,10 +205,13 @@ On a board with no stored config (factory-fresh or after `erase-flash`):
    nothing is saved. The portal reboots the board after **10 min** with no
    HTTP activity.
 
-> **Find the plug's IP:** it's DHCP-assigned and can change. In the Tapo app:
-> *Device → Settings → Device Info → IP Address*. Or scan the LAN — the plug answers
-> a 48-byte body to `POST http://<ip>/app/handshake1` (that's how `tools/klap_probe.py`
-> discovers it). "Third-Party Compatibility" must be **enabled** in the Tapo app.
+> **Plug IPs are managed in the backend, not here (fw ≥ 2.0.0-direct).** The
+> gateway no longer takes a plug IP at provisioning — the operator registers each
+> plug (with its LAN IP) in the CPO dashboard, and the backend pushes the full
+> plug roster to the gateway over MQTT (retained `/config` topic). A plug's IP is
+> editable later via `PUT /api/cpo/plugs/{id}` if a DHCP lease changes. The Tapo
+> plug still needs **"Third-Party Compatibility" enabled** in the Tapo app for the
+> gateway's local KLAP control to work.
 
 ---
 
@@ -271,7 +273,7 @@ impractical without reworking `microlink`.
 | `Brownout detector was triggered` | Underpowered USB port/cable — use a powered hub or a better cable |
 | Garbled monitor output | Baud mismatch — `idf.py monitor` uses **115200**; don't override it |
 | `Permission denied: /dev/ttyUSB0` (Linux) | `sudo usermod -aG dialout $USER`, then log out/in |
-| Plug commands do nothing after provisioning | Wrong Target Plug IP (DHCP changed it) or Tapo creds; re-provision ([§6](#6-first-boot--captive-portal-provisioning)). Validate creds with `python tools/klap_probe.py <ip>` |
+| Plug commands do nothing | Wrong plug IP (DHCP changed it) or Tapo creds. Fix the plug's `local_ip` in the CPO dashboard (`PUT /api/cpo/plugs/{id}`) — the backend re-pushes the retained roster and the gateway re-IPs the slot; no re-provisioning needed (fw ≥ 2.0.0-direct). Validate creds with `python tools/klap_probe.py <ip>` |
 | KLAP `handshake1 auth mismatch` in serial log | Wrong Tapo email/password, or "Third-Party Compatibility" disabled in the Tapo app. **Also happens after rotating the Tapo account password** — the gateway's NVS still holds the old one (bit us 2026-07-06). Update the `tapo_pwd` key in NVS namespace `storage` (a minimal one-off app calling `nvs_set_str` works, and preserves the machine key/Wi-Fi/energy state) or erase NVS and re-provision |
 
 ---

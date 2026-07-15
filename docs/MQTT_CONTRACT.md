@@ -35,6 +35,7 @@
 | Direction | Topic | QoS | Retained | Payload |
 |-----------|-------|-----|----------|---------|
 | backend → gateway | `amphive/gateways/{gateway_id}/plugs/{plug_id}/commands` | 1 | no | `{"action":"ON"\|"OFF","max_duration_seconds":<int>,"max_kwh":<float>,"max_current_a":<float>,"session_id":"<str>","local_ip":"<str>"}` OR `{"action":"SET_LIMITS","max_kwh":<float>,"max_duration_seconds":<int>,"local_ip":"<str>"}` OR `{"action":"SET_INTERVAL","interval_ms":<int>}` OR `{"action":"OTA","url":"<http(s)>"}` |
+| backend → gateway | `amphive/gateways/{gateway_id}/config` | 1 | yes | `{"v":1,"plugs":[{"plug_id":<int>,"local_ip":"<str>","max_current_a":<float\|null>}, ...]}` — the gateway's full plug roster (fw ≥ 2.0.0-direct) |
 | gateway → backend | `amphive/gateways/{gateway_id}/telemetry` | 0 | no | `{"plug_id":<int>,"watts":<f>,"kwh":<f>,"voltage":<f>,"current":<f>,"relay":<bool>,"status":"occupied"\|"available","session_id":"<str>"}` |
 
 > `voltage`/`current` are the plug's **measured** volts/amps (a Tapo P110 exposes
@@ -108,20 +109,40 @@ Tapo app / stale NVS resume) is forced OFF locally and alarmed.
 > session is active** on the addressed plug (logged and ignored). `local_ip`
 > targets the physical plug on a multi-plug gateway (TD#20), exactly as ON/OFF.
 
+> **Retained plug roster `/config` (fw ≥ 2.0.0-direct) — the primary plug source.**
+> The backend publishes each gateway's full plug list — **retained**, QoS 1 — on
+> `amphive/gateways/{gw}/config` as `{"v":1,"plugs":[{plug_id, local_ip,
+> max_current_a}, …]}` (no plug `name`: the firmware slot has none, and dropping
+> it keeps 4 plugs under the device's 512 B inbound buffer). The gateway
+> subscribes on connect and (re)builds its per-plug slot table from it
+> (`handle_plug_roster`): a new `plug_id` is tracked, a changed `local_ip` re-IPs
+> the slot, and a plug **dropped** from the roster is flagged and freed by the
+> telemetry task once idle (an **active** session is never reaped). An empty
+> `plugs:[]` frees all non-active slots. Because it is retained, a rebooting
+> gateway gets the current roster the instant it subscribes — which is what lets
+> the firmware drop the old captive-portal plug IP and the boot-time provisional
+> slot. The backend republishes it on gateway `online` (every reconnect —
+> idempotent because retained), after a plug **create**/**update**
+> (`routers/cpo.py _publish_gateway_roster`), and after an agent discovery upsert
+> (`MQTTManager.publish_plug_roster` / `_publish_roster_for_gateway`). The topic
+> is inside the existing `amphive/gateways/%u/#` ACL — no ACL change, no DB
+> migration (SECURITY.md §8.5).
+
 > **`local_ip` targets the plug (multi-plug, TD#20).** One ESP32 gateway can
 > drive several P110s, so ON/OFF carry the target plug's LAN IP (the backend
-> stores it as `plugs.local_ip` and now ships it on every ON/OFF —
+> stores it as `plugs.local_ip` and ships it on every ON/OFF —
 > `send_plug_command(..., local_ip=…)`). The firmware keeps a **per-plug** slot
 > (its own KLAP session + energy meter) keyed by the topic's `plug_id`, binding
 > that slot's IP from the payload — so a command for plug B can no longer actuate
-> plug A, and telemetry is published under each plug's own id. The device learns
-> a plug it hasn't seen (e.g. after a reboot) from the command itself, so no
-> static plug roster is shipped on-device (SECURITY.md §8.5). `local_ip` is
-> **absent** on `SET_INTERVAL` (the poll cadence is gateway-wide) and `OTA`
-> (gateway-scoped). Older single-plug firmware ignores the field and falls back
-> to its one provisioned target plug, so adding it is backward-safe. On gateway
-> reconnect the backend re-sends OFF (now with `local_ip`) to every idle plug,
-> which is also how a freshly-booted gateway re-learns all its plugs.
+> plug A, and telemetry is published under each plug's own id. As of fw
+> 2.0.0-direct the retained `/config` roster (above) is the **primary** source of
+> a plug's IP; the ON/OFF `local_ip` is now a live refresh/fallback (and the way
+> pre-2.0.0 firmware, which didn't subscribe to the roster, learned its plug).
+> `local_ip` is **absent** on `SET_INTERVAL` (the poll cadence is gateway-wide)
+> and `OTA` (gateway-scoped). Older single-plug firmware ignores the field and
+> falls back to its one provisioned target plug, so adding it is backward-safe.
+> On gateway reconnect the backend both republishes the retained roster and
+> re-sends OFF (with `local_ip`) to every idle plug.
 
 > **Note on topic shape:** telemetry is published **per-gateway**
 > (`.../{gateway_id}/telemetry`) with `plug_id` inside the JSON body — *not* the
@@ -205,7 +226,8 @@ broker cert against the embedded self-signed CA (chain + IP SAN; dates
 unchecked, no clock needed). (The legacy `AMPHIVE_DIRECT_MQTT=0` build keeps
 the microlink overlay + plaintext 1883 for comparison/rollback.) It publishes
 `online` status (retained, with its `fw` version) + subscribes to its commands
-on connect; runs a dynamically adjustable
+and its retained plug roster (`/config`, fw ≥ 2.0.0-direct) on connect; runs a
+dynamically adjustable
 telemetry/watchdog loop (default 10 seconds, updated via `SET_INTERVAL`
 between 500ms and 60000ms); parses commands with **cJSON** (topic/data
 buffers 256/512 B, oversized/fragmented payloads dropped); enforces local
