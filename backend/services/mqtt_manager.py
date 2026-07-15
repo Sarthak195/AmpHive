@@ -1098,6 +1098,11 @@ class MQTTManager:
 
         if status == "online":
             await self._republish_off_for_orphaned_plugs(gateway_id)
+            # Push the current plug roster (retained) so a gateway that just
+            # (re)connected builds/reconciles its slot table without waiting for
+            # a command. Fires on every `online` incl. a retained replay — the
+            # retained roster makes that idempotent (not gated on became_online).
+            await self._publish_roster_for_gateway(gateway_id)
         elif became_offline:
             # Only on a real ONLINE->OFFLINE transition — not a retained replay.
             await self._notify_drivers_gateway_offline(gateway_id)
@@ -1372,6 +1377,68 @@ class MQTTManager:
             "Published plug assignments",
             extra={"gateway_id": gateway_id, "assignments": assignments},
         )
+        # Keep the ESP-consumed roster in sync with agent-discovered plugs.
+        await self._publish_roster_for_gateway(gateway_id)
+
+    # -----------------------------------------------------------------------
+    # Plug roster (amphive/gateways/{gw}/config) — backend-pushed, retained
+    # -----------------------------------------------------------------------
+
+    def publish_plug_roster(self, gateway_id: str, plugs: list) -> None:
+        """
+        Publish the retained per-gateway plug roster on
+        `amphive/gateways/{gw}/config` so the firmware builds its slot table
+        proactively — add / re-IP / remove — instead of learning each plug
+        lazily from the `local_ip` on an ON/OFF command (and instead of a single
+        plug IP baked in at captive-portal setup).
+
+        `plugs` is a list of `{plug_id, local_ip, max_current_a}` dicts
+        (`max_current_a` may be None → firmware uses its default cap; the plug's
+        display name is deliberately omitted — the firmware slot has no name and
+        4 long names could overflow the device's 512-byte inbound buffer). Empty
+        list is a valid roster (a gateway with no plugs → free all non-active
+        slots on-device). Retained, so a rebooting gateway gets the current
+        roster the instant it subscribes. Mirrors the retained `assign` publish;
+        fire-and-forget (no wait_for_publish). The topic sits under the gateway's
+        own subtree, so the existing `pattern readwrite amphive/gateways/%u/#`
+        ACL already permits the gateway to subscribe it — no ACL change (SEC §8.5).
+        """
+        if self.client is None:
+            return
+        payload = {"v": 1, "plugs": plugs}
+        self.client.publish(
+            f"amphive/gateways/{gateway_id}/config",
+            json.dumps(payload), qos=1, retain=True,
+        )
+        logger.info(
+            "Published plug roster",
+            extra={"gateway_id": gateway_id, "plug_count": len(plugs)},
+        )
+
+    async def _publish_roster_for_gateway(self, gateway_id: str) -> None:
+        """Load a gateway's plugs and publish the retained roster (see
+        `publish_plug_roster`). Used on gateway (re)connect and after a discovery
+        upsert; the CPO plug-CRUD path builds the roster from its own request
+        session instead (routers/cpo.py `_publish_gateway_roster`)."""
+        from backend.database.models import Plug
+        from sqlalchemy import select
+
+        try:
+            async with self.db_session_factory() as session:
+                rows = (await session.execute(
+                    select(Plug.id, Plug.local_ip, Plug.max_current_a)
+                    .where(Plug.gateway_id == gateway_id)
+                )).all()
+            roster = [
+                {"plug_id": pid, "local_ip": ip, "max_current_a": cap}
+                for pid, ip, cap in rows
+            ]
+            self.publish_plug_roster(gateway_id, roster)
+        except Exception as e:
+            logger.error(
+                "Failed to publish plug roster",
+                extra={"gateway_id": gateway_id, "error": str(e)},
+            )
 
     # -----------------------------------------------------------------------
     # Outbound command publisher

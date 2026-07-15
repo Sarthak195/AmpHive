@@ -553,6 +553,81 @@ async def test_persist_discovery_upserts_new_plug_and_publishes_assign_map():
     MQTTManager._instance = None
 
 
+# ---------------------------------------------------------------------------
+# Plug roster (amphive/gateways/{gw}/config) — backend-pushed, retained
+# ---------------------------------------------------------------------------
+
+
+def test_publish_plug_roster_retained_config_topic():
+    """publish_plug_roster emits a retained QoS-1 {"v":1,"plugs":[...]} message
+    on the gateway's own config topic."""
+    MQTTManager._instance = None
+    mgr = MQTTManager(db_session_factory=lambda: None)
+    mgr.client = MagicMock()
+
+    mgr.publish_plug_roster("gw-1", [
+        {"plug_id": 7, "local_ip": "10.0.0.7", "max_current_a": 16.0},
+    ])
+
+    args, kwargs = mgr.client.publish.call_args
+    assert args[0] == "amphive/gateways/gw-1/config"
+    assert kwargs.get("retain") is True
+    assert kwargs.get("qos") == 1
+    assert json.loads(args[1]) == {
+        "v": 1,
+        "plugs": [{"plug_id": 7, "local_ip": "10.0.0.7", "max_current_a": 16.0}],
+    }
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_publish_roster_for_gateway_loads_plugs():
+    """_publish_roster_for_gateway loads the gateway's plugs and serialises them
+    into the roster (max_current_a=None passes through as null)."""
+    MQTTManager._instance = None
+    session = _FakeSession([
+        _FakeResult(rows=[(7, "10.0.0.7", 16.0), (8, "10.0.0.8", None)]),
+    ])
+    mgr = MQTTManager(db_session_factory=lambda: session)
+    mgr.client = MagicMock()
+
+    await mgr._publish_roster_for_gateway("gw-1")
+
+    args, kwargs = mgr.client.publish.call_args
+    assert args[0] == "amphive/gateways/gw-1/config"
+    assert kwargs.get("retain") is True
+    payload = json.loads(args[1])
+    assert payload["v"] == 1
+    assert payload["plugs"] == [
+        {"plug_id": 7, "local_ip": "10.0.0.7", "max_current_a": 16.0},
+        {"plug_id": 8, "local_ip": "10.0.0.8", "max_current_a": None},
+    ]
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_gateway_online_publishes_roster():
+    """A gateway coming online triggers a retained roster republish."""
+    from backend.database.models import GatewayStatus
+
+    MQTTManager._instance = None
+    loop = asyncio.get_running_loop()
+
+    gw = MagicMock()
+    gw.status = GatewayStatus.OFFLINE  # so this `online` is a real transition
+    session = _FakeSession([_FakeResult(scalar=gw)])
+    mgr = MQTTManager(db_session_factory=lambda: session, event_loop=loop)
+    mgr.client = MagicMock()
+    mgr._republish_off_for_orphaned_plugs = AsyncMock()
+    mgr._publish_roster_for_gateway = AsyncMock()
+    mgr._broadcast_plug_connectivity = AsyncMock()
+
+    await mgr._persist_gateway_status("gw-1", "online", "2.0.0-direct")
+
+    mgr._publish_roster_for_gateway.assert_awaited_once_with("gw-1")
+    MQTTManager._instance = None
+
+
 @pytest.mark.asyncio
 async def test_persist_discovery_unknown_gateway_publishes_nothing():
     """Discovery for an unclaimed gateway is dropped (no plug, no assign map)."""

@@ -419,7 +419,7 @@ over or harvest the owner's Tapo account. Ordered by severity.*
 - **Remaining fix:** require a physical button-hold to enter provisioning
   instead of auto-opening it on Wi-Fi loss; keep retrying STA otherwise.
 
-### 8.5 Multi-plug refactor — **DONE 2026-07-12, stayed security-safe** (code-complete + builds clean, on-device verify pending)
+### 8.5 Multi-plug refactor — **DONE 2026-07-12, stayed security-safe** (code-complete + builds clean, on-device verify pending); backend-pushed roster added 2026-07-15 (fw 2.0.0-direct)
 
 The single-plug → multi-plug refactor (TECH_DEBT #20) touched this surface. Each
 guardrail below was honored — recorded here so the invariants are auditable:
@@ -430,15 +430,21 @@ guardrail below was honored — recorded here so the invariants are auditable:
   mutex, so plug A's crypto/session can't be reused to act on plug B. The shared
   Tapo *account* `auth_hash` stays global (one account owns every plug — that is
   not a per-plug secret).
-- **`local_ip` in the command, no on-device roster (done).** The gateway learns
-  each plug's IP from the `local_ip` the backend ships on ON/OFF
-  (`send_plug_command(..., local_ip=plug.local_ip)`); it stores no static plug
-  roster and no extra secrets. A plug it hasn't seen (e.g. after a reboot) is
-  learned from the command itself.
+- **Backend-pushed retained roster, no secrets/static roster on device
+  (fw 2.0.0-direct, 2026-07-15).** The gateway learns each plug's IP from the
+  backend's **retained** plug roster on `amphive/gateways/{gw}/config`
+  (`{plug_id, local_ip, max_current_a}` — no plug name, no secrets), delivered
+  live on subscribe; the ON/OFF `local_ip` is kept as a refresh/back-compat
+  fallback. Nothing plug-specific is baked into the device at provisioning time
+  — the old captive-portal "Target Plug IP" field, its `target_plug` NVS key,
+  and the boot-time provisional slot were **removed**. The roster rides the
+  gateway's own already-authorized subtree, so it is no different, security-wise,
+  from the commands the gateway already receives.
 - **Broker ACLs stay per-gateway (unchanged).** Still
   `pattern readwrite amphive/gateways/%u/#` (per-gateway, live since 2026-07-10);
   one gateway legitimately drives several plugs under its own subtree, so no ACL
-  change was needed or made.
+  change was needed or made — the retained `.../config` roster topic falls inside
+  the same grant.
 - **Backend `plug.gateway_id == <topic gateway>` check preserved.** The
   2026-07-11 ownership check (§3) is untouched: multi-plug telemetry already
   carries a per-plug `plug_id` and is validated against the topic gateway, so a

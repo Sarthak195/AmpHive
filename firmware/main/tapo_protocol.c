@@ -460,6 +460,16 @@ tapo_plug_t *tapo_plug_create(int plug_id, const char *local_ip) {
     return p;
 }
 
+void tapo_plug_destroy(tapo_plug_t *plug) {
+    if (!plug) return;
+    /* Flush the final meter so a plug re-added later resumes its total
+       (energy_load_nvs keys on "wh_<plug_id>") rather than restarting from 0. */
+    energy_persist_nvs(plug);
+    ESP_LOGI(TAG, "Tapo plug context destroyed (id=%d, ip=%s)", plug->plug_id, plug->ip);
+    if (plug->mutex) vSemaphoreDelete(plug->mutex);
+    free(plug);
+}
+
 void tapo_plug_set_ip(tapo_plug_t *plug, const char *local_ip) {
     if (!plug || !local_ip || !local_ip[0]) return;
     xSemaphoreTake(plug->mutex, portMAX_DELAY);

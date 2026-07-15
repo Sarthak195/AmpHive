@@ -88,6 +88,17 @@ void tapo_plug_set_ip(tapo_plug_t *plug, const char *local_ip);
 void tapo_plug_reassign_id(tapo_plug_t *plug, int new_plug_id);
 
 /**
+ * @brief Destroy a per-plug driver context (free its KLAP session + mutex).
+ *
+ * Call only when the plug has been removed from the gateway's roster and no
+ * other task is using the handle. In AmpHive the telemetry task — the sole
+ * owner of per-plug KLAP I/O — reaps flagged slots at the top of its sweep, so
+ * the handle is never in flight when it's freed. Flushes the energy meter first
+ * so a plug re-added later resumes its kWh total (`wh_<plug_id>`).
+ */
+void tapo_plug_destroy(tapo_plug_t *plug);
+
+/**
  * @brief Turn a plug ON or OFF (KLAP set_device_info).
  * @return ESP_OK on success
  */

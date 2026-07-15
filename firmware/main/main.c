@@ -32,7 +32,6 @@ char wifi_password[64] = "";
 char ts_auth_key[128] = "";
 char device_name[32] = "";
 char gateway_id[32] = "";
-char target_plug_ip[16] = "";
 char tapo_email[64] = "";
 char tapo_password[64] = "";
 // MQTT broker credentials (optional). Empty = connect anonymously, which the
@@ -128,14 +127,6 @@ static int wifi_retry_count = 0;
 // context's *own* lock, so we never hold plugs_mutex across a network call.
 #define MAX_PLUGS SESSION_NVS_MAX_PLUGS
 
-// Provisional plug id for the boot-time slot on the provisioned target plug (see
-// app_main). It exists only so idle telemetry flows from boot and keeps the
-// backend's liveness gate fresh before any command; the backend's real plug id
-// is adopted into the same slot (by matching IP) on the first command for that
-// plug. Matches the pre-multi-plug default so a single-plug gateway whose plug
-// really is id 1 needs no correction.
-#define PROVISIONAL_PLUG_ID 1
-
 typedef struct {
     bool         in_use;
     int          plug_id;
@@ -151,6 +142,7 @@ typedef struct {
     float        max_current_a;          // effective per-plug current cap (amps, REC-03)
     uint8_t      cap_over_count;         // debounce: consecutive over-cap polls
     bool         unauthorized_flagged;   // rising-edge latch for UNAUTHORIZED_ON
+    bool         pending_remove;         // roster dropped this plug — telemetry task reaps it
 } plug_slot_t;
 
 static plug_slot_t plugs[MAX_PLUGS];
@@ -168,13 +160,12 @@ static plug_slot_t *slot_find_locked(int plug_id) {
     return NULL;
 }
 
-// Find or allocate the slot for plug_id, (re)binding its IP. `local_ip` comes
-// from the command payload; when empty we fall back to the provisioned
-// target_plug_ip (single-plug back-compat / an old backend that doesn't ship
-// local_ip yet). Returns NULL if the table is full or no IP is known. Caller
-// holds plugs_mutex.
+// Find or allocate the slot for plug_id, (re)binding its IP. `local_ip` is the
+// plug's LAN IP from the retained roster (amphive/gateways/{gw}/config) or an
+// ON/OFF command payload. Returns NULL if the table is full or no IP is known
+// (empty local_ip and no existing slot for this id). Caller holds plugs_mutex.
 static plug_slot_t *slot_get_locked(int plug_id, const char *local_ip) {
-    const char *ip = (local_ip && local_ip[0]) ? local_ip : target_plug_ip;
+    const char *ip = (local_ip && local_ip[0]) ? local_ip : NULL;
 
     plug_slot_t *s = slot_find_locked(plug_id);
     if (s) {
@@ -183,6 +174,7 @@ static plug_slot_t *slot_get_locked(int plug_id, const char *local_ip) {
             s->local_ip[sizeof(s->local_ip) - 1] = '\0';
             tapo_plug_set_ip(s->tapo, s->local_ip);
         }
+        s->pending_remove = false;   // named again → keep
         return s;
     }
     if (!ip || !ip[0]) {
@@ -201,6 +193,7 @@ static plug_slot_t *slot_get_locked(int plug_id, const char *local_ip) {
                      plug_id, i, plugs[i].plug_id, ip);
             plugs[i].plug_id = plug_id;
             plugs[i].unauthorized_flagged = false;
+            plugs[i].pending_remove = false;
             tapo_plug_reassign_id(plugs[i].tapo, plug_id);
             return &plugs[i];
         }
@@ -217,6 +210,7 @@ static plug_slot_t *slot_get_locked(int plug_id, const char *local_ip) {
         plugs[i].max_current_a = default_plug_cap_a;
         plugs[i].cap_over_count = 0;
         plugs[i].unauthorized_flagged = false;
+        plugs[i].pending_remove = false;
         plugs[i].in_use = true;   // publish the slot last (fields are set above)
         ESP_LOGI(TAG, "Tracking plug %d @ %s (slot %d)", plug_id, ip, i);
         return &plugs[i];
@@ -244,6 +238,60 @@ static void persist_sessions_locked(void) {
         sp->start_energy_mwh = (uint32_t)(plugs[i].start_energy_kwh * 1000.0f);
     }
     session_nvs_save_all(arr, n);
+}
+
+// Apply a retained plug roster (amphive/gateways/{gw}/config): the backend's
+// full list of this gateway's plugs {plug_id, local_ip, max_current_a}.
+// Proactively (re)builds the slot table so idle telemetry flows for every plug
+// without waiting for a command, and re-IPs a plug on a DHCP change. Plugs no
+// longer in the roster are FLAGGED (pending_remove); the telemetry task — the
+// sole owner of per-plug KLAP I/O — frees the context at the top of its sweep,
+// so we never free a handle another task holds. An active session is never
+// removed; it finalises on its own and is reaped by a later roster once idle.
+static void handle_plug_roster(const cJSON *root) {
+    const cJSON *plugs_arr = cJSON_GetObjectItemCaseSensitive(root, "plugs");
+    if (!cJSON_IsArray(plugs_arr)) {
+        ESP_LOGW(TAG, "Roster has no 'plugs' array; ignoring.");
+        return;
+    }
+
+    int seen[MAX_PLUGS];   // plug_ids the roster named (and we could slot)
+    int seen_n = 0;
+
+    xSemaphoreTake(plugs_mutex, portMAX_DELAY);
+    const cJSON *entry;
+    cJSON_ArrayForEach(entry, plugs_arr) {
+        const cJSON *idj = cJSON_GetObjectItemCaseSensitive(entry, "plug_id");
+        const cJSON *ipj = cJSON_GetObjectItemCaseSensitive(entry, "local_ip");
+        if (!cJSON_IsNumber(idj) || !cJSON_IsString(ipj) || !ipj->valuestring) continue;
+        int plug_id = (int)idj->valuedouble;
+        plug_slot_t *s = slot_get_locked(plug_id, ipj->valuestring);
+        if (!s) continue;   // table full / no IP — slot_get_locked already logged
+        // Arm the cap watchdog from the roster when a per-plug cap is given (an
+        // ON command later overrides with the session's resolved cap). Never
+        // touch an active session's live cap.
+        const cJSON *capj = cJSON_GetObjectItemCaseSensitive(entry, "max_current_a");
+        if (!s->session_active && cJSON_IsNumber(capj) && capj->valuedouble > 0.0) {
+            s->max_current_a = (float)capj->valuedouble;
+        }
+        if (seen_n < MAX_PLUGS) seen[seen_n++] = plug_id;
+    }
+
+    // Reap slots the roster dropped — but never an active session.
+    for (int i = 0; i < MAX_PLUGS; i++) {
+        if (!plugs[i].in_use || plugs[i].session_active) continue;
+        bool in_roster = false;
+        for (int j = 0; j < seen_n; j++) {
+            if (plugs[i].plug_id == seen[j]) { in_roster = true; break; }
+        }
+        if (!in_roster && !plugs[i].pending_remove) {
+            plugs[i].pending_remove = true;
+            ESP_LOGI(TAG, "Plug %d dropped from roster — flagged for removal (slot %d)",
+                     plugs[i].plug_id, i);
+        }
+    }
+    xSemaphoreGive(plugs_mutex);
+    ESP_LOGI(TAG, "Applied plug roster: %d plug(s)", seen_n);
 }
 
 // --- Forward Declarations ---
@@ -275,8 +323,6 @@ static void load_config_from_nvs(void) {
     nvs_get_str(my_handle, "device_name", device_name, &size);
     size = sizeof(gateway_id);
     nvs_get_str(my_handle, "gateway_id", gateway_id, &size);
-    size = sizeof(target_plug_ip);
-    nvs_get_str(my_handle, "target_plug", target_plug_ip, &size);
     size = sizeof(tapo_email);
     nvs_get_str(my_handle, "tapo_email", tapo_email, &size);
     size = sizeof(tapo_password);
@@ -322,7 +368,7 @@ static void load_config_from_nvs(void) {
     }
 }
 
-static void save_config_to_nvs(const char* ssid, const char* pwd, const char* auth, const char* dev_name, const char* gw_id, const char* plug_ip, const char* t_email, const char* t_pwd, const char* m_user, const char* m_pwd) {
+static void save_config_to_nvs(const char* ssid, const char* pwd, const char* auth, const char* dev_name, const char* gw_id, const char* t_email, const char* t_pwd, const char* m_user, const char* m_pwd) {
     nvs_handle_t my_handle;
     esp_err_t err = nvs_open("storage", NVS_READWRITE, &my_handle);
     if (err != ESP_OK) return;
@@ -332,7 +378,6 @@ static void save_config_to_nvs(const char* ssid, const char* pwd, const char* au
     nvs_set_str(my_handle, "ts_auth_key", auth);
     nvs_set_str(my_handle, "device_name", dev_name);
     nvs_set_str(my_handle, "gateway_id", gw_id);
-    nvs_set_str(my_handle, "target_plug", plug_ip);
     nvs_set_str(my_handle, "tapo_email", t_email);
     nvs_set_str(my_handle, "tapo_pwd", t_pwd);
     nvs_set_str(my_handle, "mqtt_user", m_user);
@@ -408,7 +453,6 @@ static const char* portal_html = \
     "<label>Setup Code (on the unit label):</label><input name='setup_code' required>"
     "<label>WiFi SSID:</label><input name='ssid' required>"
     "<label>WiFi Password:</label><input name='pwd' type='password'>"
-    "<label>Target Plug IP:</label><input name='plug_ip' required>"
     "<label>Tapo Account Email:</label><input name='tapo_email' type='email' required>"
     "<label>Tapo Account Password:</label><input name='tapo_pwd' type='password' required>"
     "<label>MQTT Password:</label><input name='mqtt_pwd' type='password' required>"
@@ -486,22 +530,21 @@ static esp_err_t portal_post_handler(httpd_req_t *req) {
 
     // gateway_id, device_name and mqtt_user are derived from the MAC (see
     // load_config_from_nvs), so the portal no longer collects them — the
-    // installer supplies only Wi-Fi, the plug IP, the Tapo account, and the
-    // per-gateway MQTT password.
-    char ssid[32] = {0}, pwd[64] = {0}, plug[16] = {0};
+    // installer supplies only Wi-Fi, the Tapo account, and the per-gateway
+    // MQTT password. Plug IPs now arrive from the backend's retained roster.
+    char ssid[32] = {0}, pwd[64] = {0};
     char t_email[64] = {0}, t_pwd[64] = {0}, m_pwd[64] = {0};
     httpd_query_key_value(buf, "ssid", ssid, sizeof(ssid));
     httpd_query_key_value(buf, "pwd", pwd, sizeof(pwd));
-    httpd_query_key_value(buf, "plug_ip", plug, sizeof(plug));
     httpd_query_key_value(buf, "tapo_email", t_email, sizeof(t_email));
     httpd_query_key_value(buf, "tapo_pwd", t_pwd, sizeof(t_pwd));
     httpd_query_key_value(buf, "mqtt_pwd", m_pwd, sizeof(m_pwd));
 
-    url_decode(ssid); url_decode(pwd); url_decode(plug);
+    url_decode(ssid); url_decode(pwd);
     url_decode(t_email); url_decode(t_pwd); url_decode(m_pwd);
 
     // mqtt_user == gateway_id (== MAC); ts_auth_key is unused in direct mode.
-    save_config_to_nvs(ssid, pwd, "", device_name, gateway_id, plug,
+    save_config_to_nvs(ssid, pwd, "", device_name, gateway_id,
                        t_email, t_pwd, gateway_id, m_pwd);
 
     const char* resp = "<html><body><h2>Saved! Rebooting gateway...</h2></body></html>";
@@ -684,6 +727,14 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
             esp_mqtt_client_subscribe(mqtt_client, command_topic, 1);
             ESP_LOGI(TAG, "Subscribed to commands: %s", command_topic);
 
+            // Subscribe to the retained plug roster for this gateway. Delivered
+            // on subscribe (retained), it (re)builds the slot table proactively —
+            // the gateway carries no plug IPs from provisioning anymore.
+            char config_topic[128];
+            snprintf(config_topic, sizeof(config_topic), "amphive/gateways/%s/config", gateway_id);
+            esp_mqtt_client_subscribe(mqtt_client, config_topic, 1);
+            ESP_LOGI(TAG, "Subscribed to roster: %s", config_topic);
+
             // Reaching the broker authenticated is the self-test bar for a
             // freshly-OTA'd image: cancel the bootloader rollback.
             ota_mark_valid_if_pending();
@@ -727,6 +778,15 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
                 ESP_LOGW(TAG, "Command JSON parse failed; ignoring payload.");
                 break;
             }
+
+            // Retained plug roster (amphive/gateways/{gw}/config) — its own topic,
+            // distinct from the per-plug command wildcard. Handle and return.
+            if (strstr(topic, "/config")) {
+                handle_plug_roster(root);
+                cJSON_Delete(root);
+                break;
+            }
+
             const cJSON *action_item = cJSON_GetObjectItemCaseSensitive(root, "action");
             const char *action = cJSON_IsString(action_item) ? action_item->valuestring : NULL;
 
@@ -735,10 +795,10 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
             int cmd_plug_id = parse_plug_id_from_topic(topic);
 
             // Target plug IP carried in the command payload (the backend ships
-            // plugs.local_ip on ON/OFF). This is how the gateway drives the
-            // *right* plug and learns plugs it hasn't seen yet, without a static
-            // on-device roster (SECURITY.md §8.5). Empty → fall back to the
-            // provisioned target_plug_ip (single-plug / pre-local_ip backend).
+            // plugs.local_ip on ON/OFF). A command for a plug already in the
+            // roster resolves by plug_id regardless; an empty local_ip only
+            // fails for a plug_id that has no slot yet (the retained roster is
+            // the primary source of a plug's IP now — SECURITY.md §8.5).
             char cmd_ip[PLUG_IP_MAX_LEN] = {0};
             const cJSON *ipj = cJSON_GetObjectItemCaseSensitive(root, "local_ip");
             if (cJSON_IsString(ipj) && ipj->valuestring) {
@@ -1012,10 +1072,23 @@ static void telemetry_task(void *pvParameters) {
 
     while (1) {
         for (int i = 0; i < MAX_PLUGS; i++) {
-            /* Snapshot the slot's identity under the lock; never hold plugs_mutex
-               across a KLAP network call. Slots are never freed, so `t` and
-               `&plugs[i]` stay valid after we release. */
+            /* Reap a plug the roster dropped (pending_remove). The telemetry task
+               is the SOLE owner of per-plug KLAP I/O, so freeing here — at the top
+               of the sweep, before any call on this slot this iteration — cannot
+               race a call in flight. Active sessions are never flagged for reap. */
             xSemaphoreTake(plugs_mutex, portMAX_DELAY);
+            if (plugs[i].in_use && plugs[i].pending_remove && !plugs[i].session_active) {
+                tapo_plug_t *dead = plugs[i].tapo;
+                plugs[i].in_use = false;
+                plugs[i].pending_remove = false;
+                plugs[i].tapo = NULL;
+                xSemaphoreGive(plugs_mutex);
+                if (dead) tapo_plug_destroy(dead);
+                continue;
+            }
+            /* Snapshot the slot's identity under the lock; never hold plugs_mutex
+               across a KLAP network call. A slot is only ever freed by the reap
+               above (this same task), so `t` stays valid after we release. */
             bool in_use = plugs[i].in_use;
             tapo_plug_t *t = plugs[i].tapo;
             xSemaphoreGive(plugs_mutex);
@@ -1271,28 +1344,11 @@ void app_main(void) {
         xSemaphoreGive(plugs_mutex);
     }
 
-    // 5b. Pre-register the provisioned target plug so idle telemetry flows from
-    //     boot. Pre-multi-plug firmware always polled its one provisioned plug
-    //     from boot, which kept the backend's session-start liveness gate fresh;
-    //     the slot table only polls plugs learned from a command, so without this
-    //     a session-less gateway would publish no telemetry and drop out of the
-    //     liveness window until its first command. The provisional id is corrected
-    //     to the backend's real id (by matching IP) on the first command. Skipped
-    //     if crash recovery already covers this IP or the provisional id.
-    if (target_plug_ip[0] != '\0') {
-        xSemaphoreTake(plugs_mutex, portMAX_DELAY);
-        bool covered = (slot_find_locked(PROVISIONAL_PLUG_ID) != NULL);
-        for (int i = 0; i < MAX_PLUGS && !covered; i++) {
-            if (plugs[i].in_use &&
-                strncmp(plugs[i].local_ip, target_plug_ip, sizeof(plugs[i].local_ip)) == 0)
-                covered = true;
-        }
-        if (!covered && slot_get_locked(PROVISIONAL_PLUG_ID, target_plug_ip)) {
-            ESP_LOGI(TAG, "Pre-registered provisioned plug @ %s (provisional id %d)",
-                     target_plug_ip, PROVISIONAL_PLUG_ID);
-        }
-        xSemaphoreGive(plugs_mutex);
-    }
+    // 5b. Idle telemetry from boot is now driven by the retained plug roster:
+    //     the gateway subscribes to amphive/gateways/{gw}/config on MQTT connect
+    //     and builds its slot table from it (handle_plug_roster), so telemetry
+    //     flows for every plug without a captive-portal plug IP or a provisional
+    //     slot. Crash-recovered sessions repopulate their own slots below.
 
     // 6. Start telemetry and safety watchdog loops
     //    Stack raised to 8 KB: the task now performs real KLAP crypto + HTTP each poll.

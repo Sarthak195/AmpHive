@@ -177,7 +177,7 @@ scoped to the caller's `tenant_id`, so operators only ever see their own assets.
 | POST | `/api/cpo/gateways/{id}/ota` | cpo/admin | `{firmware_url}` (http(s), ≤512 chars) | Trigger an OTA firmware update. Requires the gateway `ONLINE` (409 if offline — gates on the status flag, **not** telemetry freshness, so a gateway with an unreachable plug can still be updated) and ≥1 plug (409 — the OTA command rides a per-plug command topic). Publishes the `OTA` command (502 on publish fail); the gateway downloads into its passive slot and reboots (rollback-protected), refusing mid-session. → `{status:"ota_triggered", gateway_id, firmware_url, message}` |
 | GET | `/api/cpo/plugs` | cpo/admin | — | All plugs across the tenant's gateways (status, power, group). |
 | POST | `/api/cpo/plugs` | cpo/admin | `{gateway_id, name, local_ip, plug_model?, group_id?}` | Register a plug (validates gateway + group ownership). |
-| PUT | `/api/cpo/plugs/{id}` | cpo/admin | `{name?, group_id?, status?}` | Update a plug (`group_id:0` = unassign). |
+| PUT | `/api/cpo/plugs/{id}` | cpo/admin | `{name?, group_id?, status?, local_ip?, max_current_a?}` | Update a plug (`group_id:0` = unassign). Changing `local_ip` (e.g. after a DHCP change) or `max_current_a` re-publishes the gateway's retained plug roster to the device. |
 | GET | `/api/cpo/groups` | cpo/admin | — | Tenant's charger groups (with `plug_count`, `member_count`, `access_code`). |
 | POST | `/api/cpo/groups` | cpo/admin | `{name, is_public?}` | Create a group; private groups get a generated access code. |
 | PUT | `/api/cpo/groups/{id}` | cpo/admin | `{name?, is_public?, regenerate_access_code?}` | Update a group / rotate access code. |
