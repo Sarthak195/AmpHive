@@ -523,15 +523,25 @@ esp_err_t tapo_plug_get_telemetry(tapo_plug_t *plug, tapo_telemetry_t *out) {
     if (!plain) return ESP_ERR_NO_MEM;
     int plen = 0;
     float power_w = 0.0f;
+    /* Real per-phase measurements from the P110 energy monitor. current_a is
+     * REAL (measured amps) when the plug reports current_ma; voltage_v is REAL
+     * when it reports voltage_mv. A P110 that omits either field falls back to
+     * the derived current / configured nominal voltage below (older firmware). */
+    float meas_current_a = -1.0f;   /* <0 → not reported, derive from power */
+    float meas_voltage_v = -1.0f;   /* <0 → not reported, use nominal */
 
     xSemaphoreTake(plug->mutex, portMAX_DELAY);
 
-    /* 1) power (+ energy source) */
+    /* 1) power (+ energy source, + real current/voltage) */
     esp_err_t rc = klap_request(plug->ip, &plug->sess, "{\"method\":\"get_energy_usage\"}", plain, KLAP_RESP_CAP, &plen);
     if (rc != ESP_OK) { xSemaphoreGive(plug->mutex); free(plain); return rc; }
     {
         long mw = 0;   /* get_energy_usage.current_power is in milliwatts */
         if (json_int((const char *)plain, "\"current_power\":", &mw)) power_w = (float)mw / 1000.0f;
+        long cur_ma = 0;   /* current_ma: real RMS current in milliamps */
+        if (json_int((const char *)plain, "\"current_ma\":", &cur_ma)) meas_current_a = (float)cur_ma / 1000.0f;
+        long volt_mv = 0;  /* voltage_mv: real RMS voltage in millivolts */
+        if (json_int((const char *)plain, "\"voltage_mv\":", &volt_mv)) meas_voltage_v = (float)volt_mv / 1000.0f;
     }
 
     /* 2) state + safety statuses */
@@ -576,7 +586,16 @@ esp_err_t tapo_plug_get_telemetry(tapo_plug_t *plug, tapo_telemetry_t *out) {
     free(plain);
 
     out->power_w   = power_w;
-    out->current_a = (s_nominal_voltage > 1.0f) ? power_w / s_nominal_voltage : 0.0f;
+    /* Prefer the plug's REAL measured voltage/current; fall back to nominal /
+     * derived only when the P110 firmware doesn't report them. Both are published
+     * to 2 decimals by the telemetry task and consumed by the current-cap
+     * watchdog, so they must be the measured values whenever available. */
+    if (meas_voltage_v >= 0.0f) out->voltage_v = meas_voltage_v;
+    if (meas_current_a >= 0.0f) {
+        out->current_a = meas_current_a;
+    } else {
+        out->current_a = (out->voltage_v > 1.0f) ? power_w / out->voltage_v : 0.0f;
+    }
     out->energy_kwh = (float)(energy_wh_snapshot / 1000.0);
 
     return ESP_OK;

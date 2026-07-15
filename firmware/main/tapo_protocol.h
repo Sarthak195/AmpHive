@@ -14,8 +14,10 @@
  *   device_on    REAL     get_device_info.device_on
  *   overheated   REAL     get_device_info.overheat_status    != "normal"
  *   overcurrent  REAL     get_device_info.overcurrent_status != "normal"
- *   voltage_v    NOMINAL  the P110 does not report voltage (configured nominal)
- *   current_a    DERIVED  power_w / voltage_v
+ *   voltage_v    REAL     get_energy_usage.voltage_mv (millivolts) / 1000
+ *                         (falls back to the configured nominal if not reported)
+ *   current_a    REAL     get_energy_usage.current_ma (milliamps) / 1000
+ *                         (falls back to derived power_w / voltage_v if not reported)
  *   temperature_c NOMINAL the P110 has no temperature sensor (use `overheated` instead)
  */
 typedef struct {

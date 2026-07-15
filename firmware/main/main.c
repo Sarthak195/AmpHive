@@ -43,6 +43,19 @@ char mqtt_password[64] = "";
 bool config_loaded = false;
 static uint32_t telemetry_interval_ms = 10000; // Default 10s (10000ms)
 
+// ── Per-plug current-cap watchdog (REC-03) ───────────────────────────────────
+// Each session carries an effective per-plug current cap (amps). When the plug's
+// REAL measured current exceeds it beyond a small margin for a short debounce,
+// the gateway forces the relay OFF locally and raises an OVERCURRENT_CAP alarm —
+// a firmware-enforced sub-default limit, distinct from the P110's own hardware
+// OVERCURRENT_CUTOFF safety trip. The cap defaults to DEFAULT_PLUG_CAP_A (matches
+// the backend's effective_plug_cap default) when the ON payload omits max_current_a;
+// an installer may override the default via the NVS "plug_cap_a" string key.
+#define DEFAULT_PLUG_CAP_A          16.0f  // P110 rating; matches backend DEFAULT_PLUG_CAP_A
+#define OVERCURRENT_CAP_MARGIN_A    0.5f   // headroom above the cap before tripping
+#define OVERCURRENT_CAP_DEBOUNCE    3      // consecutive over-cap polls before OFF (ride out inrush)
+static float default_plug_cap_a = DEFAULT_PLUG_CAP_A;
+
 // ── Transport selection ──────────────────────────────────────────────────────
 // 1: DIRECT MQTT (default since 1.3.0) — plain outbound TLS to the broker's
 //    PUBLIC IP. No overlay: survives symmetric NAT/CGNAT (the device only
@@ -135,6 +148,8 @@ typedef struct {
     uint32_t     max_duration_s;
     float        start_energy_kwh;
     float        max_kwh;
+    float        max_current_a;          // effective per-plug current cap (amps, REC-03)
+    uint8_t      cap_over_count;         // debounce: consecutive over-cap polls
     bool         unauthorized_flagged;   // rising-edge latch for UNAUTHORIZED_ON
 } plug_slot_t;
 
@@ -199,6 +214,8 @@ static plug_slot_t *slot_get_locked(int plug_id, const char *local_ip) {
         plugs[i].local_ip[sizeof(plugs[i].local_ip) - 1] = '\0';
         plugs[i].tapo = t;
         plugs[i].session_active = false;
+        plugs[i].max_current_a = default_plug_cap_a;
+        plugs[i].cap_over_count = 0;
         plugs[i].unauthorized_flagged = false;
         plugs[i].in_use = true;   // publish the slot last (fields are set above)
         ESP_LOGI(TAG, "Tracking plug %d @ %s (slot %d)", plug_id, ip, i);
@@ -268,6 +285,14 @@ static void load_config_from_nvs(void) {
     nvs_get_str(my_handle, "mqtt_user", mqtt_username, &size);
     size = sizeof(mqtt_password);
     nvs_get_str(my_handle, "mqtt_pwd", mqtt_password, &size);
+    // Optional per-gateway default current cap (amps), used when an ON command
+    // omits max_current_a. Stored as a decimal string; ignore malformed / non-positive.
+    char cap_str[16] = "";
+    size = sizeof(cap_str);
+    if (nvs_get_str(my_handle, "plug_cap_a", cap_str, &size) == ESP_OK) {
+        float c = atof(cap_str);
+        if (c > 0.0f) default_plug_cap_a = c;
+    }
 
     nvs_close(my_handle);
 
@@ -730,6 +755,11 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
                 if (cJSON_IsNumber(dur)) duration = (uint32_t)dur->valuedouble;
                 const cJSON *kwh = cJSON_GetObjectItemCaseSensitive(root, "max_kwh");
                 if (cJSON_IsNumber(kwh)) kwh_limit = (float)kwh->valuedouble;
+                // Effective per-plug current cap (amps, REC-03). Omitted / non-positive
+                // → fall back to the gateway default so the cap watchdog stays armed.
+                float cap_a = default_plug_cap_a;
+                const cJSON *capj = cJSON_GetObjectItemCaseSensitive(root, "max_current_a");
+                if (cJSON_IsNumber(capj) && capj->valuedouble > 0.0) cap_a = (float)capj->valuedouble;
 
                 char sid[SESSION_ID_MAX_LEN] = {0};   // optional backend session_id
                 const cJSON *sidj = cJSON_GetObjectItemCaseSensitive(root, "session_id");
@@ -765,6 +795,8 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
                     s->start_time_s = now_seconds();
                     s->max_duration_s = duration;
                     s->max_kwh = kwh_limit;
+                    s->max_current_a = cap_a;
+                    s->cap_over_count = 0;
                     s->start_energy_kwh = baseline;
                     s->unauthorized_flagged = false;
                     persist_sessions_locked();
@@ -846,6 +878,14 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
                     // session_active/session_id are left untouched (NO re-baseline).
                     s->max_duration_s = duration;
                     s->max_kwh = kwh_limit;
+                    // Current cap is optional here: only re-arm it (and reset the
+                    // debounce) when the backend actually re-sends max_current_a,
+                    // so a limits update that omits it leaves the running cap intact.
+                    const cJSON *capj = cJSON_GetObjectItemCaseSensitive(root, "max_current_a");
+                    if (cJSON_IsNumber(capj) && capj->valuedouble > 0.0) {
+                        s->max_current_a = (float)capj->valuedouble;
+                        s->cap_over_count = 0;
+                    }
                     persist_sessions_locked();
                     xSemaphoreGive(plugs_mutex);
                     ESP_LOGI(TAG, "Plug %d limits updated: %lu s, %.3f kWh (session preserved)",
@@ -1024,6 +1064,18 @@ static void telemetry_task(void *pvParameters) {
                 } else if (telemetry.overcurrent) {
                     ESP_LOGE(TAG, "OVERCURRENT plug %d: overcurrent_status != normal — local OFF.", plug_id);
                     force_off = true; cutoff_alarm = "OVERCURRENT_CUTOFF"; s->session_active = false;
+                } else if (telemetry.current_a > s->max_current_a + OVERCURRENT_CAP_MARGIN_A) {
+                    /* REC-03 per-plug sub-default cap on the REAL measured current.
+                       Debounced over a few polls so brief inrush/measurement spikes
+                       don't cut a healthy session; distinct from the plug's own
+                       hardware OVERCURRENT_CUTOFF above. */
+                    if (++s->cap_over_count >= OVERCURRENT_CAP_DEBOUNCE) {
+                        ESP_LOGE(TAG, "OVERCURRENT CAP plug %d: %.2f A over cap %.2f A (+%.2f) — local OFF.",
+                                 plug_id, telemetry.current_a, s->max_current_a, OVERCURRENT_CAP_MARGIN_A);
+                        force_off = true; cutoff_alarm = "OVERCURRENT_CAP"; s->session_active = false;
+                    }
+                } else {
+                    s->cap_over_count = 0;   // back under the cap — reset the debounce
                 }
                 if (force_off) persist_sessions_locked();
             } else {
@@ -1203,6 +1255,12 @@ void app_main(void) {
             s->max_duration_s   = recovered[i].max_duration_s;
             s->max_kwh          = (float)recovered[i].max_kwh_mwh / 1000.0f;
             s->start_energy_kwh = (float)recovered[i].start_energy_mwh / 1000.0f;
+            /* The current cap is not persisted in the session NVS record, so a
+               recovered session re-arms at the gateway default until the next ON /
+               SET_LIMITS re-supplies max_current_a. Default (never 0) so the cap
+               watchdog can't false-trip on a resumed session. */
+            s->max_current_a    = default_plug_cap_a;
+            s->cap_over_count   = 0;
             s->unauthorized_flagged = false;
             /* start_time_s was tick-based and the tick counter restarts at zero on
                reboot, so the duration cap restarts from now (TD#23 — the energy cap
