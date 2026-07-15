@@ -90,3 +90,8 @@ TEST_ACCOUNTS.local.txt
 
 # Local reference clones of third-party plug-API repos (see docs/PLUG_CONNECTIVITY_OPTIONS.md)
 research/
+
+# Claude Code skills tooling (local dev machine, not project code) — the
+# find-skills skill install + its lockfile. See .claude/ (also ignored).
+.agents/
+skills-lock.json

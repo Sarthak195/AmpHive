@@ -66,8 +66,23 @@ so a reader gains nothing and a forger is rejected.
 
 ## Migration state — ROLLED OUT (2026-07-10, updated 2026-07-11)
 
-**Current fleet firmware: signed `1.7.1-direct`** (multi-plug per-plug slot
-table, TD#20). Rollout log, newest first:
+**Current fleet firmware: signed `2.0.0-direct`** (multi-plug roster
+provisioning — backend-pushed retained plug roster; captive-portal `plug_ip`
+field and provisional boot slot removed). Rollout log, newest first (NOTE: the
+`1.7.1`→`1.8.0`→`1.9.0` interim rollouts are not individually re-logged here —
+see git history / `docs/IMPLEMENTATION_STATUS.md`):
+
+- **2026-07-15 — `1.9.0-direct` → signed `2.0.0-direct`** on the real gateway
+  `1cc3abb4fb54` (multi-plug roster provisioning, PR #52). **Backend deployed
+  first** (publishes the retained roster on `amphive/gateways/{gw}/config`),
+  then the image was published via `deploy/scripts/publish_firmware.ps1`
+  (`gs://amphive-fw/amphive-gateway-2.0.0-direct.bin`, anonymous-HTTPS-fetch
+  verified) and triggered through `POST /api/cpo/gateways/1cc3abb4fb54/ota`.
+  Gateway rebooted `1.9.0`→`2.0.0` in ~30s (rollback cancelled); **`last_seen`
+  then advanced on 2.0.0**, confirming idle telemetry flows from the retained
+  roster (the device learned plug 1 @192.168.1.6 from `.../config`, not the
+  removed provisional slot). Built with **ESP-IDF v5.3.3** — the field-consistent
+  toolchain. Published image: `amphive-gateway-2.0.0-direct.bin` (**current**).
 
 - **2026-07-12 — `1.7.0-direct` → `1.7.1-direct`** on the real gateway
   `1cc3abb4fb54` (multi-plug regression fix + on-device verification).
