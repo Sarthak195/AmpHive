@@ -172,6 +172,7 @@ async def test_telemetry_update_direct_when_no_loop():
     ({"error": "UNAUTHORIZED_ON", "plug_id": 5}, "UNAUTHORIZED_ON", "critical", 5),
     ({"error": "THERMAL_CUTOFF", "plug_id": 1}, "THERMAL_CUTOFF", "critical", 1),
     ({"error": "OVERCURRENT_CUTOFF"}, "OVERCURRENT_CUTOFF", "critical", None),
+    ({"error": "OVERCURRENT_CAP", "plug_id": 5}, "OVERCURRENT_CAP", "warning", 5),  # soft cap trip
     ({"event": "OTA_STARTED"}, "OTA_STARTED", "info", None),
     ({"event": "OTA_FAILED"}, "OTA_FAILED", "warning", None),
     ({"error": "SOMETHING_NEW"}, "SOMETHING_NEW", "warning", None),  # unknown → warning
@@ -267,6 +268,7 @@ class _AlarmDB:
 @pytest.mark.parametrize("event_type,plug_id,should_trigger", [
     ("THERMAL_CUTOFF", 5, True),
     ("OVERCURRENT_CUTOFF", 5, True),
+    ("OVERCURRENT_CAP", 5, False),   # soft cap trip on a healthy plug — finalize but NOT maintenance
     ("UNAUTHORIZED_ON", 5, False),   # accountability signal, not a hardware fault
     ("OTA_FAILED", 5, False),        # OTA lifecycle notices never trigger it
     ("OTA_STARTED", 5, False),
@@ -347,6 +349,57 @@ async def test_finalize_runs_before_auto_maintenance():
         await mgr._persist_gateway_event("gw-9", 5, "THERMAL_CUTOFF", "critical", None)
 
     assert order == ["finalize", "auto_maintenance"]
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_overcurrent_cap_finalizes_but_does_not_enter_maintenance():
+    """OVERCURRENT_CAP is a soft/policy cap trip: the firmware already stopped
+    charging, so the backend must FINALIZE the session (free the plug, bill,
+    notify) — but the plug is healthy, so it must NOT be forced into MAINTENANCE.
+    Locks the finalize/maintenance gate decoupling."""
+    MQTTManager._instance = None
+    db = _AlarmDB()
+    mgr = MQTTManager(db_session_factory=lambda: db)
+    finalize_mock = AsyncMock()
+    auto_maint_mock = AsyncMock()
+    mgr._finalize_session_after_cutoff = finalize_mock
+    mgr._auto_enter_maintenance = auto_maint_mock
+
+    with patch("backend.services.socketio_manager.emit_gateway_alarm", AsyncMock()):
+        await mgr._persist_gateway_event("gw-9", 5, "OVERCURRENT_CAP", "warning", None)
+
+    finalize_mock.assert_awaited_once_with(5, "OVERCURRENT_CAP")
+    auto_maint_mock.assert_not_called()
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_overcurrent_cap_finalize_reason_string():
+    """The OVERCURRENT_CAP finalize reason routes the driver notification via
+    session_lifecycle — assert the exact reason string is passed to finalize."""
+    MQTTManager._instance = None
+    from unittest.mock import patch as _patch
+
+    captured = {}
+
+    async def _fake_finalize(db, session_id, reason=None):
+        captured["reason"] = reason
+        return {"ok": True}
+
+    class _OneActive:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def execute(self, *_a, **_k):
+            r = MagicMock()
+            r.scalar_one_or_none.return_value = 42  # an ACTIVE session id
+            return r
+
+    mgr = MQTTManager(db_session_factory=lambda: _OneActive())
+    with _patch("backend.services.session_lifecycle.finalize_charging_session", _fake_finalize):
+        await mgr._finalize_session_after_cutoff(5, "OVERCURRENT_CAP")
+
+    assert captured.get("reason") == "current cap exceeded: plug drew over its configured limit"
     MQTTManager._instance = None
 
 

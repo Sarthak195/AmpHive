@@ -214,6 +214,20 @@ messages (`/alarms`) are ingested by `_handle_gateway_alarm` → persisted as
 `gateway_events` and broadcast as the `gateway_alarm` Socket.io event
 (2026-07-10).
 
+> **Alarm handling by type.** `THERMAL_CUTOFF` and `OVERCURRENT_CUTOFF` are
+> hardware faults (severity `critical`): the backend **finalizes** the plug's
+> ACTIVE session (the firmware already force-OFF'd the relay) **and** auto-enters
+> the plug into `MAINTENANCE` so no new session can start until an operator clears
+> it (env `AUTO_MAINTENANCE_ON_CRITICAL_ALARM`). `OVERCURRENT_CAP` (fw ≥ 1.9.0) is
+> a **soft/policy cap trip** — the car drew more than the operator-set per-plug
+> current cap, below the P110's own hardware cutoff (severity `warning`): the
+> backend **finalizes** the session (bills recorded energy, frees the plug,
+> notifies the driver "Charging stopped — current limit exceeded") but keeps the
+> plug **AVAILABLE** (a healthy plug is not taken out of service on every cap
+> trip). `UNAUTHORIZED_ON` neither finalizes nor maintenances (accountability
+> signal). The finalize vs. maintenance decision uses two distinct sets
+> (`_FINALIZE_ALARM_REASONS` ⊇ `_MAINTENANCE_ALARM_REASONS`) in `mqtt_manager.py`.
+
 There is **no Last Will & Testament configured on the backend client**; the
 LWT/`offline` message is published by the *gateway* firmware.
 

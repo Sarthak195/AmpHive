@@ -333,6 +333,11 @@ async def finalize_charging_session(
         n_title, n_severity = "Charging ended — charger connection lost", "warning"
     elif reason and reason.startswith("safety cutoff"):
         n_title, n_severity = "Charging stopped for safety", "critical"
+    elif reason and "current cap exceeded" in reason:
+        # [OVERCURRENT_CAP] The car drew more than the operator-set per-plug
+        # current cap and the firmware stopped charging locally — a policy
+        # limit on a healthy plug, so a warning (not a safety-critical fault).
+        n_title, n_severity = "Charging stopped — current limit exceeded", "warning"
     elif reason and "limit reached" in reason:
         # [Session limits] A user-set stop condition (energy/time) — an
         # expected, driver-chosen outcome, so informational; the specific
@@ -351,7 +356,12 @@ async def finalize_charging_session(
         f"{plug.name}: {final_energy:.3f} kWh in {minutes} min — "
         f"{actual_debit:.2f} coins charged, {new_balance:.2f} left."
     )
-    if reason and (n_severity == "critical" or "limit reached" in reason or "reserved" in reason):
+    if reason and (
+        n_severity == "critical"
+        or "limit reached" in reason
+        or "reserved" in reason
+        or "current cap exceeded" in reason
+    ):
         n_body += f" ({reason})"
     await notify(
         session.user_id,
