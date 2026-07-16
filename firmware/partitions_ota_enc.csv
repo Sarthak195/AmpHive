@@ -1,0 +1,24 @@
+# AmpHive gateway — dual-OTA layout WITH flash/NVS encryption (4 MB flash).
+#
+# OPT-IN variant of partitions_ota.csv, selected only by the sdkconfig.flashenc
+# fragment (see deploy/docs/firmware_flash_encryption.md). Identical to the
+# mainline table except for the added `nvs_keys` partition, which holds the XTS
+# keys NVS encryption uses. It is itself flagged `encrypted` so flash encryption
+# protects it. `nvs` keeps its pre-OTA offset/size (0x9000/0x6000) so a device's
+# provisioning + crash-recovery record survive the one-time migration reflash;
+# the app slots and every other offset are unchanged from the mainline table.
+#
+# On ESP32, flash encryption alone does NOT encrypt data partitions — the plug's
+# Wi-Fi/Tapo/MQTT secrets in `nvs` are only protected once CONFIG_NVS_ENCRYPTION
+# is on AND this nvs_keys partition exists. nvs_flash_init() then uses it
+# transparently — no application code change.
+#
+# nvs_keys goes in the 128 KB free tail (ota_1 ends at 0x3E0000; flash is 4 MB).
+#
+# Name,     Type, SubType,   Offset,   Size,     Flags
+nvs,        data, nvs,       0x9000,   0x6000
+otadata,    data, ota,       0xf000,   0x2000
+phy_init,   data, phy,       0x11000,  0x1000
+ota_0,      app,  ota_0,     0x20000,  0x1E0000
+ota_1,      app,  ota_1,     0x200000, 0x1E0000
+nvs_keys,   data, nvs_keys,  0x3E0000, 0x1000,   encrypted

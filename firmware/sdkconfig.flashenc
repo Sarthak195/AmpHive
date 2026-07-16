@@ -1,0 +1,37 @@
+# AmpHive gateway — OPT-IN flash + NVS encryption fragment.
+# =========================================================
+# This file is NOT part of the default build. It exists so a deliberate,
+# operator-run encrypted build can be produced WITHOUT changing the mainline
+# sdkconfig.defaults (whose next `idf.py flash` must stay a plain, reversible
+# flash for field units). Enabling encryption burns eFuses and CANNOT be
+# delivered by OTA — it requires a one-time serial reflash per device.
+#
+# Build with the fragment layered on top of the defaults:
+#   idf.py -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.flashenc" build
+#
+# See deploy/docs/firmware_flash_encryption.md for the full runbook, the
+# irreversibility caveats, and the Development-vs-Release decision. DO NOT switch
+# to Release mode until a sacrificial dev unit has validated the whole flow — a
+# Release-mode device with a lost signing key is an unrecoverable brick.
+
+# --- Flash encryption: DEVELOPMENT mode (recoverable / re-flashable) ----------
+# Development mode encrypts in place on first boot but keeps UART-download
+# plaintext access (bounded by FLASH_CRYPT_CNT), so a bad image can still be
+# serial-reflashed. Release mode (CONFIG_SECURE_FLASH_ENCRYPTION_MODE_RELEASE)
+# disables that escape hatch permanently — production-only, after validation.
+CONFIG_SECURE_FLASH_ENC_ENABLED=y
+CONFIG_SECURE_FLASH_ENCRYPTION_MODE_DEVELOPMENT=y
+
+# --- NVS encryption (the actual point — protects the plaintext secrets) -------
+# Flash encryption alone does NOT encrypt the `nvs` data partition on ESP32, so
+# the Wi-Fi/Tapo/MQTT credentials + setup code would still read out via
+# esptool read_flash. NVS encryption fixes that; it needs the dedicated
+# `nvs_keys` partition (see partitions_ota_enc.csv), flagged `encrypted`.
+CONFIG_NVS_ENCRYPTION=y
+
+# Use the encryption-aware partition table (adds nvs_keys; app slots unchanged).
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_ota_enc.csv"
+
+# Secure Boot stays OFF (unchanged): signed-OTA verification is independent of
+# flash encryption and continues to use secure_boot_signing_key.pem. We do NOT
+# enable CONFIG_SECURE_BOOT here — that is a separate, also-irreversible step.
