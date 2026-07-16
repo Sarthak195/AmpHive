@@ -492,8 +492,9 @@ async def _load_plug(factory, plug_id: int):
 @pytest.mark.asyncio
 async def test_resolve_rate_window_slot_rate_inside_flat_outside(factory):
     """A plug's tariff carries a 09:00–17:00 slot. Inside the window the slot
-    rate + its end boundary win; outside, the tariff's flat price with no
-    later boundary. Tenant zone = UTC so minute-of-day == the UTC wall-clock."""
+    rate + its end boundary win; outside, the tariff's flat price with the
+    boundary rolled forward to the slot's next start (next day). Tenant zone =
+    UTC so minute-of-day == the UTC wall-clock."""
     from backend.services.pricing import resolve_rate_window
 
     tenant_id = await _seed_tenant(factory, tz="UTC")
@@ -514,7 +515,10 @@ async def test_resolve_rate_window_slot_rate_inside_flat_outside(factory):
     async with factory() as db:
         rate_out, bound_out = await resolve_rate_window(db, plug, at=outside)
     assert rate_out == Decimal("5.00")   # flat tariff price outside the slot
-    assert bound_out is None             # no later slot starts today
+    # Outside the slot with nothing later today, the boundary now rolls forward to
+    # the same all-days slot's next start (tomorrow 09:00) — so a session in the
+    # end-of-day gap still reprices back into the slot when it reopens.
+    assert bound_out == datetime(2026, 7, 14, 9, 0, tzinfo=timezone.utc)
 
 
 @db_gated
