@@ -72,14 +72,16 @@ def test_slot_rate_and_bound_end_min_is_exclusive_next_slot_covers():
     assert boundary == _at(2026, 7, 13, 18, 0)   # its end (1080 min)
 
 
-def test_slot_rate_and_bound_end_min_no_following_slot_is_none():
-    """minute == end_min with nothing after -> uncovered, no later boundary."""
+def test_slot_rate_and_bound_end_min_rolls_to_next_day():
+    """minute == end_min with nothing later today -> uncovered now, but the
+    boundary rolls forward to the same all-days slot's start TOMORROW (so a
+    session in the end-of-day gap still reprices when it reopens)."""
     from backend.services.pricing import _slot_rate_and_bound
 
-    slots = [_slot(360, 720, "5.00")]
-    rate, boundary = _slot_rate_and_bound(slots, _at(2026, 7, 13, 12, 0))  # 720
+    slots = [_slot(360, 720, "5.00")]  # all days (days_mask default 127)
+    rate, boundary = _slot_rate_and_bound(slots, _at(2026, 7, 13, 12, 0))  # Mon 720
     assert rate is None
-    assert boundary is None
+    assert boundary == _at(2026, 7, 14, 6, 0)   # Tue 06:00 — next day's slot start
 
 
 def test_slot_rate_and_bound_gap_returns_none_and_next_start():
@@ -93,14 +95,15 @@ def test_slot_rate_and_bound_gap_returns_none_and_next_start():
 
 def test_slot_rate_and_bound_days_mask_excludes_wrong_weekday():
     """2026-07-13 is a Monday (weekday 0). A weekends-only mask makes an
-    otherwise-covering all-day slot inactive today — no rate, no boundary."""
+    otherwise-covering all-day slot inactive today — no rate now, and the
+    boundary rolls forward to the slot's next applicable weekday (Saturday)."""
     from backend.services.pricing import _slot_rate_and_bound
 
     weekend_only = (1 << 5) | (1 << 6)           # Sat=bit5, Sun=bit6 -> 96
     slots = [_slot(0, 1440, "9.00", days_mask=weekend_only)]
     rate, boundary = _slot_rate_and_bound(slots, _at(2026, 7, 13, 12, 0))  # Mon
     assert rate is None
-    assert boundary is None
+    assert boundary == _at(2026, 7, 18, 0, 0)    # Sat 00:00 — next weekday with a slot
 
 
 def test_slot_rate_and_bound_days_mask_includes_right_weekday():

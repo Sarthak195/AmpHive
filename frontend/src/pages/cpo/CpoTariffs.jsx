@@ -5,8 +5,8 @@
  * a base coins-per-kWh rate, plus optional windows that override it at certain
  * hours (e.g. peak 18:00–22:00). Slots are half-open [start, end) in the
  * tenant's local timezone (shown read-only); a window crossing midnight is
- * entered as two slots. All-days pricing only in v1 (per-weekday is a later
- * UI-only follow-up — the API already carries days_mask).
+ * entered as two slots. Each slot can also be scoped to specific weekdays via a
+ * days_mask (Mon=bit0 … Sun=bit6; default = every day).
  *
  * Data: GET/POST/PUT/DELETE /api/cpo/tariffs[/{id}], and
  * GET/POST/DELETE /api/cpo/tariffs/{id}/slots[/{slotId}].
@@ -27,6 +27,23 @@ const toMinutes = (hhmm) => {
 // minute-of-day -> "HH:MM" (1440 -> "24:00" for a window ending at midnight).
 const fmtMinutes = (min) => `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
 
+// Weekday bit convention matches the backend: Mon=bit0 … Sun=bit6.
+const WEEKDAYS = [['Mon', 0], ['Tue', 1], ['Wed', 2], ['Thu', 3], ['Fri', 4], ['Sat', 5], ['Sun', 6]];
+const ALL_DAYS_MASK = 127;        // every day
+const WEEKDAYS_MASK = 31;         // Mon–Fri (bits 0–4)
+const WEEKENDS_MASK = 96;         // Sat+Sun (bits 5–6)
+
+// Human label for a days_mask (e.g. 127 -> "Every day", 96 -> "Weekends",
+// else the set day abbreviations).
+const daysLabel = (mask) => {
+  const m = Number(mask);
+  if (m === ALL_DAYS_MASK) return 'Every day';
+  if (m === WEEKDAYS_MASK) return 'Weekdays';
+  if (m === WEEKENDS_MASK) return 'Weekends';
+  const on = WEEKDAYS.filter(([, i]) => (m >> i) & 1).map(([label]) => label);
+  return on.length ? on.join(', ') : '—';
+};
+
 const CpoTariffs = () => {
   const [tariffs, setTariffs] = useState([]);
   const [tenantName, setTenantName] = useState('');
@@ -46,6 +63,7 @@ const CpoTariffs = () => {
   const [slotStart, setSlotStart] = useState('18:00');
   const [slotEnd, setSlotEnd] = useState('22:00');
   const [slotPrice, setSlotPrice] = useState('');
+  const [slotDays, setSlotDays] = useState(ALL_DAYS_MASK); // which weekdays the slot applies
   const [addingSlot, setAddingSlot] = useState(false);
 
   const fetchTariffs = useCallback(async () => {
@@ -124,12 +142,14 @@ const CpoTariffs = () => {
     let end = toMinutes(slotEnd);
     if (end === 0) end = 1440; // a window ending at midnight
     if (start == null || end == null) { setError('Enter a start and end time.'); return; }
+    if (!slotDays) { setError('Select at least one day.'); return; } // backend requires days_mask >= 1
     setAddingSlot(true);
     try {
       await api.post(`/api/cpo/tariffs/${selectedId}/slots`, {
         start_min: start,
         end_min: end,
         price_per_kwh: Number(slotPrice),
+        days_mask: slotDays,
       });
       setSlotPrice('');
       await loadSlots(selectedId);
@@ -265,6 +285,28 @@ const CpoTariffs = () => {
               required
               style={{ maxWidth: '9rem' }}
             />
+            <div role="group" aria-label="Days of week" style={{ display: 'flex', gap: '0.3rem', flexWrap: 'wrap' }}>
+              {WEEKDAYS.map(([label, i]) => {
+                const on = (slotDays >> i) & 1;
+                return (
+                  <button
+                    key={label}
+                    type="button"
+                    className="chip"
+                    aria-pressed={on ? 'true' : 'false'}
+                    onClick={() => setSlotDays((d) => d ^ (1 << i))}
+                    style={{
+                      cursor: 'pointer',
+                      border: '1px solid var(--color-primary)',
+                      background: on ? 'var(--color-primary)' : 'transparent',
+                      color: on ? '#000' : 'var(--color-text-secondary)',
+                    }}
+                  >
+                    {label}
+                  </button>
+                );
+              })}
+            </div>
             <button className="btn btn-primary btn-sm" type="submit" disabled={addingSlot}>
               {addingSlot ? 'Adding…' : 'Add slot'}
             </button>
@@ -275,12 +317,13 @@ const CpoTariffs = () => {
           ) : slots.length > 0 ? (
             <table className="data-table">
               <thead>
-                <tr><th>Window</th><th>Rate</th><th></th></tr>
+                <tr><th>Window</th><th>Days</th><th>Rate</th><th></th></tr>
               </thead>
               <tbody>
                 {slots.map((s) => (
                   <tr key={s.id}>
                     <td className="num">{fmtMinutes(s.start_min)} – {fmtMinutes(s.end_min)}</td>
+                    <td>{daysLabel(s.days_mask ?? ALL_DAYS_MASK)}</td>
                     <td className="num">{s.price_per_kwh}/kWh</td>
                     <td>
                       <button className="btn btn-ghost btn-sm" onClick={() => deleteSlot(s.id)}>Remove</button>
