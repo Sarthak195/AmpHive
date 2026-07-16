@@ -375,11 +375,11 @@ over or harvest the owner's Tapo account. Ordered by severity.*
 - Residual: the code is printed on serial and stored in plaintext NVS — both
   require physical access, which is §8.2's flash-encryption territory.
 
-### 8.2 No flash encryption — NVS secrets are extractable — **HIGH, open**
+### 8.2 No flash encryption — NVS secrets are extractable — **HIGH, config prepared (not burned)**
 
-- `CONFIG_SECURE_FLASH_ENC_ENABLED` and full `CONFIG_SECURE_BOOT` are **unset**.
-  The Wi-Fi password, the full **Tapo account email + password**, and the
-  gateway's MQTT credentials sit in **plaintext NVS**, readable with
+- `CONFIG_SECURE_FLASH_ENC_ENABLED` and full `CONFIG_SECURE_BOOT` are **unset on
+  every device.** The Wi-Fi password, the full **Tapo account email + password**,
+  and the gateway's MQTT credentials sit in **plaintext NVS**, readable with
   `esptool read_flash` given brief physical access — the victim's entire Tapo
   account plus a credential that impersonates this gateway (scoped to its own
   topic subtree by the broker ACLs, see §8.3).
@@ -387,8 +387,20 @@ over or harvest the owner's Tapo account. Ordered by severity.*
   verify-on-update, `sdkconfig.defaults`, fw ≥ 1.4.0) and HTTPS-only, so flash
   extraction doesn't enable a malicious-update path; the overlay auth key no
   longer exists on-device (direct MQTT, 2026-07-10).
-- **Fix:** enable flash encryption + Secure Boot v2 for production units; at
-  minimum use NVS encryption.
+- **Config prepared 2026-07-16 (not yet burned).** An opt-in encrypted-build
+  recipe now exists in-repo — `firmware/sdkconfig.flashenc`
+  (`CONFIG_SECURE_FLASH_ENC_ENABLED` Development mode + `CONFIG_NVS_ENCRYPTION`)
+  and `firmware/partitions_ota_enc.csv` (adds the `nvs_keys` partition). It is
+  **not** wired into the default build, so the routine OTA path is unchanged.
+  **Key point:** on ESP32, flash encryption alone does NOT encrypt `nvs` — NVS
+  encryption + the `nvs_keys` partition is what actually protects the secrets;
+  both are enabled together by the fragment. Burning is per-device, **serial-only
+  (not OTA-deliverable), and irreversible** — Development mode is chosen to keep a
+  serial-reflash escape hatch; Release mode only after validation. Full procedure,
+  irreversibility caveats, and the signing-key-loss brick risk:
+  [deploy/docs/firmware_flash_encryption.md](../deploy/docs/firmware_flash_encryption.md).
+- **Remaining:** an operator burn on a sacrificial dev unit, then rollout; Secure
+  Boot v2 (boot-time verification) is a separate later step.
 
 ### 8.3 ~~Reusable overlay key + anonymous broker = forge anything~~ — **RESOLVED 2026-07-10**
 

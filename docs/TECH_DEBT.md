@@ -101,8 +101,11 @@ Legend — **Impact**: how much it costs if left. **Effort**: rough work to fix.
   Event (TD#32)~~ and ~~registration validation (TD#30, done 2026-07-11)~~ —
   done.
 - **Device security (P0/P1)** lives in [SECURITY.md §8](SECURITY.md#8-firmware--gateway-device-security--backend-follow-up-gaps-2026-07-06-audit):
-  still open — no flash-encryption (plaintext NVS secrets), boot-time fallback
-  into the portal (now LOW: portal locked + idle timeout since fw 1.6.0).
+  flash-encryption **config prepared 2026-07-16** (opt-in `firmware/sdkconfig.flashenc`
+  + `partitions_ota_enc.csv` with NVS encryption; runbook at
+  `deploy/docs/firmware_flash_encryption.md`) but **not burned** on any device —
+  the burn is serial-only + irreversible, an operator decision. Boot-time fallback
+  into the portal is now LOW (portal locked + idle timeout since fw 1.6.0).
   Resolved since the audit: the open-AP + unauthenticated-`/save` portal
   (WPA2 + per-device setup code + timeout, fw 1.6.0), the
   reusable-overlay-key + anonymous-broker combination (devices moved to
