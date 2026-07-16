@@ -3,7 +3,7 @@
  * unified-ledger rendering (credit vs debit, running balance) added 2026-07-10.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 import History from './History';
@@ -65,5 +65,34 @@ describe('History', () => {
     await screen.findByText('1.234');
     await userEvent.click(screen.getByRole('button', { name: 'Wallet Ledger' }));
     expect(await screen.findByText(/No wallet activity yet/)).toBeInTheDocument();
+  });
+
+  it('opens a session invoice via an authenticated raw fetch', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, blob: () => Promise.resolve(new Blob()) });
+    vi.stubGlobal('fetch', fetchMock);
+    URL.createObjectURL = vi.fn(() => 'blob:x');
+    const openSpy = vi.spyOn(window, 'open').mockImplementation(() => {});
+    localStorage.setItem('amphive_token', 'tok');
+
+    render(<History />);
+    await screen.findByText('1.234');
+    // completed session with coins_spent > 0 → the Invoice action is offered.
+    await userEvent.click(screen.getByRole('button', { name: 'Invoice' }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    expect(fetchMock.mock.calls[0][0]).toContain('/api/sessions/1/invoice?format=html');
+    expect(fetchMock.mock.calls[0][1].headers.Authorization).toBe('Bearer tok');
+    expect(openSpy).toHaveBeenCalled();
+
+    vi.unstubAllGlobals();
+    openSpy.mockRestore();
+  });
+
+  it('opens the dispute modal from "Report an issue"', async () => {
+    render(<History />);
+    await screen.findByText('1.234');
+    await userEvent.click(screen.getByRole('button', { name: 'Report an issue' }));
+    // The modal's reason textarea (unique label) confirms it opened.
+    expect(await screen.findByLabelText(/What went wrong/i)).toBeInTheDocument();
   });
 });
