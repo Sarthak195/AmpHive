@@ -29,6 +29,8 @@ typedef struct {
     char     local_ip[PLUG_IP_MAX_LEN];       /**< plug LAN IP (to re-drive on recovery) */
     char     session_id[SESSION_ID_MAX_LEN];  /**< backend session ID (may be empty) */
     uint32_t start_time_s;                    /**< tick-derived start time (seconds) */
+    uint32_t elapsed_s;                       /**< seconds already elapsed as of this save
+                                                   (survives reboot; start_time_s does not — TD#23) */
     uint32_t max_duration_s;                  /**< max allowed duration from ON cmd */
     uint32_t max_kwh_mwh;                      /**< max_kwh × 1000 (milli-Wh integer) */
     uint32_t start_energy_mwh;                /**< starting kWh × 1000 */

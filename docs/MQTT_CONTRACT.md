@@ -47,7 +47,8 @@
 > on-device enforcement — its `plugs.max_current_a`, or the `DEFAULT_PLUG_CAP_A`
 > default (see `services/caps.py`). Older firmware ignores it.
 | gateway → backend | `amphive/gateways/{gateway_id}/status` | 1 | yes | `{"status":"online","fw":"<ver>"}` (on connect) / `{"status":"offline"}` (LWT) |
-| gateway → backend | `amphive/gateways/{gateway_id}/alarms` | 1 | no | `{"error":"THERMAL_CUTOFF"\|"OVERCURRENT_CUTOFF"\|"UNAUTHORIZED_ON","plug_id":<int>}` or `{"event":"OTA_STARTED"\|"OTA_OK_REBOOTING"\|"OTA_FAILED"\|"OTA_REFUSED_SESSION_ACTIVE"\|...}` |
+| gateway → backend | `amphive/gateways/{gateway_id}/alarms` | 1 | no | `{"error":"THERMAL_CUTOFF"\|"OVERCURRENT_CUTOFF"\|"OVERCURRENT_CAP"\|"UNAUTHORIZED_ON","plug_id":<int>}` or `{"event":"OTA_STARTED"\|"OTA_OK_REBOOTING"\|"OTA_FAILED"\|"OTA_REFUSED_SESSION_ACTIVE"\|...}` |
+| gateway → backend | `amphive/gateways/{gateway_id}/logs` | 0 | no | raw WARN/ERROR log line as plain text (fw ≥ 2.1.0-direct). Field diagnostics; the backend does **not** subscribe yet (`mosquitto_sub` ad hoc). Covered by the `amphive/gateways/%u/#` ACL. |
 | agent → backend | `amphive/gateways/{gateway_id}/discovery` | 1 | no | `{"unique_id":"<str>","provider":"<str>","model":"<str>","alias":"<str>","capabilities":["switch","power","energy"]}` |
 | backend → agent | `amphive/gateways/{gateway_id}/assign` | 1 | yes | `{"<unique_id>":<plug_id:int>, ...}` (full map for the gateway) |
 
@@ -94,9 +95,14 @@ Tapo app / stale NVS resume) is forced OFF locally and alarmed.
 > idle). The backend attributes a reading to that exact session — guarded so it
 > must still be `ACTIVE` and on the same plug — falling back to "the active
 > session on this plug" when the id is empty/absent (e.g. pre-`session_id`
-> firmware). The **offline-resync** path (`resync_offline_logs`) does *not* carry
-> `session_id` (the compact NVS ring-buffer entry has no room), so replayed
-> readings still attribute by `plug_id`.
+> firmware). The **offline-resync** path (`resync_offline_logs`) **also carries
+> `session_id`** as of fw ≥ 2.1.0-direct (TD#24): the NVS ring entry stores a
+> compact `uint32_t` session id (not the 32-char string) and the replayed payload
+> echoes it plus `relay` and `offline:true`. The backend attributes each buffered
+> reading to its exact session (dropping it if that session already finalized),
+> and the `offline:true` flag stops a historical frame from driving live relay
+> actuation (REC-02). Idle buffered frames omit `session_id` and set `relay:false`
+> so the backend's idle guard drops them.
 
 > **`SET_LIMITS` re-caps a running session without re-baselining.** To change a
 > live session's watchdog thresholds (energy + duration caps) mid-charge, the

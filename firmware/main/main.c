@@ -6,6 +6,7 @@
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
 #include "freertos/semphr.h"
+#include "freertos/queue.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_log.h"
@@ -54,6 +55,14 @@ static uint32_t telemetry_interval_ms = 10000; // Default 10s (10000ms)
 #define OVERCURRENT_CAP_MARGIN_A    0.5f   // headroom above the cap before tripping
 #define OVERCURRENT_CAP_DEBOUNCE    3      // consecutive over-cap polls before OFF (ride out inrush)
 static float default_plug_cap_a = DEFAULT_PLUG_CAP_A;
+
+// How often the telemetry task re-persists active sessions so elapsed session
+// time survives an unclean reboot (TD#23). persist_sessions_locked() is otherwise
+// only called on state-change events (start/OFF/SET_LIMITS/watchdog), so a long
+// event-free session would persist elapsed_s=0 and the duration cap would restart
+// from zero on reboot. This bounds the worst-case duration overrun to one interval
+// while keeping NVS wear modest (same order as the offline-log cadence).
+#define SESSION_PERSIST_INTERVAL_S  30
 
 // ── Transport selection ──────────────────────────────────────────────────────
 // 1: DIRECT MQTT (default since 1.3.0) — plain outbound TLS to the broker's
@@ -233,6 +242,10 @@ static void persist_sessions_locked(void) {
         strncpy(sp->local_ip, plugs[i].local_ip, sizeof(sp->local_ip) - 1);
         strncpy(sp->session_id, plugs[i].session_id, sizeof(sp->session_id) - 1);
         sp->start_time_s = plugs[i].start_time_s;
+        /* Persist elapsed-so-far, not the tick-based start (which resets to 0 on
+           reboot). Recovery restores start_time_s = now - elapsed_s so the
+           duration watchdog keeps counting across an unclean reboot (TD#23). */
+        sp->elapsed_s = now_seconds() - plugs[i].start_time_s;
         sp->max_duration_s = plugs[i].max_duration_s;
         sp->max_kwh_mwh = (uint32_t)(plugs[i].max_kwh * 1000.0f);
         sp->start_energy_mwh = (uint32_t)(plugs[i].start_energy_kwh * 1000.0f);
@@ -493,6 +506,53 @@ static void url_decode(char *s) {
     *dst = '\0';
 }
 
+// Best-effort Wi-Fi association pre-check for the captive portal (TD#31). Before
+// committing new credentials + rebooting, briefly try to associate to the
+// submitted SSID/password in AP+STA mode so a wrong network name/password is
+// caught at provisioning instead of only at charge time. FAIL-OPEN: returns false
+// ONLY on a definite association failure; a success or an inconclusive/ambiguous
+// result (timeout, can't switch mode) returns true so the check can never block
+// provisioning. Note: the AP may briefly hop to the STA's channel during the test
+// (single radio), dropping the installer's phone; on success we reboot right after
+// anyway. The plug-reachability half of TD#31 is moot — plug IPs now come from the
+// backend's retained roster, so the portal has no plug IP to ping.
+static bool portal_precheck_wifi(const char *ssid, const char *pwd) {
+    if (!ssid || !ssid[0]) return true;   // nothing to test → don't block
+
+    wifi_config_t sta_cfg = {0};
+    strncpy((char *)sta_cfg.sta.ssid, ssid, sizeof(sta_cfg.sta.ssid) - 1);
+    strncpy((char *)sta_cfg.sta.password, pwd ? pwd : "", sizeof(sta_cfg.sta.password) - 1);
+
+    // AP+STA so the portal AP stays up while the STA link is tested. The STA netif
+    // was already created in wifi_init(), and the wifi/IP event handler is
+    // registered, so CONNECTED/FAIL bits are driven as usual.
+    if (esp_wifi_set_mode(WIFI_MODE_APSTA) != ESP_OK) return true;
+    if (esp_wifi_set_config(WIFI_IF_STA, &sta_cfg) != ESP_OK) {
+        esp_wifi_set_mode(WIFI_MODE_AP);
+        return true;
+    }
+
+    wifi_retry_count = 0;
+    xEventGroupClearBits(wifi_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT);
+    esp_wifi_connect();
+
+    // The handler auto-retries up to MAXIMUM_RETRY then sets WIFI_FAIL_BIT; a
+    // success sets WIFI_CONNECTED_BIT on GOT_IP. Bound the wait so a slow/ambiguous
+    // case can't hang the portal handler.
+    EventBits_t bits = xEventGroupWaitBits(
+        wifi_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
+        pdFALSE, pdFALSE, pdMS_TO_TICKS(20000));
+
+    // Tear the STA link down and restore AP-only so the portal stays reachable if
+    // we're not about to reboot.
+    esp_wifi_disconnect();
+    esp_wifi_set_mode(WIFI_MODE_AP);
+
+    if (bits & WIFI_CONNECTED_BIT) return true;    // associated + got IP
+    if (bits & WIFI_FAIL_BIT)      return false;   // definite failure (e.g. wrong password)
+    return true;                                   // timeout/ambiguous → fail-open
+}
+
 static esp_err_t portal_post_handler(httpd_req_t *req) {
     char buf[512];
     int ret, remaining = req->content_len;
@@ -542,6 +602,18 @@ static esp_err_t portal_post_handler(httpd_req_t *req) {
 
     url_decode(ssid); url_decode(pwd);
     url_decode(t_email); url_decode(t_pwd); url_decode(m_pwd);
+
+    // Verify the Wi-Fi credentials actually associate before committing +
+    // rebooting (TD#31). Fail-open: only a definite association failure blocks the
+    // save, so this can catch a wrong SSID/password but never prevent provisioning.
+    if (!portal_precheck_wifi(ssid, pwd)) {
+        ESP_LOGW(TAG, "Portal /save: could not associate to Wi-Fi '%s' — not saving.", ssid);
+        httpd_resp_send(req,
+            "<html><body><h2>Could not connect to that Wi-Fi network.</h2>"
+            "<p>Check the network name and password, then go back and try again.</p>"
+            "</body></html>", HTTPD_RESP_USE_STRLEN);
+        return ESP_OK;
+    }
 
     // mqtt_user == gateway_id (== MAC); ts_auth_key is unused in direct mode.
     save_config_to_nvs(ssid, pwd, "", device_name, gateway_id,
@@ -698,6 +770,78 @@ static void publish_alarm(const char *error, int plug_id) {
     snprintf(topic, sizeof(topic), "amphive/gateways/%s/alarms", gateway_id);
     snprintf(payload, sizeof(payload), "{\"error\":\"%s\",\"plug_id\":%d}", error, plug_id);
     esp_mqtt_client_publish(mqtt_client, topic, payload, 0, 1, 0);
+}
+
+// ─── Firmware log → MQTT (TD#28 firmware half) ───────────────────────────────
+// Forward WARN/ERROR log lines to amphive/gateways/{gw}/logs so a deployed
+// gateway can be diagnosed without a serial cable. Constraints that shape this:
+//  - never block the task that logged (bounded queue, zero-timeout send, drop-on-full)
+//  - never publish from the vprintf hook (it can run on the MQTT task and re-enter
+//    esp-mqtt); a dedicated low-priority drain task owns every publish
+//  - avoid a feedback loop: only WARN/ERROR forward, and enqueues are suppressed
+//    while the drain task is inside a publish call
+// The broker ACL (pattern readwrite amphive/gateways/%u/#) already covers /logs.
+#define LOG_FWD_LINE_MAX   200
+#define LOG_FWD_QUEUE_LEN  16
+static QueueHandle_t  s_log_queue = NULL;
+static vprintf_like_t s_orig_vprintf = NULL;
+static volatile bool  s_log_publishing = false;
+
+// Level letter of an ESP-IDF log line, skipping a leading ANSI colour escape.
+static char log_line_level(const char *s) {
+    if (s[0] == '\033') {
+        const char *m = strchr(s, 'm');
+        if (m) s = m + 1;
+    }
+    return s[0];
+}
+
+static int log_forward_vprintf(const char *fmt, va_list args) {
+    // Serial first — the original handler consumes `args`, so copy for our own use.
+    va_list copy;
+    va_copy(copy, args);
+    int r = s_orig_vprintf ? s_orig_vprintf(fmt, args) : vprintf(fmt, args);
+
+    if (s_log_queue && !s_log_publishing) {
+        char line[LOG_FWD_LINE_MAX];
+        int n = vsnprintf(line, sizeof(line), fmt, copy);
+        if (n > 0) {
+            char lvl = log_line_level(line);
+            if (lvl == 'E' || lvl == 'W') {
+                (void)xQueueSend(s_log_queue, line, 0);   // drop if full — never block
+            }
+        }
+    }
+    va_end(copy);
+    return r;
+}
+
+static void log_forward_task(void *pvParameters) {
+    char topic[128];
+    snprintf(topic, sizeof(topic), "amphive/gateways/%s/logs", gateway_id);
+    char line[LOG_FWD_LINE_MAX];
+    while (1) {
+        if (xQueueReceive(s_log_queue, line, portMAX_DELAY) != pdTRUE) continue;
+        if (!mqtt_connected || mqtt_client == NULL) continue;   // discard when offline
+        size_t len = strlen(line);
+        while (len && (line[len - 1] == '\n' || line[len - 1] == '\r')) line[--len] = '\0';
+        if (len == 0) continue;
+        s_log_publishing = true;   // don't re-enqueue logs emitted during publish
+        esp_mqtt_client_publish(mqtt_client, topic, line, 0, 0, 0);
+        s_log_publishing = false;
+    }
+}
+
+// Install the vprintf hook + start the drain task. gateway_id must already be set.
+static void start_log_forwarding(void) {
+    s_log_queue = xQueueCreate(LOG_FWD_QUEUE_LEN, LOG_FWD_LINE_MAX);
+    if (!s_log_queue) {
+        ESP_LOGE(TAG, "log forward: queue alloc failed; serial-only logging");
+        return;
+    }
+    s_orig_vprintf = esp_log_set_vprintf(log_forward_vprintf);
+    xTaskCreate(log_forward_task, "log_forward", 4096, NULL, 3, NULL);
+    ESP_LOGI(TAG, "Log forwarding enabled -> amphive/gateways/%s/logs (WARN+)", gateway_id);
 }
 
 // ─── MQTT Subscriber/Event Handler ──────────────────────────────────────────
@@ -1036,18 +1180,30 @@ static void resync_offline_logs(void) {
     uint16_t sent = 0;
 
     while (offline_log_pop(&entry) == ESP_OK) {
+        /* Echo the buffered session_id (TD#24) so the backend attributes this
+           reading to the exact session. Omitted when 0 (idle): with relay:false
+           the backend's idle guard then drops the frame instead of billing it to
+           whatever session is ACTIVE on the plug at reconnect. "relay" mirrors the
+           occupied state the reading was captured in. */
+        char sid_field[48] = "";
+        if (entry.session_id > 0) {
+            snprintf(sid_field, sizeof(sid_field), ",\"session_id\":\"%lu\"",
+                     (unsigned long)entry.session_id);
+        }
         char payload[320];
         snprintf(payload, sizeof(payload),
                  "{\"plug_id\":%u,\"watts\":%.1f,\"kwh\":%.4f,\"voltage\":%.1f,"
-                 "\"current\":%.2f,\"status\":\"%s\",\"offline\":true,"
-                 "\"offline_ts\":%lu}",
+                 "\"current\":%.2f,\"relay\":%s,\"status\":\"%s\",\"offline\":true,"
+                 "\"offline_ts\":%lu%s}",
                  entry.plug_id,
                  (float)entry.watts_x10 / 10.0f,
                  (float)entry.kwh_x1000 / 1000.0f,
                  (float)entry.voltage_x10 / 10.0f,
                  (float)entry.current_x100 / 100.0f,
+                 entry.status ? "true" : "false",
                  entry.status ? "occupied" : "available",
-                 entry.timestamp_s);
+                 entry.timestamp_s,
+                 sid_field);
 
         esp_mqtt_client_publish(mqtt_client, telemetry_topic, payload, 0, 0, 0);
         sent++;
@@ -1188,6 +1344,10 @@ static void telemetry_task(void *pvParameters) {
                    kwh, matching the online payload). */
                 offline_telemetry_entry_t log_entry = {
                     .timestamp_s     = now_seconds(),
+                    /* Tag the buffered reading with its session so resync attributes
+                       it to the exact session, not whatever is ACTIVE on the plug at
+                       reconnect (TD#24). 0 when idle / no numeric id. */
+                    .session_id      = (sess_active && sid[0]) ? (uint32_t)strtoul(sid, NULL, 10) : 0,
                     .watts_x10       = (uint16_t)(telemetry.power_w * 10.0f),
                     .kwh_x1000       = (uint32_t)(session_kwh * 1000.0f),
                     .voltage_x10     = (uint16_t)(telemetry.voltage_v * 10.0f),
@@ -1208,6 +1368,23 @@ static void telemetry_task(void *pvParameters) {
             if (cutoff_alarm) publish_alarm(cutoff_alarm, plug_id);
             if (unauth_alarm) publish_alarm("UNAUTHORIZED_ON", plug_id);
         }
+
+        /* Throttled re-persist so elapsed session time survives an unclean reboot
+           (TD#23). Only writes when a session is active (avoids churning NVS with
+           empty sets); the event-driven persists already cover start/stop. */
+        static uint32_t last_session_persist_s = 0;
+        uint32_t persist_now_s = now_seconds();
+        if (persist_now_s - last_session_persist_s >= SESSION_PERSIST_INTERVAL_S) {
+            xSemaphoreTake(plugs_mutex, portMAX_DELAY);
+            bool any_active = false;
+            for (int i = 0; i < MAX_PLUGS; i++) {
+                if (plugs[i].in_use && plugs[i].session_active) { any_active = true; break; }
+            }
+            if (any_active) persist_sessions_locked();
+            xSemaphoreGive(plugs_mutex);
+            last_session_persist_s = persist_now_s;
+        }
+
         vTaskDelay(pdMS_TO_TICKS(telemetry_interval_ms));
     }
 }
@@ -1335,11 +1512,16 @@ void app_main(void) {
             s->max_current_a    = default_plug_cap_a;
             s->cap_over_count   = 0;
             s->unauthorized_flagged = false;
-            /* start_time_s was tick-based and the tick counter restarts at zero on
-               reboot, so the duration cap restarts from now (TD#23 — the energy cap
-               still holds). Keep the original limits: worst case the session runs a
-               little long, but the energy watchdog still trips. */
-            s->start_time_s = now_seconds();
+            /* Restore the duration watchdog across the reboot (TD#23). start_time_s
+               is tick-based and the tick counter restarts at zero on reboot, so we
+               can't persist it directly; instead we persisted elapsed-so-far and
+               back-date start_time_s by it. now_seconds() is small right after boot,
+               so this subtraction underflows when elapsed_s is large — that is fine:
+               it's unsigned modular arithmetic and the watchdog's
+               (now_seconds() - start_time_s) recovers the true elapsed exactly. If
+               the session already overran its duration, elapsed_s >= max_duration_s
+               and it trips on the first telemetry sweep. */
+            s->start_time_s = now_seconds() - recovered[i].elapsed_s;
         }
         xSemaphoreGive(plugs_mutex);
     }
@@ -1349,6 +1531,11 @@ void app_main(void) {
     //     and builds its slot table from it (handle_plug_roster), so telemetry
     //     flows for every plug without a captive-portal plug IP or a provisional
     //     slot. Crash-recovered sessions repopulate their own slots below.
+
+    // 5c. Forward WARN/ERROR logs to the broker so a deployed gateway is
+    //     observable without a serial cable (TD#28). gateway_id is set by now;
+    //     the drain task only publishes once MQTT connects.
+    start_log_forwarding();
 
     // 6. Start telemetry and safety watchdog loops
     //    Stack raised to 8 KB: the task now performs real KLAP crypto + HTTP each poll.

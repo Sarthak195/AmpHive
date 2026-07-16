@@ -122,9 +122,9 @@ async def test_session_id_parsed_and_forwarded_to_persist(reported_sid, expected
     captured = {}
 
     async def fake_persist(gateway_id, plug_id, watts, kwh, session_id=None,
-                           sample=None, relay_on=False):
+                           sample=None, relay_on=False, is_offline=False):
         captured.update(gateway_id=gateway_id, plug_id=plug_id, watts=watts,
-                        kwh=kwh, session_id=session_id)
+                        kwh=kwh, session_id=session_id, is_offline=is_offline)
 
     mgr._persist_telemetry = fake_persist
 
@@ -139,7 +139,33 @@ async def test_session_id_parsed_and_forwarded_to_persist(reported_sid, expected
     assert captured.get("plug_id") == 3
     assert captured.get("kwh") == 0.5
     assert captured.get("session_id") == expected
+    assert captured.get("is_offline") is False  # live frame (no offline flag)
 
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_handler_forwards_is_offline_for_resync_frame():
+    """[TD#24] A resync frame carries offline:true; the handler must forward
+    is_offline so _persist_telemetry can treat it as historical."""
+    MQTTManager._instance = None
+    loop = asyncio.get_running_loop()
+    mgr = MQTTManager(db_session_factory=lambda: None, event_loop=loop)
+    captured = {}
+
+    async def fake_persist(gateway_id, plug_id, watts, kwh, session_id=None,
+                           sample=None, relay_on=False, is_offline=False):
+        captured.update(session_id=session_id, is_offline=is_offline)
+
+    mgr._persist_telemetry = fake_persist
+    mgr._handle_gateway_telemetry("gw-1", {
+        "plug_id": 3, "watts": 50.0, "kwh": 0.2, "status": "occupied",
+        "session_id": "42", "relay": True, "offline": True,
+    })
+    await asyncio.sleep(0.05)
+
+    assert captured.get("session_id") == 42
+    assert captured.get("is_offline") is True
     MQTTManager._instance = None
 
 
@@ -906,6 +932,61 @@ async def test_persist_telemetry_idle_frame_not_attributed_to_active_session():
     assert active.last_telemetry_at == "SENTINEL"   # staleness clock untouched
     mgr._maybe_auto_stop_on_exhaustion.assert_not_awaited()
     mgr.send_plug_command.assert_not_called()        # there IS an ACTIVE session
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_persist_telemetry_offline_resync_attributes_to_own_session():
+    """[TD#24] A buffered reading drained on resync now echoes its own
+    session_id. If that session is still ACTIVE, the reading updates its energy
+    exactly like a live frame (buffered data isn't lost)."""
+    MQTTManager._instance = None
+    active = MagicMock()
+    active.id = 11
+    active.user_id = 1
+    active.energy_kwh = 2.0
+    active.peak_power_w = 0.0
+    session = _FakeSession([
+        _FakeResult(scalar=_owned_plug()),
+        _FakeResult(scalar=active),
+    ])
+    mgr = MQTTManager(db_session_factory=lambda: session)
+    mgr._maybe_auto_stop_on_exhaustion = AsyncMock()
+    mgr._maybe_auto_stop_on_limits = AsyncMock()
+
+    with patch("backend.services.pricing.reprice_session_if_due",
+               AsyncMock(return_value=None)):
+        await mgr._persist_telemetry("gw-1", 5, 150.0, 4.0,
+                                     session_id=11, sample=None,
+                                     relay_on=True, is_offline=True)
+
+    assert active.energy_kwh == 4.0
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_persist_telemetry_offline_resync_stale_session_id_is_inert():
+    """[TD#24] If the buffered reading's session finalized while the gateway was
+    offline (plug reused), the id-scoped lookup misses. The stale historical
+    reading must neither bill another session nor — because it's an offline
+    frame — trip the REC-02 OFF-republish against the plug's live relay."""
+    MQTTManager._instance = None
+    session = _FakeSession([
+        _FakeResult(scalar=_owned_plug()),
+        _FakeResult(scalar=None),   # session 11 no longer ACTIVE
+    ])
+    mgr = MQTTManager(db_session_factory=lambda: session)
+    mgr._maybe_auto_stop_on_exhaustion = AsyncMock()
+    mgr._maybe_auto_stop_on_limits = AsyncMock()
+    mgr.send_plug_command = MagicMock()
+
+    await mgr._persist_telemetry("gw-1", 5, 120.0, 9.9,
+                                 session_id=11, sample=None,
+                                 relay_on=True, is_offline=True)
+
+    # relay_on True + no matching ACTIVE session would normally republish OFF;
+    # is_offline suppresses it (contrast test_..._relay_on_no_session_republishes_off).
+    mgr.send_plug_command.assert_not_called()
     MQTTManager._instance = None
 
 

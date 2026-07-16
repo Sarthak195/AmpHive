@@ -15,15 +15,20 @@
 /**
  * @brief A single telemetry snapshot captured while MQTT was disconnected.
  *
- * Stored as an NVS blob in the "offlog" namespace. Kept compact (20 bytes)
+ * Stored as an NVS blob in the "offlog" namespace. Kept compact (22 bytes)
  * to minimise NVS wear. Floats are stored as fixed-point integers:
  *   - watts, voltage: × 10  (0.1 resolution)
  *   - kwh:            × 1000 (0.001 resolution, mWh)
  *   - current:        × 100  (0.01 resolution)
  *   - temperature:    × 10   (0.1 resolution)
+ *
+ * NOTE: changing this layout requires bumping OFFLOG_FORMAT_VER in offline_log.c
+ * so stale entries buffered by an older firmware are cleared on init rather than
+ * mis-read into the new struct.
  */
 typedef struct {
     uint32_t timestamp_s;      /**< uptime seconds when the reading was taken */
+    uint32_t session_id;       /**< backend session id this reading belongs to (0 = idle/none, TD#24) */
     uint16_t watts_x10;        /**< power in deci-Watts */
     uint32_t kwh_x1000;        /**< energy in milli-kWh */
     uint16_t voltage_x10;      /**< voltage in deci-Volts */
