@@ -282,6 +282,12 @@ class MQTTManager:
             except (ValueError, TypeError):
                 session_id = None
 
+        # A resync frame drained from the gateway's offline buffer carries
+        # `offline: true` (TD#24). It is a historical reading, so it may update
+        # its own (still-ACTIVE) session's energy but must never drive live relay
+        # actuation (REC-02) — see _persist_telemetry.
+        is_offline = bool(payload.get("offline", False))
+
         # Map firmware status to telemetry store status
         telem_status = "charging" if status == "occupied" else "idle"
 
@@ -352,7 +358,7 @@ class MQTTManager:
         # --- 3. Persist authoritative session totals (async, fire-and-forget) ---
         if self.db_session_factory and self.event_loop:
             asyncio.run_coroutine_threadsafe(
-                self._persist_telemetry(gateway_id, plug_id, watts, kwh, session_id, sample, relay_on),
+                self._persist_telemetry(gateway_id, plug_id, watts, kwh, session_id, sample, relay_on, is_offline),
                 self.event_loop,
             )
             # Telemetry proves the gateway is alive — refresh its liveness
@@ -647,7 +653,8 @@ class MQTTManager:
     async def _persist_telemetry(self, gateway_id: str, plug_id: int, watts: float, kwh: float,
                                  session_id: Optional[int] = None,
                                  sample: Optional[Dict[str, Any]] = None,
-                                 relay_on: bool = False):
+                                 relay_on: bool = False,
+                                 is_offline: bool = False):
         """
         Persist the latest telemetry snapshot to the database:
         - Verify the claimed plug actually belongs to the publishing gateway
@@ -789,7 +796,10 @@ class MQTTManager:
                 # Re-send OFF (idempotent — a no-op on an already-off plug),
                 # using the same best-effort wait=False publish the reconnect
                 # path uses so we don't block the loop on the broker ack.
-                elif active_session is None and relay_on:
+                # Skipped for offline-resync frames (TD#24): those are historical
+                # readings, not the plug's live relay state — an id-scoped lookup
+                # that misses a since-finalized session must not actuate the relay.
+                elif active_session is None and relay_on and not is_offline:
                     self.send_plug_command(
                         gateway_id, plug_id, "OFF", local_ip=plug.local_ip, wait=False
                     )

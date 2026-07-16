@@ -10,14 +10,21 @@ static const char *TAG = "offline_log";
 #define OFFLOG_NVS_NAMESPACE "offlog"
 #define META_KEY             "meta"
 
+/* Bump whenever offline_telemetry_entry_t's layout changes. On init a persisted
+ * ring whose format_ver differs is cleared, so old-layout entries are never
+ * mis-read into the new struct (TD#24 added session_id → v1). format_ver is the
+ * LAST meta field so an older (shorter) blob reads back as 0 → mismatch → clear. */
+#define OFFLOG_FORMAT_VER 1
+
 /**
  * Ring buffer metadata — persisted as a single NVS blob so head/tail/count
  * are always atomically consistent after an nvs_commit.
  */
 typedef struct {
-    uint16_t head;   /**< index of the next write slot */
-    uint16_t tail;   /**< index of the oldest unread entry */
-    uint16_t count;  /**< number of valid entries in the buffer */
+    uint16_t head;        /**< index of the next write slot */
+    uint16_t tail;        /**< index of the oldest unread entry */
+    uint16_t count;       /**< number of valid entries in the buffer */
+    uint8_t  format_ver;  /**< entry-layout version (see OFFLOG_FORMAT_VER) */
 } __attribute__((packed)) ring_meta_t;
 
 /* In-memory copy of the metadata (loaded once at init, updated on every op) */
@@ -60,18 +67,27 @@ esp_err_t offline_log_init(void)
 
     size_t meta_size = sizeof(s_meta);
     err = nvs_get_blob(handle, META_KEY, &s_meta, &meta_size);
-    if (err == ESP_ERR_NVS_NOT_FOUND) {
-        /* First boot — initialise empty ring */
-        memset(&s_meta, 0, sizeof(s_meta));
-        save_meta(handle);
-        nvs_commit(handle);
-        ESP_LOGI(TAG, "Offline log initialised (empty).");
-    } else if (err == ESP_OK) {
+    if (err == ESP_OK && s_meta.format_ver == OFFLOG_FORMAT_VER) {
         ESP_LOGI(TAG, "Offline log loaded: %u entries buffered (head=%u, tail=%u).",
                  s_meta.count, s_meta.head, s_meta.tail);
     } else {
-        ESP_LOGE(TAG, "Failed to read ring meta: %s", esp_err_to_name(err));
+        if (err == ESP_OK) {
+            /* A shorter/older meta blob reads format_ver back as 0 (it's the last
+               field); any mismatch means the entry layout changed, so the buffered
+               entries can't be trusted — erase the namespace and start clean. */
+            ESP_LOGW(TAG, "Offline log format v%u != v%u — clearing %u stale entries.",
+                     s_meta.format_ver, OFFLOG_FORMAT_VER, s_meta.count);
+            nvs_erase_all(handle);
+        } else if (err != ESP_ERR_NVS_NOT_FOUND) {
+            ESP_LOGE(TAG, "Failed to read ring meta: %s — resetting.", esp_err_to_name(err));
+            nvs_erase_all(handle);
+        }
+        /* First boot, format change, or read error — initialise an empty ring. */
         memset(&s_meta, 0, sizeof(s_meta));
+        s_meta.format_ver = OFFLOG_FORMAT_VER;
+        save_meta(handle);
+        nvs_commit(handle);
+        ESP_LOGI(TAG, "Offline log initialised (empty, format v%u).", OFFLOG_FORMAT_VER);
     }
 
     nvs_close(handle);
@@ -177,6 +193,7 @@ esp_err_t offline_log_clear(void)
     /* Erase the entire namespace — faster than key-by-key removal */
     nvs_erase_all(handle);
     memset(&s_meta, 0, sizeof(s_meta));
+    s_meta.format_ver = OFFLOG_FORMAT_VER;
     save_meta(handle);
     err = nvs_commit(handle);
     nvs_close(handle);

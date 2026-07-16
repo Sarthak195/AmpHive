@@ -451,17 +451,26 @@ audit merged; statuses below are as of 2026-07-11.*
     Behavior change: new plugs default to OFFLINE, so a freshly registered
     plug must be set AVAILABLE in the CPO portal before its first session
     (finalize already resets used plugs to AVAILABLE). (TD#22)
-52. **[Open] Crash-recovery resets the duration watchdog.** On reboot the
-    recovered session's `start_time_s` is reset to "now" (`main.c`, tick-based,
-    no wall clock), so the time cap restarts from zero each reboot (the energy
-    cap still holds). (TD#23)
-53. **[Open, narrowed] Offline-resync telemetry can bill the wrong session.**
-    Live readings are now attributed by the firmware-echoed `session_id`
-    (fw ≥ 1.4.x), which closes the plug-reused-while-online case. But
-    `offline_log` ring-buffer entries still carry no `session_id`, so readings
-    buffered across an MQTT outage are attributed to the plug's *current*
-    ACTIVE session on resync — the stale-overwrite window remains for the
-    buffered path. (TD#24)
+52. **[Resolved 2026-07-16, fw 2.1.0-direct — on-device verify pending]
+    Crash-recovery resets the duration watchdog.** `start_time_s` is tick-based
+    (resets to 0 on reboot), so the recovered session's time cap used to restart
+    from zero. Fixed by persisting elapsed-so-far: `session_params_t` gains
+    `elapsed_s`, the telemetry task re-persists active sessions on a 30 s throttle
+    (event-only persists left a long session at `elapsed_s=0`), and recovery
+    restores `start_time_s = now − elapsed_s` (unsigned modular arithmetic recovers
+    the true elapsed; if the session already overran, it trips on the first sweep).
+    Worst-case overrun is now one throttle interval. Chose this over an SNTP
+    wall-clock baseline (which would over-count power-off time). (TD#23)
+53. **[Resolved 2026-07-16, fw 2.1.0-direct — on-device verify pending]
+    Offline-resync telemetry can bill the wrong session.** The `offline_log` ring
+    entry now stores a compact `uint32_t session_id` (18→22 B; `ring_meta_t` gains
+    a `format_ver` so old-layout entries are cleared on init), and the resync
+    payload echoes it plus `relay`/`offline:true`. The backend attributes each
+    buffered reading to its exact session — dropping it if that session already
+    finalized — and a new `is_offline` flag keeps a historical frame from tripping
+    the REC-02 OFF-republish. Idle buffered frames omit the id + set `relay:false`
+    so the idle guard drops them. Tests: `backend/tests/test_mqtt_manager.py`
+    (resync attribution + stale-id inert). (TD#24)
 54. **[Open, reduced scope] Device / provisioning security.** Still open:
     no flash-encryption (plaintext NVS secrets — Wi-Fi, Tapo account,
     per-gateway MQTT creds, setup code) and the boot-time fallback into the
