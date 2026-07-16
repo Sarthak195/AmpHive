@@ -26,7 +26,10 @@ const NAV_ITEMS = [
   { path: '/cpo/tariffs', label: 'Tariffs', icon: '💲' },
   { path: '/cpo/reservations', label: 'Reservations', icon: '📅' },
   { path: '/cpo/earnings', label: 'Earnings', icon: '🪙' },
+  { path: '/cpo/invoices', label: 'Invoices', icon: '🧾' },
+  { path: '/cpo/disputes', label: 'Disputes', icon: '⚖️' },
   { path: '/cpo/faults', label: 'Faults', icon: '🛠️' },
+  { path: '/cpo/settings', label: 'Settings', icon: '⚙️' },
 ];
 
 const CpoLayout = ({ children, tenantName }) => {

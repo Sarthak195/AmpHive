@@ -1,10 +1,16 @@
 import { useState, useEffect, useCallback } from 'react';
 import api from '../api/client';
+import DisputeModal from '../components/DisputeModal';
 
 const formatDate = (isoString) => {
   if (!isoString) return '-';
   return new Date(isoString).toLocaleString();
 };
+
+// The invoice endpoint 400s on a zero-cost session, so only offer it for a
+// completed/paid session that actually billed something.
+const canInvoice = (s) =>
+  (s.status === 'completed' || s.status === 'paid') && Number(s.coins_spent) > 0;
 
 // Human labels for ledger transaction types.
 const TX_LABEL = {
@@ -19,6 +25,7 @@ export default function History() {
   const [ledger, setLedger] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [disputeFor, setDisputeFor] = useState(null); // session id the dispute modal is open for
 
   const fetchData = useCallback(async () => {
     try {
@@ -41,6 +48,24 @@ export default function History() {
   useEffect(() => {
     fetchData();
   }, [fetchData]);
+
+  // The GST invoice endpoint returns printable HTML (not JSON) and needs the
+  // Bearer header, so it can't go through the api client — raw-fetch the blob
+  // and open it in a new tab. Issues the invoice server-side on first view.
+  const viewInvoice = async (sessionId) => {
+    try {
+      const base = import.meta.env.VITE_API_URL || '';
+      const token = localStorage.getItem('amphive_token');
+      const res = await fetch(`${base}/api/sessions/${sessionId}/invoice?format=html`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) throw new Error('Could not load the invoice.');
+      const blob = await res.blob();
+      window.open(URL.createObjectURL(blob), '_blank');
+    } catch (err) {
+      setError(err.message || 'Could not load the invoice.');
+    }
+  };
 
   const TABS = [
     { id: 'sessions', label: 'Charging Sessions' },
@@ -86,6 +111,7 @@ export default function History() {
                   <th>Energy (kWh)</th>
                   <th>Cost (Coins)</th>
                   <th>Status</th>
+                  <th>Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -99,6 +125,18 @@ export default function History() {
                       <span className={`badge ${s.status === 'completed' || s.status === 'paid' ? 'badge-success' : 'badge-warning'}`}>
                         {s.status}
                       </span>
+                    </td>
+                    <td>
+                      <div className="flex gap-2" style={{ flexWrap: 'wrap' }}>
+                        {canInvoice(s) && (
+                          <button className="btn btn-ghost btn-sm" onClick={() => viewInvoice(s.id)}>
+                            Invoice
+                          </button>
+                        )}
+                        <button className="btn btn-ghost btn-sm" onClick={() => setDisputeFor(s.id)}>
+                          Report an issue
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -148,6 +186,14 @@ export default function History() {
             </tbody>
           </table>
         </div>
+      )}
+
+      {disputeFor != null && (
+        <DisputeModal
+          sessionId={disputeFor}
+          onClose={() => setDisputeFor(null)}
+          onSubmitted={fetchData}
+        />
       )}
     </div>
   );

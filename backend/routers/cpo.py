@@ -209,6 +209,11 @@ async def cpo_profile(
             "queued_charging_enabled": tenant.queued_charging_enabled,
             "auto_start_delay_min": tenant.auto_start_delay_min,
             "queue_ttl_min": tenant.queue_ttl_min,
+            # [GST invoices] Seller identity stamped onto issued invoices
+            # (services/invoices.py); configured on the CPO Settings page.
+            "gstin": tenant.gstin,
+            "legal_name": tenant.legal_name,
+            "invoice_prefix": tenant.invoice_prefix,
         },
         "stats": {
             "gateway_count": gateway_count,
@@ -241,6 +246,15 @@ async def cpo_update_profile(
         tenant.auto_start_delay_min = req.auto_start_delay_min
     if req.queue_ttl_min is not None:
         tenant.queue_ttl_min = req.queue_ttl_min
+    # [GST invoices] Seller identity for issued tax invoices. An empty/blank
+    # string clears the field back to NULL (so an operator can un-set it); a
+    # present value is stored trimmed.
+    if req.gstin is not None:
+        tenant.gstin = req.gstin.strip() or None
+    if req.legal_name is not None:
+        tenant.legal_name = req.legal_name.strip() or None
+    if req.invoice_prefix is not None:
+        tenant.invoice_prefix = req.invoice_prefix.strip() or None
 
     await db.commit()
     await db.refresh(tenant)
@@ -252,6 +266,9 @@ async def cpo_update_profile(
         "queued_charging_enabled": tenant.queued_charging_enabled,
         "auto_start_delay_min": tenant.auto_start_delay_min,
         "queue_ttl_min": tenant.queue_ttl_min,
+        "gstin": tenant.gstin,
+        "legal_name": tenant.legal_name,
+        "invoice_prefix": tenant.invoice_prefix,
     }
 
 

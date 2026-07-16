@@ -360,6 +360,11 @@ class CpoProfileUpdateRequest(BaseModel):
     auto_start_delay_min: Optional[int] = Field(default=None, ge=0, le=1440)
     # How long a WAITING queued charge lives (minutes) before it expires.
     queue_ttl_min: Optional[int] = Field(default=None, ge=1, le=43200)  # up to 30 days
+    # [GST invoices] Seller identity stamped onto issued tax invoices
+    # (services/invoices.py). Empty string clears the field back to NULL.
+    gstin: Optional[str] = Field(default=None, max_length=15)
+    legal_name: Optional[str] = Field(default=None, max_length=120)
+    invoice_prefix: Optional[str] = Field(default=None, max_length=12)
 
 
 class CpoGroupCreateRequest(BaseModel):
