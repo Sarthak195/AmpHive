@@ -99,16 +99,58 @@ describe('CpoTariffs', () => {
     const row = screen.getAllByRole('row').find((r) => r.textContent.includes('Society Default'));
     await user.click(within(row).getByRole('button', { name: 'Manage slots' }));
 
-    // Existing slot rendered as its window + rate.
+    // Existing slot rendered as its window + rate + days (127 -> "Every day").
     expect(await screen.findByText('18:00 – 22:00')).toBeInTheDocument();
+    expect(screen.getByText('Every day')).toBeInTheDocument();
 
-    // Add a slot — defaults are 18:00→22:00 (1080→1320); just set the price.
+    // Add a slot — defaults are 18:00→22:00 (1080→1320), all days; set the price.
     await user.type(screen.getByPlaceholderText('coins/kWh'), '6');
     await user.click(screen.getByRole('button', { name: 'Add slot' }));
 
     expect(api.post).toHaveBeenCalledWith('/api/cpo/tariffs/1/slots', {
-      start_min: 1080, end_min: 1320, price_per_kwh: 6,
+      start_min: 1080, end_min: 1320, price_per_kwh: 6, days_mask: 127,
     });
+  });
+
+  it('scopes a slot to selected weekdays via the days_mask toggles', async () => {
+    mockApi();
+    api.post.mockResolvedValue({ status: 'created', id: 12 });
+    const user = userEvent.setup();
+    renderPage();
+
+    const row = (await screen.findAllByRole('row')).find((r) => r.textContent.includes('Society Default'));
+    await user.click(within(row).getByRole('button', { name: 'Manage slots' }));
+    await screen.findByText('18:00 – 22:00');
+
+    // Start from "every day" (127); deselect Sat + Sun → Mon–Fri (31).
+    await user.click(screen.getByRole('button', { name: 'Sat' }));
+    await user.click(screen.getByRole('button', { name: 'Sun' }));
+    await user.type(screen.getByPlaceholderText('coins/kWh'), '6');
+    await user.click(screen.getByRole('button', { name: 'Add slot' }));
+
+    expect(api.post).toHaveBeenCalledWith('/api/cpo/tariffs/1/slots', {
+      start_min: 1080, end_min: 1320, price_per_kwh: 6, days_mask: 31,
+    });
+  });
+
+  it('blocks adding a slot with no days selected', async () => {
+    mockApi();
+    const user = userEvent.setup();
+    renderPage();
+
+    const row = (await screen.findAllByRole('row')).find((r) => r.textContent.includes('Society Default'));
+    await user.click(within(row).getByRole('button', { name: 'Manage slots' }));
+    await screen.findByText('18:00 – 22:00');
+
+    // Deselect every weekday, then try to add.
+    for (const d of ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']) {
+      await user.click(screen.getByRole('button', { name: d }));
+    }
+    await user.type(screen.getByPlaceholderText('coins/kWh'), '6');
+    await user.click(screen.getByRole('button', { name: 'Add slot' }));
+
+    expect(await screen.findByText(/Select at least one day/)).toBeInTheDocument();
+    expect(api.post).not.toHaveBeenCalled();
   });
 
   it('surfaces a backend overlap 409 inline when adding a slot', async () => {

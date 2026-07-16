@@ -413,6 +413,10 @@ class MQTTManager:
     _EVENT_SEVERITY = {
         "THERMAL_CUTOFF": "critical",
         "OVERCURRENT_CUTOFF": "critical",
+        # OVERCURRENT_CAP is a soft/policy cap trip (the car drew more than the
+        # operator-set per-plug cap, below the P110's own hardware cutoff) — a
+        # warning, not a hardware fault.
+        "OVERCURRENT_CAP": "warning",
         "UNAUTHORIZED_ON": "critical",
         "OTA_STARTED": "info",
         "OTA_OK_REBOOTING": "info",
@@ -425,6 +429,7 @@ class MQTTManager:
         "UNAUTHORIZED_ON": "Plug switched ON with no active session (physical button / app / stale resume) — forced OFF locally.",
         "THERMAL_CUTOFF": "Plug reported overheat — session cut off locally.",
         "OVERCURRENT_CUTOFF": "Plug reported over-current — session cut off locally.",
+        "OVERCURRENT_CAP": "Plug drew more than its configured current cap — session stopped locally.",
     }
 
     def _handle_gateway_alarm(self, gateway_id: str, payload: Dict[str, Any]):
@@ -526,15 +531,17 @@ class MQTTManager:
                 extra={"gateway_id": gateway_id, "plug_id": plug_id, "error": str(e)},
             )
 
-        # A safety cutoff means the firmware already forced the relay OFF and
-        # cleared its local session — finalize the backend session to match
+        # A finalize-worthy alarm means the firmware already forced the relay OFF
+        # and cleared its local session — finalize the backend session to match
         # (bills the recorded energy, frees the plug, notifies the driver).
         # Previously the session sat ACTIVE until the reaper noticed, and the
-        # driver never learned why charging stopped.
-        if plug_id is not None and event_type in self._SAFETY_CUTOFF_REASONS:
+        # driver never learned why charging stopped. This includes OVERCURRENT_CAP
+        # (a soft cap trip): the firmware stopped charging, so the backend must
+        # finalize too — otherwise the plug is orphaned OCCUPIED until the reaper.
+        if plug_id is not None and event_type in self._FINALIZE_ALARM_REASONS:
             await self._finalize_session_after_cutoff(plug_id, event_type)
 
-        # Fault console (additive): the same safety cutoffs also auto-enter the
+        # Fault console (additive): hardware safety cutoffs ALSO auto-enter the
         # plug into MAINTENANCE so a NEW session can't start until an operator
         # clears it (session-start already 409s any non-AVAILABLE plug).
         # Deliberately sequenced AFTER the finalize call above, in this same
@@ -543,17 +550,28 @@ class MQTTManager:
         # `plug.status = AVAILABLE`. Runs even when no session was found above
         # (a cutoff with no active session still needs the plug taken out of
         # service). Env-gated via AUTO_MAINTENANCE_ON_CRITICAL_ALARM.
+        # OVERCURRENT_CAP is deliberately EXCLUDED (not in the maintenance set):
+        # it's a policy limit on a HEALTHY plug, so the plug stays AVAILABLE after
+        # finalize rather than forcing an operator to clear maintenance each trip.
         if (
             AUTO_MAINTENANCE_ON_CRITICAL_ALARM
             and plug_id is not None
-            and event_type in self._SAFETY_CUTOFF_REASONS
+            and event_type in self._MAINTENANCE_ALARM_REASONS
         ):
             await self._auto_enter_maintenance(plug_id, event_type)
 
-    _SAFETY_CUTOFF_REASONS = {
+    # Alarms after which the firmware has already stopped charging locally, so the
+    # backend must finalize the session to match. The value is the finalize reason,
+    # which routes the driver notification (see session_lifecycle.finalize_*).
+    _FINALIZE_ALARM_REASONS = {
         "THERMAL_CUTOFF": "safety cutoff: plug reported overheat",
         "OVERCURRENT_CUTOFF": "safety cutoff: plug reported over-current",
+        "OVERCURRENT_CAP": "current cap exceeded: plug drew over its configured limit",
     }
+
+    # The subset that also takes the plug OUT OF SERVICE — genuine hardware faults
+    # only. A cap trip (OVERCURRENT_CAP) is intentionally NOT here.
+    _MAINTENANCE_ALARM_REASONS = {"THERMAL_CUTOFF", "OVERCURRENT_CUTOFF"}
 
     async def _finalize_session_after_cutoff(self, plug_id: int, event_type: str):
         """Finalize the ACTIVE session (if any) on a plug the firmware just cut
@@ -575,7 +593,7 @@ class MQTTManager:
                 return
             async with self.db_session_factory() as db:
                 outcome = await finalize_charging_session(
-                    db, session_id, reason=self._SAFETY_CUTOFF_REASONS[event_type]
+                    db, session_id, reason=self._FINALIZE_ALARM_REASONS[event_type]
                 )
             if outcome is not None:
                 logger.warning(

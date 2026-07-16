@@ -31,6 +31,9 @@ import CpoReservations from './pages/cpo/CpoReservations';
 import CpoFaults from './pages/cpo/CpoFaults';
 import CpoEarnings from './pages/cpo/CpoEarnings';
 import CpoTariffs from './pages/cpo/CpoTariffs';
+import CpoInvoices from './pages/cpo/CpoInvoices';
+import CpoDisputes from './pages/cpo/CpoDisputes';
+import CpoSettings from './pages/cpo/CpoSettings';
 
 function App() {
   return (
@@ -88,6 +91,15 @@ function App() {
           } />
           <Route path="/cpo/earnings" element={
             <CpoProtectedRoute><CpoEarnings /></CpoProtectedRoute>
+          } />
+          <Route path="/cpo/invoices" element={
+            <CpoProtectedRoute><CpoInvoices /></CpoProtectedRoute>
+          } />
+          <Route path="/cpo/disputes" element={
+            <CpoProtectedRoute><CpoDisputes /></CpoProtectedRoute>
+          } />
+          <Route path="/cpo/settings" element={
+            <CpoProtectedRoute><CpoSettings /></CpoProtectedRoute>
           } />
 
           {/* Catch-all — redirect to home */}

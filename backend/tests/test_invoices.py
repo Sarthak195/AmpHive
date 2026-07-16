@@ -90,6 +90,35 @@ def test_gst_rate_pct_falls_back_on_garbage_env(monkeypatch):
     assert invoices_service.gst_rate_pct() == Decimal("18.0")
 
 
+# --- CPO profile GST seller config (schema — DB-free) -----------------------
+
+def test_cpo_profile_update_accepts_gst_seller_fields():
+    """PUT /api/cpo/profile now carries the GST seller identity (configured on
+    the CPO Settings page) that services/invoices.py stamps onto invoices."""
+    from backend.schemas import CpoProfileUpdateRequest
+    req = CpoProfileUpdateRequest(
+        gstin="22AAAAA0000A1Z5", legal_name="Acme Charging Pvt Ltd", invoice_prefix="ACME"
+    )
+    assert (req.gstin, req.legal_name, req.invoice_prefix) == (
+        "22AAAAA0000A1Z5", "Acme Charging Pvt Ltd", "ACME"
+    )
+    # Omitted stays None (unchanged); empty string is allowed (the endpoint
+    # clears it back to NULL).
+    assert CpoProfileUpdateRequest().gstin is None
+    assert CpoProfileUpdateRequest(gstin="").gstin == ""
+
+
+def test_cpo_profile_update_enforces_gst_length_caps():
+    from pydantic import ValidationError
+    from backend.schemas import CpoProfileUpdateRequest
+    with pytest.raises(ValidationError):
+        CpoProfileUpdateRequest(gstin="x" * 16)            # GSTIN max 15
+    with pytest.raises(ValidationError):
+        CpoProfileUpdateRequest(invoice_prefix="x" * 13)   # prefix max 12
+    with pytest.raises(ValidationError):
+        CpoProfileUpdateRequest(legal_name="x" * 121)      # legal_name max 120
+
+
 def _session_mock(id=1, user_id=1, tenant_id=1, status=SessionStatus.COMPLETED, coins_spent=Decimal("10.00")):
     s = MagicMock()
     s.id = id
