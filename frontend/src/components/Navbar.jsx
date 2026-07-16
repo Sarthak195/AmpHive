@@ -54,6 +54,11 @@ const Navbar = () => {
           <Link to="/" className={`nav-link ${location.pathname === '/' ? 'active' : ''}`}>
             Home
           </Link>
+          {/* Public charger map — no account needed; also an entry point for
+              anonymous visitors (the navbar renders on /login too). */}
+          <Link to="/map" className={`nav-link ${location.pathname === '/map' ? 'active' : ''}`}>
+            🗺️ Map
+          </Link>
           <Link to="/topup" className={`nav-link ${location.pathname === '/topup' ? 'active' : ''}`}>
             Top Up
           </Link>

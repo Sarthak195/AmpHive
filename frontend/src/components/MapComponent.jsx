@@ -15,7 +15,7 @@ const markerIcon = (state) => L.divIcon({
   popupAnchor: [0, -10],
 });
 
-export default function MapComponent({ plugs, onPlugSelect }) {
+export default function MapComponent({ plugs, onPlugSelect, selectLabel = 'Select' }) {
   // Center roughly on India, or a default location
   const center = [20.5937, 78.9629];
   const zoom = 4;
@@ -66,7 +66,7 @@ export default function MapComponent({ plugs, onPlugSelect }) {
                         onPlugSelect(plug.id);
                       }}
                     >
-                      Select
+                      {selectLabel}
                     </button>
                   )}
                 </div>

@@ -174,6 +174,25 @@ class PlugResponse(BaseModel):
     watching: bool = False
 
 
+class PublicPlugResponse(BaseModel):
+    """Minimal, UNAUTHENTICATED projection of a PUBLIC-group plug for the
+    pre-signup discovery map (`GET /api/plugs/public`). Deliberately narrow: only
+    what a passer-by needs to see a charger on a map — id, name, location, live
+    availability, and price. It EXCLUDES every per-user field (watching,
+    reserved-by-me, queue), all session/driver state, and network details
+    (local_ip). Private/society plugs are never returned by that endpoint at all.
+    Starting a charge still requires an account."""
+    id: int
+    name: str
+    status: str
+    latitude: float
+    longitude: float
+    price_per_kwh: Optional[float] = None
+    # Whether the plug's gateway is reachable right now — lets the public map
+    # color a marker offline (same meaning as PlugResponse.gateway_online).
+    gateway_online: bool = True
+
+
 class GatewayEventResponse(BaseModel):
     """A gateway/plug operational event (alarm, safety cutoff, OTA notice)."""
     id: int
