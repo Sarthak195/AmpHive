@@ -10,6 +10,32 @@ NVS secrets) / TECH_DEBT device-security. See also
 [ota-signing-key](../../docs/SECURITY.md) — losing the signing key while a device
 is encrypted is unrecoverable (below).
 
+> ### ⚠️ Decide this FIRST — encryption permanently dedicates the board
+>
+> Burning encryption is a **one-way, per-chip commitment**. Once burned, that
+> ESP32 can no longer be freely repurposed:
+> - **Release mode:** UART flashing is disabled **permanently** — only a signed
+>   OTA can ever update it. It is effectively locked to AmpHive for life; you
+>   cannot reclaim it as a general dev board.
+> - **Development mode:** still serial-reflashable, but the flash stays encrypted
+>   for life, every reflash must be encryption-aware (`idf.py encrypted-flash`),
+>   and the number of plaintext reflash cycles is bounded by the `FLASH_CRYPT_CNT`
+>   eFuse. Casual "flash a random sketch" reuse is gone.
+>
+> **Only encrypt units you are committing to production AmpHive gateways — never a
+> board you may want to reclaim** for prototyping or another project. If you rotate
+> a small pool of dev boards between projects, leave them **plaintext** and rely on
+> physical security of the enclosure instead (a legitimate choice for a
+> low-physical-risk site, e.g. a locked cabinet).
+>
+> **Encryption does NOT freeze credentials.** Changing the Wi-Fi / Tapo / MQTT
+> password later still works normally — NVS encryption is transparent on write, so
+> re-provisioning through the captive portal (e.g. after a monthly Wi-Fi-password
+> rotation) needs **no** eFuse re-burn and **no** serial reflash. Encryption
+> protects the secrets *at rest*; it does not make NVS read-only. (Tip: to avoid
+> re-provisioning every rotation, keep gateways on a dedicated IoT SSID whose
+> password you don't rotate.)
+
 ---
 
 ## 1. What this protects, and why NVS encryption (not just flash encryption)
