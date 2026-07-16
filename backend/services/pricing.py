@@ -98,14 +98,17 @@ def _slot_rate_and_bound(slots, at_local: datetime):
 
       - ``rate``: 2dp Decimal price of the slot COVERING ``at_local``, or
         ``None`` when no slot covers it (a gap, or no slot for this weekday).
-      - ``boundary``: the next wall-clock datetime TODAY (in ``at_local``'s
-        zone) at which the applicable rate could change —
+      - ``boundary``: the next wall-clock datetime (in ``at_local``'s zone) at
+        which the applicable rate could change —
           * covering a slot -> that slot's ``end_min`` today (the rate is
             re-resolved at the slot's end, even if the neighbour repeats it);
-          * in a gap -> the ``start_min`` of the next slot that begins later
-            today; ``None`` if none remain today.
-        ``None`` means "no further rate change today" (compute again after the
-        local day rolls over).
+          * in a gap with a later slot today -> the ``start_min`` of the next
+            slot that begins later today;
+          * otherwise -> the start of the earliest slot on the NEXT weekday that
+            has any slot (scanning up to 7 days ahead), so a session sitting in an
+            end-of-day gap or on a slot-less weekday still reprices when the next
+            applicable window opens rather than freezing at the current rate.
+        ``None`` only when no slot exists on ANY weekday (a genuinely flat set).
 
     Covering test for a slot S: S is active on ``at_local``'s weekday
     (``(S.days_mask >> weekday) & 1``, Mon=bit0) AND
@@ -141,7 +144,18 @@ def _slot_rate_and_bound(slots, at_local: datetime):
         nxt = min(upcoming, key=lambda s: int(s.start_min))
         return None, _bound_at(nxt.start_min)
 
-    # 3. No covering slot and nothing else starts today — no later boundary.
+    # 3. No covering slot and nothing else starts later today. Roll forward to the
+    #    next weekday that bears any slot (up to 7 days) and return its earliest
+    #    start, so a session in an end-of-day gap — or on a weekday with no slots —
+    #    still reprices when the next applicable window opens (per-weekday support).
+    for delta in range(1, 8):
+        d = day_start + timedelta(days=delta)
+        wd = d.weekday()
+        day_slots = [s for s in slots if (int(s.days_mask) >> wd) & 1]
+        if day_slots:
+            return None, d + timedelta(minutes=min(int(s.start_min) for s in day_slots))
+
+    # No slot on any weekday at all — genuinely flat, no further boundary.
     return None, None
 
 
@@ -336,7 +350,11 @@ async def resolve_price_display(db: AsyncSession, plug: Plug, at: datetime = Non
 
     slot_rate, boundary = _slot_rate_and_bound(slots, at_local)
     rate = slot_rate if slot_rate is not None else flat
-    if boundary is None:
+    # Only preview a change happening LATER THE SAME LOCAL DAY. _slot_rate_and_bound
+    # can now return a cross-day boundary (the next applicable weekday) for the
+    # repricing path, but a bare "@ HH:MM" driver ribbon can't convey a future
+    # date, so a tomorrow/next-week boundary must not surface as a "next price".
+    if boundary is None or boundary.date() != at_local.date():
         return rate, None, None
 
     # The rate just past the boundary: a pure re-resolve over the SAME slots at
