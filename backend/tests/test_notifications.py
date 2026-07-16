@@ -234,6 +234,7 @@ async def test_gateway_offline_notifies_each_active_driver():
 @pytest.mark.parametrize("event_type,should_finalize", [
     ("THERMAL_CUTOFF", True),
     ("OVERCURRENT_CUTOFF", True),
+    ("OVERCURRENT_CAP", True),     # soft cap trip also finalizes (firmware already stopped)
     ("UNAUTHORIZED_ON", False),   # no session by definition
     ("OTA_STARTED", False),
 ])
@@ -270,7 +271,11 @@ async def test_cutoff_alarm_finalizes_active_session(event_type, should_finalize
 
     assert finalize_mock.called is should_finalize
     if should_finalize:
-        assert "safety cutoff" in finalize_mock.call_args.kwargs["reason"]
+        reason = finalize_mock.call_args.kwargs["reason"]
+        if event_type == "OVERCURRENT_CAP":
+            assert "current cap exceeded" in reason   # soft cap → own notification title
+        else:
+            assert "safety cutoff" in reason
     MQTTManager._instance = None
 
 
@@ -292,5 +297,5 @@ def test_finalize_notifies_on_stop_reasons():
     from backend.services import session_lifecycle
     src = inspect.getsource(session_lifecycle.finalize_charging_session)
     assert "session_stopped" in src
-    for marker in ("balance exhausted", "telemetry lost", "safety cutoff"):
+    for marker in ("balance exhausted", "telemetry lost", "safety cutoff", "current cap exceeded"):
         assert marker in src, f"finalize no longer maps reason {marker!r}"
