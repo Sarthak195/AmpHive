@@ -119,3 +119,7 @@ def rate_limit_dependency(limiter: SlidingWindowRateLimiter, action: str):
 
 login_rate_limiter = SlidingWindowRateLimiter(*_rule_from_env("LOGIN_RATE_LIMIT", "10/60"))
 register_rate_limiter = SlidingWindowRateLimiter(*_rule_from_env("REGISTER_RATE_LIMIT", "10/3600"))
+# Public, unauthenticated discovery map (GET /api/plugs/public). Generous — a
+# browsing visitor may refresh/poll live availability — but bounded so the
+# open endpoint can't be hammered to enumerate/scrape or exhaust the DB.
+public_map_rate_limiter = SlidingWindowRateLimiter(*_rule_from_env("PUBLIC_MAP_RATE_LIMIT", "60/60"))

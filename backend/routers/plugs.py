@@ -25,9 +25,10 @@ from backend.schemas import (
     CpoSetupRequest, CreateOrderRequest, CreateOrderResponse,
     DirectPlugRequest, GatewayRegisterRequest, GroupResponse,
     JoinGroupRequest, LoginRequest, PlugRegisterRequest, PlugResponse,
-    RegisterRequest, SessionStartRequest, SessionStopRequest, UserResponse,
-    VerifyPaymentRequest,
+    PublicPlugResponse, RegisterRequest, SessionStartRequest,
+    SessionStopRequest, UserResponse, VerifyPaymentRequest,
 )
+from backend.services.rate_limit import public_map_rate_limiter, rate_limit_dependency
 from backend.services import payments as payment_service
 from backend.services.auth import (
     create_access_token, decode_access_token, get_current_user,
@@ -242,6 +243,63 @@ async def get_available_plugs(
             )
         )
     return responses
+
+
+@router.get(
+    "/api/plugs/public",
+    response_model=List[PublicPlugResponse],
+    dependencies=[Depends(rate_limit_dependency(public_map_rate_limiter, "map"))],
+)
+async def get_public_plugs(db: AsyncSession = Depends(get_db)):
+    """
+    PUBLIC (no auth) — nearby PUBLIC chargers for the pre-signup discovery map.
+
+    Returns ONLY plugs that are ungrouped/legacy or in a **public** charger group
+    AND have a known location, with a deliberately minimal projection
+    (`PublicPlugResponse`). Private/society plugs (in a non-public group) are
+    never included — publicly geolocating them would be a privacy leak. Starting
+    a charge still requires an account (this endpoint is read-only discovery).
+
+    Declared before `/api/plugs/{plug_id}` so the static path wins the match.
+    """
+    public_group_ids = (
+        select(ChargerGroup.id)
+        .where(ChargerGroup.is_public == True)  # noqa: E712 (SQL boolean, not Python)
+        .scalar_subquery()
+    )
+    rows = await db.execute(
+        select(Plug, Gateway)
+        .join(Gateway, Gateway.id == Plug.gateway_id)
+        .where(
+            or_(
+                Plug.group_id.is_(None),  # ungrouped/legacy: public to all
+                Plug.group_id.in_(public_group_ids),
+            )
+        )
+    )
+
+    now = datetime.now(timezone.utc)
+    out = []
+    for plug, gateway in rows.all():
+        # Effective coords: the plug's own, else its gateway's site (same
+        # fallback the authenticated list uses). No location → not mappable.
+        lat = plug.latitude if plug.latitude is not None else gateway.latitude
+        lon = plug.longitude if plug.longitude is not None else gateway.longitude
+        if lat is None or lon is None:
+            continue
+        rate, _changes_at, _next_rate = await resolve_price_display(db, plug)
+        out.append(
+            PublicPlugResponse(
+                id=plug.id,
+                name=plug.name,
+                status=plug.status.value,
+                latitude=lat,
+                longitude=lon,
+                price_per_kwh=float(rate),
+                gateway_online=gateway_is_live(gateway, now),
+            )
+        )
+    return out
 
 
 @router.get("/api/plugs/{plug_id}", response_model=PlugResponse)

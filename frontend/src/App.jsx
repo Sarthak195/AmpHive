@@ -18,6 +18,7 @@ import Session from './pages/Session';
 import Login from './pages/Login';
 import Groups from './pages/Groups';
 import History from './pages/History';
+import PublicMap from './pages/PublicMap';
 import { ProtectedRoute, CpoProtectedRoute } from './components/ProtectedRoutes';
 
 // CPO Admin Dashboard pages
@@ -44,6 +45,9 @@ function App() {
           {/* Public routes */}
           <Route path="/" element={<Home />} />
           <Route path="/login" element={<Login />} />
+          {/* Public charger-discovery map — browse nearby public chargers
+              without an account (starting a charge still routes to sign-in). */}
+          <Route path="/map" element={<PublicMap />} />
 
           {/* Protected routes — require authentication */}
           <Route path="/topup" element={
