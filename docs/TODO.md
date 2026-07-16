@@ -249,6 +249,32 @@ been fixed by the 2026-07-08…11 work — see the shipped sections below).*
       **restore tested** into a scratch DB (row counts matched). Remaining
       ritual: quarterly restore drill (`deploy/docs/db_backup_restore.md`).
 
+## Account & auth features (backlog)
+
+- [ ] **Password reset ("forgot password") flow.** Auth today is email + bcrypt
+      password (`routers/auth.py`) with **no self-service recovery** — a driver
+      who forgets their password is locked out until an admin resets it directly
+      in the DB. Add: `POST /api/auth/forgot-password` issues a single-use,
+      time-boxed reset token (emailed link); `POST /api/auth/reset-password`
+      consumes it to set a new password and bumps the user's `token_version`
+      (revokes existing sessions — see the JWT-revocation item). Rate-limit both
+      via `services/rate_limit.py`. Frontend: a "Forgot password?" link on
+      `Login` + a reset page. **Blocked on an email/SMTP provider** — the same
+      dependency that deferred email notifications (see the driver-notifications
+      item). (No security §; new capability.)
+- [ ] **Google login ("Sign in with Google" / OAuth2).** Social login to cut
+      onboarding friction. Add a Google OAuth2 authorization-code flow:
+      `GET /api/auth/google/login` → Google consent → `GET /api/auth/google/callback`
+      verifies the returned id_token, upserts a user by **verified email**
+      (linking to an existing email/password account when one exists), and issues
+      the same app JWT the password flow does. Persist the provider + subject
+      (nullable columns or a `user_identities` table) so OAuth users need no
+      password. **Needs a Google Cloud OAuth client** (client id/secret in `.env`,
+      registered redirect URIs) and ideally a **real domain** for the redirect
+      (DuckDNS is a demonstrated SPOF — see the web-HTTPS follow-up). Frontend: a
+      "Continue with Google" button on `Login`. Consider generalizing to a
+      provider table so more IdPs (Apple, etc.) can be added later.
+
 ## Long term — productionization
 
 - [x] **[2026-07-06 audit] Multi-plug ESP32 gateway support** (shipped fw
