@@ -62,6 +62,12 @@ spec:
       labels:
         app: mosquitto
     spec:
+      # mosquitto runs as uid 1883; fsGroup makes the read-only Secret mounts
+      # (passwd/acl/certs, mode 0640 root:root) group-readable by it, and the
+      # emptyDir data/log volumes group-writable. Without this the broker dies
+      # with "Unable to open pwfile".
+      securityContext:
+        fsGroup: 1883
       containers:
         - name: mosquitto
           image: eclipse-mosquitto:2.0
