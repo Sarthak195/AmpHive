@@ -1,23 +1,27 @@
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: postgres-pvc
-  namespace: amphive
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 5Gi
----
+# =============================================================================
+# Postgres — StatefulSet + PVC (k3s built-in local-path StorageClass)
+#
+# Mirrors the compose `db` service (postgres:15-alpine). Credentials come from
+# the amphive-env Secret (POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_DB — the
+# same keys that live in .env). The Service is named `db` on 5432 so the
+# backend's DATABASE_URL host `db` resolves (compose parity).
+#
+# CUTOVER NOTE: an EMPTY PVC just boots a fresh DB and the backend runs its
+# Alembic migrations on startup. A REAL production cutover instead restores a
+# pg_dump of the live compose DB into this volume, e.g.:
+#   docker exec amphive-db pg_dump -U postgres amphive > amphive_prod_dump.sql
+#   kubectl -n amphive exec -i sts/postgres -- psql -U postgres -d amphive \
+#     < amphive_prod_dump.sql
+# =============================================================================
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: postgres
   namespace: amphive
   labels:
     app: postgres
 spec:
+  serviceName: db
   replicas: 1
   selector:
     matchLabels:
@@ -30,32 +34,72 @@ spec:
       containers:
         - name: postgres
           image: postgres:15-alpine
-          env:
-            - name: POSTGRES_DB
-              value: amphive
-            - name: POSTGRES_USER
-              value: postgres
-            - name: POSTGRES_PASSWORD
-              value: postgres
           ports:
             - containerPort: 5432
               name: postgres
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: amphive-env
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: amphive-env
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: amphive-env
+                  key: POSTGRES_DB
+            # Explicit subdir so the PVC's lost+found doesn't collide with initdb.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
           volumeMounts:
-            - name: postgres-db-data
+            - name: postgres-data
               mountPath: /var/lib/postgresql/data
-      volumes:
-        - name: postgres-db-data
-          persistentVolumeClaim:
-            claimName: postgres-pvc
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U $POSTGRES_USER"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U $POSTGRES_USER"]
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+  volumeClaimTemplates:
+    - metadata:
+        name: postgres-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: local-path   # k3s built-in dynamic provisioner
+        resources:
+          requests:
+            storage: 5Gi
 ---
+# Headless Service `db` — backs the StatefulSet AND is the name the backend
+# resolves (DATABASE_URL host `db`). ClusterIP: None keeps it internal.
 apiVersion: v1
 kind: Service
 metadata:
   name: db
   namespace: amphive
+  labels:
+    app: postgres
 spec:
+  clusterIP: None
   ports:
     - port: 5432
       targetPort: 5432
+      name: postgres
   selector:
     app: postgres

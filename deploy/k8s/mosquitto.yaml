@@ -1,13 +1,49 @@
+# =============================================================================
+# Mosquitto broker — Deployment + Service, mirroring docker-compose.tls.yml
+#
+# mosquitto.conf comes from a ConfigMap (a verbatim copy of
+# deploy/config/mosquitto.conf — keep the two in sync). The auth material that
+# deploy.ps1 generates on the VM (passwd, acl, TLS certs) is supplied here by
+# two Secrets you create out-of-band (see README):
+#   - amphive-mqtt-auth : keys `passwd`, `acl`
+#   - amphive-mqtt-certs: keys `ca.crt`, `server.crt`, `server.key`
+# Mount paths exactly match the compose bind mounts so mosquitto.conf's
+# password_file / acl_file / cafile / certfile / keyfile paths resolve.
+#
+# Two listeners (from mosquitto.conf): 1883 plaintext (internal only) and 8883
+# TLS. TLS TERMINATES HERE (mosquitto reads server.crt/key). See the Service
+# below for how each is exposed.
+# =============================================================================
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: mosquitto-config
   namespace: amphive
 data:
+  # Verbatim copy of deploy/config/mosquitto.conf. Two authenticated listeners
+  # (allow_anonymous false + passwd + ACL); 8883 adds TLS.
   mosquitto.conf: |
+    password_file /mosquitto/config/passwd
+    allow_anonymous false
+    acl_file /mosquitto/config/acl
+
+    # Plaintext listener (1883) — backend + fake-plug over the cluster network.
     listener 1883 0.0.0.0
-    allow_anonymous true
+
+    # TLS listener (8883) — gateways/agents dial mqtts://<node-ip>:<nodeport>.
+    # Server-auth only (require_certificate false); clients present user/pass.
+    listener 8883 0.0.0.0
+    cafile /mosquitto/config/certs/ca.crt
+    certfile /mosquitto/config/certs/server.crt
+    keyfile /mosquitto/config/certs/server.key
+    require_certificate false
+    tls_version tlsv1.2
+
+    persistence true
+    persistence_location /mosquitto/data/
+
     log_dest stdout
+    log_dest file /mosquitto/log/mosquitto.log
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -32,29 +68,92 @@ spec:
           ports:
             - containerPort: 1883
               name: mqtt
-            - containerPort: 9001
-              name: websockets
+            - containerPort: 8883
+              name: mqtt-tls
           volumeMounts:
-            - name: config-volume
+            - name: config
               mountPath: /mosquitto/config/mosquitto.conf
               subPath: mosquitto.conf
+            - name: auth
+              mountPath: /mosquitto/config/passwd
+              subPath: passwd
+            - name: auth
+              mountPath: /mosquitto/config/acl
+              subPath: acl
+            - name: certs
+              mountPath: /mosquitto/config/certs
+              readOnly: true
+            - name: data
+              mountPath: /mosquitto/data
+            - name: log
+              mountPath: /mosquitto/log
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
       volumes:
-        - name: config-volume
+        - name: config
           configMap:
             name: mosquitto-config
+        - name: auth
+          secret:
+            secretName: amphive-mqtt-auth
+            # mosquitto reads passwd/acl after dropping privileges; 0640 is
+            # enough and avoids a world-readable secret file.
+            defaultMode: 0640
+        - name: certs
+          secret:
+            secretName: amphive-mqtt-certs
+            defaultMode: 0640
+        # Single-node: emptyDir is fine (broker state is not source-of-truth —
+        # the backend is). Swap for a PVC if persistence across restarts matters.
+        - name: data
+          emptyDir: {}
+        - name: log
+          emptyDir: {}
 ---
+# Internal plaintext access (backend, fake-plug) on 1883.
 apiVersion: v1
 kind: Service
 metadata:
   name: mqtt
   namespace: amphive
+  labels:
+    app: mosquitto
 spec:
+  type: ClusterIP
   ports:
     - port: 1883
       targetPort: 1883
       name: mqtt
-    - port: 9001
-      targetPort: 9001
-      name: websockets
+  selector:
+    app: mosquitto
+---
+# TLS listener exposed to the fleet during the transition. NodePort 30883 on
+# every node's external IP -> broker 8883 (TLS terminates at mosquitto).
+#
+# RELAY / FIREWALL IMPLICATION: gateways currently dial mqtts://8.231.81.12:8883
+# (the compose broker). To move them onto k3s, the relay upstream / firewall /
+# LB must point at <node-ip>:30883 instead, and the k3s node's firewall must
+# allow tcp:30883. Do NOT publish 8883 directly on the host: the compose broker
+# already binds host 8883, so a hostPort/NodePort=8883 would clash. 30883 is in
+# the safe 30000-32767 NodePort range and avoids that collision.
+apiVersion: v1
+kind: Service
+metadata:
+  name: mqtt-tls
+  namespace: amphive
+  labels:
+    app: mosquitto
+spec:
+  type: NodePort
+  ports:
+    - port: 8883
+      targetPort: 8883
+      nodePort: 30883
+      name: mqtt-tls
   selector:
     app: mosquitto

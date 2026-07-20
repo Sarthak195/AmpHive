@@ -1,3 +1,22 @@
+# =============================================================================
+# Backend — Deployment + Service (compose `backend` service)
+#
+# Image is built FROM SOURCE (backend/Dockerfile) — there is no registry. Build
+# it and import into k3s containerd BEFORE `kubectl apply`:
+#   docker build -t amphive-backend:local ./backend
+#   docker save amphive-backend:local | sudo k3s ctr images import -
+# imagePullPolicy: IfNotPresent so k3s uses the imported image and never tries
+# a registry pull.
+#
+# All env comes from the amphive-env Secret (envFrom) — the same keys as .env,
+# so `kubectl create secret generic amphive-env --from-env-file=.env` populates
+# it in one shot (see README). Two values are cluster-internal service names,
+# so they are set explicitly to override whatever .env carried:
+#   MQTT_BROKER_HOST=mqtt, MQTT_BROKER_PORT=1883  (the ClusterIP `mqtt` Service)
+# DATABASE_URL from the Secret must use host `db` (postgresql+asyncpg://postgres
+# :<pw>@db:5432/amphive) — the headless `db` Service resolves it. deploy.ps1
+# already writes exactly that DATABASE_URL into .env.
+# =============================================================================
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -17,19 +36,29 @@ spec:
     spec:
       containers:
         - name: backend
-          image: sarthak195/amphive-backend:latest
+          image: amphive-backend:local
           imagePullPolicy: IfNotPresent
+          envFrom:
+            # DATABASE_URL, JWT_SECRET_KEY, MQTT_USERNAME/PASSWORD, RAZORPAY_*,
+            # COINS_*, MIN_START_BALANCE_COINS, PLATFORM_FEE_PCT, GST_RATE_PCT,
+            # TELEMETRY_RETENTION_DAYS, LOGIN/REGISTER_RATE_LIMIT, VAPID_*,
+            # FRONTEND_ORIGIN, SMTP_*, DIRECT_MODE, TAPO_* — all live in .env.
+            - secretRef:
+                name: amphive-env
           env:
-            - name: DATABASE_URL
-              value: "postgresql+asyncpg://postgres:postgres@db.amphive.svc.cluster.local:5432/amphive"
+            # Cluster service coordinates — override any host-shaped values the
+            # Secret may carry from the compose world.
             - name: MQTT_BROKER_HOST
-              value: "mqtt.amphive.svc.cluster.local"
+              value: "mqtt"
             - name: MQTT_BROKER_PORT
               value: "1883"
           ports:
             - containerPort: 8000
               name: api
           readinessProbe:
+            # Verified: backend/main.py:219 defines GET /api/health -> 200
+            # {"status":"healthy",...} with no DB dependency. (There is no
+            # /healthz; /api/config also exists but does DB work.)
             httpGet:
               path: /api/health
               port: 8000
@@ -41,13 +70,23 @@ spec:
               port: 8000
             initialDelaySeconds: 15
             periodSeconds: 20
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 750m
+              memory: 512Mi
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: backend-service
+  name: backend
   namespace: amphive
+  labels:
+    app: backend
 spec:
+  type: ClusterIP
   ports:
     - port: 8000
       targetPort: 8000
