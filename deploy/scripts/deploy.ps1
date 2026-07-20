@@ -124,8 +124,11 @@ if (-not $NoTls) {
         $content += "CADDY_DOMAIN=$caddy_domain"
         Write-Host "  WARNING: CADDY_DOMAIN missing from .env - defaulted to $caddy_domain." -ForegroundColor Yellow
     }
-    if ($caddy_domain -notmatch '^[A-Za-z0-9][A-Za-z0-9.-]*$') {
-        Write-Host "ERROR: CADDY_DOMAIN in .env may only contain letters, digits, '.' and '-'." -ForegroundColor Red
+    # Comma-separated lists ("amphive.app, amphive.duckdns.org") pass through
+    # as a multi-name Caddy site address so old + new domains serve together
+    # during a domain migration.
+    if ($caddy_domain -notmatch '^[A-Za-z0-9][A-Za-z0-9., -]*$') {
+        Write-Host "ERROR: CADDY_DOMAIN in .env may only contain letters, digits, '.', '-', ',' and spaces." -ForegroundColor Red
         exit 1
     }
     # Optional second hostname for the CPO operator portal (same bundle, the
@@ -133,8 +136,8 @@ if (-not $NoTls) {
     # subdomains of the registered host to the same IP, so no extra DNS setup.
     $line = $content | Where-Object { $_ -like "CADDY_CPO_DOMAIN=*" } | Select-Object -First 1
     if ($line) { $caddy_cpo_domain = $line.Substring("CADDY_CPO_DOMAIN=".Length).Trim() }
-    if ($caddy_cpo_domain -ne "" -and $caddy_cpo_domain -notmatch '^[A-Za-z0-9][A-Za-z0-9.-]*$') {
-        Write-Host "ERROR: CADDY_CPO_DOMAIN in .env may only contain letters, digits, '.' and '-'." -ForegroundColor Red
+    if ($caddy_cpo_domain -ne "" -and $caddy_cpo_domain -notmatch '^[A-Za-z0-9][A-Za-z0-9., -]*$') {
+        Write-Host "ERROR: CADDY_CPO_DOMAIN in .env may only contain letters, digits, '.', '-', ',' and spaces." -ForegroundColor Red
         exit 1
     }
     $line = $content | Where-Object { $_ -like "ACME_EMAIL=*" } | Select-Object -First 1

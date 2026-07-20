@@ -21,6 +21,8 @@ _ALLOWED_ORIGINS = [
     "https://amphive.duckdns.org",
     "http://cpo.amphive.duckdns.org",
     "https://cpo.amphive.duckdns.org",
+    "https://amphive.app",
+    "https://cpo.amphive.app",
     "http://8.231.81.12",
     "https://8.231.81.12",
 ]
