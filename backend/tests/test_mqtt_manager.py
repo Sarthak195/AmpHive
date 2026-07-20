@@ -1266,6 +1266,8 @@ def test_send_plug_limits_includes_max_current_a():
     mgr = MQTTManager(db_session_factory=lambda: None)
     mgr.client = MagicMock()
     mgr.client.publish.return_value.is_published.return_value = True
+    # Default wait=False path reports the publish rc (0 == MQTT_ERR_SUCCESS).
+    mgr.client.publish.return_value.rc = 0
 
     ok = mgr.send_plug_limits("gw-1", 7, max_kwh=5.0, max_duration_seconds=3600,
                               local_ip="10.0.0.7", max_current_a=8.0)

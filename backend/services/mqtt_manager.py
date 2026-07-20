@@ -1609,7 +1609,9 @@ class MQTTManager:
                     "interval_ms": interval_ms, "topic": topic,
                 },
             )
-            return info.is_published()
+            # wait=True actually confirms the PUBACK; wait=False only enqueued it,
+            # so report the publish rc (mirrors send_plug_command).
+            return info.is_published() if wait else info.rc == mqtt.MQTT_ERR_SUCCESS
         except Exception as e:
             logger.error(
                 "Failed to publish interval command",
@@ -1661,7 +1663,9 @@ class MQTTManager:
                     "topic": topic,
                 },
             )
-            return info.is_published()
+            # wait=True actually confirms the PUBACK; wait=False only enqueued it,
+            # so report the publish rc (mirrors send_plug_command).
+            return info.is_published() if wait else info.rc == mqtt.MQTT_ERR_SUCCESS
         except Exception as e:
             logger.error(
                 "Failed to publish limits command",
