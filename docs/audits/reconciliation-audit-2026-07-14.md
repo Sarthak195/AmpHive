@@ -43,7 +43,9 @@ so they'd surface *new* ones:
 - **No per-plug power signal** at session start (start uses per-gateway
   `gateway_is_live`) — `docs/proposals/queued-charge-offline-plug.md`.
 - **Unbilled offline tail** on long outages; the software agent has no local kWh cutoff
-  — memory `gateway-offline-reconnect-reconciliation.md` + the proposal.
+  — memory `gateway-offline-reconnect-reconciliation.md` + the proposal. *(Update
+  2026-07-20: the agent-side half is closed — `agent/amphive_agent/core.py` now enforces
+  `max_kwh`/`max_duration_seconds` locally, offline included.)*
 - **Legacy `hold_coins IS NULL` sessions** keep the old whole-wallet exhaustion + forgiven
   overage — documented residual in `docs/SECURITY.md §5`.
 

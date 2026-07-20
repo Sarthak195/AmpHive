@@ -141,7 +141,7 @@ data path, and adds a discovery/assign handshake.
 
 | Direction | Topic | QoS | Ret. | Payload | Status |
 |---|---|---|---|---|---|
-| backend → agent | `amphive/gateways/{gw}/plugs/{plug_id}/commands` | 1 | no | `{"action":"ON"\|"OFF",...}` / `SET_INTERVAL` / `OTA` | **existing** |
+| backend → agent | `amphive/gateways/{gw}/plugs/{plug_id}/commands` | 1 | no | `{"action":"ON"\|"OFF",...}` / `SET_LIMITS` / `SET_INTERVAL` / `OTA` | **existing** |
 | agent → backend | `amphive/gateways/{gw}/telemetry` | 0 | no | `{"plug_id","watts","kwh","voltage","current","status","session_id"}` | **existing** |
 | agent → backend | `amphive/gateways/{gw}/status` | 1 | yes | `{"status":"online","fw":"agent-x"}` / LWT `{"status":"offline"}` | **existing** |
 | agent → backend | `amphive/gateways/{gw}/discovery` | 1 | no | `{"unique_id","provider","model","alias","capabilities"}` | **new** |
@@ -151,10 +151,26 @@ data path, and adds a discovery/assign handshake.
 is **session-relative** (energy *this session*, billed directly), not the plug's
 lifetime meter. So the agent, exactly like the ESP:
 - on `ON`: capture `baseline_kwh = device.energy_kwh` and store the backend's
-  `session_id`; mark the plug `occupied`.
+  `session_id` **and the local watchdog limits** (`max_kwh` /
+  `max_duration_seconds` from the payload; persisted, so a restart mid-session
+  keeps them); mark the plug `occupied`.
 - each poll: publish `kwh = max(0, device.energy_kwh − baseline_kwh)`, echo
-  `session_id`, `status:"occupied"`.
+  `session_id`, `status:"occupied"` — **and run the local watchdog**: at
+  `session kwh ≥ max_kwh` or elapsed `≥ max_duration_seconds` the agent cuts the
+  plug OFF itself (LAN-local `set_power(False)`, so it works with the broker
+  unreachable — no unbilled offline tail beyond the limit). The trip frame goes
+  out pre-watchdog (occupied + final kwh, like the firmware), then a QoS-1
+  `{"event":"LOCAL_LIMIT_CUTOFF","reason":"ENERGY_LIMIT"|"DURATION_LIMIT","plug_id"}`
+  alarm is queued on `/alarms` (paho delivers it on reconnect). A plug with no
+  cumulative meter still gets an energy limit via a watts×dt integration
+  fallback.
+- `SET_LIMITS` re-caps a **running** session's `max_kwh`/`max_duration_s`
+  without re-baselining (no-op when idle) — same semantics as the firmware
+  (MQTT_CONTRACT.md).
 - on `OFF` / idle: `kwh: 0`, `status:"available"`, `session_id:""`.
+
+Tests: `agent/test_local_limits.py` (stub device + stub broker, incl. the
+broker-down cutoff) and the `python -m amphive_agent.core` self-checks.
 
 `OTA` is a no-op for the agent (it self-updates via its own package channel);
 reply on `/alarms` with `OTA_REFUSED` or just ignore. `SET_INTERVAL` adjusts the

@@ -89,6 +89,12 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 | OTA hardening: signed images + https-only | ✅ | **Rolled out 2026-07-10** (fw ≥ 1.4.0): ECDSA signed-app verification on update (`SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT`, key gitignored), plain http refused by firmware + backend (`CpoGatewayOtaRequest` `^https://`, **deployed**), images on the public HTTPS bucket `gs://amphive-fw`. The real gateway `1cc3abb4fb54` was OTA'd end-to-end over the direct-MQTT path from `1.3.2-direct` → signed **`1.5.0-direct`** (`OTA_OK_REBOOTING` → offline → back online on 1.5.0, rollback cancelled). From 1.4.0 onward only signed images install. |
 | Headscale (vs Tailscale defaults) | 🟡 | `/key` fetch supports it, but default host constants point at Tailscale |
 
+### Software gateway (AmpHive Agent, [`agent/`](../agent) — [AMPHIVE_AGENT.md](AMPHIVE_AGENT.md))
+| Capability | Status | Notes |
+|------------|:------:|-------|
+| Multi-brand software gateway (kasa/shelly/sim providers, discovery→assign) | ✅ | Speaks the firmware MQTT contract verbatim; verified end-to-end against a real broker with the `sim` provider (see AMPHIVE_AGENT.md). |
+| **Local kWh + duration watchdog (offline cutoff)** | ✅ | **2026-07-20** — closes the "software agent has NO local kWh limit → unbilled offline tail" gap (memory `gateway-offline-reconnect-reconciliation.md`, `docs/proposals/queued-charge-offline-plug.md` §out-of-scope, reconciliation audit exclusion list). The `ON` payload's `max_kwh`/`max_duration_seconds` are stored (persisted in the agent's JSON store, so a restart mid-session keeps them); every poll the agent checks session energy (cumulative-meter delta, with a watts×dt integration fallback for meterless plugs) and elapsed time, and on a limit cuts the plug OFF **locally over the LAN — works with the broker unreachable**, mirroring the firmware watchdog. Like the firmware, the trip frame is published pre-watchdog (occupied + final kwh) and, unlike the firmware (which stays silent on limit cutoffs), a QoS-1 `{"event":"LOCAL_LIMIT_CUTOFF","reason":"ENERGY_LIMIT"\|"DURATION_LIMIT","plug_id"}` alarm is queued (paho delivers on reconnect). `SET_LIMITS` re-caps a running session without re-baselining (no-op when idle), matching MQTT_CONTRACT.md. Tests: `agent/test_local_limits.py` (stubbed device + offline broker) + `python -m amphive_agent.core` self-checks. |
+
 ### Infra / deploy
 | Capability | Status | Notes |
 |------------|:------:|-------|
