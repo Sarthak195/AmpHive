@@ -53,14 +53,29 @@ firmware/
 | `microlink_vpn` (legacy build only) | 32768 | 6 | floating |
 | `ml_coord_poll` (inside microlink, legacy build only) | 8 KB | max-1 | pinned Core 1 |
 
-Hard-coded constants: `AMPHIVE_DIRECT_MQTT 1` → `MQTT_BROKER_URL
-"mqtts://8.231.81.12:8883"` (the VM's static public IP; the broker CA is
-embedded via `EMBED_TXTFILES "certs/mqtt_ca.crt"` and validated by mbedTLS:
-chain + IP SAN, no date check). The legacy build (`AMPHIVE_DIRECT_MQTT 0`) keeps
-`SERVER_VPN_IP "100.87.241.70"` + plaintext `mqtt://100.87.241.70:1883` inside
-the WireGuard tunnel. SSID, WiFi password, auth key,
-device name, gateway id, and MQTT credentials all come from
-NVS (namespace `storage`) populated by the captive portal. Plug IPs are **not**
+Broker endpoint (fw ≥ 2.3.0): `AMPHIVE_DIRECT_MQTT 1` → default `MQTT_BROKER_URL
+"mqtts://mqtt.amphive.app:8883"` — a **DNS name**, so the broker can move
+machines by flipping the A record without touching firmware. An optional NVS
+key `broker_url` (namespace `storage`, full URI) **overrides** the compiled
+default when set; there is no captive-portal field for it (set it manually for
+lab brokers). **One-time self-migration:** if the stored `broker_url` contains
+a legacy pinned IP (`8.231.81.12` or `100.87.241.70`), boot logs a warning,
+erases the key, and uses the DNS default — an OTA alone retargets the fleet.
+TLS validation: the broker CA is embedded via `EMBED_TXTFILES
+"certs/mqtt_ca.crt"`; esp-tls/mbedTLS verifies the cert chain **and** the URI
+host against the cert SANs (DNS SAN `mqtt.amphive.app` for the hostname
+default; the cert also keeps the legacy IP SANs so a raw-IP `broker_url` still
+validates). No `skip_cert_common_name_check` / `common_name` override is set,
+so default hostname verification applies. No date check
+(`MBEDTLS_HAVE_TIME_DATE` off — no clock). Fw ≤ 2.2.0 hard-coded
+`mqtts://8.231.81.12:8883` and validated the IP SAN. The legacy build
+(`AMPHIVE_DIRECT_MQTT 0`) keeps `SERVER_VPN_IP "100.87.241.70"` + plaintext
+`mqtt://100.87.241.70:1883` inside the WireGuard tunnel. SSID, WiFi password,
+auth key, device name, gateway id, and MQTT credentials all come from
+NVS (namespace `storage`) populated by the captive portal. DNS caveat: the
+gateway resolves `mqtt.amphive.app` via the DHCP-provided LAN DNS; if that
+resolver is down the connection fails (no compiled-in IP fallback — a raw-IP
+`broker_url` in NVS is the manual workaround). Plug IPs are **not**
 stored on-device (fw ≥ 2.0.0-direct) — they arrive from the backend's retained
 roster (§3).
 

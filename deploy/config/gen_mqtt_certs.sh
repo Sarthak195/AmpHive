@@ -11,16 +11,22 @@
 #   server.key  broker private key    — SECRET (gitignored); mosquitto `keyfile`
 # and copies ca.crt to firmware/main/certs/mqtt_ca.crt for the firmware build.
 #
-# The firmware validates the broker cert against this CA (chain + IP SAN);
+# The firmware validates the broker cert against this CA (chain + SAN matching
+# the dialed host: DNS SAN for fw >= 2.3.0, IP SAN for older raw-IP firmware);
 # it does NOT check cert dates (CONFIG_MBEDTLS_HAVE_TIME_DATE is off, no clock
 # needed), so validity is set long (10y) mainly for any date-checking client.
 #
 # Usage:  MQTT_TLS_SAN_IP=100.87.241.70 bash deploy/config/gen_mqtt_certs.sh
 #
-# Re-issuing the SERVER cert only (e.g. the broker gained a public IP): keep
-# the CA (it is embedded in deployed firmware), regenerate server.key/crt:
+# Re-issuing the SERVER cert only (e.g. the broker gained a public IP or a DNS
+# name): keep the CA (it is embedded in deployed firmware), regenerate
+# server.key/crt:
 #   RESIGN_SERVER=1 MQTT_TLS_SAN_IPS=100.87.241.70,8.231.81.12 \
-#     bash deploy/config/gen_mqtt_certs.sh
+#     MQTT_TLS_SAN_DNS=mqtt.amphive.app bash deploy/config/gen_mqtt_certs.sh
+#
+# The server cert carries BOTH the DNS SAN (mqtt.amphive.app — fw >= 2.3.0
+# dials the hostname) and the legacy IP SANs (fw <= 2.2.0 dials the raw IP),
+# so one cert serves the whole fleet during the DNS transition.
 # =============================================================================
 set -euo pipefail
 
@@ -34,6 +40,9 @@ export MSYS2_ARG_CONV_EXCL="*"
 # One or more SAN IPs, comma-separated (every address a client may dial:
 # overlay IP for transition clients, public IP for direct-MQTT clients).
 SAN_IPS="${MQTT_TLS_SAN_IPS:-${MQTT_TLS_SAN_IP:-100.87.241.70}}"
+# DNS SAN(s), comma-separated. Default = the broker's stable hostname, which
+# fw >= 2.3.0 validates; set empty to omit (not recommended).
+SAN_DNS="${MQTT_TLS_SAN_DNS:-mqtt.amphive.app}"
 RESIGN="${RESIGN_SERVER:-0}"
 DAYS=3650
 
@@ -68,16 +77,24 @@ if [[ "$RESIGN" != "1" ]]; then
     -out ca.crt
 fi
 
-echo "Generating server cert for SAN IP(s) $SAN_IPS..."
+echo "Generating server cert for SAN IP(s) $SAN_IPS + DNS $SAN_DNS..."
 openssl genrsa -out server.key 2048
 openssl req -new -key server.key -subj "/CN=amphive-mqtt/O=AmpHive" -out server.csr
 
-# SAN must carry the exact address the gateway dials (mbedTLS checks it).
+# SAN must carry the exact address the gateway dials (mbedTLS checks it):
+# IP SANs for legacy raw-IP firmware (<= 2.2.0), DNS SANs for hostname
+# firmware (>= 2.3.0).
 SAN_LIST=""
 IFS=',' read -ra ADDRS <<< "$SAN_IPS"
 for ip in "${ADDRS[@]}"; do
   SAN_LIST+="IP:${ip// /}, "
 done
+if [[ -n "$SAN_DNS" ]]; then
+  IFS=',' read -ra NAMES <<< "$SAN_DNS"
+  for name in "${NAMES[@]}"; do
+    SAN_LIST+="DNS:${name// /}, "
+  done
+fi
 printf 'subjectAltName = %sDNS:mqtt, DNS:localhost\nextendedKeyUsage = serverAuth\n' "$SAN_LIST" > server.ext
 
 openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key \
