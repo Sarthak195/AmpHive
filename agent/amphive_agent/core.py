@@ -16,6 +16,7 @@ import json
 import logging
 import signal
 import ssl
+import time
 
 import paho.mqtt.client as mqtt
 
@@ -29,6 +30,18 @@ log = logging.getLogger(__name__)
 # Meter-reset / rounding tolerance (kWh). Telemetry ``kwh`` is published at 4
 # decimals, so a drop smaller than this is noise, not a power-cycle reset.
 _KWH_EPSILON = 1e-4
+
+# Local watchdog defaults, mirroring the firmware / backend ON contract
+# (send_plug_command defaults: max_kwh=30.0, max_duration=14400).
+_DEFAULT_MAX_KWH = 30.0
+_DEFAULT_MAX_DURATION_S = 14400
+
+# Meterless watts*dt integration: never integrate across a gap longer than this
+# many poll intervals. A first poll after an agent restart / event-loop stall
+# would otherwise multiply the *current* watts across the whole wall-clock gap
+# and could instantly trip max_kwh with phantom energy. A gap beyond the clamp
+# is treated as "resume now" (integrate nothing for it).
+_INTEGRATION_MAX_GAP_POLLS = 3.0
 
 
 def monotonic_session_kwh(session: dict, energy_kwh: float) -> tuple[float, bool]:
@@ -59,6 +72,26 @@ def monotonic_session_kwh(session: dict, energy_kwh: float) -> tuple[float, bool
         session["last_kwh"] = session_kwh
         changed = True
     return session_kwh, changed
+
+
+def limit_exceeded(session: dict, session_kwh: float, now_ts: float) -> str | None:
+    """Local watchdog check, mirroring the firmware's per-poll test.
+
+    Returns ``"ENERGY_LIMIT"`` / ``"DURATION_LIMIT"`` when the session has hit
+    its cap, else ``None``. Pure function so it is trivially testable; the
+    caller (the poll loop) does the actual cutoff.
+
+    Duration is checked BEFORE energy, matching the firmware watchdog order
+    (firmware/main/main.c: elapsed >= max_duration_s, then kwh >= max_kwh).
+    """
+    max_dur = session.get("max_duration_s")
+    start = session.get("start_ts")
+    if max_dur is not None and start is not None and now_ts - float(start) >= float(max_dur):
+        return "DURATION_LIMIT"
+    max_kwh = session.get("max_kwh")
+    if max_kwh is not None and session_kwh >= float(max_kwh):
+        return "ENERGY_LIMIT"
+    return None
 
 
 class AmpHiveAgent:
@@ -156,16 +189,49 @@ class AmpHiveAgent:
             if action == "ON":
                 await dev.set_power(True)
                 state = await dev.get_state()
+                now = time.time()
                 self.store.set_session(plug_id, {
                     "on": True,
                     "baseline_kwh": state.energy_kwh,
                     "session_id": str(cmd.get("session_id", "")),
+                    # Local watchdog limits (mirrors the firmware): enforced by
+                    # the poll loop even when the broker is unreachable, and
+                    # persisted so a restart mid-session keeps them.
+                    "max_kwh": float(cmd.get("max_kwh", _DEFAULT_MAX_KWH)),
+                    "max_duration_s": int(cmd.get("max_duration_seconds",
+                                                  _DEFAULT_MAX_DURATION_S)),
+                    "start_ts": now,
+                    "last_poll_ts": now,
+                    "integrated_kwh": 0.0,  # meterless fallback (watts * dt)
+                    # True once the device has EVER reported a positive
+                    # cumulative meter reading this session; a metered plug
+                    # never uses the integrator (a transient 0/failed read
+                    # must not inflate integrated_kwh).
+                    "has_meter": state.energy_kwh > 0.0,
                 })
-                log.info("plug %s ON (session=%s)", plug_id, cmd.get("session_id", ""))
+                log.info("plug %s ON (session=%s, limits: %.1f kWh / %s s)",
+                         plug_id, cmd.get("session_id", ""),
+                         float(cmd.get("max_kwh", _DEFAULT_MAX_KWH)),
+                         cmd.get("max_duration_seconds", _DEFAULT_MAX_DURATION_S))
             elif action == "OFF":
                 await dev.set_power(False)
                 self.store.clear_session(plug_id)
                 log.info("plug %s OFF", plug_id)
+            elif action == "SET_LIMITS":
+                # Re-cap a RUNNING session without re-baselining, exactly like
+                # the firmware (docs/MQTT_CONTRACT.md): only max_kwh /
+                # max_duration_s change; baseline/session_id/start stay put.
+                session = self.store.get_session(plug_id)
+                if not session or not session.get("on"):
+                    log.info("SET_LIMITS for plug %s ignored: no active session", plug_id)
+                    return
+                if cmd.get("max_kwh") is not None:
+                    session["max_kwh"] = float(cmd["max_kwh"])
+                if cmd.get("max_duration_seconds") is not None:
+                    session["max_duration_s"] = int(cmd["max_duration_seconds"])
+                self.store.set_session(plug_id, session)
+                log.info("plug %s SET_LIMITS -> %.1f kWh / %s s", plug_id,
+                         session.get("max_kwh"), session.get("max_duration_s"))
             elif action == "OTA":
                 # The agent self-updates via its package channel; OTA is n/a.
                 self.mqtt.publish(
@@ -223,8 +289,67 @@ class AmpHiveAgent:
                 except Exception:
                     log.warning("poll failed for plug %s", plug_id)
                     continue
-                self._publish_telemetry(plug_id, state)
+                await self._watchdog_and_publish(plug_id, dev, state)
             await self._sleep_or_stop(self._poll_s)
+
+    async def _watchdog_and_publish(self, plug_id: int, dev: PlugDevice, state: PlugState):
+        """Local safety watchdog + telemetry, mirroring the firmware loop.
+
+        Cuts the plug OFF when the session hits its energy/duration limit —
+        ``set_power`` is LAN-local, so this works with the broker unreachable
+        (the offline-tail gap). Like the firmware, the trip frame is published
+        *pre-watchdog* (still ``occupied``, carrying the final kwh), then the
+        session ends and a QoS-1 alarm is queued (paho delivers it on
+        reconnect if the broker is down).
+        """
+        session = self.store.get_session(plug_id)
+        reason = None
+        if session and session.get("on"):
+            now = time.time()
+            session_kwh, _ = monotonic_session_kwh(session, state.energy_kwh)
+            if state.energy_kwh > 0.0 and not session.get("has_meter"):
+                # The device DOES have a cumulative meter: latch it so a later
+                # transient 0/failed read never flips us into the integrator
+                # (integrated_kwh only grows, so one glitch would permanently
+                # inflate effective_kwh).
+                session["has_meter"] = True
+            # Meterless fallback: a plug that has NEVER reported a cumulative
+            # energy reading this session still gets a limit by integrating
+            # watts over the poll gap, like the fake-plug simulator. The gap
+            # is clamped: after an agent restart / stall the persisted
+            # last_poll_ts may be arbitrarily old, and integrating the current
+            # watts across that whole gap would fabricate phantom energy —
+            # beyond the clamp we "resume now" and integrate nothing.
+            if not session.get("has_meter") and state.watts > 0.0:
+                last = float(session.get("last_poll_ts") or now)
+                dt = now - last
+                if 0.0 < dt <= _INTEGRATION_MAX_GAP_POLLS * self._poll_s:
+                    session["integrated_kwh"] = (
+                        float(session.get("integrated_kwh", 0.0))
+                        + (state.watts / 1000.0) * (dt / 3600.0)
+                    )
+            session["last_poll_ts"] = now
+            effective_kwh = max(session_kwh, float(session.get("integrated_kwh", 0.0)))
+            reason = limit_exceeded(session, effective_kwh, now)
+            self.store.set_session(plug_id, session)
+            if reason:
+                log.error("WATCHDOG plug %s: %s (%.4f kWh, %.0f s) — local OFF",
+                          plug_id, reason, effective_kwh,
+                          now - float(session.get("start_ts") or now))
+                try:
+                    await dev.set_power(False)
+                except Exception:
+                    log.exception("watchdog OFF failed for plug %s", plug_id)
+        # Trip frame (if any) goes out pre-watchdog: occupied + final kwh.
+        self._publish_telemetry(plug_id, state)
+        if reason:
+            self.store.clear_session(plug_id)
+            self.mqtt.publish(
+                f"{self.base}/alarms",
+                json.dumps({"event": "LOCAL_LIMIT_CUTOFF", "reason": reason,
+                            "plug_id": plug_id}),
+                qos=1,
+            )
 
     def _publish_telemetry(self, plug_id: int, state: PlugState):
         session = self.store.get_session(plug_id)
@@ -232,6 +357,11 @@ class AmpHiveAgent:
             session_kwh, changed = monotonic_session_kwh(session, state.energy_kwh)
             if changed:
                 self.store.set_session(plug_id, session)
+            # Publish the same effective energy the watchdog enforces: for a
+            # meterless plug the watts*dt integrator IS the session energy
+            # (the meter delta is 0), so the trip frame must carry it for the
+            # backend to bill the energy that caused the cutoff.
+            session_kwh = max(session_kwh, float(session.get("integrated_kwh", 0.0)))
             status = "occupied"
             session_id = str(session.get("session_id", ""))
         else:
@@ -340,3 +470,20 @@ if __name__ == "__main__":
     # Idle plug draws nothing.
     assert PlugState(on=False).effective_current() == 0.0
     print("PlugState.effective_current self-check: OK")
+
+    # limit_exceeded: the local watchdog predicate (mirrors the firmware).
+    sess = {"max_kwh": 5.0, "max_duration_s": 3600, "start_ts": 1000.0}
+    assert limit_exceeded(sess, 4.99, 1500.0) is None          # under both caps
+    assert limit_exceeded(sess, 5.0, 1500.0) == "ENERGY_LIMIT" # kWh cap (>=)
+    assert limit_exceeded(sess, 0.0, 4600.0) == "DURATION_LIMIT"  # time cap (>=)
+    # Duration trips first when both are exceeded (matches firmware ordering:
+    # main.c checks elapsed >= max_duration_s before kwh >= max_kwh).
+    assert limit_exceeded(sess, 9.0, 9999.0) == "DURATION_LIMIT"
+    # SET_LIMITS mid-session: a raised cap un-trips, a lowered cap trips.
+    sess["max_kwh"] = 10.0
+    assert limit_exceeded(sess, 5.0, 1500.0) is None
+    sess["max_kwh"] = 2.0
+    assert limit_exceeded(sess, 5.0, 1500.0) == "ENERGY_LIMIT"
+    # Legacy session dict without limit keys never trips.
+    assert limit_exceeded({}, 999.0, 1e12) is None
+    print("limit_exceeded self-check: OK")
