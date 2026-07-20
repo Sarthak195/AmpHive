@@ -15,7 +15,6 @@ from fastapi.security import HTTPAuthorizationCredentials
 from jose import jwt
 
 from backend.routers.auth import logout
-from backend.services import auth as auth_service
 from backend.services.auth import (
     JWT_ALGORITHM, JWT_SECRET_KEY, create_access_token, get_current_user,
 )

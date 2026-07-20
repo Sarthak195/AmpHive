@@ -537,7 +537,7 @@ async def test_finalize_caps_debit_at_hold_even_when_wallet_could_cover_more(fac
 
     import backend.services.session_lifecycle as sl_mod
     from backend import state as state_module
-    from backend.database.models import ChargingSession, SessionStatus, User
+    from backend.database.models import SessionStatus, User
 
     tenant_id = await _seed_tenant(factory)
     gw = await _seed_gateway(factory, tenant_id, "gw-fin-2")
@@ -583,7 +583,7 @@ async def test_legacy_null_hold_session_finalizes_with_pre_hold_behavior(factory
     import backend.services.session_lifecycle as sl_mod
     from backend import state as state_module
     from backend.database.models import (
-        ChargingSession, LedgerTransaction, SessionStatus, User,
+        LedgerTransaction, SessionStatus, User,
     )
 
     tenant_id = await _seed_tenant(factory)

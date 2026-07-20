@@ -1585,7 +1585,7 @@ class MQTTManager:
             )
             return False
 
-    def send_plug_interval(self, gateway_id: str, plug_id: int, interval_ms: int) -> bool:
+    def send_plug_interval(self, gateway_id: str, plug_id: int, interval_ms: int, wait: bool = False) -> bool:
         """
         Sends a SET_INTERVAL command to a specific plug registered under a gateway.
         Topic: amphive/gateways/{gateway_id}/plugs/{plug_id}/commands
@@ -1600,7 +1600,8 @@ class MQTTManager:
         try:
             payload_str = json.dumps(payload)
             info = self.client.publish(topic, payload_str, qos=1)
-            info.wait_for_publish(timeout=3.0)
+            if wait:
+                info.wait_for_publish(timeout=3.0)
             logger.info(
                 "Published interval command",
                 extra={
@@ -1608,7 +1609,9 @@ class MQTTManager:
                     "interval_ms": interval_ms, "topic": topic,
                 },
             )
-            return info.is_published()
+            # wait=True actually confirms the PUBACK; wait=False only enqueued it,
+            # so report the publish rc (mirrors send_plug_command).
+            return info.is_published() if wait else info.rc == mqtt.MQTT_ERR_SUCCESS
         except Exception as e:
             logger.error(
                 "Failed to publish interval command",
@@ -1616,7 +1619,7 @@ class MQTTManager:
             )
             return False
 
-    def send_plug_limits(self, gateway_id: str, plug_id: int, max_kwh: float, max_duration_seconds: int, local_ip: Optional[str] = None, max_current_a: Optional[float] = None) -> bool:
+    def send_plug_limits(self, gateway_id: str, plug_id: int, max_kwh: float, max_duration_seconds: int, local_ip: Optional[str] = None, max_current_a: Optional[float] = None, wait: bool = False) -> bool:
         """
         Sends a SET_LIMITS command to a specific plug registered under a gateway.
         Topic: amphive/gateways/{gateway_id}/plugs/{plug_id}/commands
@@ -1650,7 +1653,8 @@ class MQTTManager:
         try:
             payload_str = json.dumps(payload)
             info = self.client.publish(topic, payload_str, qos=1)
-            info.wait_for_publish(timeout=3.0)
+            if wait:
+                info.wait_for_publish(timeout=3.0)
             logger.info(
                 "Published limits command",
                 extra={
@@ -1659,7 +1663,9 @@ class MQTTManager:
                     "topic": topic,
                 },
             )
-            return info.is_published()
+            # wait=True actually confirms the PUBACK; wait=False only enqueued it,
+            # so report the publish rc (mirrors send_plug_command).
+            return info.is_published() if wait else info.rc == mqtt.MQTT_ERR_SUCCESS
         except Exception as e:
             logger.error(
                 "Failed to publish limits command",

@@ -1,45 +1,23 @@
 """
 Direct routes — moved verbatim from main.py (2026-07-07, TD#7 split).
 """
-import json
 import logging
 import os
-from datetime import datetime, timedelta, timezone
-from typing import List, Optional
+from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy import Date, and_, cast, func, or_, select
-from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi import APIRouter, Depends, HTTPException
 
 from backend import state
-from backend.database.db import async_session_factory, get_db
 from backend.database.models import (
-    ChargerGroup, ChargingSession, Gateway, GatewayStatus, GroupMembership,
-    LedgerTransaction, Plug, PlugStatus, SessionStatus, TelemetryReading,
-    Tenant, TransactionType, User, UserRole,
+    User,
 )
 from backend.schemas import (
-    AuthResponse, CpoGatewayCreateRequest, CpoGroupCreateRequest,
-    CpoGroupUpdateRequest, CpoPlugCreateRequest, CpoPlugUpdateRequest,
-    CpoSetupRequest, CreateOrderRequest, CreateOrderResponse,
-    DirectPlugRequest, GatewayRegisterRequest, GroupResponse,
-    JoinGroupRequest, LoginRequest, PlugRegisterRequest, PlugResponse,
-    RegisterRequest, SessionStartRequest, SessionStopRequest, UserResponse,
-    VerifyPaymentRequest,
+    DirectPlugRequest,
 )
-from backend.services import payments as payment_service
 from backend.services.auth import (
-    create_access_token, decode_access_token, get_current_user,
-    hash_password, verify_password,
+    get_current_user,
 )
-from backend.services.money import ZERO_MONEY, to_money
 from backend.services.rbac import require_role
-from backend.services.session_lifecycle import (
-    check_and_speed_up_active_session, finalize_charging_session,
-    gateway_is_live, set_plug_telemetry_interval,
-)
-from backend.services.telemetry import COINS_PER_KWH
 
 logger = logging.getLogger("amphive.api")
 router = APIRouter()

@@ -1,51 +1,36 @@
 """
 Plugs routes — moved verbatim from main.py (2026-07-07, TD#7 split).
 """
-import json
 import logging
-import os
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy import Date, and_, cast, delete, func, or_, select
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import and_, delete, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend import state
-from backend.database.db import async_session_factory, get_db
+from backend.database.db import get_db
 from backend.database.models import (
-    CapacityRequest, ChargerGroup, ChargingSession, Gateway, GatewayStatus,
-    GroupMembership, LedgerTransaction, Plug, PlugStatus, PlugWatch,
-    SessionStatus, TelemetryReading, Tenant, TransactionType, User, UserRole,
+    CapacityRequest, ChargerGroup, Gateway, GroupMembership, Plug, PlugStatus, PlugWatch,
+    Tenant, User,
 )
 from backend.schemas import (
-    AuthResponse, CpoGatewayCreateRequest, CpoGroupCreateRequest,
-    CpoGroupUpdateRequest, CpoPlugCreateRequest, CpoPlugUpdateRequest,
-    CpoSetupRequest, CreateOrderRequest, CreateOrderResponse,
-    DirectPlugRequest, GatewayRegisterRequest, GroupResponse,
-    JoinGroupRequest, LoginRequest, PlugRegisterRequest, PlugResponse,
-    PublicPlugResponse, RegisterRequest, SessionStartRequest,
-    SessionStopRequest, UserResponse, VerifyPaymentRequest,
+    PlugResponse,
+    PublicPlugResponse,
 )
 from backend.services.rate_limit import public_map_rate_limiter, rate_limit_dependency
-from backend.services import payments as payment_service
 from backend.services.auth import (
-    create_access_token, decode_access_token, get_current_user,
-    hash_password, verify_password,
+    get_current_user,
 )
-from backend.services.money import ZERO_MONEY, to_money
 from backend.services.pricing import resolve_price_display
-from backend.services.rbac import require_role
 from backend.services.session_lifecycle import (
-    check_and_speed_up_active_session, finalize_charging_session,
-    gateway_is_live, plug_is_powered, set_plug_telemetry_interval,
+    gateway_is_live, plug_is_powered,
 )
 # [Queued charge] queue_available on PlugResponse = gateway online + plug
 # unpowered + the CPO's queued-charging resolver says yes (Plug override ->
 # Tenant default).
 from backend.services.session_start import queued_charging_enabled
-from backend.services.telemetry import COINS_PER_KWH
 
 logger = logging.getLogger("amphive.api")
 router = APIRouter()

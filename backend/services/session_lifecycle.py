@@ -327,7 +327,7 @@ async def finalize_charging_session(
     # balance auto-stop, reaper). Best-effort by contract: notify() never
     # raises into the billing path.
     from backend.services.notifications import notify
-    if reason and "balance exhausted" in reason:
+    if reason and "exhausted" in reason:
         n_title, n_severity = "Charging auto-stopped — balance used up", "warning"
     elif reason and "telemetry lost" in reason:
         n_title, n_severity = "Charging ended — charger connection lost", "warning"
@@ -361,6 +361,7 @@ async def finalize_charging_session(
         or "limit reached" in reason
         or "reserved" in reason
         or "current cap exceeded" in reason
+        or "exhausted" in reason
     ):
         n_body += f" ({reason})"
     await notify(

@@ -1,12 +1,12 @@
 import logging
 import asyncio
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 import socketio
 
 from backend.services.auth import decode_access_token
 from backend.services.telemetry import TelemetryStore
 from backend.database.db import async_session_factory
-from backend.database.models import ChargingSession
+from backend.database.models import ChargingSession, User
 from sqlalchemy import select, and_
 
 logger = logging.getLogger("amphive.socketio")
@@ -19,8 +19,6 @@ _ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "https://amphive.app",
     "https://cpo.amphive.app",
-    "http://8.231.81.12",
-    "https://8.231.81.12",
 ]
 sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins=_ALLOWED_ORIGINS)
 
@@ -111,6 +109,18 @@ async def connect(sid, environ, auth=None):
             return False
             
         user_id = int(payload.get("sub"))
+
+        # Reject tokens issued before the user's current token epoch (logout /
+        # password change / admin revoke bumps token_version), mirroring the
+        # HTTP auth check in backend.services.auth.get_current_user.
+        async with async_session_factory() as db:
+            result = await db.execute(select(User).where(User.id == user_id))
+            user = result.scalar_one_or_none()
+
+        if user is None or payload.get("tv", 0) != user.token_version:
+            logger.warning(f"Socket connection rejected: Revoked or unknown user (sid: {sid})")
+            return False
+
         # Save user info in connection session
         await sio.save_session(sid, {"user_id": user_id})
         # Per-user room: lets the backend target one user's live clients

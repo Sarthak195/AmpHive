@@ -3,22 +3,20 @@ Cpo routes — moved verbatim from main.py (2026-07-07, TD#7 split).
 """
 import csv
 import io
-import json
 import logging
-import os
 import secrets
 import string
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
-from sqlalchemy import Date, and_, cast, func, or_, select
+from sqlalchemy import Date, and_, cast, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend import state
-from backend.database.db import async_session_factory, get_db
+from backend.database.db import get_db
 from backend.database.models import (
     AuditLog, ChargerGroup, ChargingSession, DisputeStatus, Gateway,
     GatewayEvent, GatewayStatus, GroupMembership, LedgerTransaction,
@@ -26,31 +24,19 @@ from backend.database.models import (
     TelemetryReading, Tenant, TransactionType, User, UserRole,
 )
 from backend.schemas import (
-    AuthResponse, CpoDisputeResolveRequest, CpoGatewayCreateRequest,
+    CpoDisputeResolveRequest, CpoGatewayCreateRequest,
     CpoGatewayOtaRequest, CpoGroupCreateRequest, CpoGroupUpdateRequest,
     CpoPlugCreateRequest, CpoPlugMaintenanceRequest, CpoPlugUpdateRequest,
-    CpoProfileUpdateRequest, CpoSetupRequest, CreateOrderRequest, CreateOrderResponse,
-    DirectPlugRequest, DisputeResponse, GatewayEventResponse,
-    GatewayRegisterRequest, GroupResponse, JoinGroupRequest, LoginRequest,
-    PlugRegisterRequest, PlugResponse, RegisterRequest,
-    SessionStartRequest, SessionStopRequest, UserResponse,
-    VerifyPaymentRequest,
+    CpoProfileUpdateRequest, CpoSetupRequest, DisputeResponse, GatewayEventResponse,
 )
-from backend.services import payments as payment_service
 from backend.services.audit import try_record_audit
 
 from backend.services import payouts as payout_service
 from backend.services.auth import (
-    create_access_token, decode_access_token, get_current_user,
-    hash_password, verify_password,
+    get_current_user,
 )
 from backend.services.money import ZERO_MONEY, to_money
 from backend.services.rbac import require_role
-from backend.services.session_lifecycle import (
-    check_and_speed_up_active_session, finalize_charging_session,
-    gateway_is_live, set_plug_telemetry_interval,
-)
-from backend.services.telemetry import COINS_PER_KWH
 from backend.services.wallet import credit_wallet
 
 logger = logging.getLogger("amphive.api")

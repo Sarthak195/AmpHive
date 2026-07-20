@@ -4,7 +4,6 @@ push gating), dead-subscription pruning, the MQTT emit points (low-balance
 warn-once, gateway-offline fan-out, safety-cutoff finalize), and the router
 wiring.
 """
-import asyncio
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -297,5 +296,5 @@ def test_finalize_notifies_on_stop_reasons():
     from backend.services import session_lifecycle
     src = inspect.getsource(session_lifecycle.finalize_charging_session)
     assert "session_stopped" in src
-    for marker in ("balance exhausted", "telemetry lost", "safety cutoff", "current cap exceeded"):
+    for marker in ("exhausted", "telemetry lost", "safety cutoff", "current cap exceeded"):
         assert marker in src, f"finalize no longer maps reason {marker!r}"

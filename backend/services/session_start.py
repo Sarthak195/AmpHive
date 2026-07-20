@@ -15,6 +15,7 @@ check, the reservation gate, and the gateway-liveness / plug-power gates (they
 differ between a walk-up start and an auto-start); this helper picks up at
 circuit admission and finishes with the plug live and streaming telemetry.
 """
+import asyncio
 import logging
 import os
 from datetime import datetime, timezone
@@ -197,7 +198,7 @@ async def begin_active_session(
     # Now command the gateway. If this fails, undo the claim so the plug doesn't
     # stay OCCUPIED with a live ACTIVE session nobody can drive.
     from backend.services.caps import effective_plug_cap
-    success = state.mqtt_manager.send_plug_command(
+    success = await asyncio.to_thread(lambda: state.mqtt_manager.send_plug_command(
         gateway_id=plug.gateway_id,
         plug_id=plug.id,
         action="ON",
@@ -208,7 +209,7 @@ async def begin_active_session(
         # Plug's effective current cap for on-device enforcement (the plug
         # measures real current). Its own max_current_a, or DEFAULT_PLUG_CAP_A.
         max_current_a=effective_plug_cap(plug),
-    )
+    ))
     if not success:
         session.status = SessionStatus.CANCELLED
         session.ended_at = datetime.now(timezone.utc)
