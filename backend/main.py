@@ -168,6 +168,8 @@ app.add_middleware(
         "http://localhost:3000",
         "http://amphive.duckdns.org",
         "https://amphive.duckdns.org",
+        "http://cpo.amphive.duckdns.org",
+        "https://cpo.amphive.duckdns.org",
         "http://8.231.81.12",
         "https://8.231.81.12",
     ],

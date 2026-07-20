@@ -174,6 +174,24 @@ the origin location as router `state.from` so `Login.jsx` returns the driver to 
 a `CpoProtectedRoute` that requires the `cpo` role and drives the `/api/cpo/*`
 endpoints (tenant setup, gateway/plug/group CRUD, and analytics).
 
+**Hostname partition (2026-07-20)** — one bundle, two hostnames. The portal
+is served on `cpo.amphive.duckdns.org` (DuckDNS subdomains resolve to the
+same IP; `CADDY_CPO_DOMAIN` in `.env` makes `deploy.ps1` emit a second,
+identical Caddy site block). `frontend/src/utils/appHost.js` (`isCpoHost()`,
+with a `VITE_FORCE_CPO_HOST` dev/test override, plus `cpoOrigin()` /
+`driverOrigin()`) drives the split in `App.jsx` and `Navbar.jsx`:
+
+- **Driver host** — driver routes only; `/cpo/*` hard-redirects to the CPO
+  origin (`components/HostRouting.jsx` `ExternalRedirect`). The navbar's
+  in-app CPO links are gone; signed-in users get a modest external
+  "Apply to host chargers" link to `<cpo-origin>/cpo`.
+- **CPO host** — operator portal only. `/` role-routes (`CpoLanding`):
+  anonymous → `/login` (same `Login.jsx`), `cpo`/`admin` → `/cpo/dashboard`,
+  a driver-role login gets a "not an operator account" notice linking to the
+  driver origin and to the `/cpo` become-a-host flow. Driver routes
+  (`/map`, `/topup`, `/session`, `/groups`, `/history`) hard-redirect to the
+  driver origin. Both hostnames are in the backend CORS/Socket.io allowlists.
+
 ---
 
 ## 5. Networks at a glance

@@ -13,6 +13,7 @@ import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { useWallet } from '../contexts/WalletContext';
 import NotificationBell from './NotificationBell';
+import { isCpoHost, cpoOrigin } from '../utils/appHost';
 
 const Navbar = () => {
   const { user, logout } = useAuth();
@@ -20,6 +21,9 @@ const Navbar = () => {
   const location = useLocation();
   const navigate = useNavigate();
   const [menuOpen, setMenuOpen] = useState(false);
+  // Hostname partition: the CPO host shows only operator navigation; the
+  // driver host shows only driver navigation (see utils/appHost.js).
+  const cpoHost = isCpoHost();
 
   // Close the mobile dropdown whenever the route changes (link tap, back
   // button, programmatic navigation, etc.) so it never lingers open.
@@ -51,40 +55,41 @@ const Navbar = () => {
         {/* Nav links: a horizontal row on desktop; on mobile this becomes a
             dropdown panel toggled by the hamburger button below. */}
         <div className={`flex items-center gap-4 nav-desktop ${menuOpen ? 'open' : ''}`}>
-          <Link to="/" className={`nav-link ${location.pathname === '/' ? 'active' : ''}`}>
-            Home
-          </Link>
-          {/* Public charger map — no account needed; also an entry point for
-              anonymous visitors (the navbar renders on /login too). */}
-          <Link to="/map" className={`nav-link ${location.pathname === '/map' ? 'active' : ''}`}>
-            🗺️ Map
-          </Link>
-          <Link to="/topup" className={`nav-link ${location.pathname === '/topup' ? 'active' : ''}`}>
-            Top Up
-          </Link>
-          <Link to="/groups" className={`nav-link ${location.pathname === '/groups' ? 'active' : ''}`}>
-            Groups
-          </Link>
+          {!cpoHost && (
+            <>
+              <Link to="/" className={`nav-link ${location.pathname === '/' ? 'active' : ''}`}>
+                Home
+              </Link>
+              {/* Public charger map — no account needed; also an entry point for
+                  anonymous visitors (the navbar renders on /login too). */}
+              <Link to="/map" className={`nav-link ${location.pathname === '/map' ? 'active' : ''}`}>
+                🗺️ Map
+              </Link>
+              <Link to="/topup" className={`nav-link ${location.pathname === '/topup' ? 'active' : ''}`}>
+                Top Up
+              </Link>
+              <Link to="/groups" className={`nav-link ${location.pathname === '/groups' ? 'active' : ''}`}>
+                Groups
+              </Link>
 
-          {/* CPO Portal link — only for users with the 'cpo' role */}
-          {user && (user.role === 'cpo' || user.role === 'admin') && (
+              {/* The operator portal lives on the CPO origin now — a modest
+                  external link is all that remains on the driver host. */}
+              {user && (
+                <a href={`${cpoOrigin()}/cpo`} className="nav-link">
+                  Apply to host chargers
+                </a>
+              )}
+            </>
+          )}
+
+          {/* CPO host: operator navigation only */}
+          {cpoHost && user && (user.role === 'cpo' || user.role === 'admin') && (
             <Link
               to="/cpo/dashboard"
               className={`nav-link ${location.pathname.startsWith('/cpo') ? 'active' : ''}`}
               style={{ color: location.pathname.startsWith('/cpo') ? 'var(--color-cpo-accent)' : undefined }}
             >
               ⚡ CPO Portal
-            </Link>
-          )}
-
-          {/* Become a Host link — for authenticated drivers who aren't CPOs yet */}
-          {user && user.role === 'driver' && (
-            <Link
-              to="/cpo"
-              className="nav-link"
-              style={{ color: 'var(--color-cpo-accent)' }}
-            >
-              🏢 Become a Host
             </Link>
           )}
         </div>
