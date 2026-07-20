@@ -1,6 +1,7 @@
 """
 Auth routes — moved verbatim from main.py (2026-07-07, TD#7 split).
 """
+import asyncio
 import hashlib
 import json
 import logging
@@ -259,9 +260,12 @@ async def forgot_password(req: ForgotPasswordRequest, db: AsyncSession = Depends
     await db.commit()
 
     reset_link = f"{email_service.frontend_origin()}/reset-password?token={token}"
-    # send_password_reset never raises (SMTP failures are logged), so the
-    # response below stays identical for both branches of the lookup.
-    await email_service.send_password_reset(user.email, reset_link, RESET_TOKEN_TTL_MIN)
+    # Fire-and-forget: awaiting SMTP here would make known-account requests
+    # measurably slower than the early return above (timing enumeration
+    # oracle). send_password_reset never raises (SMTP failures are logged).
+    asyncio.get_running_loop().create_task(
+        email_service.send_password_reset(user.email, reset_link, RESET_TOKEN_TTL_MIN)
+    )
     logger.info(
         "Password reset token issued",
         extra={"user_id": user.id, "email": user.email},
@@ -296,7 +300,23 @@ async def reset_password(req: ResetPasswordRequest, db: AsyncSession = Depends(g
             detail="Invalid or expired reset link. Please request a new one.",
         )
 
-    prt.used_at = now  # single-use: consumed even if the user never logs in
+    # Single-use, race-safe: the conditional UPDATE is the consumption point —
+    # two concurrent submissions of the same token both pass the SELECT check
+    # above, but only one can win this row (WHERE used_at IS NULL).
+    consumed = await db.execute(
+        update(PasswordResetToken)
+        .where(
+            PasswordResetToken.id == prt.id,
+            PasswordResetToken.used_at.is_(None),
+        )
+        .values(used_at=now)
+        .execution_options(synchronize_session=False)
+    )
+    if consumed.rowcount == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid or expired reset link. Please request a new one.",
+        )
     await db.execute(
         update(User)
         .where(User.id == prt.user_id)

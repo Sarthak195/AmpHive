@@ -10,6 +10,7 @@ stamped used. Both endpoints sit behind the sliding-window rate limiter.
 
 Mock-DB style mirrors test_token_revocation.py (no database needed).
 """
+import asyncio
 import hashlib
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
@@ -75,6 +76,7 @@ async def test_forgot_password_issues_hashed_token_and_emails_link(monkeypatch):
     db = _db([_scalar(_user()), MagicMock()])
 
     res = await forgot_password(ForgotPasswordRequest(email="driver@amphive.test"), db)
+    await asyncio.sleep(0)  # let the fire-and-forget email task run
 
     assert res["status"] == "ok"
     db.commit.assert_awaited_once()
@@ -120,14 +122,20 @@ async def test_forgot_password_unknown_email_same_response_no_email(monkeypatch)
 @pytest.mark.asyncio
 async def test_reset_password_consumes_token_and_revokes_sessions():
     prt = _prt(user_id=7)
-    db = _db([_scalar(prt), MagicMock()])
+    consumed = MagicMock()
+    consumed.rowcount = 1
+    db = _db([_scalar(prt), consumed, MagicMock()])
 
     res = await reset_password(ResetPasswordRequest(token="tok", password="newpassword1"), db)
 
     assert res == {"status": "password_reset"}
-    assert prt.used_at is not None  # single-use: stamped consumed
+    # Single-use + race-safe: consumption is a conditional UPDATE guarded on
+    # used_at IS NULL — not a Python-side attribute write.
+    consume_stmt = str(db.execute.await_args_list[1].args[0])
+    assert consume_stmt.startswith("UPDATE password_reset_tokens")
+    assert "used_at IS NULL" in consume_stmt
     # DB-side atomic epoch bump + bcrypt rehash in one UPDATE.
-    stmt = str(db.execute.await_args_list[1].args[0])
+    stmt = str(db.execute.await_args_list[2].args[0])
     assert stmt.startswith("UPDATE users")
     assert "token_version + " in stmt
     assert "hashed_password" in stmt
@@ -135,6 +143,21 @@ async def test_reset_password_consumes_token_and_revokes_sessions():
     # Lookup was by digest, not the raw token.
     lookup = db.execute.await_args_list[0].args[0]
     assert _hash_reset_token("tok") in str(lookup.compile(compile_kwargs={"literal_binds": True}))
+
+
+@pytest.mark.asyncio
+async def test_reset_password_concurrent_consumption_loses_race_gets_400():
+    """Two concurrent submissions both pass the SELECT check; the loser of the
+    conditional UPDATE (rowcount 0) must get the same uniform 400."""
+    prt = _prt(user_id=7)
+    lost = MagicMock()
+    lost.rowcount = 0
+    db = _db([_scalar(prt), lost])
+    with pytest.raises(HTTPException) as exc:
+        await reset_password(ResetPasswordRequest(token="tok", password="newpassword1"), db)
+    assert exc.value.status_code == 400
+    assert "invalid or expired" in exc.value.detail.lower()
+    db.commit.assert_not_awaited()
 
 
 @pytest.mark.asyncio
