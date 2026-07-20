@@ -114,6 +114,7 @@ foreach ($name in @("MQTT_USERNAME", "MQTT_PASSWORD")) {
 # Both values are interpolated into the generated Caddyfile, so they are
 # validated to a safe character set.
 $caddy_domain = ""
+$caddy_cpo_domain = ""
 $acme_email = ""
 if (-not $NoTls) {
     $line = $content | Where-Object { $_ -like "CADDY_DOMAIN=*" } | Select-Object -First 1
@@ -125,6 +126,15 @@ if (-not $NoTls) {
     }
     if ($caddy_domain -notmatch '^[A-Za-z0-9][A-Za-z0-9.-]*$') {
         Write-Host "ERROR: CADDY_DOMAIN in .env may only contain letters, digits, '.' and '-'." -ForegroundColor Red
+        exit 1
+    }
+    # Optional second hostname for the CPO operator portal (same bundle, the
+    # frontend partitions the experience by hostname). DuckDNS resolves
+    # subdomains of the registered host to the same IP, so no extra DNS setup.
+    $line = $content | Where-Object { $_ -like "CADDY_CPO_DOMAIN=*" } | Select-Object -First 1
+    if ($line) { $caddy_cpo_domain = $line.Substring("CADDY_CPO_DOMAIN=".Length).Trim() }
+    if ($caddy_cpo_domain -ne "" -and $caddy_cpo_domain -notmatch '^[A-Za-z0-9][A-Za-z0-9.-]*$') {
+        Write-Host "ERROR: CADDY_CPO_DOMAIN in .env may only contain letters, digits, '.' and '-'." -ForegroundColor Red
         exit 1
     }
     $line = $content | Where-Object { $_ -like "ACME_EMAIL=*" } | Select-Object -First 1
@@ -217,6 +227,18 @@ if (-not $NoTls) {
     $caddy_lines += "`treverse_proxy frontend:80"
     $caddy_lines += "}"
     $caddy_lines += ""
+    # CPO operator-portal hostname (optional): identical serving config — the
+    # same frontend container handles the SPA, /api and socket.io proxying;
+    # the SPA itself branches on the hostname (frontend/src/utils/appHost.js).
+    if ($caddy_cpo_domain -ne "") {
+        $caddy_lines += "$caddy_cpo_domain {"
+        $caddy_lines += "`tencode gzip"
+        $caddy_lines += "`t# HSTS: browsers pin https for this domain for 1 year (SECURITY.md 3)."
+        $caddy_lines += "`theader Strict-Transport-Security `"max-age=31536000`""
+        $caddy_lines += "`treverse_proxy frontend:80"
+        $caddy_lines += "}"
+        $caddy_lines += ""
+    }
     $caddy_lines += "# Bare-IP / unknown-Host requests: SERVE the app (plain http) rather than"
     $caddy_lines += "# redirect to the domain, so the site stays reachable by IP when the DNS"
     $caddy_lines += "# provider has an outage (seen with DuckDNS 2026-07-11). Tighten to a"
@@ -293,6 +315,9 @@ if ($NoTls) {
     Write-Host "  Backend  : http://${vm_ip}:8000/docs" -ForegroundColor Yellow
 } else {
     Write-Host "  Frontend : https://$caddy_domain (http redirects; first cert issuance can take ~a minute)" -ForegroundColor Yellow
+    if ($caddy_cpo_domain -ne "") {
+        Write-Host "  CPO      : https://$caddy_cpo_domain (operator portal; same stack, hostname-partitioned SPA)" -ForegroundColor Yellow
+    }
     Write-Host "  Backend  : https://$caddy_domain/api (:8000 is firewalled since 2026-07-11 - VM-local only)" -ForegroundColor Yellow
     Write-Host "  Requires : GCP firewall allows tcp:80 AND tcp:443; $caddy_domain resolves to $vm_ip" -ForegroundColor Yellow
 }

@@ -26,7 +26,26 @@ gcloud compute firewall-rules create allow-amphive-https `
 
 ```
 CADDY_DOMAIN=amphive.duckdns.org
+CADDY_CPO_DOMAIN=cpo.amphive.duckdns.org  # optional — CPO operator-portal hostname (added 2026-07-20)
 ACME_EMAIL=          # optional — Let's Encrypt expiry notices
+```
+
+## CPO hostname (2026-07-20)
+
+The CPO operator portal moved to its own hostname,
+`cpo.amphive.duckdns.org` (DuckDNS resolves subdomains of the registered
+host to the same IP — no extra DNS setup or duck.sh change). When
+`CADDY_CPO_DOMAIN` is set in `.env`, `deploy.ps1` emits a second site block
+in the generated Caddyfile with the **same** config as the main domain
+(gzip, HSTS, `reverse_proxy frontend:80` — the frontend's Nginx already
+proxies `/api` + `/socket.io`, and the SPA partitions driver vs. operator
+UI by hostname, `frontend/src/utils/appHost.js`). Caddy obtains and renews
+a separate Let's Encrypt cert for it automatically. Leave the variable
+empty for a single-hostname deploy. Verification additions:
+
+```sh
+curl -sI https://cpo.amphive.duckdns.org            # 200, valid LE cert, HSTS header
+curl -s  https://cpo.amphive.duckdns.org/api/config # API reachable via the CPO host
 ```
 
 ## Rollout
