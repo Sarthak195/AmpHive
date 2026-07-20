@@ -358,6 +358,13 @@ been fixed by the 2026-07-08…11 work — see the shipped sections below).*
       plaintext `1883` listener stays up during transition (backend internal +
       OTA-rollback target), bound internal-only once all gateways are on 8883.
       Deploy ships certs via `deploy.ps1`; firmware ships via OTA. (SEC §3)
+- [ ] **MQTT broker DNS un-pinning — operator rollout** (code done, fw
+      2.3.0-direct): firmware default is now `mqtts://mqtt.amphive.app:8883`
+      (was pinned `8.231.81.12`; NVS `broker_url` override + legacy-IP
+      self-migration). Remaining operator steps, in order: reissue the server
+      cert (same CA, dual DNS+IP SANs) → create the `mqtt.amphive.app` A
+      record → deploy broker → OTA fleet. Runbook:
+      `deploy/docs/mqtt_dns_rollout.md`.
 - [x] **Finish Path A end-to-end**: real billed session on physical hardware over
       ESP32+MQTT, feeding the session/telemetry pipeline. **Achieved 2026-07-06** —
       a real ESP32 + P110 ran a billed session; the plug delivered correct energy

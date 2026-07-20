@@ -39,6 +39,10 @@ char tapo_password[64] = "";
 // broker allows until the stage-2 allow_anonymous=false flip (SECURITY.md §3).
 char mqtt_username[64] = "";
 char mqtt_password[64] = "";
+// Optional NVS broker override ("broker_url", full URI e.g. mqtts://host:8883).
+// Empty = use the compiled-in MQTT_BROKER_URL default. Legacy raw-IP values are
+// self-migrated to the DNS default at load (see load_config_from_nvs()).
+char mqtt_broker_url[128] = "";
 
 bool config_loaded = false;
 static uint32_t telemetry_interval_ms = 10000; // Default 10s (10000ms)
@@ -75,9 +79,20 @@ static float default_plug_cap_a = DEFAULT_PLUG_CAP_A;
 #define AMPHIVE_DIRECT_MQTT 1
 
 #if AMPHIVE_DIRECT_MQTT
-// The VM's reserved static public IP (gcloud: amphive-static-ip). The broker
-// cert carries this IP in its SANs; mbedTLS verifies it against the embedded CA.
-#define MQTT_BROKER_URL     "mqtts://8.231.81.12:8883"
+// Default broker endpoint (fw >= 2.3.0): a DNS name, so the broker can move
+// machines by flipping the mqtt.amphive.app A record — no firmware change.
+// esp-tls/mbedTLS verifies the broker cert against the embedded CA AND checks
+// the URI host against the cert's SANs (DNS SAN for this name; the cert also
+// keeps the legacy IP SANs so raw-IP URIs still validate). No date check
+// (MBEDTLS_HAVE_TIME_DATE off — no clock). An NVS "broker_url" value, if set,
+// overrides this default (legacy raw-IP values excepted — see
+// load_config_from_nvs()).
+#define MQTT_BROKER_URL     "mqtts://mqtt.amphive.app:8883"
+// Legacy compiled-in endpoints (fw <= 2.2.0): if a device's NVS broker_url
+// still carries one of these raw IPs, treat it as unset so an OTA alone
+// retargets the fleet at the DNS name (one-time self-migration, no reprovision).
+#define LEGACY_BROKER_IP_PUBLIC  "8.231.81.12"    // VM static public IP (amphive-static-ip)
+#define LEGACY_BROKER_IP_OVERLAY "100.87.241.70"  // old Tailscale/overlay IP
 #define MQTT_USE_TLS        1
 #else
 // The central AmpHive server's Tailscale VPN IP
@@ -322,6 +337,21 @@ static void microlink_task(void *pvParameters);
 #endif
 
 // ─── NVS Configuration Helpers ───────────────────────────────────────────────
+#if AMPHIVE_DIRECT_MQTT
+// True iff `url`'s host component is EXACTLY `ip` — i.e. `ip` is bounded by
+// "://" on the left and a port ':' , path '/', or end-of-string on the right.
+// Exact-host (not substring) so a deliberate future pin like
+// mqtts://8.231.81.123:8883 is NOT mistaken for the legacy 8.231.81.12.
+static bool broker_url_host_is(const char *url, const char *ip) {
+    const char *host = strstr(url, "://");
+    host = host ? host + 3 : url;
+    size_t iplen = strlen(ip);
+    if (strncmp(host, ip, iplen) != 0) return false;
+    char after = host[iplen];
+    return after == '\0' || after == ':' || after == '/';
+}
+#endif
+
 static void load_config_from_nvs(void) {
     nvs_handle_t my_handle;
     esp_err_t err = nvs_open("storage", NVS_READWRITE, &my_handle);
@@ -348,6 +378,23 @@ static void load_config_from_nvs(void) {
     nvs_get_str(my_handle, "mqtt_user", mqtt_username, &size);
     size = sizeof(mqtt_password);
     nvs_get_str(my_handle, "mqtt_pwd", mqtt_password, &size);
+    size = sizeof(mqtt_broker_url);
+    nvs_get_str(my_handle, "broker_url", mqtt_broker_url, &size);
+#if AMPHIVE_DIRECT_MQTT
+    // One-time self-migration (fw 2.3.0): if the stored broker URI points at a
+    // legacy hard-coded IP, drop it and fall through to the compiled DNS
+    // default — an OTA alone moves the fleet, no reprovisioning. Any OTHER
+    // stored value (a lab broker, a future endpoint) is honored as-is.
+    if (mqtt_broker_url[0] != '\0' &&
+        (broker_url_host_is(mqtt_broker_url, LEGACY_BROKER_IP_PUBLIC) ||
+         broker_url_host_is(mqtt_broker_url, LEGACY_BROKER_IP_OVERLAY))) {
+        ESP_LOGW(TAG, "NVS broker_url '%s' is a legacy pinned IP - migrating to default %s",
+                 mqtt_broker_url, MQTT_BROKER_URL);
+        mqtt_broker_url[0] = '\0';
+        nvs_erase_key(my_handle, "broker_url");
+        nvs_commit(my_handle);
+    }
+#endif
     // Optional per-gateway default current cap (amps), used when an ON command
     // omits max_current_a. Stored as a decimal string; ignore malformed / non-positive.
     char cap_str[16] = "";
@@ -1117,13 +1164,23 @@ static void start_mqtt_client(void) {
     char lwt_topic[128];
     snprintf(lwt_topic, sizeof(lwt_topic), "amphive/gateways/%s/status", gateway_id);
 
+    // NVS "broker_url" override wins when set (and not a migrated legacy IP);
+    // otherwise the compiled-in DNS default.
+    const char *broker_uri =
+        (mqtt_broker_url[0] != '\0') ? mqtt_broker_url : MQTT_BROKER_URL;
+    ESP_LOGI(TAG, "MQTT broker: %s (%s)", broker_uri,
+             mqtt_broker_url[0] != '\0' ? "NVS override" : "compiled default");
+
     esp_mqtt_client_config_t mqtt_cfg = {
-        .broker.address.uri = MQTT_BROKER_URL,
+        .broker.address.uri = broker_uri,
 #if MQTT_USE_TLS
         /* TLS: verify the broker against our embedded self-signed CA. The URI
-           scheme (mqtts://) selects TLS; the CA PEM authenticates the server
-           (chain + IP SAN). Dates aren't validated (no clock). Only attach the
-           CA on a TLS scheme — esp-mqtt rejects SSL configs on plain mqtt://. */
+           scheme (mqtts://) selects TLS; the CA PEM authenticates the chain and
+           esp-tls/mbedTLS verifies the URI host against the cert SANs — DNS SAN
+           for a hostname URI, IP SAN for a raw-IP URI (no skip_cert_common_name
+           _check / common_name override, so default hostname verification
+           applies). Dates aren't validated (no clock). Only attach the CA on a
+           TLS scheme — esp-mqtt rejects SSL configs on plain mqtt://. */
         .broker.verification.certificate = (const char *)mqtt_ca_crt_start,
 #endif
         .session.last_will = {
@@ -1553,7 +1610,8 @@ void app_main(void) {
     //    right away. esp-mqtt owns reconnection (backoff on the default
     //    reconnect_timeout_ms), and the Wi-Fi netif is never torn down by us,
     //    so no overlay-style teardown hook is needed.
-    ESP_LOGI(TAG, "Direct MQTT transport: connecting to " MQTT_BROKER_URL);
+    ESP_LOGI(TAG, "Direct MQTT transport: connecting to %s",
+             mqtt_broker_url[0] != '\0' ? mqtt_broker_url : MQTT_BROKER_URL);
     start_mqtt_client();
 #else
     // 7. Start Tailscale connection client

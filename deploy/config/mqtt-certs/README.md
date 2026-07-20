@@ -2,8 +2,10 @@
 
 Self-signed CA + broker server cert for the MQTT TLS listener (port 8883),
 added 2026-07-08. The gateway firmware embeds `ca.crt` and validates the
-broker's cert against it (chain + IP SAN); the ESP does **not** check cert
-dates (`CONFIG_MBEDTLS_HAVE_TIME_DATE` off), so no clock/SNTP is required.
+broker's cert against it (chain + SAN matching the dialed host: DNS SAN
+`mqtt.amphive.app` for fw ≥ 2.3.0, IP SAN for older raw-IP firmware); the ESP
+does **not** check cert dates (`CONFIG_MBEDTLS_HAVE_TIME_DATE` off), so no
+clock/SNTP is required.
 
 | File | Secret? | Tracked | Used by |
 |------|:-------:|:-------:|---------|
@@ -15,13 +17,17 @@ dates (`CONFIG_MBEDTLS_HAVE_TIME_DATE` off), so no clock/SNTP is required.
 ## Regenerating
 
 ```bash
-MQTT_TLS_SAN_IP=100.87.241.70 bash deploy/config/gen_mqtt_certs.sh
+# Server cert only, SAME CA (normal case — new SAN, e.g. the DNS name):
+RESIGN_SERVER=1 MQTT_TLS_SAN_IPS=100.87.241.70,8.231.81.12 \
+  MQTT_TLS_SAN_DNS=mqtt.amphive.app bash deploy/config/gen_mqtt_certs.sh
 ```
 
-The `SAN_IP` **must** be the overlay address the gateway dials
-(`mqtts://<ip>:8883`) — mbedTLS checks it against the cert's IP SAN. If the
-VM overlay IP changes, regenerate (delete the old keys first), rebuild +
-re-OTA the firmware (new CA), and redeploy.
+The SANs **must** carry every address a gateway may dial (`mqtts://<host>:8883`)
+— mbedTLS checks the dialed host against the cert SANs. Keep the legacy IP
+SANs alongside the DNS SAN until the whole fleet is on fw ≥ 2.3.0. **Never
+regenerate the CA** unless you intend to re-flash/OTA every gateway — the CA is
+embedded in deployed firmware; use `RESIGN_SERVER=1` to reissue only the
+server cert. See `deploy/docs/mqtt_dns_rollout.md` for the full rollout order.
 
 ## Deployment
 
