@@ -467,7 +467,15 @@ audit merged; statuses below are as of 2026-07-11.*
     restores `start_time_s = now − elapsed_s` (unsigned modular arithmetic recovers
     the true elapsed; if the session already overran, it trips on the first sweep).
     Worst-case overrun is now one throttle interval. Chose this over an SNTP
-    wall-clock baseline (which would over-count power-off time). (TD#23)
+    wall-clock baseline (which would over-count power-off time). **fw
+    2.2.0-direct** additionally persists the session's `max_current_a` (as
+    `max_current_ma`) in the same blob, so crash recovery re-arms the
+    OVERCURRENT_CAP watchdog at the session's own cap instead of the gateway
+    default; the blob-size change safely voids pre-2.2.0 records (fail-closed
+    load — and OTA is refused mid-session, so nothing is lost). The backend's
+    `send_plug_limits` now also carries `max_current_a=effective_plug_cap(plug)`
+    (from `PATCH /api/sessions/{id}/limits`), so a mid-session cap change lands
+    on-device via SET_LIMITS. (TD#23)
 53. **[Resolved 2026-07-16, fw 2.1.0-direct — on-device verify pending]
     Offline-resync telemetry can bill the wrong session.** The `offline_log` ring
     entry now stores a compact `uint32_t session_id` (18→22 B; `ring_meta_t` gains
@@ -518,9 +526,15 @@ audit merged; statuses below are as of 2026-07-11.*
     access-code regen with actor/tenant/target, readable via
     `GET /api/cpo/audit`. Gateway/plug **delete** are pre-named in the action
     taxonomy but have no endpoint yet to hook (no such CPO routes exist).
-    Still open: firmware `ESP_LOGI` remains serial-only (no log topic —
-    TD#28, firmware half), and the portal Wi-Fi/plug reachability pre-check
-    (TD#31, second half). (TD#26, TD#28, TD#31)
+    The **portal Wi-Fi pre-check** (TD#31, second half) shipped in fw
+    2.1.0-direct: `/save` briefly associates in AP+STA mode to the submitted
+    SSID/password (fail-open — only a definite association failure blocks the
+    save; ≤ 20 s bound; the single radio may briefly drop the installer's
+    phone). The plug-IP half is moot — plug IPs come from the retained roster
+    (fw ≥ 2.0.0), so the portal no longer collects them. Still open: firmware
+    `ESP_LOGI` WARN/ERROR now forward to the `/logs` topic (fw 2.1.0), but the
+    backend does not subscribe/persist them yet (TD#28, firmware half
+    partially closed). (TD#26, TD#28, TD#31)
 56. **[Resolved 2026-07-12] No session-sized authorization hold — overage
     forgiven past the wallet.** `/api/sessions/start` only checked a flat
     `MIN_START_BALANCE_COINS` floor, and `finalize_charging_session` billed

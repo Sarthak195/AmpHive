@@ -145,14 +145,19 @@ been fixed by the 2026-07-08…11 work — see the shipped sections below).*
       create/delete, and access-code regen in `routers/cpo.py`; read via
       `GET /api/cpo/audit`. Gateway/plug delete have no endpoint yet to hook.
       (TD#26)
-- [ ] **[2026-07-06 audit] Fix crash-recovery duration watchdog** — the
-      recovered firmware session resets its start time each reboot, so the time
-      cap restarts from zero (energy cap still holds). Needs an SNTP wall-clock
-      baseline or persisted elapsed time. (TD#23)
-- [ ] **[2026-07-06 audit] Stamp `session_id` into the offline ring buffer** —
-      live telemetry is session-id-attributed now, but readings buffered across
-      an MQTT outage still attach to the plug's current ACTIVE session on
-      resync. (TD#24)
+- [x] **[2026-07-06 audit] Fix crash-recovery duration watchdog.** Done —
+      persisted-elapsed (not SNTP: no wall-clock dependency, and SNTP would
+      over-count power-off time): `session_params_t.elapsed_s` is re-persisted
+      on a 30 s throttle in the telemetry task, and recovery back-dates
+      `start_time_s = now − elapsed_s` so the duration cap counts total
+      elapsed across reboots (worst-case overrun ≈ one persist interval).
+      Shipped in fw 2.1.0-direct; on-device verify pending. (TD#23)
+- [x] **[2026-07-06 audit] Stamp `session_id` into the offline ring buffer.**
+      Done — each `offline_log` entry stores a compact `uint32_t` session id
+      (+ occupied state) at capture time; the resync payload echoes it (plus
+      `relay`/`offline:true`) so the backend attributes each buffered reading
+      to its exact session and drops frames for finalized ones. Shipped in
+      fw 2.1.0-direct; on-device verify pending. (TD#24)
 - [x] **[2026-07-06 audit] Structured logging + correlation ids — backend.**
       Done 2026-07-12 — `backend/logging_config.py` (JSON-lines formatter on
       the root logger, `correlation_id` ContextVar + `logging.Filter`, env
@@ -168,9 +173,15 @@ been fixed by the 2026-07-08…11 work — see the shipped sections below).*
 - [x] **[2026-07-06 audit] Registration validation.** Done 2026-07-11 —
       `EmailStr` + 8-72 char password rule; login left unvalidated for
       pre-rule accounts. (TD#30)
-- [ ] **[2026-07-06 audit] Portal reachability test** — test Wi-Fi/plug
-      reachability before saving config (onboarding). The CSS half of TD#31
-      was closed in fw 1.6.0 (`box-sizing:border-box`; the reported
+- [x] **[2026-07-06 audit] Portal reachability test.** Done — the portal's
+      `/save` now pre-checks the submitted Wi-Fi credentials by briefly
+      associating in AP+STA mode (`portal_precheck_wifi`, ≤ 20 s, fail-open:
+      only a definite association failure blocks the save). The plug-IP half
+      is moot — plug IPs come from the backend's retained roster (fw ≥ 2.0.0),
+      so the portal no longer collects them. Limitation: the single radio may
+      briefly drop the installer's phone off the setup AP during the test.
+      Shipped in fw 2.1.0-direct; on-device verify pending. The CSS half of
+      TD#31 was closed in fw 1.6.0 (`box-sizing:border-box`; the reported
       `width:100%%` was a mis-diagnosis — the HTML *is* printf-formatted, so
       `%%` already rendered as `%`). (TD#31)
 - [x] **Kill N+1 queries** (2026-07-07) in `get_available_plugs`,

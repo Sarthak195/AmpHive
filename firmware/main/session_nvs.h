@@ -34,6 +34,9 @@ typedef struct {
     uint32_t max_duration_s;                  /**< max allowed duration from ON cmd */
     uint32_t max_kwh_mwh;                      /**< max_kwh × 1000 (milli-Wh integer) */
     uint32_t start_energy_mwh;                /**< starting kWh × 1000 */
+    uint32_t max_current_ma;                  /**< per-plug current cap × 1000 (mA);
+                                                   0 = none recorded → recovery re-arms
+                                                   at the gateway default (fw 2.2.0) */
 } session_params_t;
 
 /**

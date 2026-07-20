@@ -475,12 +475,17 @@ async def update_session_limits(
         and session.max_kwh is not None
         and session.max_duration_seconds is not None
     ):
+        from backend.services.caps import effective_plug_cap
         state.mqtt_manager.send_plug_limits(
             gateway_id=plug.gateway_id,
             plug_id=plug.id,
             max_kwh=session.max_kwh,
             max_duration_seconds=session.max_duration_seconds,
             local_ip=plug.local_ip,
+            # Re-arm the on-device OVERCURRENT_CAP at the plug's effective cap
+            # (its own max_current_a, or DEFAULT_PLUG_CAP_A) — same resolution
+            # as the ON path, so a cap the operator changed mid-session lands.
+            max_current_a=effective_plug_cap(plug),
         )
 
     logger.info(

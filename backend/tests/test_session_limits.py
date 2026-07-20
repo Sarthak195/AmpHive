@@ -381,6 +381,9 @@ async def test_patch_pushes_set_limits_to_firmware(factory, monkeypatch):
     kwargs = fake_mgr.send_plug_limits.call_args.kwargs
     assert kwargs["max_kwh"] == 1.0            # unchanged, still pushed
     assert kwargs["max_duration_seconds"] == 3600  # the raised value
+    # The push also re-arms the on-device current cap at the plug's effective
+    # cap (its own max_current_a, or DEFAULT_PLUG_CAP_A) — never omitted here.
+    assert kwargs["max_current_a"] is not None
 
 
 @db_gated

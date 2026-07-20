@@ -1259,6 +1259,45 @@ def test_send_plug_command_omits_max_current_a_when_absent():
     MQTTManager._instance = None
 
 
+def test_send_plug_limits_includes_max_current_a():
+    """SET_LIMITS carries max_current_a when given, so the firmware re-arms the
+    running session's OVERCURRENT_CAP watchdog at the plug's effective cap."""
+    MQTTManager._instance = None
+    mgr = MQTTManager(db_session_factory=lambda: None)
+    mgr.client = MagicMock()
+    mgr.client.publish.return_value.is_published.return_value = True
+
+    ok = mgr.send_plug_limits("gw-1", 7, max_kwh=5.0, max_duration_seconds=3600,
+                              local_ip="10.0.0.7", max_current_a=8.0)
+
+    assert ok is True
+    args, _ = mgr.client.publish.call_args
+    assert args[0] == "amphive/gateways/gw-1/plugs/7/commands"
+    payload = json.loads(args[1])
+    assert payload["action"] == "SET_LIMITS"
+    assert payload["max_kwh"] == 5.0
+    assert payload["max_duration_seconds"] == 3600
+    assert payload["max_current_a"] == 8.0
+    MQTTManager._instance = None
+
+
+def test_send_plug_limits_omits_max_current_a_when_absent():
+    """A limits update without max_current_a omits the key — the firmware then
+    leaves the running session's on-device cap untouched (backward-safe)."""
+    MQTTManager._instance = None
+    mgr = MQTTManager(db_session_factory=lambda: None)
+    mgr.client = MagicMock()
+    mgr.client.publish.return_value.is_published.return_value = True
+
+    mgr.send_plug_limits("gw-1", 7, max_kwh=5.0, max_duration_seconds=3600)
+
+    args, _ = mgr.client.publish.call_args
+    payload = json.loads(args[1])
+    assert payload["action"] == "SET_LIMITS"
+    assert "max_current_a" not in payload
+    MQTTManager._instance = None
+
+
 def test_send_plug_command_omits_local_ip_when_absent():
     """Without local_ip the key is omitted, so old single-plug firmware falls
     back to its one provisioned target plug (backward-safe)."""

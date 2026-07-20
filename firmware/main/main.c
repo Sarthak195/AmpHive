@@ -249,6 +249,10 @@ static void persist_sessions_locked(void) {
         sp->max_duration_s = plugs[i].max_duration_s;
         sp->max_kwh_mwh = (uint32_t)(plugs[i].max_kwh * 1000.0f);
         sp->start_energy_mwh = (uint32_t)(plugs[i].start_energy_kwh * 1000.0f);
+        /* Persist the session's effective current cap (mA) so crash recovery
+           re-arms the OVERCURRENT_CAP watchdog at the SESSION's cap, not the
+           gateway default (fw 2.2.0). */
+        sp->max_current_ma = (uint32_t)(plugs[i].max_current_a * 1000.0f);
     }
     session_nvs_save_all(arr, n);
 }
@@ -1505,11 +1509,14 @@ void app_main(void) {
             s->max_duration_s   = recovered[i].max_duration_s;
             s->max_kwh          = (float)recovered[i].max_kwh_mwh / 1000.0f;
             s->start_energy_kwh = (float)recovered[i].start_energy_mwh / 1000.0f;
-            /* The current cap is not persisted in the session NVS record, so a
-               recovered session re-arms at the gateway default until the next ON /
-               SET_LIMITS re-supplies max_current_a. Default (never 0) so the cap
-               watchdog can't false-trip on a resumed session. */
-            s->max_current_a    = default_plug_cap_a;
+            /* Re-arm the OVERCURRENT_CAP watchdog at the persisted session cap
+               (fw 2.2.0 stores it as mA in the session blob). A record without
+               one (0 — shouldn't happen post-2.2.0, but fail safe) falls back to
+               the gateway default so the cap can never re-arm at 0 A and
+               false-trip the resumed session. */
+            s->max_current_a    = (recovered[i].max_current_ma > 0)
+                                    ? (float)recovered[i].max_current_ma / 1000.0f
+                                    : default_plug_cap_a;
             s->cap_over_count   = 0;
             s->unauthorized_flagged = false;
             /* Restore the duration watchdog across the reboot (TD#23). start_time_s
