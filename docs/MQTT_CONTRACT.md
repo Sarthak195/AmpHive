@@ -47,7 +47,7 @@
 > on-device enforcement — its `plugs.max_current_a`, or the `DEFAULT_PLUG_CAP_A`
 > default (see `services/caps.py`). Older firmware ignores it.
 | gateway → backend | `amphive/gateways/{gateway_id}/status` | 1 | yes | `{"status":"online","fw":"<ver>"}` (on connect) / `{"status":"offline"}` (LWT) |
-| gateway → backend | `amphive/gateways/{gateway_id}/alarms` | 1 | no | `{"error":"THERMAL_CUTOFF"\|"OVERCURRENT_CUTOFF"\|"OVERCURRENT_CAP"\|"UNAUTHORIZED_ON","plug_id":<int>}` or `{"event":"OTA_STARTED"\|"OTA_OK_REBOOTING"\|"OTA_FAILED"\|"OTA_REFUSED_SESSION_ACTIVE"\|...}` |
+| gateway → backend | `amphive/gateways/{gateway_id}/alarms` | 1 | no | `{"error":"THERMAL_CUTOFF"\|"OVERCURRENT_CUTOFF"\|"OVERCURRENT_CAP"\|"UNAUTHORIZED_ON","plug_id":<int>}` or `{"event":"OTA_STARTED"\|"OTA_OK_REBOOTING"\|"OTA_FAILED"\|"OTA_REFUSED_SESSION_ACTIVE"\|...}` or (software agent) `{"event":"LOCAL_LIMIT_CUTOFF","reason":"ENERGY_LIMIT"\|"DURATION_LIMIT","plug_id":<int>}` |
 | gateway → backend | `amphive/gateways/{gateway_id}/logs` | 0 | no | raw WARN/ERROR log line as plain text (fw ≥ 2.1.0-direct). Field diagnostics; the backend does **not** subscribe yet (`mosquitto_sub` ad hoc). Covered by the `amphive/gateways/%u/#` ACL. |
 | agent → backend | `amphive/gateways/{gateway_id}/discovery` | 1 | no | `{"unique_id":"<str>","provider":"<str>","model":"<str>","alias":"<str>","capabilities":["switch","power","energy"]}` |
 | backend → agent | `amphive/gateways/{gateway_id}/assign` | 1 | yes | `{"<unique_id>":<plug_id:int>, ...}` (full map for the gateway) |
@@ -230,7 +230,12 @@ messages (`/alarms`) are ingested by `_handle_gateway_alarm` → persisted as
 > backend **finalizes** the session (bills recorded energy, frees the plug,
 > notifies the driver "Charging stopped — current limit exceeded") but keeps the
 > plug **AVAILABLE** (a healthy plug is not taken out of service on every cap
-> trip). `UNAUTHORIZED_ON` neither finalizes nor maintenances (accountability
+> trip). `LOCAL_LIMIT_CUTOFF` (software agent only) is the agent's local
+> kWh/duration watchdog trip — an expected end-of-session (severity `info`):
+> the agent already cut the plug OFF over the LAN, so the backend **finalizes**
+> the session (reason "limit reached: session hit its energy/duration limit")
+> and keeps the plug **AVAILABLE**, same shape as `OVERCURRENT_CAP`.
+> `UNAUTHORIZED_ON` neither finalizes nor maintenances (accountability
 > signal). The finalize vs. maintenance decision uses two distinct sets
 > (`_FINALIZE_ALARM_REASONS` ⊇ `_MAINTENANCE_ALARM_REASONS`) in `mqtt_manager.py`.
 

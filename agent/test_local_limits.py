@@ -161,12 +161,67 @@ async def run_tests():
     dev2 = MeterlessDevice()
     agent.devices[8] = dev2
     await agent._handle_command(8, {"action": "ON", "session_id": "44",
-                                    "max_kwh": 1.0, "max_duration_seconds": 7200})
+                                    "max_kwh": 0.02, "max_duration_seconds": 7200})
     s = agent.store.get_session(8)
-    s["last_poll_ts"] = time.time() - 3600  # pretend one hour at 10 kW elapsed
+    assert s["has_meter"] is False, s
+    # 10 s at 10 kW (within the 3x-poll clamp; poll_s=5) = 0.0278 kWh > 0.02 cap.
+    s["last_poll_ts"] = time.time() - 10
     agent.store.set_session(8, s)
     await agent._watchdog_and_publish(8, dev2, await dev2.get_state())
-    assert not dev2.on, "meterless integration (10 kWh >> 1 kWh cap) must trip"
+    assert not dev2.on, "meterless integration (0.028 kWh > 0.02 kWh cap) must trip"
+    # The trip frame must bill the integrated energy, not 0 (meterless plug).
+    tele = [json.loads(p) for t, p, q in agent.mqtt.published
+            if t.endswith("/telemetry")]
+    assert tele[-1]["status"] == "occupied" and tele[-1]["kwh"] >= 0.02, tele[-1]
+
+    # --- Gap clamp: a restart/stall gap must NOT lump-sum into the integrator ---
+    dev3 = MeterlessDevice()
+    agent.devices[9] = dev3
+    await agent._handle_command(9, {"action": "ON", "session_id": "45",
+                                    "max_kwh": 1.0, "max_duration_seconds": 7200})
+    s = agent.store.get_session(9)
+    s["last_poll_ts"] = time.time() - 3600  # agent was down an hour
+    agent.store.set_session(9, s)
+    await agent._watchdog_and_publish(9, dev3, await dev3.get_state())
+    assert dev3.on, "an hour-long gap must resume-now, not fabricate 10 kWh"
+    s = agent.store.get_session(9)
+    assert s["integrated_kwh"] == 0.0, s  # nothing integrated across the gap
+    # A subsequent normal poll gap integrates as usual.
+    s["last_poll_ts"] = time.time() - 5
+    agent.store.set_session(9, s)
+    await agent._watchdog_and_publish(9, dev3, await dev3.get_state())
+    s = agent.store.get_session(9)
+    assert 0.01 < s["integrated_kwh"] < 0.02, s  # ~10 kW * 5 s = 0.0139 kWh
+    await agent._handle_command(9, {"action": "OFF"})
+
+    # --- Metered plug glitch: one transient energy_kwh=0 read must NOT flip
+    # the device into the meterless integrator (integrated_kwh only grows) ---
+    class GlitchDevice(StubDevice):
+        glitch = False
+
+        async def get_state(self):
+            e = 0.0 if self.glitch else self.energy_kwh
+            return PlugState(on=self.on, watts=10000.0 if self.on else 0.0,
+                             energy_kwh=e, voltage=230.0, current=45.0)
+
+    dev4 = GlitchDevice()
+    agent.devices[10] = dev4
+    await agent._handle_command(10, {"action": "ON", "session_id": "46",
+                                     "max_kwh": 2.0, "max_duration_seconds": 7200})
+    s = agent.store.get_session(10)
+    assert s["has_meter"] is True, s  # positive meter at ON latches the flag
+    dev4.energy_kwh = 101.0  # 1.0 kWh into the session
+    await agent._watchdog_and_publish(10, dev4, await dev4.get_state())
+    assert dev4.on
+    dev4.glitch = True  # transient failed/zero meter read while charging
+    s = agent.store.get_session(10)
+    s["last_poll_ts"] = time.time() - 10  # even with a gap: no integration
+    agent.store.set_session(10, s)
+    await agent._watchdog_and_publish(10, dev4, await dev4.get_state())
+    assert dev4.on, "a metered plug's zero-read glitch must not trip the cap"
+    s = agent.store.get_session(10)
+    assert s["integrated_kwh"] == 0.0, s  # integrator never ran for this plug
+    await agent._handle_command(10, {"action": "OFF"})
 
     # Pure-function sanity (also covered by `python -m amphive_agent.core`).
     assert limit_exceeded({"max_kwh": 1.0}, 0.5, 0) is None

@@ -155,15 +155,25 @@ lifetime meter. So the agent, exactly like the ESP:
   `max_duration_seconds` from the payload; persisted, so a restart mid-session
   keeps them); mark the plug `occupied`.
 - each poll: publish `kwh = max(0, device.energy_kwh − baseline_kwh)`, echo
-  `session_id`, `status:"occupied"` — **and run the local watchdog**: at
-  `session kwh ≥ max_kwh` or elapsed `≥ max_duration_seconds` the agent cuts the
-  plug OFF itself (LAN-local `set_power(False)`, so it works with the broker
-  unreachable — no unbilled offline tail beyond the limit). The trip frame goes
-  out pre-watchdog (occupied + final kwh, like the firmware), then a QoS-1
+  `session_id`, `status:"occupied"` — **and run the local watchdog**: at elapsed
+  `≥ max_duration_seconds` or `session kwh ≥ max_kwh` (duration checked first,
+  matching the firmware order) the agent cuts the plug OFF itself (LAN-local
+  `set_power(False)`, so it works with the broker unreachable — no unbilled
+  offline tail beyond the limit). The trip frame goes out pre-watchdog
+  (occupied + final kwh, like the firmware), then a QoS-1
   `{"event":"LOCAL_LIMIT_CUTOFF","reason":"ENERGY_LIMIT"|"DURATION_LIMIT","plug_id"}`
-  alarm is queued on `/alarms` (paho delivers it on reconnect). A plug with no
-  cumulative meter still gets an energy limit via a watts×dt integration
-  fallback.
+  alarm is queued on `/alarms` (paho delivers it on reconnect). **The backend
+  finalizes the session on this alarm** (like `OVERCURRENT_CAP`: bills the
+  recorded energy, frees the plug, notifies the driver; no maintenance — the
+  plug is healthy), so it doesn't orphan ACTIVE until the reaper. A plug that
+  has never reported a positive cumulative meter reading this session still
+  gets an energy limit via a watts×dt integration fallback: the per-poll gap is
+  clamped to 3× the poll interval (a restart/stall "resumes now" rather than
+  fabricating phantom energy from the current watts × the whole gap), a device
+  that HAS reported a positive meter never uses the integrator (one transient
+  zero read can't inflate it), and the published `kwh` is the same effective
+  energy the watchdog enforces (`max(meter delta, integrated)`), so billing
+  sees the energy that caused the trip.
 - `SET_LIMITS` re-caps a **running** session's `max_kwh`/`max_duration_s`
   without re-baselining (no-op when idle) — same semantics as the firmware
   (MQTT_CONTRACT.md).
