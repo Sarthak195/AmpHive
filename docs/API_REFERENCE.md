@@ -42,6 +42,8 @@ Interactive docs: `http://<host>:8000/docs`.
 | POST | `/api/auth/login` | none | `{email, password}` | `{token, user}` — 401 on bad credentials. |
 | GET | `/api/auth/me` | JWT | — | `{id, email, full_name, role, coin_balance, available_balance}` — `available_balance` (added 2026-07-12) is `coin_balance` minus coins held by the driver's OTHER active sessions' authorization holds (`services/wallet.py available_balance`); additive, `coin_balance` unchanged |
 | POST | `/api/auth/logout` | JWT | — | Revokes every token for the caller (bumps `users.token_version`; "log out everywhere") → `{status:"logged_out"}`. |
+| POST | `/api/auth/forgot-password` | none | `{email}` | Issues a single-use reset token (SHA-256 digest stored in `password_reset_tokens`, `RESET_TOKEN_TTL_MIN` expiry, prior unused tokens voided) and emails `FRONTEND_ORIGIN/reset-password?token=...` via `services/email.py` (SMTP if `SMTP_HOST` set, else the link is logged at WARNING). **Always the same generic 200** — no account enumeration. Rate-limited (`FORGOT_PASSWORD_RATE_LIMIT`). |
+| POST | `/api/auth/reset-password` | none | `{token, password}` | Consumes the token: 8-72 char rule (as registration), bcrypt rehash, bumps `users.token_version` (revokes every session), stamps the token used. Uniform 400 for unknown/expired/already-used tokens. Rate-limited (`RESET_PASSWORD_RATE_LIMIT`). → `{status:"password_reset"}` |
 
 `user` object shape: `{id, email, full_name, role, coin_balance}` (where `coin_balance` is a float; the `/api/auth/register`/`/api/auth/login` `AuthResponse.user` dict predates `available_balance` and hasn't been extended to it — only `GET /api/auth/me` (`UserResponse`) carries the new field today).
 Token: HS256 JWT, claims `sub`/`role`/`email`/`iat`/`exp`, **7-day** expiry.
@@ -219,6 +221,10 @@ scoped to the caller's `tenant_id`, so operators only ever see their own assets.
 | `TELEMETRY_RETENTION_DAYS` | `0` | Prune `telemetry_readings` older than N days. `0` = retention disabled (keep all) |
 | `TELEMETRY_PRUNE_EVERY_N_FLUSHES` | `360` | Run the retention prune every N flushes (~hourly at the default interval) |
 | `LOGIN_RATE_LIMIT` / `REGISTER_RATE_LIMIT` | `10/60` / `10/3600` | Auth rate limits, `"<attempts>/<window sec>"` per client IP (429 + Retry-After) |
+| `FORGOT_PASSWORD_RATE_LIMIT` / `RESET_PASSWORD_RATE_LIMIT` | `5/3600` / `10/3600` | Password-reset rate limits, same format/mechanism as the login/register limits |
+| `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASSWORD` / `SMTP_FROM` | `""` / `587` / `""` / `""` / `""` | Outbound email (STARTTLS) for password-reset links; `SMTP_HOST` unset = console fallback (link logged at WARNING). Login skipped when `SMTP_USER` empty |
+| `FRONTEND_ORIGIN` | `https://amphive.duckdns.org` | Base URL for links in outbound email (`/reset-password?token=...`) |
+| `RESET_TOKEN_TTL_MIN` | `30` | Minutes a password-reset link stays valid (single use) |
 | `VAPID_PRIVATE_KEY` / `VAPID_SUBJECT` | `""` / `mailto:admin@amphive.example` | Web Push signing key + contact; empty key = push disabled (feed + Socket.io still work) |
 | `LOW_BALANCE_WARN_FRACTION` | `0.8` | Notify the driver once per session when accrued cost crosses this fraction of the wallet balance (`0` disables) |
 | `PLATFORM_FEE_PCT` | `10.0` | Platform's cut of CPO gross earnings, percent — the fee/net split on `/api/cpo/earnings` and payout snapshots (`services/payouts.py`; falls back to the default on a malformed value) |
