@@ -7,6 +7,13 @@ falling back to sequential scans / single-column indexes:
   - charging_sessions(tenant_id, started_at): CPO session history, newest-first
   - ledger_transactions(user_id, created_at): a driver's wallet/ledger feed
 
+The indexes are also declared on the ORM models (__table_args__). Because
+init_db() stamps a legacy create_all database at baseline and then upgrades to
+head, this revision can run against a schema that already carries these indexes
+(create_all built them from the model metadata). CREATE INDEX IF NOT EXISTS
+keeps that path a no-op while still building the indexes on a from-empty
+`alembic upgrade head`.
+
 Revision ID: 0024_session_ledger_indexes
 Revises: 0023_password_reset_tokens
 Create Date: 2026-07-20
@@ -18,16 +25,19 @@ down_revision = "0023_password_reset_tokens"
 branch_labels = None
 depends_on = None
 
+_INDEXES = [
+    ("ix_charging_sessions_plug_status", "charging_sessions", "plug_id, status"),
+    ("ix_charging_sessions_user_status", "charging_sessions", "user_id, status"),
+    ("ix_charging_sessions_tenant_started", "charging_sessions", "tenant_id, started_at"),
+    ("ix_ledger_user_created", "ledger_transactions", "user_id, created_at"),
+]
+
 
 def upgrade() -> None:
-    op.create_index("ix_charging_sessions_plug_status", "charging_sessions", ["plug_id", "status"])
-    op.create_index("ix_charging_sessions_user_status", "charging_sessions", ["user_id", "status"])
-    op.create_index("ix_charging_sessions_tenant_started", "charging_sessions", ["tenant_id", "started_at"])
-    op.create_index("ix_ledger_user_created", "ledger_transactions", ["user_id", "created_at"])
+    for name, table, cols in _INDEXES:
+        op.execute(f"CREATE INDEX IF NOT EXISTS {name} ON {table} ({cols})")
 
 
 def downgrade() -> None:
-    op.drop_index("ix_ledger_user_created", table_name="ledger_transactions")
-    op.drop_index("ix_charging_sessions_tenant_started", table_name="charging_sessions")
-    op.drop_index("ix_charging_sessions_user_status", table_name="charging_sessions")
-    op.drop_index("ix_charging_sessions_plug_status", table_name="charging_sessions")
+    for name, _table, _cols in reversed(_INDEXES):
+        op.execute(f"DROP INDEX IF EXISTS {name}")

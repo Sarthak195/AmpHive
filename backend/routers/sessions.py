@@ -30,6 +30,9 @@ from backend.services.pricing import max_rate_over_window
 from backend.services.session_lifecycle import (
     finalize_charging_session,
     gateway_is_live, plug_is_powered,
+    # Not called here, but tests patch it on this module (the start flow's
+    # telemetry-interval stub); keep it importable as that patch surface.
+    set_plug_telemetry_interval,  # noqa: F401
 )
 # [Session start refactor] The ACTIVE-session start body (caps -> rate -> hold
 # -> create -> claim -> publish -> rollback) lives in one shared helper so the
