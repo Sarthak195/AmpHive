@@ -4,14 +4,28 @@ import types
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
-from backend.services.socketio_manager import connect, disconnect, subscribe_session, unsubscribe_session
+from backend.services.socketio_manager import connect, subscribe_session
+
+def _configure_user_db(mock_db_factory, user):
+    """Wire a patched async_session_factory so `async with` yields a session
+    whose User query returns `user` (pass None to simulate a deleted account)."""
+    mock_db = AsyncMock()
+    mock_db.execute = AsyncMock()
+    mock_result = MagicMock()
+    mock_result.scalar_one_or_none.return_value = user
+    mock_db.execute.return_value = mock_result
+    mock_db_factory.return_value.__aenter__.return_value = mock_db
+
 
 @pytest.mark.asyncio
 async def test_connect_valid_token():
     with patch("backend.services.socketio_manager.decode_access_token") as mock_decode, \
+         patch("backend.services.socketio_manager.async_session_factory") as mock_db_factory, \
          patch("backend.services.socketio_manager.sio") as mock_sio:
-        
-        mock_decode.return_value = {"sub": "42"}
+
+        # tv matches the user's current token_version (0), so the token is live.
+        mock_decode.return_value = {"sub": "42", "tv": 0}
+        _configure_user_db(mock_db_factory, MagicMock(token_version=0))
         mock_sio.save_session = AsyncMock()
         mock_sio.enter_room = AsyncMock()
 
@@ -27,6 +41,29 @@ async def test_connect_valid_token():
         mock_sio.save_session.reset_mock()
         res = await connect("sid-123", {"QUERY_STRING": "token=query-jwt"}, None)
         assert res is False
+        mock_sio.save_session.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_connect_rejects_revoked_or_unknown_user():
+    """A token whose tv predates the user's token_version (logout / password
+    reset / admin revoke), or that names a deleted user, must not connect."""
+    with patch("backend.services.socketio_manager.decode_access_token") as mock_decode, \
+         patch("backend.services.socketio_manager.async_session_factory") as mock_db_factory, \
+         patch("backend.services.socketio_manager.sio") as mock_sio:
+
+        mock_sio.save_session = AsyncMock()
+
+        # Revoked: token minted at tv=1, user's token_version has since bumped to 2.
+        mock_decode.return_value = {"sub": "42", "tv": 1}
+        _configure_user_db(mock_db_factory, MagicMock(token_version=2))
+        assert await connect("sid-r", {}, {"token": "revoked-jwt"}) is False
+
+        # Unknown/deleted user: the User row is gone.
+        mock_decode.return_value = {"sub": "99", "tv": 0}
+        _configure_user_db(mock_db_factory, None)
+        assert await connect("sid-u", {}, {"token": "orphan-jwt"}) is False
+
         mock_sio.save_session.assert_not_awaited()
 
 @pytest.mark.asyncio

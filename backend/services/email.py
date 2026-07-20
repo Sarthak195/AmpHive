@@ -31,7 +31,7 @@ logger = logging.getLogger("amphive.email")
 
 def frontend_origin() -> str:
     """Base URL the frontend is served from, for links in outbound email."""
-    return os.getenv("FRONTEND_ORIGIN", "https://amphive.duckdns.org").rstrip("/")
+    return os.getenv("FRONTEND_ORIGIN", "https://amphive.app").rstrip("/")
 
 
 def _send_via_smtp(to_addr: str, subject: str, body: str) -> None:

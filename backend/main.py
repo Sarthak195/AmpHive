@@ -14,42 +14,23 @@ Phase 2 additions:
 - Session history endpoint
 """
 
-import asyncio
-import json
 import logging
 import os
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
-from typing import List, Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Depends, Request
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, EmailStr, Field
-from sqlalchemy import select, or_, and_, func, cast, Date
-from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.database.db import get_db, init_db, async_session_factory
-from backend.database.models import (
-    User, UserRole, Plug, PlugStatus, Gateway, GatewayStatus, Tenant,
-    ChargingSession, SessionStatus, LedgerTransaction, TransactionType,
-    ChargerGroup, GroupMembership, TelemetryReading,
-)
+from backend.database.db import init_db, async_session_factory
 from backend.logging_config import configure_logging, set_correlation_id
-from backend.services.auth import (
-    hash_password, verify_password, create_access_token, get_current_user, decode_access_token
-)
-from backend.services.rbac import require_role
 from backend.services.mqtt_manager import MQTTManager
-from backend.services.telemetry import TelemetryStore, COINS_PER_KWH
-from backend.services.money import to_money, ZERO_MONEY
+from backend.services.telemetry import COINS_PER_KWH
 from backend.services.telemetry_persistence import TelemetryPersistenceService
 from backend.services.session_reaper import SessionReaperService
 # [Direct Mode] Import the Tapo direct driver for ESP32-bypass plug control
 from backend.services.tapo_direct import TapoDirectDriver
-from backend.services import payments as payment_service
 
 # Load environment variables from .env file (for local development)
 load_dotenv()
@@ -79,10 +60,7 @@ TAPO_PLUG_IP = os.getenv("TAPO_PLUG_IP", "")
 # the session helpers moved verbatim to services/session_lifecycle.py.
 from backend import state
 from backend.services.session_lifecycle import (  # noqa: E402
-    check_and_speed_up_active_session,
     finalize_charging_session,
-    gateway_is_live,
-    set_plug_telemetry_interval,
 )
 
 
@@ -170,8 +148,6 @@ app.add_middleware(
         # duckdns origins retired 2026-07-20 after the amphive.app cutover.
         "https://amphive.app",
         "https://cpo.amphive.app",
-        "http://8.231.81.12",
-        "https://8.231.81.12",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -201,15 +177,6 @@ async def correlation_id_middleware(request: Request, call_next):
 # Pydantic Request/Response Schemas — moved to backend/schemas.py (TD#7)
 # ===========================================================================
 
-from backend.schemas import (  # noqa: E402
-    AuthResponse, CpoGatewayCreateRequest, CpoGroupCreateRequest,
-    CpoGroupUpdateRequest, CpoPlugCreateRequest, CpoPlugUpdateRequest,
-    CpoSetupRequest, CreateOrderRequest, CreateOrderResponse,
-    DirectPlugRequest, GatewayRegisterRequest, GroupResponse,
-    JoinGroupRequest, LoginRequest, PlugRegisterRequest, PlugResponse,
-    RegisterRequest, SessionStartRequest, SessionStopRequest, UserResponse,
-    VerifyPaymentRequest,
-)
 
 
 # ===========================================================================

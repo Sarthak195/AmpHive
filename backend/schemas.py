@@ -238,7 +238,7 @@ class LedgerEntryResponse(BaseModel):
 
 
 class CreateOrderRequest(BaseModel):
-    amount_inr: float  # Amount in Rupees (e.g. 100 for ₹100)
+    amount_inr: float = Field(gt=0, le=10000, allow_inf_nan=False)  # Amount in Rupees (e.g. 100 for ₹100)
 
 class CreateOrderResponse(BaseModel):
     order_id: str

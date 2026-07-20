@@ -15,7 +15,7 @@ import enum
 from datetime import datetime
 from typing import List, Optional
 from decimal import Decimal
-from sqlalchemy import CheckConstraint, Column, Integer, BigInteger, SmallInteger, String, Float, Numeric, Boolean, ForeignKey, DateTime, Enum as SQLEnum, Index, Text, UniqueConstraint, text
+from sqlalchemy import CheckConstraint, Integer, BigInteger, SmallInteger, String, Float, Numeric, Boolean, ForeignKey, DateTime, Enum as SQLEnum, Index, Text, UniqueConstraint, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 class Base(DeclarativeBase):
@@ -355,6 +355,16 @@ class ChargingSession(Base):
     rate_segment_start_kwh: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     rate_valid_until: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    # Hot-path composite indexes (Alembic revision 0024_session_ledger_indexes):
+    # plug_id/status backs "is this plug's session still active", user_id/status
+    # backs a driver's active/past sessions, tenant_id/started_at backs CPO
+    # session history ordered newest-first.
+    __table_args__ = (
+        Index("ix_charging_sessions_plug_status", "plug_id", "status"),
+        Index("ix_charging_sessions_user_status", "user_id", "status"),
+        Index("ix_charging_sessions_tenant_started", "tenant_id", "started_at"),
+    )
+
 
 class LedgerTransaction(Base):
     __tablename__ = "ledger_transactions"
@@ -377,6 +387,12 @@ class LedgerTransaction(Base):
     # Relationships
     user: Mapped[User] = relationship("User", back_populates="transactions")
     session: Mapped[Optional[ChargingSession]] = relationship("ChargingSession", back_populates="ledger_transactions")
+
+    # Hot-path composite index (Alembic revision 0024_session_ledger_indexes):
+    # backs a driver's wallet/ledger feed ordered newest-first.
+    __table_args__ = (
+        Index("ix_ledger_user_created", "user_id", "created_at"),
+    )
 
 
 # --- [P2] Charger Group Models (Public vs Private Access-Code-Gated) ---

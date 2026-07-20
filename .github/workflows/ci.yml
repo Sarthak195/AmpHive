@@ -38,6 +38,8 @@ jobs:
           cache-dependency-path: backend/requirements*.txt
       - name: Install dependencies
         run: pip install -r backend/requirements.txt -r backend/requirements-dev.txt
+      - name: Lint (unused imports)
+        run: ruff check --select F401 backend/
       - name: Run tests
         run: pytest backend/tests -q
         env:

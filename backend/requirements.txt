@@ -1,5 +1,5 @@
 fastapi>=0.100.0
-uvicorn>=0.22.0
+uvicorn[standard]>=0.22.0
 paho-mqtt>=2.1.0
 sqlalchemy>=2.0.0
 asyncpg>=0.28.0
@@ -25,5 +25,5 @@ python-engineio>=4.9.0
 pywebpush>=2.0.0
 # [Direct Mode] TP-Link Tapo P110 smart plug control library (Rust-backed)
 # Used for development/testing to control the plug directly without ESP32
-tapo
+tapo<1.0  # upper-bounded pending a full lockfile (audit L6)
 

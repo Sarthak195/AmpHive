@@ -1,45 +1,35 @@
 """
 Sessions routes — moved verbatim from main.py (2026-07-07, TD#7 split).
 """
-import json
 import logging
 import os
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional
+from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy import Date, and_, cast, func, or_, select
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import and_, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend import state
-from backend.database.db import async_session_factory, get_db
+from backend.database.db import get_db
 from backend.database.models import (
-    ChargerGroup, ChargingSession, DisputeStatus, Gateway, GatewayStatus,
-    GroupMembership, LedgerTransaction, Plug, PlugStatus, SessionDispute,
-    SessionStatus, TelemetryReading, Tenant, TransactionType, User, UserRole,
+    ChargerGroup, ChargingSession, DisputeStatus, Gateway, GroupMembership, Plug, PlugStatus, SessionDispute,
+    SessionStatus, Tenant, User, UserRole,
 )
 from backend.schemas import (
-    AuthResponse, CpoGatewayCreateRequest, CpoGroupCreateRequest,
-    CpoGroupUpdateRequest, CpoPlugCreateRequest, CpoPlugUpdateRequest,
-    CpoSetupRequest, CreateOrderRequest, CreateOrderResponse,
-    DirectPlugRequest, DisputeCreateRequest, DisputeResponse,
-    GatewayRegisterRequest, GroupResponse, JoinGroupRequest, LoginRequest,
-    PlugRegisterRequest, PlugResponse, QueueChargeRequest, RegisterRequest,
-    SessionLimitsUpdateRequest, SessionStartRequest,
-    SessionStopRequest, UserResponse, VerifyPaymentRequest,
+    DisputeCreateRequest, DisputeResponse,
+    QueueChargeRequest, SessionLimitsUpdateRequest, SessionStartRequest,
+    SessionStopRequest,
 )
-from backend.services import payments as payment_service
 from backend.services.auth import (
-    create_access_token, decode_access_token, get_current_user,
-    hash_password, verify_password,
+    get_current_user,
 )
 from backend.services.money import energy_cost, to_money
 from backend.services.pricing import max_rate_over_window
-from backend.services.rbac import require_role
 from backend.services.session_lifecycle import (
-    check_and_speed_up_active_session, finalize_charging_session,
-    gateway_is_live, plug_is_powered, set_plug_telemetry_interval,
+    finalize_charging_session,
+    gateway_is_live, plug_is_powered,
 )
 # [Session start refactor] The ACTIVE-session start body (caps -> rate -> hold
 # -> create -> claim -> publish -> rollback) lives in one shared helper so the
