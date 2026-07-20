@@ -249,9 +249,12 @@ been fixed by the 2026-07-08…11 work — see the shipped sections below).*
       CORS/Socket.io allowlists + Caddy multi-domain serving (`amphive.app,
       amphive.duckdns.org` transition) shipped; cert issues automatically
       once the name.com A records point `@` and `cpo` at 8.231.81.12
-      (parking IP still resolving at ship time). Remaining after cutover:
-      retire the duckdns names, then flip bare-IP serve-mode back to a
-      redirect. (SEC §3/§6)
+      (parking IP still resolving at ship time). **Cutover verified live +
+      duckdns names retired 2026-07-20** (allowlists + Caddy site blocks
+      dropped). DECISION: bare-IP serve-mode stays (not flipped to a
+      redirect) — it is the DNS-outage escape hatch and the frontend's
+      unsplit bare-IP mode depends on it; a redirect would defeat both.
+      (SEC §3/§6)
 - [x] **Database + config backups** (2026-07-11, **live + verified
       end-to-end**): nightly `backup_db.sh` cron (21:00 UTC) does
       `pg_dump -Fc` + ops-config tarball (broker passwd/ACL hashes exist only
