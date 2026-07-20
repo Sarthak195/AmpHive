@@ -34,7 +34,7 @@
 
 | Direction | Topic | QoS | Retained | Payload |
 |-----------|-------|-----|----------|---------|
-| backend → gateway | `amphive/gateways/{gateway_id}/plugs/{plug_id}/commands` | 1 | no | `{"action":"ON"\|"OFF","max_duration_seconds":<int>,"max_kwh":<float>,"max_current_a":<float>,"session_id":"<str>","local_ip":"<str>"}` OR `{"action":"SET_LIMITS","max_kwh":<float>,"max_duration_seconds":<int>,"local_ip":"<str>"}` OR `{"action":"SET_INTERVAL","interval_ms":<int>}` OR `{"action":"OTA","url":"<http(s)>"}` |
+| backend → gateway | `amphive/gateways/{gateway_id}/plugs/{plug_id}/commands` | 1 | no | `{"action":"ON"\|"OFF","max_duration_seconds":<int>,"max_kwh":<float>,"max_current_a":<float>,"session_id":"<str>","local_ip":"<str>"}` OR `{"action":"SET_LIMITS","max_kwh":<float>,"max_duration_seconds":<int>,"max_current_a":<float>,"local_ip":"<str>"}` OR `{"action":"SET_INTERVAL","interval_ms":<int>}` OR `{"action":"OTA","url":"<http(s)>"}` |
 | backend → gateway | `amphive/gateways/{gateway_id}/config` | 1 | yes | `{"v":1,"plugs":[{"plug_id":<int>,"local_ip":"<str>","max_current_a":<float\|null>}, ...]}` — the gateway's full plug roster (fw ≥ 2.0.0-direct) |
 | gateway → backend | `amphive/gateways/{gateway_id}/telemetry` | 0 | no | `{"plug_id":<int>,"watts":<f>,"kwh":<f>,"voltage":<f>,"current":<f>,"relay":<bool>,"status":"occupied"\|"available","session_id":"<str>"}` |
 
@@ -43,9 +43,12 @@
 > `watts/voltage` (apparent power != active power) — consumers must treat it as a
 > real measurement, not derive it. A device that omits current falls back to a
 > derived `watts/voltage` value (see the AmpHive Agent `PlugState.effective_current`).
-> `max_current_a` (ON only) is the plug's effective current cap (amps) for
-> on-device enforcement — its `plugs.max_current_a`, or the `DEFAULT_PLUG_CAP_A`
-> default (see `services/caps.py`). Older firmware ignores it.
+> `max_current_a` (ON and SET_LIMITS) is the plug's effective current cap (amps)
+> for on-device enforcement — its `plugs.max_current_a`, or the
+> `DEFAULT_PLUG_CAP_A` default (see `services/caps.py`). The firmware trips
+> `OVERCURRENT_CAP` at this per-plug threshold (debounced) and, as of fw ≥
+> 2.2.0-direct, persists it in the session NVS blob so crash recovery re-arms
+> the session's own cap rather than the gateway default. Older firmware ignores it.
 | gateway → backend | `amphive/gateways/{gateway_id}/status` | 1 | yes | `{"status":"online","fw":"<ver>"}` (on connect) / `{"status":"offline"}` (LWT) |
 | gateway → backend | `amphive/gateways/{gateway_id}/alarms` | 1 | no | `{"error":"THERMAL_CUTOFF"\|"OVERCURRENT_CUTOFF"\|"OVERCURRENT_CAP"\|"UNAUTHORIZED_ON","plug_id":<int>}` or `{"event":"OTA_STARTED"\|"OTA_OK_REBOOTING"\|"OTA_FAILED"\|"OTA_REFUSED_SESSION_ACTIVE"\|...}` |
 | gateway → backend | `amphive/gateways/{gateway_id}/logs` | 0 | no | raw WARN/ERROR log line as plain text (fw ≥ 2.1.0-direct). Field diagnostics; the backend does **not** subscribe yet (`mosquitto_sub` ad hoc). Covered by the `amphive/gateways/%u/#` ACL. |
@@ -111,7 +114,10 @@ Tapo app / stale NVS resume) is forced OFF locally and alarmed.
 > would reset `start_energy_kwh` and re-bill from zero. `SET_LIMITS` updates
 > **only** `max_kwh` and `max_duration_s` (then re-persists to NVS) and leaves
 > `start_energy_kwh`, `start_time_s`, `session_active`, and `session_id`
-> untouched, so accumulated billing is unaffected. It is a **no-op when no
+> untouched, so accumulated billing is unaffected. When the payload carries
+> `max_current_a` (> 0) the firmware also re-arms the session's OVERCURRENT_CAP
+> watchdog at it and resets the debounce; omitted, the running cap is left
+> intact. It is a **no-op when no
 > session is active** on the addressed plug (logged and ignored). `local_ip`
 > targets the physical plug on a multi-plug gateway (TD#20), exactly as ON/OFF.
 
@@ -171,13 +177,14 @@ Tapo app / stale NVS resume) is forced OFF locally and alarmed.
   blocking broker-ack wait.
 - `MQTTManager.send_plug_interval(gateway_id, plug_id, interval_ms)`
   publishes the `SET_INTERVAL` command at QoS 1 to configure the gateway's telemetry reporting interval.
-- `MQTTManager.send_plug_limits(gateway_id, plug_id, max_kwh, max_duration_seconds, local_ip=None)`
+- `MQTTManager.send_plug_limits(gateway_id, plug_id, max_kwh, max_duration_seconds, local_ip=None, max_current_a=None)`
   publishes the `SET_LIMITS` command at QoS 1 (blocking `wait_for_publish(timeout=3.0)`,
   returns `is_published()`) to re-cap a **running** session's energy/duration
   watchdog thresholds without re-baselining (see the `SET_LIMITS` note above).
   **Wired best-effort into `PATCH /api/sessions/{id}/limits` (2026-07-14):** after
   the limit change commits, the route pushes the session's current `max_kwh` +
-  `max_duration_seconds` (both, always) so RAISING a limit above the value baked
+  `max_duration_seconds` (both, always) plus `max_current_a=effective_plug_cap(plug)`
+  (so an operator's mid-session cap change lands on-device too) so RAISING a limit above the value baked
   into the original `ON` takes effect on-device; a failed publish never fails the
   request (the telemetry-path backend mirror still enforces within ~1 s), and
   legacy NULL-limit sessions are skipped. On-device effect awaits an OTA to

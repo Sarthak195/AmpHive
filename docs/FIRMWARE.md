@@ -76,7 +76,8 @@ password); `gateway_id`, `device_name`, and `mqtt_user` are derived from the STA
 MAC, not typed, and plug IPs come from the backend's retained roster (§3), not
 the portal. POST `/save` verifies the setup code
 (constant-time compare; wrong code → 1 s throttle + 403, nothing written),
-URL-decodes the fields, writes them to NVS, and reboots. The Tapo credentials
+URL-decodes the fields, **pre-checks the Wi-Fi credentials** (see below), writes
+them to NVS, and reboots. The Tapo credentials
 are used by the KLAP driver's auth hash (see §4).
 
 - **Setup code:** 10 chars from an unambiguous alphabet, generated via
@@ -85,6 +86,17 @@ are used by the KLAP driver's auth hash (see §4).
   onto the unit label. One secret serves as both the AP's WPA2 passphrase and
   the `/save` token (defense-in-depth against other clients on the setup AP).
   After a full NVS erase a new code is generated — re-label the unit.
+- **Wi-Fi pre-check (TD#31, fw ≥ 2.1.0-direct):** before committing + rebooting,
+  `/save` briefly flips to **AP+STA** and tries to associate to the submitted
+  SSID/password (`portal_precheck_wifi`, ≤ 20 s wait), so a typo'd network name
+  or password is caught at provisioning instead of at charge time. **Fail-open:**
+  only a *definite* association failure (retry-exhausted `WIFI_FAIL_BIT`) blocks
+  the save with an error page; success, timeout, or an inconclusive result
+  proceeds — the check can never brick provisioning. Limitation: the single
+  radio may briefly hop to the STA's channel during the test, dropping the
+  installer's phone off the AP for a few seconds. The old "plug IP
+  reachability" half of TD#31 is moot — the portal no longer collects plug IPs
+  (retained roster, §3).
 - **Idle timeout:** the portal reboots the device after **10 min** without HTTP
   activity, so the boot-time Wi-Fi-loss fallback (SECURITY.md §8.4) no longer
   leaves an AP up indefinitely — a provisioned gateway retries its STA link on
@@ -127,10 +139,17 @@ are used by the KLAP driver's auth hash (see §4).
     clamped ≥ 0; 0 when idle), and the active `session_id` is echoed back — see
     [MQTT_CONTRACT.md](MQTT_CONTRACT.md). The raw lifetime meter is never billed.
   - If MQTT is connected: publishes telemetry normally.
-  - If MQTT is disconnected: buffers the reading in `offline_log` (NVS ring buffer,
-    session-relative `kwh`, no `session_id` field).
+  - If MQTT is disconnected: buffers the reading in `offline_log` (NVS ring
+    buffer, session-relative `kwh`). Since fw 2.1.0-direct (TD#24) each entry
+    also stamps the **owning session id** (compact `uint32_t`) + occupied state
+    at capture time, echoed on resync so the backend attributes replayed
+    readings to the exact session, not whatever is ACTIVE at reconnect.
   - While a session is active, enforces edge cutoffs in both online and offline modes:
-    - **Duration:** elapsed ≥ `max_duration_s` → local OFF + NVS clear.
+    - **Duration:** elapsed ≥ `max_duration_s` → local OFF + NVS clear. Counts
+      **total** elapsed across reboots (TD#23): elapsed-so-far is persisted with
+      the session (30 s throttle in the telemetry task + on every state change)
+      and recovery back-dates `start_time_s` by it, so a crash can't restart the
+      time cap from zero (worst-case overrun ≈ one persist interval).
     - **Energy:** consumed ≥ `max_kwh` → local OFF + NVS clear.
     - **Thermal:** plug reports `overheat_status != "normal"` → local OFF + NVS clear
       + publish `THERMAL_CUTOFF` alarm (if online). (The P110 has no temperature
@@ -138,6 +157,12 @@ are used by the KLAP driver's auth hash (see §4).
     - **Over-current:** plug reports `overcurrent_status != "normal"` → local OFF +
       NVS clear + publish `OVERCURRENT_CUTOFF` alarm. (The plug does the sensing;
       this replaces the previously-unimplemented 13 A/5-min rule.)
+    - **Per-plug current cap (REC-03):** measured `current_a` above the session's
+      `max_current_a` (+0.5 A margin, 3-poll debounce against inrush) → local OFF
+      + `OVERCURRENT_CAP` alarm. The cap arrives on `ON`/`SET_LIMITS`/the roster
+      (default `DEFAULT_PLUG_CAP_A` 16 A, NVS-overridable via `plug_cap_a`) and —
+      fw ≥ 2.2.0-direct — is persisted in the session blob so crash recovery
+      re-arms the session's own cap, not the gateway default.
   - **Unauthorized physical-on guard (fw 1.5.0):** when there is **no** active
     session, the loop checks the plug's real `device_on`; if the relay is ON
     (physical button, Tapo app, or NVS crash-recovery resuming a stale session)
@@ -155,7 +180,11 @@ The active per-plug sessions are persisted to a dedicated NVS namespace
 refactor (TD#20) the whole set is stored as **one blob** (`session_nvs_save_all`
 / `session_nvs_load_all`) so a save is atomic; each record adds `plug_id` and
 `local_ip` to the prior fields (`active`, `session_id`, `start_time_s`,
-`max_duration_s`, `max_kwh` and `start_energy_kwh` as milliWh integers). Carrying
+`max_duration_s`, `max_kwh` and `start_energy_kwh` as milliWh integers), plus
+`elapsed_s` — seconds elapsed as of the save, re-persisted on a 30 s throttle so
+the duration watchdog survives reboots (TD#23, fw 2.1.0) — and `max_current_ma`,
+the session's current cap, so recovery re-arms `OVERCURRENT_CAP` at the
+session's own threshold (fw 2.2.0). Carrying
 `local_ip` is what lets crash recovery re-create the plug's KLAP context and keep
 driving it — the backend ON command that first taught the IP is gone after a
 reboot. On boot, `session_nvs_load_all()` restores **every** recovered session's
