@@ -332,11 +332,15 @@ queued charge, and let the queue sweep own the actual energize.
 ### Out-of-scope but related gaps (flag, don't fix here)
 - **Unbilled offline tail:** on an outage longer than `SESSION_STALE_TIMEOUT_SEC`, the
   session is finalized but the relay keeps delivering energy until reconnect (orphan-OFF).
-  The software agent has **no local kWh cutoff** (`core.py:121-130` — only the ESP32
-  firmware enforces limits locally), so that tail is unbilled and unbounded by kWh. The
-  duration backstop still finalizes the DB session on wall-clock but can't actuate an
-  offline relay. Consider a separate follow-up (operator alert on orphan-OFF, and/or a
-  local kWh limit in the agent).
+  ~~The software agent has **no local kWh cutoff** (only the ESP32 firmware enforces
+  limits locally), so that tail is unbilled and unbounded by kWh.~~ **Closed 2026-07-20:**
+  the agent now enforces the ON payload's `max_kwh`/`max_duration_seconds` locally
+  (LAN-side `set_power(False)` even with the broker down, `SET_LIMITS` honored,
+  `LOCAL_LIMIT_CUTOFF` alarm queued for reconnect) — see `agent/amphive_agent/core.py`
+  and IMPLEMENTATION_STATUS.md § Software gateway. The tail is now bounded by the
+  session's own limits, same as ESP32 gateways; the ≤-limit tail remains unbilled until
+  reconnect telemetry lands, and the duration backstop still finalizes the DB session on
+  wall-clock. Remaining follow-up: operator alert on orphan-OFF.
 
 ---
 

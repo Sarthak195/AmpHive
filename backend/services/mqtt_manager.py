@@ -417,6 +417,10 @@ class MQTTManager:
         # operator-set per-plug cap, below the P110's own hardware cutoff) — a
         # warning, not a hardware fault.
         "OVERCURRENT_CAP": "warning",
+        # LOCAL_LIMIT_CUTOFF is the software agent's local watchdog hitting the
+        # session's own kWh/duration limit — an expected end-of-session (the
+        # agent cut the plug OFF locally), not a fault.
+        "LOCAL_LIMIT_CUTOFF": "info",
         "UNAUTHORIZED_ON": "critical",
         "OTA_STARTED": "info",
         "OTA_OK_REBOOTING": "info",
@@ -430,6 +434,7 @@ class MQTTManager:
         "THERMAL_CUTOFF": "Plug reported overheat — session cut off locally.",
         "OVERCURRENT_CUTOFF": "Plug reported over-current — session cut off locally.",
         "OVERCURRENT_CAP": "Plug drew more than its configured current cap — session stopped locally.",
+        "LOCAL_LIMIT_CUTOFF": "Session hit its energy/duration limit — the gateway agent cut the plug off locally.",
     }
 
     def _handle_gateway_alarm(self, gateway_id: str, payload: Dict[str, Any]):
@@ -567,6 +572,11 @@ class MQTTManager:
         "THERMAL_CUTOFF": "safety cutoff: plug reported overheat",
         "OVERCURRENT_CUTOFF": "safety cutoff: plug reported over-current",
         "OVERCURRENT_CAP": "current cap exceeded: plug drew over its configured limit",
+        # The software agent's local watchdog (agent/amphive_agent/core.py)
+        # already cut the plug OFF and cleared its local session — finalize so
+        # the session bills and the driver is notified instead of the session
+        # orphaning ACTIVE until the reaper. A healthy plug: no maintenance.
+        "LOCAL_LIMIT_CUTOFF": "limit reached: session hit its energy/duration limit",
     }
 
     # The subset that also takes the plug OUT OF SERVICE — genuine hardware faults
@@ -1606,11 +1616,11 @@ class MQTTManager:
             )
             return False
 
-    def send_plug_limits(self, gateway_id: str, plug_id: int, max_kwh: float, max_duration_seconds: int, local_ip: Optional[str] = None) -> bool:
+    def send_plug_limits(self, gateway_id: str, plug_id: int, max_kwh: float, max_duration_seconds: int, local_ip: Optional[str] = None, max_current_a: Optional[float] = None) -> bool:
         """
         Sends a SET_LIMITS command to a specific plug registered under a gateway.
         Topic: amphive/gateways/{gateway_id}/plugs/{plug_id}/commands
-        Payload: {"action": "SET_LIMITS", "max_kwh": X, "max_duration_seconds": Y, "local_ip": "<str>"}
+        Payload: {"action": "SET_LIMITS", "max_kwh": X, "max_duration_seconds": Y, "local_ip": "<str>", "max_current_a": Z}
 
         Updates a RUNNING session's watchdog thresholds (energy + duration caps)
         in place. Unlike ON, the firmware does **not** re-read the meter baseline
@@ -1619,6 +1629,13 @@ class MQTTManager:
         `local_ip` targets the physical plug on a multi-plug gateway (TD#20),
         mirroring ON/OFF; the empty-string default is harmless for older
         single-plug firmware, which falls back to its provisioned target.
+
+        When `max_current_a` is given, the firmware re-arms the running
+        session's OVERCURRENT_CAP watchdog at it (and resets the debounce);
+        omitted (None), the key is left out of the payload and the on-device
+        cap is untouched — mirroring the ON path's optional cap. The caller
+        resolves it via services/caps.py effective_plug_cap. Older firmware
+        ignores the extra field, so this is backward-safe.
         """
         topic = f"amphive/gateways/{gateway_id}/plugs/{plug_id}/commands"
         payload = {
@@ -1627,6 +1644,8 @@ class MQTTManager:
             "max_duration_seconds": max_duration_seconds,
             "local_ip": local_ip or "",
         }
+        if max_current_a is not None:
+            payload["max_current_a"] = max_current_a
 
         try:
             payload_str = json.dumps(payload)

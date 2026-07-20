@@ -26,6 +26,8 @@ import Login from './pages/Login';
 import Groups from './pages/Groups';
 import History from './pages/History';
 import PublicMap from './pages/PublicMap';
+import ForgotPassword from './pages/ForgotPassword';
+import ResetPassword from './pages/ResetPassword';
 import { ProtectedRoute, CpoProtectedRoute } from './components/ProtectedRoutes';
 import { ExternalRedirect, CpoLanding } from './components/HostRouting';
 import { isCpoHost, isSplitHost, cpoOrigin, driverOrigin } from './utils/appHost';
@@ -48,6 +50,15 @@ import CpoSettings from './pages/cpo/CpoSettings';
 /** CPO dashboard route table — shared by both hosts' route trees below
     (on the driver host they never render: a catch-all ExternalRedirect
     for /cpo/* shadows them). */
+/** Password reset — public on every host (operators forget passwords too);
+    the emailed link lands on /reset-password?token=... */
+const passwordResetRoutes = (
+  <>
+    <Route path="/forgot-password" element={<ForgotPassword />} />
+    <Route path="/reset-password" element={<ResetPassword />} />
+  </>
+);
+
 const cpoDashboardRoutes = (
   <>
     <Route path="/cpo/dashboard" element={
@@ -96,6 +107,7 @@ const CpoHostRoutes = () => (
     {/* Landing: anonymous → login; role-routed after that (CpoLanding). */}
     <Route path="/" element={<CpoLanding />} />
     <Route path="/login" element={<Login />} />
+    {passwordResetRoutes}
 
     {/* CPO self-serve setup ("Become a Host") lives on this host. */}
     <Route path="/cpo" element={
@@ -120,6 +132,7 @@ const DriverHostRoutes = () => (
     {/* Public routes */}
     <Route path="/" element={<Home />} />
     <Route path="/login" element={<Login />} />
+    {passwordResetRoutes}
     {/* Public charger-discovery map — browse nearby public chargers
         without an account (starting a charge still routes to sign-in). */}
     <Route path="/map" element={<PublicMap />} />
@@ -154,6 +167,7 @@ const UnsplitRoutes = () => (
   <Routes>
     <Route path="/" element={<Home />} />
     <Route path="/login" element={<Login />} />
+    {passwordResetRoutes}
     <Route path="/map" element={<PublicMap />} />
     <Route path="/topup" element={
       <ProtectedRoute><TopUp /></ProtectedRoute>

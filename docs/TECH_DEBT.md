@@ -86,8 +86,11 @@ Legend — **Impact**: how much it costs if left. **Effort**: rough work to fix.
   [SECURITY.md §8.5](SECURITY.md#8-firmware--gateway-device-security--backend-follow-up-gaps-2026-07-06-audit)).
   ~~Consume `+/alarms` (TD#21)~~ — done 2026-07-10 (CPO events feed). ~~Reject
   starts on offline/maintenance plugs (TD#22)~~ — done 2026-07-11.
-- **P2 reliability/accountability:** duration-watchdog reboot reset (TD#23),
-  offline-resync mis-billing — buffered path only now (TD#24). ~~CPO audit
+- **P2 reliability/accountability:** ~~duration-watchdog reboot reset
+  (TD#23)~~ — done (persisted `elapsed_s` + 30 s throttled re-persist, fw
+  2.1.0-direct; on-device verify pending). ~~Offline-resync mis-billing
+  (TD#24)~~ — done (ring entries stamp the owning `session_id` at capture,
+  echoed on resync, fw 2.1.0-direct). ~~CPO audit
   log (TD#26)~~ — done 2026-07-12 (`audit_logs` table + `services/audit.py`,
   wired into gateway/plug/group create, plug status change, group delete,
   and access-code regen; `GET /api/cpo/audit` read path). ~~Gateway
@@ -96,7 +99,9 @@ Legend — **Impact**: how much it costs if left. **Effort**: rough work to fix.
   payload plug-ownership check.
 - **P3 polish/onboarding:** ~~structured logging — backend (TD#28)~~ — done
   2026-07-12 (JSON logs + correlation ids + broker log persistence; firmware
-  log topic still open, see TD#28), portal reachability test (TD#31 — the CSS
+  log topic still open, see TD#28). ~~Portal reachability test (TD#31)~~ —
+  done: fail-open AP+STA Wi-Fi association pre-check on `/save` (fw
+  2.1.0-direct; the plug-IP half is moot since the retained roster; the CSS
   half closed fw 1.6.0). ~~Unified ledger view (TD#29)~~, ~~shared telemetry
   Event (TD#32)~~ and ~~registration validation (TD#30, done 2026-07-11)~~ —
   done.

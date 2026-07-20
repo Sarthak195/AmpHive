@@ -1154,3 +1154,34 @@ class QueuedCharge(Base):
             postgresql_where=text("status = 'waiting'"),
         ),
     )
+
+
+class PasswordResetToken(Base):
+    """[Password reset] A single-use, time-boxed "forgot password" token.
+
+    The raw token (secrets.token_urlsafe) is emailed to the driver and NEVER
+    stored — only its SHA-256 hex digest lives here, so a DB leak does not
+    hand out working reset links (same rationale as storing bcrypt hashes,
+    minus the salt: the token already has ~256 bits of entropy, so a plain
+    unsalted digest is fine and keeps lookup a single indexed equality).
+
+    Lifecycle: issued by POST /api/auth/forgot-password (which first voids the
+    user's outstanding unused tokens — at most one live link per user);
+    consumed exactly once by POST /api/auth/reset-password, which stamps
+    used_at, rewrites hashed_password, and bumps users.token_version (revoking
+    every JWT). Expired/used rows are inert — no reaper needed at this
+    volume. No relationship() back-refs, matching Reservation/QueuedCharge.
+    """
+    __tablename__ = "password_reset_tokens"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    # SHA-256 hex digest of the raw token (64 chars); unique so consumption is
+    # a single indexed lookup and a (astronomically unlikely) digest collision
+    # fails loudly at insert instead of silently crossing accounts.
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # NULL = still consumable (if unexpired); set on consumption OR when a
+    # newer forgot-password request supersedes this token.
+    used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)

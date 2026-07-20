@@ -13,7 +13,7 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 | Capability | Status | Notes |
 |------------|:------:|-------|
 | REST API (auth, groups, plugs, sessions, payments, direct, CPO portal) | ✅ | 43 endpoints (2026-07-10: CPO events feed `GET /api/cpo/events` + `POST /api/cpo/events/{id}/ack`, unified `GET /api/wallet/ledger`, public `GET /api/config`, `GET /api/cpo/analytics/sessions.csv` export) — see [API_REFERENCE.md](API_REFERENCE.md) |
-| JWT auth + bcrypt | ✅ | Env-configurable expiry (`JWT_EXPIRY_DAYS`, default 7); user loaded fresh per request. **Revocable** via the `token_version` epoch (`tv` claim, re-checked per request; `POST /api/auth/logout` bumps it — "log out everywhere"). **Rate-limited** (2026-07-11): login/register enforce a per-IP sliding window (`LOGIN_RATE_LIMIT` 10/60s, `REGISTER_RATE_LIMIT` 10/3600s → 429 + Retry-After; `services/rate_limit.py`) — closes SEC §8.6. |
+| JWT auth + bcrypt | ✅ | Env-configurable expiry (`JWT_EXPIRY_DAYS`, default 7); user loaded fresh per request. **Revocable** via the `token_version` epoch (`tv` claim, re-checked per request; `POST /api/auth/logout` bumps it — "log out everywhere"). **Rate-limited** (2026-07-11): login/register enforce a per-IP sliding window (`LOGIN_RATE_LIMIT` 10/60s, `REGISTER_RATE_LIMIT` 10/3600s → 429 + Retry-After; `services/rate_limit.py`) — closes SEC §8.6. **Self-service password reset** (2026-07-20): `POST /api/auth/forgot-password` (enumeration-safe generic 200; single-use token, SHA-256 digest stored in `password_reset_tokens` — migration `0023`; `RESET_TOKEN_TTL_MIN` 30 min) + `POST /api/auth/reset-password` (8-72 rule, bcrypt rehash, `token_version` bump revokes all sessions); both rate-limited (`FORGOT_PASSWORD_RATE_LIMIT` / `RESET_PASSWORD_RATE_LIMIT`); delivery via `services/email.py` — SMTP STARTTLS when `SMTP_*` env is set, else the reset link is logged at WARNING (console fallback). Frontend `/forgot-password` + `/reset-password` pages. |
 | Role-based access control | ✅ | Enforced via `services/rbac.py` `require_role(...)` on all `/api/cpo/*` routes (checks the DB role, not just the token) |
 | MQTT command publish (ON/OFF) | ✅ | QoS 1, 3 s wait |
 | MQTT inbound telemetry/status handling | ✅ | Telemetry updates TelemetryStore and session DB (now incl. `voltage`/`relay`). Status updates gateway state in DB. |
@@ -89,6 +89,12 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 | OTA updates | ✅ | Dual OTA app slots (`partitions_ota.csv`) + `esp_https_ota` with bootloader rollback (`ota_update.c`). Triggered by the `OTA` MQTT command / `POST /api/cpo/gateways/{id}/ota`; refuses mid-session; cancels rollback only once the new image re-reaches the broker. **Verified end-to-end on-device 2026-07-08** (`1.1.0 → 1.1.1`) and again **over the direct-MQTT path 2026-07-10** (`1.3.0 → 1.3.1`, image on a public URL, slot swap + `marking image valid`, no overlay). |
 | OTA hardening: signed images + https-only | ✅ | **Rolled out 2026-07-10** (fw ≥ 1.4.0): ECDSA signed-app verification on update (`SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT`, key gitignored), plain http refused by firmware + backend (`CpoGatewayOtaRequest` `^https://`, **deployed**), images on the public HTTPS bucket `gs://amphive-fw`. The real gateway `1cc3abb4fb54` was OTA'd end-to-end over the direct-MQTT path from `1.3.2-direct` → signed **`1.5.0-direct`** (`OTA_OK_REBOOTING` → offline → back online on 1.5.0, rollback cancelled). From 1.4.0 onward only signed images install. |
 | Headscale (vs Tailscale defaults) | 🟡 | `/key` fetch supports it, but default host constants point at Tailscale |
+
+### Software gateway (AmpHive Agent, [`agent/`](../agent) — [AMPHIVE_AGENT.md](AMPHIVE_AGENT.md))
+| Capability | Status | Notes |
+|------------|:------:|-------|
+| Multi-brand software gateway (kasa/shelly/sim providers, discovery→assign) | ✅ | Speaks the firmware MQTT contract verbatim; verified end-to-end against a real broker with the `sim` provider (see AMPHIVE_AGENT.md). |
+| **Local kWh + duration watchdog (offline cutoff)** | ✅ | **2026-07-20** — closes the "software agent has NO local kWh limit → unbilled offline tail" gap (memory `gateway-offline-reconnect-reconciliation.md`, `docs/proposals/queued-charge-offline-plug.md` §out-of-scope, reconciliation audit exclusion list). The `ON` payload's `max_kwh`/`max_duration_seconds` are stored (persisted in the agent's JSON store, so a restart mid-session keeps them); every poll the agent checks session energy (cumulative-meter delta, with a watts×dt integration fallback for meterless plugs) and elapsed time, and on a limit cuts the plug OFF **locally over the LAN — works with the broker unreachable**, mirroring the firmware watchdog. Like the firmware, the trip frame is published pre-watchdog (occupied + final kwh) and, unlike the firmware (which stays silent on limit cutoffs), a QoS-1 `{"event":"LOCAL_LIMIT_CUTOFF","reason":"ENERGY_LIMIT"\|"DURATION_LIMIT","plug_id"}` alarm is queued (paho delivers on reconnect) — **the backend finalizes the session on this alarm** (bills, frees the plug, notifies the driver; no maintenance), like `OVERCURRENT_CAP`. `SET_LIMITS` re-caps a running session without re-baselining (no-op when idle), matching MQTT_CONTRACT.md. Tests: `agent/test_local_limits.py` (stubbed device + offline broker) + `python -m amphive_agent.core` self-checks. |
 
 ### Infra / deploy
 | Capability | Status | Notes |
@@ -462,7 +468,15 @@ audit merged; statuses below are as of 2026-07-11.*
     restores `start_time_s = now − elapsed_s` (unsigned modular arithmetic recovers
     the true elapsed; if the session already overran, it trips on the first sweep).
     Worst-case overrun is now one throttle interval. Chose this over an SNTP
-    wall-clock baseline (which would over-count power-off time). (TD#23)
+    wall-clock baseline (which would over-count power-off time). **fw
+    2.2.0-direct** additionally persists the session's `max_current_a` (as
+    `max_current_ma`) in the same blob, so crash recovery re-arms the
+    OVERCURRENT_CAP watchdog at the session's own cap instead of the gateway
+    default; the blob-size change safely voids pre-2.2.0 records (fail-closed
+    load — and OTA is refused mid-session, so nothing is lost). The backend's
+    `send_plug_limits` now also carries `max_current_a=effective_plug_cap(plug)`
+    (from `PATCH /api/sessions/{id}/limits`), so a mid-session cap change lands
+    on-device via SET_LIMITS. (TD#23)
 53. **[Resolved 2026-07-16, fw 2.1.0-direct — on-device verify pending]
     Offline-resync telemetry can bill the wrong session.** The `offline_log` ring
     entry now stores a compact `uint32_t session_id` (18→22 B; `ring_meta_t` gains
@@ -513,9 +527,15 @@ audit merged; statuses below are as of 2026-07-11.*
     access-code regen with actor/tenant/target, readable via
     `GET /api/cpo/audit`. Gateway/plug **delete** are pre-named in the action
     taxonomy but have no endpoint yet to hook (no such CPO routes exist).
-    Still open: firmware `ESP_LOGI` remains serial-only (no log topic —
-    TD#28, firmware half), and the portal Wi-Fi/plug reachability pre-check
-    (TD#31, second half). (TD#26, TD#28, TD#31)
+    The **portal Wi-Fi pre-check** (TD#31, second half) shipped in fw
+    2.1.0-direct: `/save` briefly associates in AP+STA mode to the submitted
+    SSID/password (fail-open — only a definite association failure blocks the
+    save; ≤ 20 s bound; the single radio may briefly drop the installer's
+    phone). The plug-IP half is moot — plug IPs come from the retained roster
+    (fw ≥ 2.0.0), so the portal no longer collects them. Still open: firmware
+    `ESP_LOGI` WARN/ERROR now forward to the `/logs` topic (fw 2.1.0), but the
+    backend does not subscribe/persist them yet (TD#28, firmware half
+    partially closed). (TD#26, TD#28, TD#31)
 56. **[Resolved 2026-07-12] No session-sized authorization hold — overage
     forgiven past the wallet.** `/api/sessions/start` only checked a flat
     `MIN_START_BALANCE_COINS` floor, and `finalize_charging_session` billed
