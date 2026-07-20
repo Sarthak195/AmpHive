@@ -1,9 +1,39 @@
 # AmpHive — Implementation Status & Discrepancies
 
-*Verified against source on 2026-07-04. This page reconciles the aspirational
+*Verified against source on 2026-07-20. This page reconciles the aspirational
 product specs ([requirements.md](../requirements.md), [features_list.md](../features_list.md))
 with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub/mock ·
 ❌ not implemented.*
+
+---
+
+## 0. Latest — 2026-07-20 audit + quick-wins hardening (PR #72, merged, **pending deploy**)
+
+A 7-level codebase audit (architecture / security / quality / performance /
+testing / dependencies / docs) surfaced **68 findings (0 Critical, 2 High, 24
+Medium, 30 Low, 12 Info)**. The low-effort/high-impact subset shipped as **PR
+#72 (merged to `main` @ `7669bce`)** — **not yet deployed to prod, so prod
+trails `main` by this batch**; a `deploy.ps1` run (which applies migration
+`0024` via `init_db` and re-emits the Caddy config) is required to land it.
+
+What merged:
+- **Security:** reset-link default → `https://amphive.app` (was the retired duckdns); Socket.io `connect` now enforces the `token_version` epoch (revoked/logged-out tokens can no longer open a realtime channel — closes the gap vs the HTTP path); `http(s)://8.231.81.12` removed from the CORS + Socket.io allowlists; `amount_inr` bounded at the schema (`Field(gt=0, le=10000, allow_inf_nan=False)` — NaN was slipping past the manual guard); **CSP + `X-Frame-Options: DENY` + `nosniff` + HSTS `includeSubDomains`** added to both Caddy vhosts.
+- **Performance:** the outbound MQTT publishes (`send_plug_interval`/`send_plug_limits`, and `send_plug_command` from session-start) no longer block the asyncio event loop on the broker PUBACK — a slow/reconnecting broker no longer freezes the backend (**audit High**). New composite indexes on `charging_sessions` (`plug_id/status`, `user_id/status`, `tenant_id/started_at`) and `ledger_transactions` (`user_id/created_at`) — Alembic `0024_session_ledger_indexes`, idempotent `CREATE INDEX IF NOT EXISTS`, mirrored in the ORM `__table_args__`.
+- **Quality / CI:** the hold-exhausted auto-stop notification is no longer mislabeled "Charging complete" (`session_lifecycle` now matches `"exhausted"`); **408 dead imports swept** (ruff F401) and **CI now gates `ruff check --select F401 backend/`**.
+- **Deps:** `frontend/Dockerfile` → `npm ci`; `uvicorn[standard]`; `tapo<1.0`.
+
+**Deploy caveats:** the CSP is not browser-verified — smoke-test Leaflet map
+tiles + the Razorpay checkout iframe (and `caddy validate`) before trusting it;
+migration `0024` is idempotent and safe to re-run.
+
+**Not in this batch (audit backlog):** the 2nd audit High — the Razorpay
+signature/webhook credit path has **zero tests** — plus the Mediums/Lows: split
+the `cpo.py` god router + `MQTTManager` god object; the `/api/plugs/available`
+N+1 tariff resolution; `python-jose>=3.4.0` (CVE floor) + a backend deps
+lockfile; replace abandoned passlib; and the **doc drift** where
+[ARCHITECTURE.md](ARCHITECTURE.md), the root README, [AGENTS.md](../AGENTS.md)
+and `.env.template` still describe the retired Headscale/WireGuard overlay +
+duckdns as the live path.
 
 ---
 
