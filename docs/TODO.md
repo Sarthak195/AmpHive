@@ -340,7 +340,11 @@ been fixed by the 2026-07-08…11 work — see the shipped sections below).*
       (`mqtt_user`/`mqtt_pwd`, optional portal fields) seeded + flashed on the
       dev gateway. Verified in prod: anonymous → `not authorised`; backend +
       ESP32 authenticate and telemetry flows. (SEC §3)
-- [~] **MQTT broker TLS** (2026-07-08, code complete, staged rollout): a TLS
+- [x] **MQTT broker TLS** — COMPLETE 2026-07-20: plaintext 1883 is no longer
+      host-published (compose change; backend + fake-plug use the internal
+      Docker network), so the only externally reachable listener is TLS 8883.
+      Original staged rollout below. (SEC §3)
+      (2026-07-08, code complete, staged rollout): a TLS
       listener on **8883** with a self-signed CA + server cert
       (`deploy/config/gen_mqtt_certs.sh`, SAN `IP:100.87.241.70`); firmware
       `1.2.0` embeds the CA and dials `mqtts://…:8883` (validates chain + IP

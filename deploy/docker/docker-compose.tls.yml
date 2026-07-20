@@ -39,13 +39,11 @@ services:
     container_name: amphive-mqtt
     restart: always
     ports:
-      # MQTT_BIND_IP controls which HOST interface the broker is reachable on.
-      # 0.0.0.0 = public internet (legacy, insecure: the broker is anonymous).
-      # Set it to the VM's overlay/Tailscale IP (e.g. 100.87.241.70) in .env so
-      # only overlay peers (the ESP32 gateways) can reach port 1883. The
-      # backend is unaffected — it reaches 'mqtt' over the compose network,
-      # not via this published port.
-      - "${MQTT_BIND_IP}:1883:1883"
+      # Plaintext 1883 is NO LONGER host-published (2026-07-20): the whole
+      # fleet is on direct-MQTT 8883, and the backend + fake-plug reach
+      # 'mqtt' over the compose network, which needs no published port.
+      # Break-glass rollback: re-add "${MQTT_BIND_IP}:1883:1883" here.
+      #
       # TLS listener (8883): PUBLIC by default (direct-MQTT path — gateways and
       # agents dial out to mqtts://<public-ip>:8883; auth = TLS + per-gateway
       # creds + ACLs, see docs/SECURITY.md §3). Override MQTT_TLS_BIND_IP in
