@@ -170,6 +170,9 @@ app.add_middleware(
         "https://amphive.duckdns.org",
         "http://cpo.amphive.duckdns.org",
         "https://cpo.amphive.duckdns.org",
+        # Real domain (2026-07-20; .app is HSTS-preloaded so https-only).
+        "https://amphive.app",
+        "https://cpo.amphive.app",
         "http://8.231.81.12",
         "https://8.231.81.12",
     ],

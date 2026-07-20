@@ -244,11 +244,14 @@ been fixed by the 2026-07-08…11 work — see the shipped sections below).*
 - [~] **Web HTTPS follow-ups** (2/4 done 2026-07-11): ~~drop tcp:8000 from
       `allow-amphive-ports`~~ (tcp:80-only now; :8000 stays VM-local) and
       ~~add HSTS~~ (max-age=31536000 in the generated Caddyfile) — both
-      **deployed + verified in prod**. Remaining: **replace DuckDNS with a
-      real domain** (proven SPOF; also needed for Razorpay live-mode legal
-      pages), and only then flip bare-IP serve-mode back to a redirect
-      (doing it on DuckDNS re-creates the outage mode serve-mode was built
-      to survive). (SEC §3/§6)
+      **deployed + verified in prod**. **Real domain acquired 2026-07-20:
+      `amphive.app`** (name.com; .app is HSTS-preloaded → https-only) —
+      CORS/Socket.io allowlists + Caddy multi-domain serving (`amphive.app,
+      amphive.duckdns.org` transition) shipped; cert issues automatically
+      once the name.com A records point `@` and `cpo` at 8.231.81.12
+      (parking IP still resolving at ship time). Remaining after cutover:
+      retire the duckdns names, then flip bare-IP serve-mode back to a
+      redirect. (SEC §3/§6)
 - [x] **Database + config backups** (2026-07-11, **live + verified
       end-to-end**): nightly `backup_db.sh` cron (21:00 UTC) does
       `pg_dump -Fc` + ops-config tarball (broker passwd/ACL hashes exist only
