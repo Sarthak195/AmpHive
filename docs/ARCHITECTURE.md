@@ -1,13 +1,13 @@
 # AmpHive — System Architecture
 
-*Verified against source on 2026-07-06. For per-component status and the gap
+*Verified against source on 2026-07-20. For per-component status and the gap
 between this and the product specs, see [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md).*
 
 AmpHive turns off-the-shelf smart plugs (TP-Link Tapo P110) into a shared,
 monetizable EV-charging network. A driver enters a **Plug ID** in a web app,
 the backend authorizes and bills against a prepaid coin wallet, and a command
-travels to the plug — either through an ESP32 gateway over an encrypted overlay
-network, or (today, for dev/test) directly over a WireGuard tunnel.
+travels to the plug through an ESP32-C3 gateway that dials **outbound direct
+MQTT** to the public broker over the open internet — no VPN/overlay hop.
 
 ---
 
@@ -17,72 +17,78 @@ network, or (today, for dev/test) directly over a WireGuard tunnel.
 ┌───────────────┐   REST/JSON    ┌─────────────────────┐   asyncpg    ┌──────────────────┐
 │  Driver Web   │ ◄────────────► │   FastAPI backend   │ ◄──────────► │   PostgreSQL 15  │
 │  App (React)  │  + Socket.io   │   (Uvicorn, main.py)│              │ (Docker on VM)   │
+│  (Caddy TLS)  │                │   :8000, VM-local    │              │ (Docker on VM)   │
 └───────────────┘                └──────┬──────────────┘              └──────────────────┘
                                         │ MQTT (paho)
                                   ┌─────▼──────────┐
                                   │   Mosquitto    │  topics: amphive/gateways/...
-                                  │   MQTT broker  │
-                                  └─────┬──────────┘
-                                        │  (MQTT runs *inside* the overlay tunnel)
-              ┌─────────────────────────┴───────────────────────────┐
-              │                                                       │
-   ── PATH A: ESP32 gateway ─────────────────          ── PATH B: Direct Mode (dev) ──
-              │                                                       │
-   ┌──────────▼───────────┐                              ┌───────────▼────────────┐
-   │  ESP32-S3 gateway     │  Tailscale overlay          │  Backend calls a relay  │
-   │  (microlink client)   │  100.64.0.0/10              │  over WireGuard tunnel  │
-   └──────────┬───────────┘                              │  10.10.0.0/24           │
-              │ local LAN/VLAN                            └───────────┬────────────┘
-   ┌──────────▼───────────┐                              ┌───────────▼────────────┐
-   │  Tapo P110 smart plug │                              │  Tapo P110 (home LAN)   │
-   └──────────────────────┘                              └─────────────────────────┘
+                                  │   MQTT broker  │  TLS on :8883 (mqtt.amphive.app)
+                                  └─────┬──────────┘  per-gateway user/pass + ACLs
+                                        │  outbound mqtts:// over the public internet
+                             ┌──────────▼───────────┐
+                             │  ESP32-C3 gateway     │
+                             │  (AMPHIVE_DIRECT_MQTT)│
+                             └──────────┬───────────┘
+                                        │ local LAN/VLAN
+                             ┌──────────▼───────────┐
+                             │  Tapo P110 smart plug │
+                             └──────────────────────┘
 ```
 
-The cloud control plane is identical for both paths. The difference is **how the
-last hop to the physical plug is reached**.
+Caddy terminates TLS for the web/API surface on `amphive.app` (driver) and
+`cpo.amphive.app` (operator portal); the FastAPI backend on `:8000` is
+VM-local only, not published to the internet directly. The MQTT broker
+terminates TLS on `mqtt.amphive.app:8883`; each gateway authenticates with a
+per-gateway username/password and is restricted by topic ACL to its own
+`amphive/gateways/<id>/#` namespace. There is no VPN/overlay between the
+gateway and the broker — the connection is a plain outbound TLS session, same
+as any MQTT client on the public internet.
 
 ---
 
-## 2. The two operating modes
+## 2. The gateway path — direct MQTT (the product design)
 
-AmpHive can drive a plug two ways. As of 2026-07-06 the deployment runs **Path A**
-(ESP32 gateway over MQTT); **Path B (Direct Mode over WireGuard) has been retired**
-— the WireGuard tunnel is no longer used and `DIRECT_MODE=false`. The Direct-Mode
-code (`tapo_direct`, `/direct/*`) remains but is dormant, kept for reference.
+Since 2026-07-10 the deployment runs a single live path: the ESP32-C3 gateway
+over **direct MQTT**, built with `AMPHIVE_DIRECT_MQTT=1`. Two earlier paths are
+retired and kept only for history — see below.
 
-### Path A — ESP32 gateway over MQTT (the product design)
-1. The ESP32 joins the **Headscale/Tailscale overlay** via the `microlink`
-   firmware component and gets a `100.64.x.x` VPN IP.
-2. It connects to the MQTT broker at `mqtt://100.64.0.1:1883` (the server's
-   overlay IP) and subscribes to its command topic.
-3. The backend publishes `ON`/`OFF` commands; the ESP32 drives the local plug
-   and publishes telemetry/status back.
-4. See [MQTT_CONTRACT.md](MQTT_CONTRACT.md) for exact topics.
+### Direct MQTT gateway (live)
+1. The ESP32-C3 dials **outbound** `mqtts://mqtt.amphive.app:8883` over the
+   public internet (TLS + per-gateway username/password) and subscribes to its
+   command topic. No VPN/overlay hop is involved.
+2. The backend publishes `ON`/`OFF` commands; the gateway drives the local plug
+   and publishes telemetry/status back, restricted by broker ACL to its own
+   `amphive/gateways/<id>/#` topic namespace.
+3. See [MQTT_CONTRACT.md](MQTT_CONTRACT.md) for exact topics.
 
-**Status:** the firmware control loop, overlay client, and MQTT contract are
-implemented and the topic strings match the backend. The backend's inbound
-handlers are **live** — telemetry updates the in-memory `TelemetryStore` (feeding
-the Socket.io stream) and persists `energy_kwh`/`peak_power_w` to the session row, and
-status messages update gateway online/offline state in the DB. The ESP32 runs a
-**real KLAP v2** Tapo driver (mbedTLS SHA/AES + esp_http_client). Path A has now
-been run **end-to-end on physical hardware** — a real ESP32 + P110 drove a billed
-session with correct energy delivery. That run surfaced a session-overbilling bug
-(firmware published its lifetime energy meter instead of session-relative energy),
-fixed and **verified on-device 2026-07-06** — the reflashed gateway ran consecutive
-billed sessions whose telemetry `kwh` each started at 0 and echoed the backend's
-`session_id`. See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md).
+**Status:** the firmware control loop and MQTT contract are implemented and the
+topic strings match the backend. The backend's inbound handlers are **live** —
+telemetry updates the in-memory `TelemetryStore` (feeding the Socket.io stream)
+and persists `energy_kwh`/`peak_power_w` to the session row, and status messages
+update gateway online/offline state in the DB. The ESP32 runs a **real KLAP v2**
+Tapo driver (mbedTLS SHA/AES + esp_http_client) and has been run **end-to-end on
+physical hardware** — a real ESP32-C3 + P110 drove billed sessions with correct
+session-relative energy delivery. See
+[IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md).
 
-### Path B — Direct Mode over WireGuard (retired 2026-07-06 — kept for reference)
-1. A WireGuard tunnel links the GCP VM (`10.10.0.1`) to the developer's home PC
+### Retired — ESP32 gateway over the Headscale/Tailscale overlay (retired 2026-07-10)
+Gateways formerly joined a Headscale/Tailscale overlay (`100.64.x.x` VPN IPs,
+`microlink` firmware component) and reached the broker over that tunnel at
+`mqtt://100.64.0.1:1883`. The direct-MQTT pivot removed this hop entirely; the
+overlay control plane is decommissioned and the `microlink` firmware task is
+compiled out.
+
+### Retired — Direct Mode over WireGuard (retired 2026-07-06 — kept for reference)
+1. A WireGuard tunnel linked the GCP VM (`10.10.0.1`) to the developer's home PC
    (`10.10.0.2`) on UDP/51820.
-2. The backend's `tapo_direct` service calls a small HTTP **relay**
+2. The backend's `tapo_direct` service called a small HTTP **relay**
    (`tools/relay_server.py`, port 8000) running on the home PC via
-   `TAPO_RELAY_URL`. The relay uses the `tapo` Python library to control the
+   `TAPO_RELAY_URL`. The relay used the `tapo` Python library to control the
    real plug on the home LAN.
 3. Exposed under `POST/GET /api/direct/plug/*` and gated by `DIRECT_MODE=true`.
 
-This is explicitly a **temporary bypass** until physical ESP32 hardware is in
-place, but it is the path that is wired up in the committed environment.
+This was a **temporary bypass** used before physical ESP32 hardware was
+available; the code (`tapo_direct`, `/direct/*`) remains but is dormant.
 
 ---
 
@@ -175,9 +181,11 @@ a `CpoProtectedRoute` that requires the `cpo` role and drives the `/api/cpo/*`
 endpoints (tenant setup, gateway/plug/group CRUD, and analytics).
 
 **Hostname partition (2026-07-20)** — one bundle, two hostnames. The portal
-is served on `cpo.amphive.duckdns.org` (DuckDNS subdomains resolve to the
-same IP; `CADDY_CPO_DOMAIN` in `.env` makes `deploy.ps1` emit a second,
-identical Caddy site block). `frontend/src/utils/appHost.js` (`isCpoHost()`,
+is served on `cpo.amphive.app` (the real `amphive.app` domain went live
+2026-07-20; the earlier `amphive.duckdns.org` DuckDNS hostnames are retired —
+no DuckDNS updater cron remains). `CADDY_CPO_DOMAIN` in `.env` makes
+`deploy.ps1` emit a second, identical Caddy site block.
+`frontend/src/utils/appHost.js` (`isCpoHost()`,
 with a `VITE_FORCE_CPO_HOST` dev/test override, plus `cpoOrigin()` /
 `driverOrigin()`) drives the split in `App.jsx` and `Navbar.jsx`:
 
@@ -198,12 +206,14 @@ with a `VITE_FORCE_CPO_HOST` dev/test override, plus `cpoOrigin()` /
 
 | Network | Range | Purpose | Used by |
 |---------|-------|---------|---------|
-| Headscale/Tailscale overlay | `100.64.0.0/10` | Secure mesh between server and ESP32 gateways | Path A (firmware `microlink`, K8s `headscale.yaml`) |
-| WireGuard Direct-Mode tunnel | `10.10.0.0/24` | Cloud VM ↔ home PC for Direct Mode (**retired 2026-07-06**) | Path B (`amphive_tunnel.conf`, `tapo_direct`) |
+| Public internet (TLS) | n/a | Gateway ↔ broker direct MQTT (`mqtt.amphive.app:8883`), TLS + per-gateway creds/ACLs | Live gateway path (`AMPHIVE_DIRECT_MQTT`) |
 | Site IoT VLAN (VLAN 20) | site-defined | Physically isolate plugs + gateway from the resident network | Product design (CPO router config) |
+| ~~Headscale/Tailscale overlay~~ | `100.64.0.0/10` | ~~Secure mesh between server and ESP32 gateways~~ — **retired 2026-07-10**, superseded by direct MQTT | Historical (firmware `microlink`, K8s `deploy/k8s/headscale.yaml`) |
+| ~~WireGuard Direct-Mode tunnel~~ | `10.10.0.0/24` | ~~Cloud VM ↔ home PC for Direct Mode~~ — **retired 2026-07-06** | Historical (`amphive_tunnel.conf`, `tapo_direct`) |
 
-These are three independent networks; the `100.64.x` overlay and the `10.10.0.x`
-tunnel are unrelated despite both being "VPNs".
+The overlay and the WireGuard Direct-Mode tunnel were two independent,
+now-retired VPNs; gateways today reach the broker directly over TLS with no
+VPN hop.
 
 ---
 
@@ -214,7 +224,10 @@ tunnel are unrelated despite both being "VPNs".
 | Frontend | React 19, React Router 6, Vite 8, hand-written CSS (glassmorphism). Razorpay via CDN. |
 | Backend | Python 3.11 (Dockerfile), FastAPI, Uvicorn, SQLAlchemy 2.0 (async), Pydantic, paho-mqtt v2, python-jose, passlib/bcrypt, razorpay, tapo. |
 | Database | PostgreSQL 15 (Docker container on the GCP VM — Cloud SQL was decommissioned 2026-06-29). **No** TimescaleDB. |
-| Messaging | Eclipse Mosquitto 2.0 (anonymous, no TLS — secured by the overlay). |
-| Overlay VPN | Headscale control plane + the custom `microlink` Tailscale client on the ESP32. |
-| Firmware | ESP-IDF (targets ESP32-S3-N16R8), FreeRTOS, `microlink`, vendored `wireguard_lwip`. |
-| Infra | Docker / Docker Compose on a GCP Compute Engine VM (`asia-south1`); K8s/K3s manifests also present but not the live deployment. |
+| Messaging | Eclipse Mosquitto 2.0, TLS on `:8883` (`mqtt.amphive.app`), per-gateway username/password + topic ACLs. Plaintext `:1883` is not host-published. |
+| Firmware | ESP-IDF (targets ESP32-C3), FreeRTOS, direct MQTT client (`AMPHIVE_DIRECT_MQTT`). |
+| Infra | Docker / Docker Compose on a GCP Compute Engine VM (`asia-south1`), Caddy for TLS termination (`amphive.app` / `cpo.amphive.app`); K8s/K3s manifests also present but not the live deployment. |
+
+**Retired:** Headscale control plane + the custom `microlink` Tailscale client
+on the ESP32, and vendored `wireguard_lwip` — both superseded by the direct-MQTT
+pivot (2026-07-10); no longer part of the live stack.

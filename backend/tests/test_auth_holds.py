@@ -624,6 +624,70 @@ async def test_legacy_null_hold_session_finalizes_with_pre_hold_behavior(factory
     assert "shortfall" in (ledger.description or "").lower()
 
 
+@pytest.mark.asyncio
+async def test_finalize_ownership_guard_rejects_wrong_user(factory, monkeypatch):
+    """A driver must not be able to finalize (stop/bill) another driver's
+    ACTIVE session: expected_user_id filters the row lookup, so calling
+    finalize_charging_session with the WRONG user's id returns None and
+    leaves the session ACTIVE and the owning user's balance/hold untouched.
+    Also: POST /api/sessions/stop (stop_charging_session) must 404 for the
+    non-owning caller rather than leaking/affecting the session."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from fastapi import HTTPException
+    from sqlalchemy import select
+
+    import backend.services.session_lifecycle as sl_mod
+    from backend import state as state_module
+    from backend.database.models import ChargingSession, SessionStatus, User
+    from backend.routers.sessions import stop_charging_session
+    from backend.schemas import SessionStopRequest
+
+    tenant_id = await _seed_tenant(factory)
+    gw = await _seed_gateway(factory, tenant_id, "gw-ownership-1")
+    plug_id = await _seed_plug(factory, gw)
+    owner_id = await _seed_user(factory, "200.00", tenant_id)
+    other_id = await _seed_user(factory, "0.00", tenant_id)
+
+    session_id = await _seed_session(
+        factory, tenant_id=tenant_id, user_id=owner_id, plug_id=plug_id,
+        status=SessionStatus.ACTIVE, hold_coins="50.00",
+        energy_kwh=2.0, rate_coins_per_kwh="5.00",
+    )
+
+    monkeypatch.setattr(
+        state_module, "mqtt_manager",
+        MagicMock(send_plug_command=MagicMock(return_value=True)),
+    )
+    monkeypatch.setattr(sl_mod, "set_plug_telemetry_interval", AsyncMock())
+    state_module.telemetry_store.start_session(plug_id)
+
+    # finalize_charging_session, called as user B, must be a no-op.
+    async with factory() as db:
+        outcome = await sl_mod.finalize_charging_session(
+            db, session_id, expected_user_id=other_id
+        )
+    assert outcome is None
+
+    async with factory() as db:
+        reloaded = (await db.execute(
+            select(ChargingSession).where(ChargingSession.id == session_id)
+        )).scalar_one()
+    assert reloaded.status == SessionStatus.ACTIVE
+
+    async with factory() as db:
+        owner = (await db.execute(select(User).where(User.id == owner_id))).scalar_one()
+    assert owner.coin_balance == Decimal("200.00")
+
+    # The router path for user B must 404, not silently succeed.
+    async with factory() as db:
+        with pytest.raises(HTTPException) as exc_info:
+            await stop_charging_session(
+                SessionStopRequest(session_id=session_id), _fake_user(other_id), db
+            )
+    assert exc_info.value.status_code == 404
+
+
 # --- 4. Auto-stop threshold uses the hold ----------------------------------------
 
 @pytest.mark.asyncio

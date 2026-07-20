@@ -2,14 +2,16 @@
 
 *The exact topic/payload contract between the FastAPI backend
 (`backend/services/mqtt_manager.py`) and the ESP32 gateway firmware
-(`firmware/main/main.c`). Verified 2026-06-20 — firmware and backend agree.*
+(`firmware/main/main.c`). Verified 2026-07-20 — firmware and backend agree.*
 
 - **Broker:** Eclipse Mosquitto 2.0. Two listeners:
-  - **`mqtts://8.231.81.12:8883` — PUBLIC, the primary transport** (2026-07-10,
-    "direct MQTT"): devices/agents dial **outbound** TLS to the VM's static IP,
-    validating the broker cert (SANs carry both IPs) against the embedded
-    AmpHive CA. Outbound-only traversal — works behind symmetric NAT/CGNAT with
-    no overlay, STUN, or port-forwards.
+  - **`mqtts://mqtt.amphive.app:8883` — PUBLIC, the primary transport** (2026-07-10,
+    "direct MQTT"; DNS-named since fw 2.3.0, 2026-07-20): devices/agents dial
+    **outbound** TLS to this hostname, validating the broker cert (SANs carry
+    the DNS name and the legacy VM IP) against the embedded AmpHive CA.
+    Outbound-only traversal — works behind symmetric NAT/CGNAT with no
+    overlay, STUN, or port-forwards. The legacy IP `8.231.81.12:8883` remains
+    valid (retained IP SAN) for gateways on fw < 2.3.0 that still hard-code it.
   - **`mqtt://100.87.241.70:1883` — overlay-only, legacy/transition**: reachable
     only over the WireGuard overlay; also the backend's path (internal Docker
     network). Retire per-device once migrated to 8883.
@@ -22,7 +24,10 @@
   `mqtt_user`/`mqtt_pwd` — see [SECURITY.md §3](SECURITY.md).
 - **Backend client id:** `amphive_backend_server` (paho-mqtt v2, `VERSION2`).
 - **Gateway broker URL (firmware):** `AMPHIVE_DIRECT_MQTT=1` (default, fw ≥
-  1.3.0) hard-codes `mqtts://8.231.81.12:8883`, started right after Wi-Fi.
+  1.3.0) connects to the public broker, started right after Wi-Fi. As of fw
+  2.3.0 the default is the DNS name `mqtts://mqtt.amphive.app:8883` (un-pinned
+  from the IP, with NVS self-migration for devices upgrading from the old
+  hard-coded `mqtts://8.231.81.12:8883`); fw 1.3.0–2.2.x hard-code the IP form.
   The legacy overlay build (`AMPHIVE_DIRECT_MQTT=0`) uses
   `mqtt://100.87.241.70:1883`, started lazily once the overlay reaches
   `CONNECTED`/`MONITORING`.
@@ -252,9 +257,10 @@ LWT/`offline` message is published by the *gateway* firmware.
 ## Firmware side (summary)
 
 The ESP32 connects **directly over TLS to the public broker**
-(`mqtts://8.231.81.12:8883`, firmware ≥ 1.3.0, `AMPHIVE_DIRECT_MQTT=1`) as
+(`mqtts://mqtt.amphive.app:8883` as of fw 2.3.0, legacy `mqtts://8.231.81.12:8883`
+on fw 1.3.0–2.2.x, `AMPHIVE_DIRECT_MQTT=1`) as
 soon as Wi-Fi is up — no overlay; esp-mqtt owns reconnection — validating the
-broker cert against the embedded self-signed CA (chain + IP SAN; dates
+broker cert against the embedded self-signed CA (chain + DNS/IP SANs; dates
 unchecked, no clock needed). (The legacy `AMPHIVE_DIRECT_MQTT=0` build keeps
 the microlink overlay + plaintext 1883 for comparison/rollback.) It publishes
 `online` status (retained, with its `fw` version) + subscribes to its commands

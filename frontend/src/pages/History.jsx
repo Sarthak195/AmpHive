@@ -119,8 +119,8 @@ export default function History() {
                   <tr key={s.id}>
                     <td>{formatDate(s.started_at)}</td>
                     <td>{s.plug_id}</td>
-                    <td className="num">{s.energy_kwh.toFixed(3)}</td>
-                    <td className="num" style={{ color: 'var(--color-accent)' }}>{s.coins_spent.toFixed(2)}</td>
+                    <td className="num">{Number(s.energy_kwh ?? 0).toFixed(3)}</td>
+                    <td className="num" style={{ color: 'var(--color-accent)' }}>{Number(s.coins_spent ?? 0).toFixed(2)}</td>
                     <td>
                       <span className={`badge ${s.status === 'completed' || s.status === 'paid' ? 'badge-success' : 'badge-warning'}`}>
                         {s.status}
@@ -175,10 +175,10 @@ export default function History() {
                       fontWeight: 600,
                       color: credit ? 'var(--color-success)' : 'var(--color-danger)',
                     }}>
-                      {credit ? '+' : ''}{tx.amount.toFixed(2)}
+                      {credit ? '+' : ''}{Number(tx.amount ?? 0).toFixed(2)}
                     </td>
                     <td className="num" style={{ textAlign: 'right', color: 'var(--color-text-secondary)' }}>
-                      {tx.balance_after.toFixed(2)}
+                      {Number(tx.balance_after ?? 0).toFixed(2)}
                     </td>
                   </tr>
                 );

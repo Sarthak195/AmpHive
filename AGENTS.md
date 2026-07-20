@@ -10,20 +10,21 @@ actually works vs. stub/aspirational) and [docs/SECURITY.md](docs/SECURITY.md)
 
 A shared EV-charging PaaS that turns off-the-shelf TP-Link Tapo P110 smart plugs
 into a monetizable charging network: a FastAPI backend + React SPA in the cloud,
-ESP32-S3 gateways at each site, connected over a Headscale/WireGuard overlay.
-There are **two operating modes** — Path A (ESP32 + MQTT, the product design and,
-as of 2026-07-06, the operating path) and Path B (Direct Mode over WireGuard,
-**retired 2026-07-06** — the tunnel is no longer used and `DIRECT_MODE=false`; the
-`tapo_direct` / `/direct/*` code remains but is dormant). See
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+ESP32-C3 gateways at each site, connected by **direct MQTT** — gateways dial
+outbound to `mqtts://mqtt.amphive.app:8883` (public), authenticated by TLS plus
+per-gateway username/password and topic ACLs. Firmware builds with
+`AMPHIVE_DIRECT_MQTT=1`; there is no VPN/overlay hop. (A Headscale/WireGuard
+overlay and a separate "Direct Mode" WireGuard-relay path both existed earlier
+in the project and are retired; the `tapo_direct` / `/direct/*` backend code
+remains but is dormant.) See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Where things live
 
 | Area | Path | Reference |
 |------|------|-----------|
-| Backend (FastAPI, all routes in `main.py`) | `backend/` | [API_REFERENCE](docs/API_REFERENCE.md) · [DATA_MODEL](docs/DATA_MODEL.md) |
+| Backend (FastAPI, routes in `backend/routers/*.py`) | `backend/` | [API_REFERENCE](docs/API_REFERENCE.md) · [DATA_MODEL](docs/DATA_MODEL.md) |
 | Frontend (React 19 + Vite, driver + CPO portal) | `frontend/` | [ARCHITECTURE](docs/ARCHITECTURE.md#4-frontend) |
-| Firmware (ESP-IDF, ESP32-S3) | `firmware/` | [FIRMWARE](docs/FIRMWARE.md) |
+| Firmware (ESP-IDF, ESP32-C3) | `firmware/` | [FIRMWARE](docs/FIRMWARE.md) |
 | Deploy (compose, K8s, configs, runbooks) | `deploy/` | [DEPLOYMENT](docs/DEPLOYMENT.md) |
 | Ops helper scripts (VM start/stop, remote logs) | `scripts/` | [DEPLOYMENT](docs/DEPLOYMENT.md#helper-scripts-scripts) |
 | Direct-Mode Tapo helpers (run on home PC) | `tools/` | [DEPLOYMENT](docs/DEPLOYMENT.md) |
@@ -42,11 +43,12 @@ as of 2026-07-06, the operating path) and Path B (Direct Mode over WireGuard,
 2. **Deploy via the script.** Backend/frontend changes ship through
    `deploy/scripts/deploy.ps1`, which uploads code and rebuilds containers on the
    VM. See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
-3. **ESP32 stack sizing.** The `microlink` VPN task needs a large stack (~32 KB)
-   allocated in external PSRAM; keep tasks separated to avoid internal-DRAM
-   crashes.
-4. **Headscale config validation.** Changes must satisfy both the nested
-   `noise.private_key_path` and `dns.nameservers` blocks.
+3. *(Historical, no longer applies)* ESP32 stack sizing for the `microlink` VPN
+   task's large PSRAM-backed stack — that overlay client is retired and
+   compiled out (the esp32c3 target has no external PSRAM anyway).
+4. *(Historical, no longer applies)* Headscale config validation — the
+   Headscale/WireGuard overlay is retired; there is no Headscale config left
+   to validate.
 5. **Secrets.** Do not commit new secrets; several already-committed ones need
    rotation — see [docs/SECURITY.md](docs/SECURITY.md). App `.env` files are
    gitignored.
