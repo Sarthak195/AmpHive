@@ -19,6 +19,8 @@ import Login from './pages/Login';
 import Groups from './pages/Groups';
 import History from './pages/History';
 import PublicMap from './pages/PublicMap';
+import ForgotPassword from './pages/ForgotPassword';
+import ResetPassword from './pages/ResetPassword';
 import { ProtectedRoute, CpoProtectedRoute } from './components/ProtectedRoutes';
 
 // CPO Admin Dashboard pages
@@ -45,6 +47,10 @@ function App() {
           {/* Public routes */}
           <Route path="/" element={<Home />} />
           <Route path="/login" element={<Login />} />
+          {/* Password reset — public: request a reset email, then land here
+              from the emailed /reset-password?token=... link. */}
+          <Route path="/forgot-password" element={<ForgotPassword />} />
+          <Route path="/reset-password" element={<ResetPassword />} />
           {/* Public charger-discovery map — browse nearby public chargers
               without an account (starting a charge still routes to sign-in). */}
           <Route path="/map" element={<PublicMap />} />

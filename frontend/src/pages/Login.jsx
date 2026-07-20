@@ -9,7 +9,7 @@
  */
 
 import { useState } from 'react';
-import { useNavigate, useLocation } from 'react-router-dom';
+import { Link, useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 
 const Login = () => {
@@ -122,6 +122,15 @@ const Login = () => {
               autoComplete={isRegister ? 'new-password' : 'current-password'}
             />
           </div>
+
+          {/* Forgot password (sign-in mode only) */}
+          {!isRegister && (
+            <p style={{ textAlign: 'right', fontSize: '0.9rem', marginTop: '-0.5rem' }}>
+              <Link to="/forgot-password" style={{ color: 'var(--color-primary)', fontWeight: 600 }}>
+                Forgot password?
+              </Link>
+            </p>
+          )}
 
           {/* Error Message */}
           {error && (

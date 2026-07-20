@@ -1,9 +1,12 @@
 """
 Auth routes — moved verbatim from main.py (2026-07-07, TD#7 split).
 """
+import asyncio
+import hashlib
 import json
 import logging
 import os
+import secrets
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
@@ -16,17 +19,17 @@ from backend import state
 from backend.database.db import async_session_factory, get_db
 from backend.database.models import (
     ChargerGroup, ChargingSession, Gateway, GatewayStatus, GroupMembership,
-    LedgerTransaction, Plug, PlugStatus, SessionStatus, TelemetryReading,
-    Tenant, TransactionType, User, UserRole,
+    LedgerTransaction, PasswordResetToken, Plug, PlugStatus, SessionStatus,
+    TelemetryReading, Tenant, TransactionType, User, UserRole,
 )
 from backend.schemas import (
     AuthResponse, CpoGatewayCreateRequest, CpoGroupCreateRequest,
     CpoGroupUpdateRequest, CpoPlugCreateRequest, CpoPlugUpdateRequest,
     CpoSetupRequest, CreateOrderRequest, CreateOrderResponse,
-    DirectPlugRequest, GatewayRegisterRequest, GroupResponse,
-    JoinGroupRequest, LoginRequest, PlugRegisterRequest, PlugResponse,
-    RegisterRequest, SessionStartRequest, SessionStopRequest, UserResponse,
-    VerifyPaymentRequest,
+    DirectPlugRequest, ForgotPasswordRequest, GatewayRegisterRequest,
+    GroupResponse, JoinGroupRequest, LoginRequest, PlugRegisterRequest,
+    PlugResponse, RegisterRequest, ResetPasswordRequest, SessionStartRequest,
+    SessionStopRequest, UserResponse, VerifyPaymentRequest,
 )
 from backend.services import payments as payment_service
 from backend.services.auth import (
@@ -34,8 +37,10 @@ from backend.services.auth import (
     hash_password, verify_password,
 )
 from backend.services.money import ZERO_MONEY, to_money
+from backend.services import email as email_service
 from backend.services.rate_limit import (
-    login_rate_limiter, rate_limit_dependency, register_rate_limiter,
+    forgot_password_rate_limiter, login_rate_limiter, rate_limit_dependency,
+    register_rate_limiter, reset_password_rate_limiter,
 )
 from backend.services.rbac import require_role
 from backend.services.session_lifecycle import (
@@ -188,5 +193,144 @@ async def logout(
         extra={"user_id": user.id, "email": user.email, "token_version": new_epoch},
     )
     return {"status": "logged_out"}
+
+
+# ===========================================================================
+# Password reset ("forgot password")
+# ===========================================================================
+
+# How long an emailed reset link stays valid. Short on purpose — the token is
+# a bearer credential sitting in an inbox.
+RESET_TOKEN_TTL_MIN = int(os.getenv("RESET_TOKEN_TTL_MIN", "30"))
+
+# The response body both outcomes of forgot-password share (enumeration-safe).
+_FORGOT_RESPONSE = {
+    "status": "ok",
+    "detail": "If an account exists for that email, a password reset link has been sent.",
+}
+
+
+def _hash_reset_token(token: str) -> str:
+    """SHA-256 hex digest — what password_reset_tokens.token_hash stores."""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+@router.post(
+    "/api/auth/forgot-password",
+    dependencies=[Depends(rate_limit_dependency(forgot_password_rate_limiter, "password reset"))],
+)
+async def forgot_password(req: ForgotPasswordRequest, db: AsyncSession = Depends(get_db)):
+    """
+    Issue a single-use, time-boxed password-reset token and email the link.
+
+    ALWAYS returns the same generic 200, whether or not the email matches an
+    account — no account enumeration (unlike /register, which legitimately
+    reveals duplicates, this endpoint takes arbitrary input from anyone).
+    Rate-limited per client IP (FORGOT_PASSWORD_RATE_LIMIT) since each allowed
+    call with a real account triggers an outbound email.
+
+    Only the SHA-256 digest of the token is stored (PasswordResetToken);
+    outstanding unused tokens for the user are voided first, so at most one
+    live link exists per account. Delivery goes through services/email.py:
+    SMTP when SMTP_HOST is configured, otherwise the link is logged at
+    WARNING (console fallback).
+    """
+    result = await db.execute(select(User).where(User.email == req.email))
+    user = result.scalar_one_or_none()
+    if user is None:
+        return _FORGOT_RESPONSE
+
+    now = datetime.now(timezone.utc)
+    token = secrets.token_urlsafe(32)
+    # Void any outstanding unused tokens — a re-request supersedes old links.
+    await db.execute(
+        update(PasswordResetToken)
+        .where(
+            PasswordResetToken.user_id == user.id,
+            PasswordResetToken.used_at.is_(None),
+        )
+        .values(used_at=now)
+        .execution_options(synchronize_session=False)
+    )
+    db.add(PasswordResetToken(
+        user_id=user.id,
+        token_hash=_hash_reset_token(token),
+        expires_at=now + timedelta(minutes=RESET_TOKEN_TTL_MIN),
+    ))
+    await db.commit()
+
+    reset_link = f"{email_service.frontend_origin()}/reset-password?token={token}"
+    # Fire-and-forget: awaiting SMTP here would make known-account requests
+    # measurably slower than the early return above (timing enumeration
+    # oracle). send_password_reset never raises (SMTP failures are logged).
+    asyncio.get_running_loop().create_task(
+        email_service.send_password_reset(user.email, reset_link, RESET_TOKEN_TTL_MIN)
+    )
+    logger.info(
+        "Password reset token issued",
+        extra={"user_id": user.id, "email": user.email},
+    )
+    return _FORGOT_RESPONSE
+
+
+@router.post(
+    "/api/auth/reset-password",
+    dependencies=[Depends(rate_limit_dependency(reset_password_rate_limiter, "password reset"))],
+)
+async def reset_password(req: ResetPasswordRequest, db: AsyncSession = Depends(get_db)):
+    """
+    Consume a reset token: set the new password (same 8-72 rule as
+    registration, enforced by ResetPasswordRequest) and revoke every existing
+    session by bumping users.token_version (DB-side atomic increment — same
+    lost-update rationale as /logout). The token row is stamped used_at, so a
+    second submission of the same link fails. Unknown, expired, and
+    already-used tokens all get the same 400 (no oracle on which it was).
+    Rate-limited per client IP (RESET_PASSWORD_RATE_LIMIT).
+    """
+    now = datetime.now(timezone.utc)
+    result = await db.execute(
+        select(PasswordResetToken).where(
+            PasswordResetToken.token_hash == _hash_reset_token(req.token)
+        )
+    )
+    prt = result.scalar_one_or_none()
+    if prt is None or prt.used_at is not None or prt.expires_at <= now:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid or expired reset link. Please request a new one.",
+        )
+
+    # Single-use, race-safe: the conditional UPDATE is the consumption point —
+    # two concurrent submissions of the same token both pass the SELECT check
+    # above, but only one can win this row (WHERE used_at IS NULL).
+    consumed = await db.execute(
+        update(PasswordResetToken)
+        .where(
+            PasswordResetToken.id == prt.id,
+            PasswordResetToken.used_at.is_(None),
+        )
+        .values(used_at=now)
+        .execution_options(synchronize_session=False)
+    )
+    if consumed.rowcount == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid or expired reset link. Please request a new one.",
+        )
+    await db.execute(
+        update(User)
+        .where(User.id == prt.user_id)
+        .values(
+            hashed_password=hash_password(req.password),
+            token_version=User.token_version + 1,  # revoke all sessions
+        )
+        .execution_options(synchronize_session=False)
+    )
+    await db.commit()
+    logger.info(
+        "Password reset completed (all sessions revoked)",
+        extra={"user_id": prt.user_id},
+    )
+    return {"status": "password_reset"}
 
 

@@ -27,6 +27,17 @@ class LoginRequest(BaseModel):
     email: str
     password: str
 
+class ForgotPasswordRequest(BaseModel):
+    # Plain `str` (not EmailStr) on purpose: the endpoint answers the same
+    # generic 200 for ANY input (no account enumeration), and login is also a
+    # plain str so pre-EmailStr accounts can recover too.
+    email: str
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    # Same 8-72 rule as RegisterRequest (bcrypt truncates at 72 bytes).
+    password: str = Field(min_length=8, max_length=72)
+
 class AuthResponse(BaseModel):
     token: str
     user: dict

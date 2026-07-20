@@ -7,8 +7,10 @@ on restart, which is acceptable for brute-force / enumeration protection (an
 attacker cannot trigger restarts).
 
 Rules are env-configurable as "<attempts>/<window seconds>":
-  LOGIN_RATE_LIMIT    (default 10/60   — 10 attempts per minute per IP)
-  REGISTER_RATE_LIMIT (default 10/3600 — 10 registrations per hour per IP)
+  LOGIN_RATE_LIMIT           (default 10/60   — 10 attempts per minute per IP)
+  REGISTER_RATE_LIMIT        (default 10/3600 — 10 registrations per hour per IP)
+  FORGOT_PASSWORD_RATE_LIMIT (default 5/3600  — 5 reset emails per hour per IP)
+  RESET_PASSWORD_RATE_LIMIT  (default 10/3600 — 10 token submissions per hour per IP)
 """
 import logging
 import os
@@ -119,6 +121,11 @@ def rate_limit_dependency(limiter: SlidingWindowRateLimiter, action: str):
 
 login_rate_limiter = SlidingWindowRateLimiter(*_rule_from_env("LOGIN_RATE_LIMIT", "10/60"))
 register_rate_limiter = SlidingWindowRateLimiter(*_rule_from_env("REGISTER_RATE_LIMIT", "10/3600"))
+# Password reset: forgot-password is tighter than login (each allowed call can
+# trigger an outbound email), reset-password bounds online token guessing —
+# though the 256-bit token makes brute force academic anyway.
+forgot_password_rate_limiter = SlidingWindowRateLimiter(*_rule_from_env("FORGOT_PASSWORD_RATE_LIMIT", "5/3600"))
+reset_password_rate_limiter = SlidingWindowRateLimiter(*_rule_from_env("RESET_PASSWORD_RATE_LIMIT", "10/3600"))
 # Public, unauthenticated discovery map (GET /api/plugs/public). Generous — a
 # browsing visitor may refresh/poll live availability — but bounded so the
 # open endpoint can't be hammered to enumerate/scrape or exhaust the DB.

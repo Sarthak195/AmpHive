@@ -251,17 +251,23 @@ been fixed by the 2026-07-08…11 work — see the shipped sections below).*
 
 ## Account & auth features (backlog)
 
-- [ ] **Password reset ("forgot password") flow.** Auth today is email + bcrypt
-      password (`routers/auth.py`) with **no self-service recovery** — a driver
-      who forgets their password is locked out until an admin resets it directly
-      in the DB. Add: `POST /api/auth/forgot-password` issues a single-use,
-      time-boxed reset token (emailed link); `POST /api/auth/reset-password`
-      consumes it to set a new password and bumps the user's `token_version`
-      (revokes existing sessions — see the JWT-revocation item). Rate-limit both
-      via `services/rate_limit.py`. Frontend: a "Forgot password?" link on
-      `Login` + a reset page. **Blocked on an email/SMTP provider** — the same
-      dependency that deferred email notifications (see the driver-notifications
-      item). (No security §; new capability.)
+- [x] **Password reset ("forgot password") flow.** Done 2026-07-20 —
+      `POST /api/auth/forgot-password` issues a single-use, time-boxed token
+      (SHA-256 digest in the new `password_reset_tokens` table, migration
+      `0023`; `RESET_TOKEN_TTL_MIN`, default 30 min; always the same generic
+      200 — no enumeration) and `POST /api/auth/reset-password` consumes it:
+      same 8-72 password rule as registration, bcrypt rehash, `token_version`
+      bump (revokes all sessions), token stamped used. Both rate-limited via
+      `services/rate_limit.py` (`FORGOT_PASSWORD_RATE_LIMIT` 5/3600,
+      `RESET_PASSWORD_RATE_LIMIT` 10/3600). Email via the new pluggable
+      `services/email.py`: STARTTLS `smtplib` when `SMTP_HOST` / `SMTP_PORT` /
+      `SMTP_USER` / `SMTP_PASSWORD` / `SMTP_FROM` are set, otherwise the
+      `FRONTEND_ORIGIN/reset-password?token=...` link is logged at WARNING
+      (console fallback — the flow works without a provider; plug in real
+      SMTP creds when one is chosen). Frontend: "Forgot password?" link on
+      `Login` + `/forgot-password` and `/reset-password` pages. Tests:
+      `backend/tests/test_password_reset.py` + the two page suites. (No
+      security §; new capability.)
 - [ ] **Google login ("Sign in with Google" / OAuth2).** Social login to cut
       onboarding friction. Add a Google OAuth2 authorization-code flow:
       `GET /api/auth/google/login` → Google consent → `GET /api/auth/google/callback`
