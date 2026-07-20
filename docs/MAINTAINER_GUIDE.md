@@ -10,17 +10,19 @@ is the operational "how do I actually work on and run this thing" layer.*
 
 AmpHive turns TP-Link Tapo P110 smart plugs into a billed, shared EV-charging
 network. A driver enters a **Plug ID** in a React app → FastAPI authorizes and
-bills a prepaid **coin** wallet → a command reaches the plug one of two ways:
+bills a prepaid **coin** wallet → a command reaches the plug via:
 
-- **Path A (product design — now the operating path):** backend → MQTT →
-  **ESP32-S3 gateway** (over a Headscale/WireGuard overlay) → local Tapo plug.
-  As of 2026-07-06 this is what the deployment runs (`DIRECT_MODE=false`); the
-  on-device Tapo driver is KLAP v2.
-- **Path B (Direct Mode over WireGuard — retired 2026-07-06):** backend called a
-  **relay/tapo lib** over a WireGuard tunnel to a plug on the developer's home LAN.
-  No longer used; the `tapo_direct` / `/direct/*` code remains but is dormant.
+- **Direct MQTT (the operating path since 2026-07-10):** backend → MQTT →
+  **ESP32-C3 gateway**, which dials *outbound* to `mqtts://mqtt.amphive.app:8883`
+  (public), authenticated by TLS plus per-gateway username/password and topic
+  ACLs → local Tapo plug (on-device driver is KLAP v2). Firmware builds with
+  `AMPHIVE_DIRECT_MQTT=1`; there is no VPN/overlay hop on devices.
 
-Everything cloud-side is identical between the two; only the last hop differs.
+*(Historical: two earlier paths are retired — a Headscale/WireGuard overlay
+that gateways once tunneled through, and a separate "Direct Mode" that had the
+backend call a relay/tapo lib over a WireGuard tunnel to a plug on the
+developer's home LAN. The `tapo_direct` / `/direct/*` backend code remains but
+is dormant.)
 
 ## 2. Where things live
 
@@ -38,7 +40,7 @@ Everything cloud-side is identical between the two; only the last hop differs.
 | DB tables | `backend/database/models.py` (**runtime source of truth**, not the `.sql` files) |
 | Driver UI | `frontend/src/pages/*`, `components/*`, `contexts/*` |
 | CPO operator portal | `frontend/src/pages/cpo/*` |
-| ESP32 firmware | `firmware/main/*.c` (app) + `firmware/components/microlink/*` (overlay client) |
+| ESP32-C3 firmware | `firmware/main/*.c` (app); the old `firmware/components/microlink/*` overlay client is retired/compiled out |
 | Deploy | `deploy/scripts/deploy.ps1`, `deploy/docker/docker-compose.prod.yml` |
 
 ## 3. Golden rules (from AGENTS.md — do not break these)
@@ -98,6 +100,12 @@ commands you run against the VM there.**
   never edit `0001_baseline`). Startup runs `upgrade head` automatically and
   stamps pre-Alembic databases. The old `_INPLACE_UPGRADES` and `.sql` files
   are gone; CI fails if the migrations drift from the models.
+- **Parallel-branch migration renumbering:** revisions are sequential,
+  zero-padded (`00NN_...`), and must form a single linear head — no forked
+  history. When two branches add migrations in parallel, the branch that
+  merges *second* renumbers its revision (and `down_revision`) to sit after
+  the first branch's, before merging. Run `test_migrations.py` to confirm a
+  single linear chain before merging.
 - **Money is `NUMERIC(12,2)`/Decimal** (since 2026-07-06); route all wallet
   math through `services/money.to_money`, never raw floats.
 - **MQTT requires authentication** (since 2026-07-07): broker credentials come

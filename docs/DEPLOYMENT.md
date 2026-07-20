@@ -1,6 +1,6 @@
 # AmpHive — Deployment
 
-*Verified against `deploy/`, `scripts/`, and `tools/` on 2026-07-02.*
+*Verified against `deploy/`, `scripts/`, and `tools/` on 2026-07-20.*
 
 The deployment model is **Docker Compose on a GCP Compute Engine VM**.
 (The K3s manifests under `deploy/k8s/` were **retired 2026-07-07** — see
@@ -57,7 +57,7 @@ file omits all secrets, so Direct Mode / Razorpay won't work there.
    MQTT credentials) and set
    `DATABASE_URL=postgresql+asyncpg://postgres:<POSTGRES_PASSWORD>@db:5432/amphive`
    (the hostname `db` resolves within the Docker Compose network). Reads
-   `CADDY_DOMAIN` (defaults to `amphive.duckdns.org` if missing) and optional
+   `CADDY_DOMAIN` (defaults to `amphive.app` if missing) and optional
    `ACME_EMAIL` for the TLS front door.
 2. `tar` up `backend/` + `frontend/` (excluding node_modules/.venv/.git) and
    `gcloud compute scp` the tarball to `~/amphive/`.
@@ -71,8 +71,13 @@ file omits all secrets, so Direct Mode / Razorpay won't work there.
 **Total time:** ~1–2 minutes (no Cloud SQL polling wait). First TLS deploy also
 needs ~a minute for Caddy's initial Let's Encrypt issuance (requires tcp:80 +
 tcp:443 open — firewall rules `allow-amphive-ports` / `allow-amphive-https` —
-and `CADDY_DOMAIN` resolving to the VM's static IP; the DuckDNS updater cron on
-the VM keeps `amphive.duckdns.org` current).
+and `CADDY_DOMAIN` resolving to the VM's static IP). **DNS (as of 2026-07-20):**
+`amphive.app` (driver) and `cpo.amphive.app` (CPO operator portal) are real,
+statically-configured A records at the domain registrar pointing at the VM's
+static IP; there's also an `mqtt.amphive.app` A record for the direct-MQTT
+broker endpoint (§2). DuckDNS is **retired** — no dynamic-DNS updater cron
+runs on the VM anymore, and `scripts/setup_duckdns.sh` is unused/retired
+(kept only as reference; see [SECURITY.md](SECURITY.md)).
 
 ### One-time VM bootstrap — `deploy/scripts/startup.sh`
 
@@ -93,7 +98,7 @@ run from anywhere.
 | `scripts/stop-remote-servers.bat` | SSH `docker-compose down`. |
 | `scripts/restart-remote-servers.bat` | SSH `docker-compose restart`. |
 | `scripts/logs-remote-backend.bat` | SSH `docker logs -f amphive-backend`. |
-| `scripts/setup_duckdns.sh` | DuckDNS dynamic-DNS updater (⚠ commits a live token — see [SECURITY.md](SECURITY.md)). |
+| `scripts/setup_duckdns.sh` | **Retired 2026-07-20** — DuckDNS dynamic-DNS updater, superseded by the real `amphive.app` domain (⚠ commits a live token — see [SECURITY.md](SECURITY.md)). |
 
 ### Database Seeding
 
@@ -124,12 +129,13 @@ Two listeners, both authenticated (`allow_anonymous false` + passwd file) and
 topic-ACL'd (per-gateway accounts are scoped to `amphive/gateways/<id>/#`):
 
 - **8883 (TLS, public)** — the primary **direct-MQTT** path: gateways/agents dial
-  outbound `mqtts://8.231.81.12:8883` and validate the broker cert against the
-  embedded AmpHive CA. Certs live in `~/amphive/mqtt-certs` (shipped by
-  `deploy.ps1`).
-- **1883 (plaintext)** — backend over the internal Docker network + legacy/
-  transition path, published only on the overlay IP (`MQTT_BIND_IP`). To be
-  bound internal-only once no gateway needs it.
+  outbound `mqtts://mqtt.amphive.app:8883` (DNS name, un-pinned from the raw
+  VM IP as of fw 2.3.0) and validate the broker cert against the embedded
+  AmpHive CA (the broker cert carries an `mqtt.amphive.app` DNS SAN). Certs
+  live in `~/amphive/mqtt-certs` (shipped by `deploy.ps1`).
+- **1883 (plaintext)** — backend over the internal Docker network only; **not
+  host-published** as of 2026-07-20 (no overlay/VPN network exists to bind it
+  to either — see [SECURITY.md](SECURITY.md)).
 
 The passwd and ACL files are generated on the VM by `deploy.ps1`; per-gateway
 accounts are added with `deploy/scripts/add_gateway_user.ps1`. Full history and

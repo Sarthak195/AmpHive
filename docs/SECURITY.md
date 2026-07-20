@@ -1,6 +1,6 @@
 # AmpHive — Security Notes
 
-*Verified against source on 2026-07-02. This is a developer-facing inventory of
+*Verified against source on 2026-07-20. This is a developer-facing inventory of
 known security gaps, not a formal audit. Items are roughly ordered by severity.*
 
 > Several real secrets were committed to git history. **As of 2026-07-06 all four
@@ -94,20 +94,17 @@ BFG + force-push) to purge the dead values entirely.
   reaches the API via the frontend nginx proxy, so nothing public needed it —
   :8000 stays published for VM-local debugging over SSH), and **HSTS**
   (`Strict-Transport-Security: max-age=31536000`) added to the generated
-  Caddyfile's domain block. **Still remaining:** replace DuckDNS with a real
-  domain (proven SPOF — see §6), and only *then* flip bare-IP serve-mode to
-  a redirect (flipping while still on DuckDNS would re-create the outage
-  mode the serve fallback was built to survive) and trim the plain-http
-  origins from the CORS/Socket.io allowlists.
-- **MQTT broker** — *largely closed as of 2026-07-10.* It *used* to be
+  Caddyfile's domain block. **[Resolved 2026-07-20]** DuckDNS replaced with a
+  real domain — `amphive.app` / `cpo.amphive.app` are live (see §6); the CORS
+  / Socket.io allowlists have also been trimmed of the raw-IP origins.
+- **MQTT broker** — *closed as of 2026-07-20.* It *used* to be
   anonymous and reachable on **1883 from `0.0.0.0/0`** — anyone could
   publish/subscribe, send plug `ON`/`OFF`, and **forge telemetry that
   feeds billing**. Since then: public exposure closed 2026-07-06, auth
   enforced 2026-07-07, TLS listener added 2026-07-08, and the public **8883
   direct-MQTT path** hardened with per-gateway credentials + topic ACLs
-  2026-07-10 (details below). Remaining: the plaintext 1883 listener stays
-  up (overlay/backend-internal, legacy/transition only) until every legacy
-  client is confirmed off it.
+  2026-07-10 (details below). **[Resolved 2026-07-20]** the plaintext 1883
+  listener is no longer host-published; direct-MQTT gateways use 8883 only.
   - [Done 2026-07-06] MQTT now binds to the VM overlay IP `100.87.241.70`
     (`MQTT_BIND_IP` in `.env`), and the GCP firewall rule was restricted to
     tcp:80 + tcp:8000 — **1883 is no longer publicly reachable**. The ESP32
@@ -197,10 +194,12 @@ BFG + force-push) to purge the dead values entirely.
   (once per episode) as a **critical `UNAUTHORIZED_ON` event** surfaced to the
   operator (`gateway_events` table → `GET /api/cpo/events`) — a defense
   against out-of-band plug activation.
-- [Fixed + deployed 2026-07-06] **CORS** is restricted to an explicit allowlist
-  (localhost, `amphive.duckdns.org`, VM IP; http+https) with the wildcard removed,
-  in `backend/main.py:187`. Verified in prod: an allowed origin is echoed, a
-  foreign origin gets no `Access-Control-Allow-Origin` header.
+- [Fixed + deployed 2026-07-06, **domain + allowlist updated 2026-07-20**]
+  **CORS** is restricted to an explicit allowlist (localhost, `amphive.app` /
+  `cpo.amphive.app`; the raw-IP/DuckDNS origins have been trimmed) with the
+  wildcard removed, in `backend/main.py:187`. Verified in prod: an allowed
+  origin is echoed, a foreign origin gets no `Access-Control-Allow-Origin`
+  header.
 - **`/api/payments/webhook`** is unauthenticated by design but HMAC-gated. It now
   auto-credits coins on `payment.captured`; abuse via replay is mitigated by the
   HMAC signature check plus idempotency on `razorpay_payment_id`, but a leaked
@@ -495,8 +494,9 @@ Status — open items and recently closed:
       See §3 and `deploy/docs/web_tls_rollout.md`.
 - [x] ~~Drop tcp:8000 from `allow-amphive-ports`; add HSTS~~ **Done
       2026-07-11** (`allow-amphive-ports` is tcp:80-only now; HSTS
-      max-age=31536000 in the generated Caddyfile). Still open: replace
-      DuckDNS with a real domain (proven SPOF — §3/§6), then flip bare-IP
+      max-age=31536000 in the generated Caddyfile).
+- [x] Replace DuckDNS with a real domain (2026-07-20) — `amphive.app` /
+      `cpo.amphive.app` are live; DuckDNS retired. Still open: flip bare-IP
       serve-mode to a redirect.
 - [x] **Rotate** WireGuard keys, DuckDNS token, Tapo & DB passwords at the source
       (2026-07-06). Dead old values remain in git history — *optional* scrub.
@@ -510,8 +510,8 @@ Status — open items and recently closed:
       strong key is set; the backend falls back to an ephemeral key elsewhere.
 - [x] MQTT bound to the overlay IP + public 1883 firewall rule dropped (2026-07-06).
 - [x] CORS restricted to an allowlist in `backend/main.py` (2026-07-06, deployed).
-- [ ] MQTT broker **TLS** rollout completion: OTA every gateway to ≥ 1.2.0
-      (mqtts://8883), then bind plaintext 1883 internal-only (see §3).
+- [x] MQTT broker **TLS** rollout completion (2026-07-20): all gateways on
+      direct-MQTT/8883; plaintext 1883 no longer host-published (see §3).
 - [x] DB-level non-negative-balance CHECK (2026-07-07) — Alembic
       `0002_wallet_non_negative` adds `ck_users_coin_balance_non_negative`
       (see §5).

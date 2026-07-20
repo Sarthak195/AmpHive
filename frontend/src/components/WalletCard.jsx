@@ -71,7 +71,7 @@ const WalletCard = () => {
             color: 'var(--color-accent)',
             lineHeight: 1,
           }}>
-            {balance.toFixed(2)}
+            {Number(balance ?? 0).toFixed(2)}
           </span>
           <span style={{
             fontSize: '1.1rem',

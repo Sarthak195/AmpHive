@@ -167,7 +167,7 @@ async def create_payment_order(
     if req.amount_inr > 10000:
         raise HTTPException(status_code=400, detail="Maximum top-up amount is ₹10,000.")
 
-    order = payment_service.create_order(req.amount_inr, user.id)
+    order = await asyncio.to_thread(payment_service.create_order, req.amount_inr, user.id)
     if order is None:
         raise HTTPException(
             status_code=503,

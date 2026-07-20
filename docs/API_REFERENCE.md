@@ -3,7 +3,7 @@
 *Verified against `backend/` on 2026-07-02; endpoint list refreshed 2026-07-10.*
 
 Routes live in `backend/routers/*.py` (`{auth,groups,plugs,sessions,payments,
-direct,cpo}.py`), each an `APIRouter` mounted on the FastAPI `app` in
+direct,cpo,notifications,reservations}.py`), each an `APIRouter` mounted on the FastAPI `app` in
 `backend/main.py` (the 2026-07-07 `main.py` split — TD#7). Every path is
 hard-coded under `/api` (no router `prefix=`). The app title is
 **"AmpHive Shared EV Charging API"**, version **2.0.0**.
@@ -14,16 +14,21 @@ Interactive docs: `http://<host>:8000/docs`.
   DB on every request, so balance/role are always current.
 - Routes marked **cpo/admin** additionally require the caller's DB role to be
   `cpo` or `admin`, enforced by `require_role(...)` (`backend/services/rbac.py`).
-- **CORS:** explicit allowlist (localhost, `amphive.duckdns.org`, VM IP) —
+- **CORS:** explicit allowlist (localhost dev origins, `amphive.app`, `cpo.amphive.app`) —
   locked down 2026-07-06.
-- **41 endpoints total**, grouped below: health (1), auth (4), groups (2),
-  plugs (2), sessions (4), payments (3), Direct Mode (5), CPO portal (20).
+- **86 `@router` route decorators total** across 9 routers (see Swagger
+  `/docs` for the live, authoritative list): auth (6), cpo (43), direct (5),
+  groups (2), notifications (6), payments (4), plugs (6), reservations (4),
+  sessions (10).
   (The legacy SSE endpoint `/api/sessions/live/{id}` was retired 2026-07-07 —
   live telemetry is Socket.io only. The CPO gateway OTA-trigger endpoint was
   added 2026-07-07; the `/api/auth/logout` revocation endpoint 2026-07-08; the
   CPO events feed + ack endpoints 2026-07-10; the CPO audit-log endpoint
-  2026-07-12. This count predates a few other endpoints added alongside it —
-  not re-audited here.)
+  2026-07-12; the driver notifications router and plug reservations router
+  were added 2026-07-11/2026-07-12 respectively — see [Driver
+  notifications](#driver-notifications-routersnotificationspy-2026-07-11) and
+  [Plug reservations](#plug-reservations-routersreservationspy-2026-07-12)
+  below.)
 
 ---
 
@@ -223,7 +228,7 @@ scoped to the caller's `tenant_id`, so operators only ever see their own assets.
 | `LOGIN_RATE_LIMIT` / `REGISTER_RATE_LIMIT` | `10/60` / `10/3600` | Auth rate limits, `"<attempts>/<window sec>"` per client IP (429 + Retry-After) |
 | `FORGOT_PASSWORD_RATE_LIMIT` / `RESET_PASSWORD_RATE_LIMIT` | `5/3600` / `10/3600` | Password-reset rate limits, same format/mechanism as the login/register limits |
 | `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASSWORD` / `SMTP_FROM` | `""` / `587` / `""` / `""` / `""` | Outbound email (STARTTLS) for password-reset links; `SMTP_HOST` unset = console fallback (link logged at WARNING). Login skipped when `SMTP_USER` empty |
-| `FRONTEND_ORIGIN` | `https://amphive.duckdns.org` | Base URL for links in outbound email (`/reset-password?token=...`) |
+| `FRONTEND_ORIGIN` | `https://amphive.app` | Base URL for links in outbound email (`/reset-password?token=...`) |
 | `RESET_TOKEN_TTL_MIN` | `30` | Minutes a password-reset link stays valid (single use) |
 | `VAPID_PRIVATE_KEY` / `VAPID_SUBJECT` | `""` / `mailto:admin@amphive.example` | Web Push signing key + contact; empty key = push disabled (feed + Socket.io still work) |
 | `LOW_BALANCE_WARN_FRACTION` | `0.8` | Notify the driver once per session when accrued cost crosses this fraction of the wallet balance (`0` disables) |
