@@ -13,7 +13,7 @@ import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { useWallet } from '../contexts/WalletContext';
 import NotificationBell from './NotificationBell';
-import { isCpoHost, cpoOrigin } from '../utils/appHost';
+import { isCpoHost, isSplitHost, cpoOrigin } from '../utils/appHost';
 
 const Navbar = () => {
   const { user, logout } = useAuth();
@@ -82,8 +82,8 @@ const Navbar = () => {
             </>
           )}
 
-          {/* CPO host: operator navigation only */}
-          {cpoHost && user && (user.role === 'cpo' || user.role === 'admin') && (
+          {/* CPO host (or unsplit bare-IP/localhost fallback): operator link */}
+          {(cpoHost || !isSplitHost()) && user && (user.role === 'cpo' || user.role === 'admin') && (
             <Link
               to="/cpo/dashboard"
               className={`nav-link ${location.pathname.startsWith('/cpo') ? 'active' : ''}`}

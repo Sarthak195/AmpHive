@@ -3,7 +3,7 @@
  * the VITE_FORCE_CPO_HOST dev/test override, and counterpart-origin derivation.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { isCpoHost, cpoOrigin, driverOrigin } from './appHost';
+import { isCpoHost, isSplitHost, cpoOrigin, driverOrigin } from './appHost';
 
 // jsdom supplies protocol/port; derive expectations from it rather than
 // hardcoding the test-runner URL.
@@ -34,6 +34,24 @@ describe('isCpoHost', () => {
 
   it('defaults to the real hostname (jsdom localhost → driver host)', () => {
     expect(isCpoHost()).toBe(false);
+  });
+});
+
+describe('isSplitHost — bare-IP/localhost stay unsplit', () => {
+  it('is true for real domains, cpo. or not', () => {
+    expect(isSplitHost('amphive.duckdns.org')).toBe(true);
+    expect(isSplitHost('cpo.amphive.duckdns.org')).toBe(true);
+  });
+
+  it('is false for bare IPs (DNS-outage fallback) and localhost', () => {
+    expect(isSplitHost('8.231.81.12')).toBe(false);
+    expect(isSplitHost('localhost')).toBe(false);
+  });
+
+  it('origins collapse to same-host on unsplit hosts (internal /cpo)', () => {
+    expect(cpoOrigin('8.231.81.12')).toBe(origin('8.231.81.12'));
+    expect(driverOrigin('8.231.81.12')).toBe(origin('8.231.81.12'));
+    expect(cpoOrigin('localhost')).toBe(origin('localhost'));
   });
 });
 

@@ -28,7 +28,7 @@ import History from './pages/History';
 import PublicMap from './pages/PublicMap';
 import { ProtectedRoute, CpoProtectedRoute } from './components/ProtectedRoutes';
 import { ExternalRedirect, CpoLanding } from './components/HostRouting';
-import { isCpoHost, cpoOrigin, driverOrigin } from './utils/appHost';
+import { isCpoHost, isSplitHost, cpoOrigin, driverOrigin } from './utils/appHost';
 
 // CPO Admin Dashboard pages
 import CpoSetup from './pages/cpo/CpoSetup';
@@ -147,12 +147,41 @@ const DriverHostRoutes = () => (
   </Routes>
 );
 
+/** Unsplit hosts (bare IP DNS-outage fallback, localhost dev): the original
+    combined tree — internal /cpo, no cross-origin redirects. Without this a
+    DuckDNS outage would lock operators out of the portal entirely. */
+const UnsplitRoutes = () => (
+  <Routes>
+    <Route path="/" element={<Home />} />
+    <Route path="/login" element={<Login />} />
+    <Route path="/map" element={<PublicMap />} />
+    <Route path="/topup" element={
+      <ProtectedRoute><TopUp /></ProtectedRoute>
+    } />
+    <Route path="/session" element={
+      <ProtectedRoute><Session /></ProtectedRoute>
+    } />
+    <Route path="/groups" element={
+      <ProtectedRoute><Groups /></ProtectedRoute>
+    } />
+    <Route path="/history" element={
+      <ProtectedRoute><History /></ProtectedRoute>
+    } />
+    <Route path="/cpo" element={
+      <ProtectedRoute><CpoSetup /></ProtectedRoute>
+    } />
+    {cpoDashboardRoutes}
+    <Route path="*" element={<Navigate to="/" replace />} />
+  </Routes>
+);
+
 function App() {
   return (
     <Router>
       <div style={{ minHeight: '100vh' }}>
         <Navbar />
-        {isCpoHost() ? <CpoHostRoutes /> : <DriverHostRoutes />}
+        {!isSplitHost() ? <UnsplitRoutes />
+          : isCpoHost() ? <CpoHostRoutes /> : <DriverHostRoutes />}
       </div>
     </Router>
   );

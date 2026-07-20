@@ -10,13 +10,14 @@ import { MemoryRouter } from 'react-router-dom';
 
 import Navbar from './Navbar';
 import { useAuth } from '../contexts/AuthContext';
-import { isCpoHost, cpoOrigin } from '../utils/appHost';
+import { isCpoHost, isSplitHost, cpoOrigin } from '../utils/appHost';
 
 vi.mock('../contexts/AuthContext', () => ({ useAuth: vi.fn() }));
 vi.mock('../contexts/WalletContext', () => ({ useWallet: () => ({ balance: 0 }) }));
 vi.mock('./NotificationBell', () => ({ default: () => null }));
 vi.mock('../utils/appHost', () => ({
   isCpoHost: vi.fn(),
+  isSplitHost: vi.fn(),
   cpoOrigin: vi.fn(),
 }));
 
@@ -29,6 +30,7 @@ const renderNavbar = () =>
 
 beforeEach(() => {
   vi.clearAllMocks();
+  isSplitHost.mockReturnValue(true);
   cpoOrigin.mockReturnValue('https://cpo.amphive.duckdns.org');
 });
 
