@@ -108,6 +108,14 @@ services:
       # Web Push (driver notifications); empty = push disabled
       - VAPID_PRIVATE_KEY=${VAPID_PRIVATE_KEY}
       - VAPID_SUBJECT=${VAPID_SUBJECT}
+      # Password-reset links + email delivery; SMTP_* empty = links logged
+      # at WARNING (console fallback) instead of emailed.
+      - FRONTEND_ORIGIN=${FRONTEND_ORIGIN:-}
+      - SMTP_HOST=${SMTP_HOST:-}
+      - SMTP_PORT=${SMTP_PORT:-}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASSWORD=${SMTP_PASSWORD:-}
+      - SMTP_FROM=${SMTP_FROM:-}
       # [Direct Mode] Tapo P110 control via WireGuard tunnel (bypasses ESP32)
       - DIRECT_MODE=${DIRECT_MODE}
       - TAPO_USERNAME=${TAPO_USERNAME}
