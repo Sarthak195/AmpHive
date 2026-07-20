@@ -337,6 +337,21 @@ static void microlink_task(void *pvParameters);
 #endif
 
 // ─── NVS Configuration Helpers ───────────────────────────────────────────────
+#if AMPHIVE_DIRECT_MQTT
+// True iff `url`'s host component is EXACTLY `ip` — i.e. `ip` is bounded by
+// "://" on the left and a port ':' , path '/', or end-of-string on the right.
+// Exact-host (not substring) so a deliberate future pin like
+// mqtts://8.231.81.123:8883 is NOT mistaken for the legacy 8.231.81.12.
+static bool broker_url_host_is(const char *url, const char *ip) {
+    const char *host = strstr(url, "://");
+    host = host ? host + 3 : url;
+    size_t iplen = strlen(ip);
+    if (strncmp(host, ip, iplen) != 0) return false;
+    char after = host[iplen];
+    return after == '\0' || after == ':' || after == '/';
+}
+#endif
+
 static void load_config_from_nvs(void) {
     nvs_handle_t my_handle;
     esp_err_t err = nvs_open("storage", NVS_READWRITE, &my_handle);
@@ -371,8 +386,8 @@ static void load_config_from_nvs(void) {
     // default — an OTA alone moves the fleet, no reprovisioning. Any OTHER
     // stored value (a lab broker, a future endpoint) is honored as-is.
     if (mqtt_broker_url[0] != '\0' &&
-        (strstr(mqtt_broker_url, LEGACY_BROKER_IP_PUBLIC) != NULL ||
-         strstr(mqtt_broker_url, LEGACY_BROKER_IP_OVERLAY) != NULL)) {
+        (broker_url_host_is(mqtt_broker_url, LEGACY_BROKER_IP_PUBLIC) ||
+         broker_url_host_is(mqtt_broker_url, LEGACY_BROKER_IP_OVERLAY))) {
         ESP_LOGW(TAG, "NVS broker_url '%s' is a legacy pinned IP - migrating to default %s",
                  mqtt_broker_url, MQTT_BROKER_URL);
         mqtt_broker_url[0] = '\0';
