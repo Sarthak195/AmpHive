@@ -166,11 +166,8 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:5173",
         "http://localhost:3000",
-        "http://amphive.duckdns.org",
-        "https://amphive.duckdns.org",
-        "http://cpo.amphive.duckdns.org",
-        "https://cpo.amphive.duckdns.org",
         # Real domain (2026-07-20; .app is HSTS-preloaded so https-only).
+        # duckdns origins retired 2026-07-20 after the amphive.app cutover.
         "https://amphive.app",
         "https://cpo.amphive.app",
         "http://8.231.81.12",

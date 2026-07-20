@@ -17,10 +17,6 @@ logger = logging.getLogger("amphive.socketio")
 _ALLOWED_ORIGINS = [
     "http://localhost:5173",
     "http://localhost:3000",
-    "http://amphive.duckdns.org",
-    "https://amphive.duckdns.org",
-    "http://cpo.amphive.duckdns.org",
-    "https://cpo.amphive.duckdns.org",
     "https://amphive.app",
     "https://cpo.amphive.app",
     "http://8.231.81.12",
