@@ -510,8 +510,13 @@ class CpoTopupCreateRequest(BaseModel):
     against the tenant's available top-up pool (services/payouts.py's
     available_pool_coins), not just > 0 here — the router 409s with the
     actual figure when it's exceeded. `note` is optional, short free text
-    ("cash, pump 3")."""
-    driver_email: EmailStr
+    ("cash, pump 3").
+
+    `driver_email` is a plain `str` (not EmailStr) on purpose, matching the
+    forgot-password request above: this is a lookup of an EXISTING account
+    (the router 404s unknowns), and EmailStr's validator rejects reserved
+    TLDs like the seeded `@amphive.test` accounts (caught by CI 2026-07-21)."""
+    driver_email: str
     amount_coins: float = Field(gt=0)
     note: Optional[str] = Field(default=None, max_length=500)
 
