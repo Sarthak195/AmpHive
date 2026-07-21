@@ -1,120 +1,233 @@
 /**
- * AmpHive CPO Layout Component
- * =============================
- * Sidebar + content wrapper for all CPO admin dashboard pages.
- * Features a collapsible sidebar with navigation links, tenant info,
- * and a floating toggle button for mobile.
+ * CpoLayout — the operator console shell.
+ * =======================================
+ * Volt-theme sidebar chrome for all 13 console pages: brand, org name
+ * (TenantContext), grouped navigation with live count-pill badges
+ * (Health = unacked events, Disputes = open disputes, Groups = pending
+ * capacity requests), a footer with the signed-in email / driver-app link /
+ * sign out, and — on mobile — a sticky topbar with an off-canvas drawer.
  *
- * The CPO portal is set apart from the driver app by its sidebar layout and
- * density — the accent is the shared amp-lime (the old purple is retired).
+ * It mounts <TenantProvider> and renders <CpoAlerts> above the page content
+ * so every console page shows unacknowledged critical/warning events.
+ * App.jsx mounts CPO routes as direct elements (pages wrap themselves in
+ * this layout), so page content arrives via `children`; <Outlet/> is the
+ * fallback should the route tree ever switch to a layout route.
  */
 
-import { useState } from 'react';
-import { Link, useLocation } from 'react-router-dom';
+import { useEffect, useRef, useState } from 'react';
+import { Link, Outlet, useLocation } from 'react-router-dom';
+import {
+  BatteryCharging,
+  CalendarClock,
+  ExternalLink,
+  FileText,
+  HeartPulse,
+  LayoutDashboard,
+  LogOut,
+  Menu,
+  PlugZap,
+  Radio,
+  Scale,
+  Settings,
+  Tags,
+  Users,
+  Wallet,
+  Zap,
+} from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
+import { TenantProvider, useTenant } from '../contexts/TenantContext';
+import useTheme from '../hooks/useTheme';
+import { driverOrigin } from '../utils/appHost';
+import NotificationBell from './NotificationBell';
+import CpoAlerts from './CpoAlerts';
+import './CpoLayout.css';
 
-/**
- * Navigation items for the CPO sidebar.
- * Each item has a path, label, and emoji icon.
- */
-const NAV_ITEMS = [
-  { path: '/cpo/dashboard', label: 'Dashboard', icon: '📊' },
-  { path: '/cpo/gateways', label: 'Gateways', icon: '📡' },
-  { path: '/cpo/plugs', label: 'Plugs', icon: '🔌' },
-  { path: '/cpo/groups', label: 'Groups', icon: '👥' },
-  { path: '/cpo/sessions', label: 'Sessions', icon: '⚡' },
-  { path: '/cpo/tariffs', label: 'Tariffs', icon: '💲' },
-  { path: '/cpo/reservations', label: 'Reservations', icon: '📅' },
-  { path: '/cpo/earnings', label: 'Earnings', icon: '🪙' },
-  { path: '/cpo/invoices', label: 'Invoices', icon: '🧾' },
-  { path: '/cpo/disputes', label: 'Disputes', icon: '⚖️' },
-  { path: '/cpo/faults', label: 'Faults', icon: '🛠️' },
-  { path: '/cpo/settings', label: 'Settings', icon: '⚙️' },
+/** Grouped nav. `badge` names a key of TenantContext counts. */
+const NAV_GROUPS = [
+  {
+    group: null,
+    items: [{ to: '/cpo/dashboard', label: 'Dashboard', icon: LayoutDashboard }],
+  },
+  {
+    group: 'Infrastructure',
+    items: [
+      { to: '/cpo/chargers', label: 'Chargers', icon: PlugZap },
+      { to: '/cpo/gateways', label: 'Gateways', icon: Radio },
+      { to: '/cpo/groups', label: 'Groups', icon: Users, badge: 'pendingCapacity' },
+      { to: '/cpo/health', label: 'Health', icon: HeartPulse, badge: 'unackedEvents' },
+    ],
+  },
+  {
+    group: 'Operations',
+    items: [
+      { to: '/cpo/sessions', label: 'Sessions', icon: BatteryCharging },
+      { to: '/cpo/reservations', label: 'Reservations', icon: CalendarClock },
+    ],
+  },
+  {
+    group: 'Revenue',
+    items: [
+      { to: '/cpo/pricing', label: 'Pricing', icon: Tags },
+      { to: '/cpo/earnings', label: 'Earnings', icon: Wallet },
+      { to: '/cpo/invoices', label: 'Invoices', icon: FileText },
+      { to: '/cpo/disputes', label: 'Disputes', icon: Scale, badge: 'openDisputes' },
+    ],
+  },
 ];
 
-const CpoLayout = ({ children, tenantName }) => {
-  const [sidebarOpen, setSidebarOpen] = useState(false);
-  const location = useLocation();
-  const { user } = useAuth();
+const SETTINGS_ITEM = { to: '/cpo/settings', label: 'Settings', icon: Settings };
+
+const ALL_ITEMS = [...NAV_GROUPS.flatMap((g) => g.items), SETTINGS_ITEM];
+
+/** Below this width the sidebar becomes an off-canvas drawer (see CpoLayout.css). */
+const MOBILE_QUERY = '(max-width: 900px)';
+
+const NavItem = ({ item, counts, pathname }) => {
+  const { to, label, icon: Icon, badge } = item;
+  const active = pathname.startsWith(to);
+  const count = badge ? counts[badge] : null;
+  return (
+    <Link
+      to={to}
+      className={`console-link${active ? ' active' : ''}`}
+      aria-current={active ? 'page' : undefined}
+    >
+      <Icon aria-hidden="true" />
+      {label}
+      {count > 0 && <span className="count-pill">{count > 99 ? '99+' : count}</span>}
+    </Link>
+  );
+};
+
+const CpoLayoutInner = ({ children }) => {
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [isMobile, setIsMobile] = useState(() => window.matchMedia(MOBILE_QUERY).matches);
+  const { pathname } = useLocation();
+  const { user, logout } = useAuth();
+  const { profile, counts } = useTenant();
+  const sidebarRef = useRef(null);
+  const menuButtonRef = useRef(null);
+
+  const orgName = profile?.tenant?.name;
+  const pageTitle =
+    ALL_ITEMS.find((item) => pathname.startsWith(item.to))?.label || 'Console';
+
+  const closeDrawer = (restoreFocus = false) => {
+    setDrawerOpen(false);
+    if (restoreFocus) menuButtonRef.current?.focus();
+  };
+
+  // Route change (nav click) closes the drawer.
+  useEffect(() => {
+    setDrawerOpen(false);
+  }, [pathname]);
+
+  // Track the mobile breakpoint so the closed off-canvas sidebar can be
+  // marked inert (removed from tab order) on mobile only — on desktop the
+  // sidebar is always visible and must stay interactive.
+  useEffect(() => {
+    const mql = window.matchMedia(MOBILE_QUERY);
+    const onChange = (e) => setIsMobile(e.matches);
+    mql.addEventListener('change', onChange);
+    return () => mql.removeEventListener('change', onChange);
+  }, []);
+
+  // Open drawer: focus moves in; Esc closes and returns focus to the toggle.
+  useEffect(() => {
+    if (!drawerOpen) return undefined;
+    sidebarRef.current?.querySelector('a, button')?.focus();
+    const onKey = (e) => {
+      if (e.key === 'Escape') {
+        setDrawerOpen(false);
+        menuButtonRef.current?.focus();
+      }
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [drawerOpen]);
 
   return (
-    <div className="cpo-layout">
-      {/* Sidebar Navigation */}
-      <aside className={`cpo-sidebar ${sidebarOpen ? 'open' : ''}`}>
-        {/* Sidebar Header: Tenant branding */}
-        <div className="cpo-sidebar-header">
-          <h3>⚡ CPO Portal</h3>
-          <p>{tenantName || 'Your Organization'}</p>
+    <div className="console">
+      <aside
+        ref={sidebarRef}
+        id="console-sidebar"
+        className={`console-sidebar${drawerOpen ? ' open' : ''}`}
+        inert={isMobile && !drawerOpen}
+      >
+        <div className="console-brand">
+          <Zap size={20} aria-hidden="true" />
+          <span>AmpHive Console</span>
         </div>
+        {orgName && <div className="console-org">{orgName}</div>}
 
-        {/* Navigation Links */}
-        <nav className="cpo-sidebar-nav">
-          {NAV_ITEMS.map((item) => (
-            <Link
-              key={item.path}
-              to={item.path}
-              className={`cpo-nav-item ${location.pathname === item.path ? 'active' : ''}`}
-              onClick={() => setSidebarOpen(false)} // Close sidebar on mobile nav
-            >
-              <span className="cpo-nav-icon">{item.icon}</span>
-              {item.label}
-            </Link>
+        <nav className="console-nav" aria-label="Console">
+          {NAV_GROUPS.map(({ group, items }) => (
+            <div key={group || 'main'} className="console-nav-section">
+              {group && <div className="console-nav-group">{group}</div>}
+              {items.map((item) => (
+                <NavItem key={item.to} item={item} counts={counts} pathname={pathname} />
+              ))}
+            </div>
           ))}
+          <div className="console-nav-section console-nav-end">
+            <NavItem item={SETTINGS_ITEM} counts={counts} pathname={pathname} />
+          </div>
         </nav>
 
-        {/* Sidebar Footer: User info */}
-        {user && (
-          <div style={{
-            padding: '1rem 1.25rem',
-            borderTop: '1px solid var(--color-surface-border)',
-            marginTop: 'auto',
-          }}>
-            <p style={{
-              fontSize: '0.8rem',
-              color: 'var(--color-text-muted)',
-              margin: 0,
-            }}>
-              Signed in as
-            </p>
-            <p style={{
-              fontSize: '0.85rem',
-              color: 'var(--color-text-secondary)',
-              margin: '0.15rem 0 0',
-              fontWeight: 500,
-            }}>
-              {user.full_name || user.email}
-            </p>
-          </div>
-        )}
+        <div className="console-footer">
+          {user?.email && <span className="console-footer-email">{user.email}</span>}
+          <a className="console-footer-action" href={driverOrigin()}>
+            Driver app
+            <ExternalLink size={13} aria-hidden="true" />
+          </a>
+          <button type="button" className="console-footer-action" onClick={logout}>
+            Sign out
+            <LogOut size={13} aria-hidden="true" />
+          </button>
+        </div>
       </aside>
 
-      {/* Mobile sidebar toggle button */}
-      <button
-        className="cpo-sidebar-toggle"
-        onClick={() => setSidebarOpen(!sidebarOpen)}
-        aria-label="Toggle sidebar"
-      >
-        {sidebarOpen ? '✕' : '☰'}
-      </button>
-
-      {/* Mobile overlay to close sidebar when clicking outside */}
-      {sidebarOpen && (
-        <div
-          style={{
-            position: 'fixed',
-            inset: 0,
-            background: 'rgba(0,0,0,0.4)',
-            zIndex: 35,
-          }}
-          onClick={() => setSidebarOpen(false)}
+      {drawerOpen && (
+        <button
+          type="button"
+          className="console-scrim"
+          aria-label="Close menu"
+          onClick={() => closeDrawer()}
         />
       )}
 
-      {/* Main Content Area */}
-      <main className="cpo-content">
-        {children}
-      </main>
+      <div className="console-column">
+        <header className="console-topbar">
+          <button
+            ref={menuButtonRef}
+            type="button"
+            className="btn btn-quiet btn-icon"
+            aria-label="Open menu"
+            aria-expanded={drawerOpen}
+            aria-controls="console-sidebar"
+            onClick={() => setDrawerOpen(true)}
+          >
+            <Menu size={20} aria-hidden="true" />
+          </button>
+          <span className="console-topbar-title">{pageTitle}</span>
+          <NotificationBell />
+        </header>
+
+        <main className="console-main">
+          <CpoAlerts />
+          {children ?? <Outlet />}
+        </main>
+      </div>
     </div>
+  );
+};
+
+const CpoLayout = ({ children }) => {
+  useTheme('volt');
+  return (
+    <TenantProvider>
+      <CpoLayoutInner>{children}</CpoLayoutInner>
+    </TenantProvider>
   );
 };
 

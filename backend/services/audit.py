@@ -25,7 +25,7 @@ logger = logging.getLogger("amphive.api")
 async def record_audit(
     db: AsyncSession,
     *,
-    tenant_id: int,
+    tenant_id: Optional[int],
     actor_user_id: Optional[int],
     action: str,
     target_type: str,
@@ -56,7 +56,7 @@ async def record_audit(
 async def try_record_audit(
     db: AsyncSession,
     *,
-    tenant_id: int,
+    tenant_id: Optional[int],
     actor_user_id: Optional[int],
     action: str,
     target_type: str,

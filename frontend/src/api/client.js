@@ -10,8 +10,14 @@
  *   the current origin (for same-domain Docker deployments).
  * - JWT token is stored in localStorage under 'amphive_token'.
  * - On 401 response, the token is cleared and user is redirected
- *   to the login page to re-authenticate.
+ *   to the login page to re-authenticate — with the current location
+ *   preserved as ?next= so Login can send them back.
+ * - Every request carries a 20s AbortController timeout so a dead backend
+ *   surfaces as a friendly error (err.code === 'timeout') instead of an
+ *   indefinite spinner.
  */
+
+const REQUEST_TIMEOUT_MS = 20_000;
 
 // In development: Vite provides import.meta.env.VITE_API_URL
 // In production (Docker): frontend is reverse-proxied to the same origin
@@ -38,18 +44,37 @@ export async function apiRequest(endpoint, options = {}) {
     headers['Authorization'] = `Bearer ${token}`;
   }
 
-  const response = await fetch(`${API_BASE}${endpoint}`, {
-    ...options,
-    headers,
-  });
+  // Timeout: abort the request after 20s so a dead backend fails fast.
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+  let response;
+  try {
+    response = await fetch(`${API_BASE}${endpoint}`, {
+      ...options,
+      headers,
+      signal: controller.signal,
+    });
+  } catch (fetchErr) {
+    if (fetchErr.name === 'AbortError') {
+      const err = new Error('The request timed out. Check your connection and try again.');
+      err.code = 'timeout';
+      throw err;
+    }
+    throw fetchErr;
+  } finally {
+    clearTimeout(timeoutId);
+  }
 
   // Handle 401 Unauthorized — token expired or invalid
   if (response.status === 401) {
     localStorage.removeItem('amphive_token');
     localStorage.removeItem('amphive_user');
-    // Redirect to login page if not already there
+    // Redirect to login page if not already there, preserving the current
+    // location so Login can return the user after re-authenticating.
     if (window.location.pathname !== '/login') {
-      window.location.href = '/login';
+      const next = encodeURIComponent(window.location.pathname + window.location.search);
+      window.location.href = `/login?next=${next}`;
     }
     throw new Error('Authentication expired. Please sign in again.');
   }

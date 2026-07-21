@@ -1,6 +1,8 @@
 /**
  * AuthContext tests: session restore on mount, login persisting the JWT,
- * failed-restore cleanup, and logout clearing everything.
+ * failed-restore cleanup, and logout clearing everything. Children render
+ * during the restore too — consumers branch on `loading` themselves (the
+ * BootSplash gate lives in App, not here).
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
@@ -14,10 +16,11 @@ vi.mock('../api/client', () => ({
 }));
 
 const Probe = () => {
-  const { user, login, logout } = useAuth();
+  const { user, login, logout, loading } = useAuth();
   return (
     <div>
       <div data-testid="user">{user ? user.email : 'anonymous'}</div>
+      <div data-testid="loading">{String(loading)}</div>
       <button onClick={() => login('driver@amphive.test', 'pw').catch(() => {})}>login</button>
       <button onClick={logout}>logout</button>
     </div>
@@ -37,6 +40,23 @@ beforeEach(() => {
 });
 
 describe('session restore on mount', () => {
+  it('renders children immediately while the restore is still in flight (loading=true)', async () => {
+    localStorage.setItem('amphive_token', 'jwt-123');
+    let resolveMe;
+    api.get.mockReturnValue(new Promise((resolve) => { resolveMe = resolve; }));
+
+    renderProbe();
+
+    // Children are NOT withheld during loading — App-level code (BootSplash)
+    // decides what to show; the context just exposes `loading`.
+    expect(screen.getByTestId('user')).toHaveTextContent('anonymous');
+    expect(screen.getByTestId('loading')).toHaveTextContent('true');
+
+    resolveMe({ email: 'driver@amphive.test', role: 'driver' });
+    await waitFor(() => expect(screen.getByTestId('loading')).toHaveTextContent('false'));
+    expect(screen.getByTestId('user')).toHaveTextContent('driver@amphive.test');
+  });
+
   it('restores the user via /api/auth/me when a token exists', async () => {
     localStorage.setItem('amphive_token', 'jwt-123');
     api.get.mockResolvedValue({ email: 'driver@amphive.test', role: 'driver' });
@@ -87,6 +107,30 @@ describe('login / logout', () => {
     expect(screen.getByTestId('user')).toHaveTextContent('driver@amphive.test');
     expect(localStorage.getItem('amphive_token')).toBe('fresh-jwt');
     expect(JSON.parse(localStorage.getItem('amphive_user')).email).toBe('driver@amphive.test');
+  });
+
+  it('login refreshes from /api/auth/me so fields missing from the AuthResponse land', async () => {
+    api.post.mockResolvedValue({
+      token: 'fresh-jwt',
+      user: { email: 'driver@amphive.test', role: 'driver' },
+    });
+    api.get.mockResolvedValue({
+      email: 'driver@amphive.test',
+      role: 'driver',
+      available_balance: 42,
+      created_at: '2026-01-01T00:00:00Z',
+      is_disabled: false,
+    });
+    renderProbe();
+    await screen.findByTestId('user');
+
+    await userEvent.click(screen.getByText('login'));
+
+    // The optimistic set happens first, then the /me refresh lands the full shape.
+    await waitFor(() => expect(api.get).toHaveBeenCalledWith('/api/auth/me'));
+    await waitFor(() =>
+      expect(JSON.parse(localStorage.getItem('amphive_user')).available_balance).toBe(42)
+    );
   });
 
   it('logout revokes server-side then clears state and localStorage', async () => {

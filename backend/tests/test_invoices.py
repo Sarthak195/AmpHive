@@ -593,4 +593,6 @@ async def test_cpo_list_invoices_is_tenant_scoped_and_newest_first(factory):
     async with factory() as db:
         result = await cpo_list_invoices(user=cpo_a, db=db, limit=50, offset=0)
 
-    assert [r["session_id"] for r in result] == [session_2, session_1]
+    # [redesign/ui-v3 contract §4] paginated {total, items} shape
+    assert result["total"] == 2
+    assert [r["session_id"] for r in result["items"]] == [session_2, session_1]

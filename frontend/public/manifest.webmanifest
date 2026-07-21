@@ -1,0 +1,12 @@
+{
+  "name": "AmpHive",
+  "short_name": "AmpHive",
+  "description": "Shared EV charging — find a charger, plug in, pay from your wallet.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#FAF7EF",
+  "theme_color": "#FAF7EF",
+  "icons": [
+    { "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml" }
+  ]
+}

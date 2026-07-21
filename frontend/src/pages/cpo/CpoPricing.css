@@ -1,0 +1,114 @@
+/**
+ * CpoPricing — layout only; color/type/elevation all come from tokens via
+ * primitives.css classes reused here (.card, .field, .chip, .badge-soft
+ * vars). The coverage grid tints are the one bespoke bit: five semantic
+ * "soft" tokens cycled per slot, scoped to .pricing-grid-cell so they never
+ * leak onto the shared .chip/.badge classes elsewhere in the app.
+ */
+
+.pricing-section h2 {
+  margin-bottom: var(--sp-2);
+}
+
+.pricing-slot-editor {
+  display: grid;
+  gap: var(--sp-4);
+}
+
+.pricing-slot-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--sp-4);
+}
+
+.pricing-slot-form .field {
+  min-width: 9rem;
+}
+
+.pricing-day-chip {
+  cursor: pointer;
+}
+
+.pricing-day-chip[aria-pressed='true'] {
+  background: var(--brand-soft);
+  color: var(--brand);
+  border-color: transparent;
+}
+
+.pricing-default-field {
+  max-width: 26rem;
+}
+
+/* ---- coverage grid ------------------------------------------------------- */
+
+.pricing-grid-wrap {
+  overflow-x: auto;
+}
+
+.pricing-grid {
+  display: grid;
+  grid-template-columns: 2.75rem repeat(24, minmax(1.1rem, 1fr));
+  gap: 2px;
+  min-width: 40rem;
+}
+
+.pricing-grid-row {
+  display: contents;
+}
+
+.pricing-grid-hour {
+  font-size: 0.65rem;
+  line-height: 1;
+  text-align: center;
+  color: var(--ink-3);
+  font-family: var(--font-data);
+}
+
+.pricing-grid-daylabel {
+  display: flex;
+  align-items: center;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--ink-2);
+}
+
+.pricing-grid-cell {
+  height: 1.15rem;
+  border-radius: 2px;
+  background: var(--surface-2);
+}
+
+.pricing-grid-cell--base {
+  background: var(--surface-2);
+}
+
+.pricing-grid-cell--a { background: var(--brand-soft); }
+.pricing-grid-cell--b { background: var(--info-soft); }
+.pricing-grid-cell--c { background: var(--warn-soft); }
+.pricing-grid-cell--d { background: var(--ok-soft); }
+.pricing-grid-cell--e { background: var(--danger-soft); }
+
+.pricing-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-4);
+  margin-top: var(--sp-1);
+}
+
+.pricing-legend-item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--text-xs);
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.pricing-legend-swatch {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  display: inline-block;
+  flex-shrink: 0;
+}

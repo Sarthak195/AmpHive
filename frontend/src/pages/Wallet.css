@@ -1,0 +1,56 @@
+/**
+ * Wallet — layout only. Color/type/elevation come from tokens/primitives
+ * (.card, .banner, .btn, .field, .stack); this file just arranges them.
+ */
+
+.wallet-balance-card {
+  display: grid;
+  gap: var(--sp-1);
+}
+
+.wallet-balance-label {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+.wallet-balance-figure {
+  font-family: var(--font-data);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--text-4xl);
+  font-weight: 700;
+  color: var(--ink);
+  margin: var(--sp-1) 0;
+}
+
+.wallet-topup-card {
+  display: grid;
+  gap: var(--sp-4);
+}
+
+.wallet-ledger-heading {
+  margin-bottom: var(--sp-3);
+}
+
+.wallet-amount-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+
+.wallet-order-ref {
+  margin-top: var(--sp-2);
+  font-size: var(--text-xs);
+}
+
+.wallet-next-link {
+  margin-top: var(--sp-3);
+}
+
+.wallet-amount-credit { color: var(--ok); }
+.wallet-amount-debit { color: var(--danger); }

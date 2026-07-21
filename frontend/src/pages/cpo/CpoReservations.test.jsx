@@ -1,171 +1,178 @@
 /**
- * CpoReservations tests: the reservations page renders tenant bookings
- * (plug, driver, window, status badge, linked session), offers Cancel only
- * on still-BOOKED rows and posts the operator-cancel through window.confirm,
- * surfaces a backend 409 inline, applies the status filter to the query, and
- * shows the empty state.
+ * CpoReservations page tests (redesign v3, D5): the List view (filters,
+ * pagination, ErrorState-with-retry, operator cancel via ConfirmDialog with
+ * the "driver will be notified" copy), the List↔Day `.seg` toggle, and the
+ * Day view's client-side per-plug/per-day grouping of a single fetched page.
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, within, waitFor } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { render, screen, waitFor, fireEvent, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter } from 'react-router-dom';
 
 import CpoReservations from './CpoReservations';
 import api from '../../api/client';
+
+vi.mock('../../components/CpoLayout', () => ({
+  default: ({ children }) => <div>{children}</div>,
+}));
 
 vi.mock('../../api/client', () => ({
   default: { get: vi.fn(), post: vi.fn(), put: vi.fn(), delete: vi.fn() },
 }));
 
-// CpoLayout reads useAuth() for its sidebar footer — stub it.
-vi.mock('../../contexts/AuthContext', () => ({
-  useAuth: () => ({ user: { email: 'cpo@amphive.test', full_name: 'Ops', role: 'cpo' } }),
-}));
+const toast = { ok: vi.fn(), error: vi.fn(), info: vi.fn(), warn: vi.fn() };
+vi.mock('../../components/ui', async (importOriginal) => {
+  const actual = await importOriginal();
+  return { ...actual, useToast: () => toast };
+});
 
-const RESERVATIONS = [
-  {
-    id: 7, plug_id: 2, plug_name: 'Bay 2',
-    user_id: 5, user_email: 'asha@example.com', user_name: 'Asha',
-    start_at: '2026-07-13T09:00:00+00:00', end_at: '2026-07-13T10:00:00+00:00',
-    status: 'booked', session_id: null, created_at: '2026-07-13T08:00:00+00:00',
-  },
-  {
-    id: 6, plug_id: 1, plug_name: 'Bay 1',
-    user_id: 4, user_email: 'ravi@example.com', user_name: 'Ravi',
-    start_at: '2026-07-12T18:00:00+00:00', end_at: '2026-07-12T19:00:00+00:00',
-    status: 'fulfilled', session_id: 88, created_at: '2026-07-12T17:00:00+00:00',
-  },
-  {
-    id: 5, plug_id: 1, plug_name: 'Bay 1',
-    user_id: 5, user_email: 'asha@example.com', user_name: 'Asha',
-    start_at: '2026-07-11T08:00:00+00:00', end_at: '2026-07-11T09:00:00+00:00',
-    status: 'cancelled', session_id: null, created_at: '2026-07-11T07:00:00+00:00',
-  },
-];
+const RESERVATIONS_PAGE = {
+  total: 2,
+  items: [
+    {
+      id: 1, plug_id: 1, plug_name: 'Garage plug', user_name: 'Asha', user_email: 'asha@amphive.test',
+      start_at: '2026-07-21T09:00:00Z', end_at: '2026-07-21T10:00:00Z', status: 'booked', session_id: null,
+    },
+    {
+      id: 2, plug_id: 2, plug_name: 'Porch plug', user_name: 'Rae', user_email: 'rae@amphive.test',
+      start_at: '2026-07-20T09:00:00Z', end_at: '2026-07-20T10:00:00Z', status: 'fulfilled', session_id: 9,
+    },
+  ],
+};
 
-const PROFILE = { tenant: { name: 'Acme Charging' } };
+const PLUGS = [{ id: 1, name: 'Garage plug' }, { id: 2, name: 'Porch plug' }];
 
-const mockApiGet = (reservations = RESERVATIONS, profile = PROFILE) => {
+const mockRoutes = ({ reservations = RESERVATIONS_PAGE, plugs = PLUGS } = {}) => {
   api.get.mockImplementation((url) => {
     if (url.startsWith('/api/cpo/reservations')) return Promise.resolve(reservations);
-    if (url === '/api/cpo/profile') return Promise.resolve(profile);
-    return Promise.resolve([]);
+    if (url === '/api/cpo/plugs') return Promise.resolve(plugs);
+    return Promise.reject(new Error(`unhandled url ${url}`));
   });
 };
 
-const renderPage = () => render(
-  <MemoryRouter>
-    <CpoReservations />
-  </MemoryRouter>
-);
-
 beforeEach(() => {
   vi.clearAllMocks();
+  mockRoutes();
 });
 
-afterEach(() => {
-  vi.restoreAllMocks();
-});
-
-describe('CpoReservations', () => {
-  it('renders booking rows with plug, driver, status badge, and linked session', async () => {
-    mockApiGet();
-    renderPage();
-
-    await screen.findByText('Bay 2');
-    const rows = screen.getAllByRole('row');
-
-    const bookedRow = rows.find((r) => r.textContent.includes('#7'));
-    expect(within(bookedRow).getByText('Asha')).toBeInTheDocument();
-    expect(within(bookedRow).getByText('asha@example.com')).toBeInTheDocument();
-    expect(within(bookedRow).getByText('booked')).toBeInTheDocument();
-
-    const fulfilledRow = rows.find((r) => r.textContent.includes('#6'));
-    expect(within(fulfilledRow).getByText('fulfilled')).toBeInTheDocument();
-    expect(within(fulfilledRow).getByText('#88')).toBeInTheDocument(); // linked session
-
-    // Summary count reflects loaded rows + active (booked) tally.
-    expect(screen.getByText(/3 shown · 1 active/)).toBeInTheDocument();
+describe('CpoReservations — list view', () => {
+  it('fetches with limit/offset and renders rows', async () => {
+    render(<CpoReservations />);
+    expect(await screen.findByText('Garage plug')).toBeInTheDocument();
+    expect(api.get).toHaveBeenCalledWith('/api/cpo/reservations?limit=20&offset=0');
+    expect(screen.getByText('Porch plug')).toBeInTheDocument();
+    // "Booked"/"Fulfilled" also label <option>s in the status filter, so
+    // scope these to the table's status badges.
+    const table = screen.getByRole('table');
+    expect(within(table).getByText('Booked')).toBeInTheDocument();
+    expect(within(table).getByText('Fulfilled')).toBeInTheDocument();
   });
 
-  it('offers Cancel only on BOOKED rows', async () => {
-    mockApiGet();
-    renderPage();
+  it('applies the status filter and the upcoming-only checkbox', async () => {
+    render(<CpoReservations />);
+    await screen.findByText('Garage plug');
+    api.get.mockClear();
 
-    await screen.findByText('Bay 2');
-    const rows = screen.getAllByRole('row');
+    await userEvent.selectOptions(screen.getByLabelText('Status'), 'booked');
+    await waitFor(() =>
+      expect(api.get).toHaveBeenCalledWith('/api/cpo/reservations?limit=20&offset=0&status=booked')
+    );
 
-    const bookedRow = rows.find((r) => r.textContent.includes('#7'));
-    expect(within(bookedRow).getByRole('button', { name: 'Cancel' })).toBeInTheDocument();
-
-    const fulfilledRow = rows.find((r) => r.textContent.includes('#6'));
-    expect(within(fulfilledRow).queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument();
-
-    const cancelledRow = rows.find((r) => r.textContent.includes('#5'));
-    expect(within(cancelledRow).queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument();
+    api.get.mockClear();
+    await userEvent.click(screen.getByLabelText('Upcoming only'));
+    await waitFor(() =>
+      expect(api.get).toHaveBeenCalledWith(
+        '/api/cpo/reservations?limit=20&offset=0&status=booked&upcoming_only=true'
+      )
+    );
   });
 
-  it('cancels a BOOKED reservation through window.confirm and refetches', async () => {
-    mockApiGet();
-    api.post.mockResolvedValue({ id: 7, status: 'cancelled' });
-    vi.spyOn(window, 'confirm').mockReturnValue(true);
-    const user = userEvent.setup();
-    renderPage();
-
-    await screen.findByText('Bay 2');
-    await user.click(screen.getByRole('button', { name: 'Cancel' }));
-
-    expect(api.post).toHaveBeenCalledWith('/api/reservations/7/cancel', {});
-    // Initial load + refetch after the successful cancel.
-    await waitFor(() => {
-      const listCalls = api.get.mock.calls.filter(([url]) => url.startsWith('/api/cpo/reservations'));
-      expect(listCalls.length).toBe(2);
+  it('shows a retryable error instead of an empty state on failure', async () => {
+    api.get.mockImplementation((url) => {
+      if (url.startsWith('/api/cpo/reservations')) return Promise.reject(new Error('down'));
+      return Promise.resolve(PLUGS);
     });
+    render(<CpoReservations />);
+    expect(await screen.findByText("Couldn't load this")).toBeInTheDocument();
+    expect(screen.queryByText('No reservations found')).not.toBeInTheDocument();
+
+    mockRoutes();
+    await userEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(await screen.findByText('Garage plug')).toBeInTheDocument();
   });
 
-  it('does not cancel when the operator declines the confirm', async () => {
-    mockApiGet();
-    vi.spyOn(window, 'confirm').mockReturnValue(false);
-    const user = userEvent.setup();
-    renderPage();
-
-    await screen.findByText('Bay 2');
-    await user.click(screen.getByRole('button', { name: 'Cancel' }));
-
-    expect(api.post).not.toHaveBeenCalled();
-  });
-
-  it('surfaces a backend cancel error inline', async () => {
-    mockApiGet();
-    api.post.mockRejectedValue(new Error('This reservation is already fulfilled.'));
-    vi.spyOn(window, 'confirm').mockReturnValue(true);
-    const user = userEvent.setup();
-    renderPage();
-
-    await screen.findByText('Bay 2');
-    await user.click(screen.getByRole('button', { name: 'Cancel' }));
-
-    expect(await screen.findByText('This reservation is already fulfilled.')).toBeInTheDocument();
-  });
-
-  it('applies the status filter to the query', async () => {
-    mockApiGet();
-    const user = userEvent.setup();
-    renderPage();
-
-    await screen.findByText('Bay 2');
-    await user.selectOptions(screen.getByRole('combobox'), 'fulfilled');
-
-    await waitFor(() => {
-      const listCalls = api.get.mock.calls.filter(([url]) => url.startsWith('/api/cpo/reservations'));
-      expect(listCalls.some(([url]) => url.includes('status=fulfilled'))).toBe(true);
-    });
-  });
-
-  it('shows the empty state when there are no reservations', async () => {
-    mockApiGet([]);
-    renderPage();
-
+  it('shows the empty state only for a true zero-row result', async () => {
+    mockRoutes({ reservations: { total: 0, items: [] } });
+    render(<CpoReservations />);
     expect(await screen.findByText('No reservations found')).toBeInTheDocument();
+  });
+
+  it('only offers Cancel on a booked reservation', async () => {
+    render(<CpoReservations />);
+    await screen.findByText('Garage plug');
+    expect(screen.getAllByRole('button', { name: 'Cancel' })).toHaveLength(1);
+  });
+
+  it('cancels via ConfirmDialog with "the driver will be notified" and refetches', async () => {
+    render(<CpoReservations />);
+    await screen.findByText('Garage plug');
+
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(await screen.findByText(/the driver will be notified/)).toBeInTheDocument();
+
+    api.post.mockResolvedValue({});
+    api.get.mockClear();
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel reservation' }));
+
+    await waitFor(() => expect(api.post).toHaveBeenCalledWith('/api/reservations/1/cancel', {}));
+    await waitFor(() => expect(toast.ok).toHaveBeenCalledWith('Reservation cancelled.'));
+    await waitFor(() => expect(api.get).toHaveBeenCalledWith('/api/cpo/reservations?limit=20&offset=0'));
+  });
+
+  it('surfaces a cancel failure as an error toast without closing silently', async () => {
+    render(<CpoReservations />);
+    await screen.findByText('Garage plug');
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+
+    api.post.mockRejectedValue(new Error('already fulfilled'));
+    await userEvent.click(await screen.findByRole('button', { name: 'Cancel reservation' }));
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('already fulfilled'));
+  });
+});
+
+describe('CpoReservations — Day view', () => {
+  it('switches views via the seg toggle and fetches a page + the plug roster once', async () => {
+    render(<CpoReservations />);
+    await screen.findByText('Garage plug');
+    api.get.mockClear();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Day' }));
+
+    await waitFor(() => expect(api.get).toHaveBeenCalledWith('/api/cpo/plugs'));
+    expect(api.get).toHaveBeenCalledWith(expect.stringContaining('/api/cpo/reservations?limit='));
+    expect(await screen.findByText('Booked')).toBeInTheDocument(); // legend badge
+  });
+
+  it('renders one row per charger, with a booking placed only on its own day', async () => {
+    render(<CpoReservations />);
+    await screen.findByText('Garage plug');
+    await userEvent.click(screen.getByRole('button', { name: 'Day' }));
+    await screen.findByText('Booked');
+
+    const dayInput = screen.getByLabelText('Day');
+    fireEvent.change(dayInput, { target: { value: '2026-07-21' } });
+    expect(await screen.findByTitle(/Asha.*Booked/s)).toBeInTheDocument();
+    expect(screen.queryByTitle(/Rae.*Fulfilled/s)).not.toBeInTheDocument();
+  });
+
+  it('shows a retryable error instead of a fake empty timeline on failure', async () => {
+    api.get.mockImplementation((url) => {
+      if (url.startsWith('/api/cpo/reservations')) return Promise.reject(new Error('down'));
+      return Promise.resolve(PLUGS);
+    });
+    render(<CpoReservations />);
+    await screen.findByText("Couldn't load this"); // list view's own error, from the initial fetch
+    await userEvent.click(screen.getByRole('button', { name: 'Day' }));
+    expect(await screen.findAllByText("Couldn't load this")).not.toHaveLength(0);
   });
 });

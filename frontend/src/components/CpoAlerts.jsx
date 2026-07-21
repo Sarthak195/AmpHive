@@ -1,123 +1,144 @@
 /**
- * AmpHive CPO Alerts Feed
- * =======================
- * Shows gateway/plug operational events for the operator's tenant — safety
- * cutoffs (thermal / over-current), unauthorized-on alarms (a plug switched on
- * with no authorized session), and OTA lifecycle notices.
+ * CpoAlerts — the console's ambient alert strip.
+ * ==============================================
+ * Rendered by CpoLayout on EVERY console page (not just the dashboard):
+ * unacknowledged critical/warning gateway events as banners, severity-sorted
+ * (critical first, then newest). Info-level events stay on the Health page.
  *
- * Sources: GET /api/cpo/events (persisted history, newest first) merged with
- * live `gateway_alarm` socket broadcasts (via SessionContext, which owns the
- * one shared socket). Operators can acknowledge an event to clear it from the
- * active feed without losing the audit row.
+ * Sources: GET /api/cpo/events?unacknowledged_only=true on a 60s poll, plus
+ * an immediate refetch when the shared socket broadcasts a `gateway_alarm`
+ * (via SessionContext). Acknowledging posts the ack, drops the banner and
+ * refreshes TenantContext so the Health nav badge stays in step.
  */
 
-import { useState, useEffect, useCallback } from 'react';
+import { useCallback, useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
+import { AlertTriangle, OctagonAlert } from 'lucide-react';
 import api from '../api/client';
+import usePoll from '../hooks/usePoll';
 import { useSession } from '../contexts/SessionContext';
+import { useTenant } from '../contexts/TenantContext';
+import { useToast } from './ui';
+import { eventTypeCopy, apiErrorCopy } from '../utils/statusCopy';
+import './CpoAlerts.css';
 
-const SEVERITY_STYLE = {
-  critical: { color: 'var(--color-danger)', bg: 'hsla(0, 80%, 50%, 0.10)', border: 'hsla(0, 80%, 50%, 0.35)', icon: '🚨' },
-  warning: { color: 'var(--color-warning, #f0a020)', bg: 'hsla(38, 90%, 50%, 0.10)', border: 'hsla(38, 90%, 50%, 0.35)', icon: '⚠️' },
-  info: { color: 'var(--color-text-secondary)', bg: 'hsla(75, 8%, 50%, 0.10)', border: 'hsla(75, 8%, 50%, 0.30)', icon: 'ℹ️' },
-};
+/** Only critical/warning events interrupt every page. */
+const SEVERITY_RANK = { critical: 0, warning: 1 };
+const MAX_SHOWN = 4;
 
 const timeAgo = (iso) => {
   if (!iso) return '';
   const secs = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
-  if (secs < 60) return `${secs}s ago`;
+  if (secs < 60) return 'just now';
   if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
   if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`;
   return `${Math.floor(secs / 86400)}d ago`;
 };
 
 const CpoAlerts = () => {
-  const { alarms } = useSession();
-  const [events, setEvents] = useState([]);
-  const [loading, setLoading] = useState(true);
+  // Null-safe: the CPO host may render before SessionProvider hands out a
+  // socket, and unit tests mount without the provider entirely.
+  const { alarms } = useSession() || {};
+  const { refresh } = useTenant();
+  const toast = useToast();
+  const [events, setEvents] = useState(null); // null = first load pending
+  const [failed, setFailed] = useState(false);
+  const [ackBusy, setAckBusy] = useState(null);
 
   const fetchEvents = useCallback(async () => {
     try {
       const res = await api.get('/api/cpo/events?unacknowledged_only=true&limit=50');
-      setEvents(res);
-    } catch (err) {
-      console.error('Failed to load CPO events:', err);
-    } finally {
-      setLoading(false);
+      const list = Array.isArray(res) ? res : res?.items || [];
+      setEvents(
+        list
+          .filter((e) => SEVERITY_RANK[e.severity] !== undefined)
+          .sort(
+            (a, b) =>
+              SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity] ||
+              new Date(b.created_at || 0) - new Date(a.created_at || 0),
+          ),
+      );
+      setFailed(false);
+    } catch {
+      setFailed(true);
     }
   }, []);
 
-  useEffect(() => {
-    fetchEvents();
-  }, [fetchEvents]);
+  usePoll(fetchEvents, 60_000);
 
-  // A live socket alarm may reference an event our tenant owns but that we
-  // haven't fetched yet — re-pull the list so the acknowledge action targets a
-  // real row. (Broadcasts are global; the fetch is tenant-scoped, so anything
-  // that isn't ours simply won't appear.)
+  // A live socket alarm may reference an event we haven't fetched yet —
+  // re-pull so the Acknowledge action targets a real row.
   useEffect(() => {
-    if (alarms && alarms.length > 0) {
-      fetchEvents();
-    }
+    if (alarms && alarms.length > 0) fetchEvents();
   }, [alarms, fetchEvents]);
 
   const acknowledge = async (id) => {
+    setAckBusy(id);
     try {
       await api.post(`/api/cpo/events/${id}/ack`, {});
-      setEvents((prev) => prev.filter((e) => e.id !== id));
+      setEvents((prev) => (prev || []).filter((e) => e.id !== id));
+      refresh(); // keep the Health nav badge in step
     } catch (err) {
-      console.error('Failed to acknowledge event:', err);
+      toast.error(apiErrorCopy(err));
+    } finally {
+      setAckBusy(null);
     }
   };
 
-  if (loading) return null;
-  if (events.length === 0) return null;
+  if (failed) {
+    return (
+      <div className="console-alerts">
+        <div className="banner banner-danger console-alert" role="alert">
+          <AlertTriangle size={18} aria-hidden="true" />
+          <div className="console-alert-body">Couldn't check for new alerts.</div>
+          <button type="button" className="btn btn-quiet btn-sm" onClick={fetchEvents}>
+            Retry
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (!events || events.length === 0) return null;
+
+  const shown = events.slice(0, MAX_SHOWN);
 
   return (
-    <div className="glass" style={{ padding: '1.25rem 1.5rem', marginBottom: '2rem', borderRadius: 'var(--radius-md)' }}>
-      <div className="flex justify-between items-center" style={{ marginBottom: '0.75rem' }}>
-        <h3 style={{ margin: 0 }}>🔔 Active Alerts ({events.length})</h3>
-      </div>
-      <div className="flex flex-col gap-2">
-        {events.map((ev) => {
-          const s = SEVERITY_STYLE[ev.severity] || SEVERITY_STYLE.info;
-          return (
-            <div
-              key={ev.id}
-              className="flex justify-between items-center gap-3"
-              style={{
-                padding: '0.6rem 0.85rem',
-                borderRadius: 'var(--radius-md)',
-                background: s.bg,
-                border: `1px solid ${s.border}`,
-              }}
-            >
-              <div className="flex items-center gap-2" style={{ minWidth: 0 }}>
-                <span style={{ fontSize: '1.1rem' }}>{s.icon}</span>
-                <div style={{ minWidth: 0 }}>
-                  <div style={{ color: s.color, fontWeight: 600, fontSize: '0.9rem' }}>
-                    {ev.event_type.replace(/_/g, ' ')}
-                    {ev.plug_id != null && (
-                      <span style={{ color: 'var(--color-text-muted)', fontWeight: 400 }}> · plug {ev.plug_id}</span>
-                    )}
-                  </div>
-                  <div style={{ color: 'var(--color-text-secondary)', fontSize: '0.8rem' }}>
-                    {ev.detail || `Gateway ${ev.gateway_id}`}
-                    <span style={{ color: 'var(--color-text-muted)' }}> · {timeAgo(ev.created_at)}</span>
-                  </div>
-                </div>
-              </div>
-              <button
-                className="btn btn-ghost btn-sm"
-                onClick={() => acknowledge(ev.id)}
-                style={{ flexShrink: 0, whiteSpace: 'nowrap' }}
-              >
-                Dismiss
-              </button>
+    <section className="console-alerts" aria-label="Active alerts" aria-live="polite">
+      {shown.map((ev) => {
+        const critical = ev.severity === 'critical';
+        const Icon = critical ? OctagonAlert : AlertTriangle;
+        return (
+          <div
+            key={ev.id}
+            className={`banner ${critical ? 'banner-danger' : 'banner-warn'} console-alert`}
+          >
+            <Icon size={18} aria-hidden="true" />
+            <div className="console-alert-body">
+              <strong>{eventTypeCopy(ev.event_type)}</strong>
+              <span className="console-alert-detail">
+                {ev.detail || `Gateway ${ev.gateway_id}`}
+                {ev.plug_id != null && ` · Plug ${ev.plug_id}`}
+                {ev.created_at && ` · ${timeAgo(ev.created_at)}`}
+              </span>
             </div>
-          );
-        })}
-      </div>
-    </div>
+            <button
+              type="button"
+              className="btn btn-quiet btn-sm"
+              disabled={ackBusy === ev.id}
+              onClick={() => acknowledge(ev.id)}
+            >
+              {ackBusy === ev.id ? 'Acknowledging…' : 'Acknowledge'}
+            </button>
+          </div>
+        );
+      })}
+      <Link className="console-alerts-viewall" to="/cpo/health">
+        {events.length > shown.length
+          ? `View all ${events.length} alerts`
+          : 'View all alerts'}
+      </Link>
+    </section>
   );
 };
 

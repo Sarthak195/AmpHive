@@ -1,29 +1,40 @@
 /**
- * ReserveModal — book a future time slot on a plug (feat/reservations).
+ * ReserveModal — book a future time slot on a charger.
+ * ====================================================
+ * Shared prop contract (redesign-v3):
+ *   <ReserveModal open onClose plug onReserved />
  *
- * Shows the plug's upcoming BOOKED windows (GET /api/plugs/{id}/reservations)
- * so group members book around each other — the private society/office use
- * case — then POSTs {plug_id, start_at, end_at} as ISO strings built from a
- * local date + start time + a duration preset (30 min / 1 h / 2 h / 4 h).
- * Server-side policy rejections (409 slot taken / reservation cap, 400
- * window rules) surface inline via the api client's error message.
- * Reservations are free — no coins are held.
+ * Fetches the plug's upcoming BOOKED windows (GET /api/plugs/{id}/reservations)
+ * so group members book around each other. A fetch failure shows an ErrorState
+ * INSIDE the modal (never a clean-looking empty schedule). The chosen window
+ * is checked client-side against those windows for overlap before submitting;
+ * duration comes from preset chips (30m / 1h / 2h / 4h) or a custom end time.
+ * POSTs {plug_id, start_at, end_at}; server rejections surface inline.
+ * Reservations are free — no money is held.
  */
-import { useState, useEffect } from 'react';
+
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import Modal from './ui/Modal';
+import './ReserveModal.css';
+import ErrorState from './ui/ErrorState';
+import Skeleton from './ui/Skeleton';
+import { useToast } from './ui/Toast';
 import api from '../api/client';
+import { apiErrorCopy } from '../utils/statusCopy';
 import { fmtWindow } from '../utils/reservationTime';
 
 const DURATIONS = [
-  { label: '30 min', minutes: 30 },
-  { label: '1 h', minutes: 60 },
-  { label: '2 h', minutes: 120 },
-  { label: '4 h', minutes: 240 },
+  { id: '30', label: '30m', minutes: 30 },
+  { id: '60', label: '1h', minutes: 60 },
+  { id: '120', label: '2h', minutes: 120 },
+  { id: '240', label: '4h', minutes: 240 },
+  { id: 'custom', label: 'Custom end', minutes: null },
 ];
 
 const pad = (n) => String(n).padStart(2, '0');
 
-// Local-time defaults for the inputs: today + the next 30-minute boundary
-// (with a small lead so "now" hasn't slipped into the past by submit time).
+// Local-time defaults: the next 30-minute boundary, with a small lead so
+// "now" hasn't slipped into the past by submit time.
 const defaultStart = () => {
   const d = new Date(Date.now() + 5 * 60 * 1000);
   d.setSeconds(0, 0);
@@ -34,83 +45,131 @@ const defaultStart = () => {
 const toDateValue = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 const toTimeValue = (d) => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
 
-const ReserveModal = ({ plug, onClose, onBooked }) => {
-  const start = defaultStart();
-  const [date, setDate] = useState(toDateValue(start));
-  const [time, setTime] = useState(toTimeValue(start));
-  const [duration, setDuration] = useState(60);
-  const [windows, setWindows] = useState([]);
-  const [error, setError] = useState('');
-  const [submitting, setSubmitting] = useState(false);
+export default function ReserveModal({ open, onClose, plug, onReserved }) {
+  const toast = useToast();
 
-  // The plug's upcoming schedule, so the driver books around it.
+  const [date, setDate] = useState('');
+  const [time, setTime] = useState('');
+  const [duration, setDuration] = useState('60');
+  const [customEnd, setCustomEnd] = useState('');
+  const [windows, setWindows] = useState(null); // null = loading
+  const [windowsError, setWindowsError] = useState(null);
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const fetchWindows = useCallback(async () => {
+    setWindowsError(null);
+    setWindows(null);
+    try {
+      const data = await api.get(`/api/plugs/${plug.id}/reservations`);
+      setWindows(Array.isArray(data) ? data : []);
+    } catch (err) {
+      setWindowsError(err);
+      setWindows(null);
+    }
+  }, [plug]);
+
+  // Fresh form + schedule every time the modal opens.
   useEffect(() => {
-    let cancelled = false;
-    api
-      .get(`/api/plugs/${plug.id}/reservations`)
-      .then((data) => {
-        if (!cancelled) setWindows(Array.isArray(data) ? data : []);
-      })
-      .catch((err) => console.error('Failed to fetch plug schedule:', err));
-    return () => {
-      cancelled = true;
-    };
-  }, [plug.id]);
+    if (!open || !plug) return;
+    const start = defaultStart();
+    setDate(toDateValue(start));
+    setTime(toTimeValue(start));
+    setDuration('60');
+    setCustomEnd('');
+    setError('');
+    setBusy(false);
+    fetchWindows();
+  }, [open, plug, fetchWindows]);
+
+  // The chosen [start, end) window, or null while the inputs don't parse.
+  const chosen = useMemo(() => {
+    if (!date || !time) return null;
+    const start = new Date(`${date}T${time}`);
+    if (Number.isNaN(start.getTime())) return null;
+    if (duration === 'custom') {
+      if (!customEnd) return null;
+      const end = new Date(`${date}T${customEnd}`);
+      if (Number.isNaN(end.getTime()) || end <= start) return null;
+      return { start, end };
+    }
+    const minutes = DURATIONS.find((d) => d.id === duration)?.minutes;
+    if (!minutes) return null;
+    return { start, end: new Date(start.getTime() + minutes * 60 * 1000) };
+  }, [date, time, duration, customEnd]);
+
+  // Client-side overlap check against the fetched windows.
+  const overlap = useMemo(() => {
+    if (!chosen || !Array.isArray(windows)) return null;
+    return (
+      windows.find(
+        (w) => chosen.start < new Date(w.end_at) && chosen.end > new Date(w.start_at)
+      ) || null
+    );
+  }, [chosen, windows]);
+
+  if (!open || !plug) return null;
+
+  const customEndInvalid =
+    duration === 'custom' && customEnd !== '' && chosen == null && date && time;
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError('');
-
-    const startAt = new Date(`${date}T${time}`);
-    if (Number.isNaN(startAt.getTime())) {
-      setError('Pick a valid date and start time.');
+    if (!chosen) {
+      setError(
+        duration === 'custom'
+          ? 'Pick a valid date, start time and an end time after the start.'
+          : 'Pick a valid date and start time.'
+      );
       return;
     }
-    const endAt = new Date(startAt.getTime() + duration * 60 * 1000);
-
-    setSubmitting(true);
+    if (overlap) {
+      setError(
+        `That time overlaps an existing reservation (${fmtWindow(overlap.start_at, overlap.end_at)}) — pick another slot.`
+      );
+      return;
+    }
+    setBusy(true);
     try {
       await api.post('/api/reservations', {
         plug_id: plug.id,
-        start_at: startAt.toISOString(),
-        end_at: endAt.toISOString(),
+        start_at: chosen.start.toISOString(),
+        end_at: chosen.end.toISOString(),
       });
-      onBooked?.();
+      toast.ok(`Reserved — ${plug.name || `Charger ${plug.id}`}, ${fmtWindow(chosen.start, chosen.end)}`);
+      onReserved?.();
     } catch (err) {
-      // 409s (slot taken / cap reached) and 400s (window rules) land here
-      // with the backend's specific message.
-      setError(err.message);
-    } finally {
-      setSubmitting(false);
+      // 409s (slot taken / cap reached) and 400s (window rules) land here.
+      setError(apiErrorCopy(err));
+      setBusy(false);
     }
   };
 
   return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-content" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-header">
-          <h2>Reserve {plug.name}</h2>
-          <button className="modal-close" onClick={onClose} aria-label="Close">
-            ✕
-          </button>
-        </div>
-
-        <p style={{ fontSize: '0.85rem', color: 'var(--color-text-secondary)', marginBottom: '1rem' }}>
-          Book a time slot — during it, only you can start a session on this
-          plug. Reservations are free.
+    <Modal open={open} onClose={busy ? undefined : onClose} title={`Reserve ${plug.name || `charger ${plug.id}`}`}>
+      <div className="stack">
+        <p className="text-2 text-sm">
+          Book a time slot — during it, only you can start a charge on this charger. Reservations
+          are free.
         </p>
 
-        {/* Upcoming windows on this plug, so people book around them. */}
-        <div style={{ marginBottom: '1.25rem' }}>
-          <h4 style={{ fontSize: '0.9rem', marginBottom: '0.5rem' }}>Upcoming reservations</h4>
-          {windows.length === 0 ? (
-            <p style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>
-              No upcoming reservations — the schedule is clear.
-            </p>
+        <div>
+          <h3 className="reserve-schedule-title">Upcoming reservations</h3>
+          {windowsError ? (
+            <ErrorState
+              error={windowsError}
+              onRetry={fetchWindows}
+              title="Couldn't load the schedule"
+            />
+          ) : windows === null ? (
+            <Skeleton lines={2} />
+          ) : windows.length === 0 ? (
+            <p className="text-3 text-sm">No upcoming reservations — the schedule is clear.</p>
           ) : (
-            <ul style={{ margin: 0, paddingLeft: '1.1rem', fontSize: '0.85rem', color: 'var(--color-text-secondary)' }}>
+            <ul className="reserve-window-list text-sm text-2">
               {windows.map((w) => (
-                <li key={w.id} style={{ marginBottom: '0.25rem' }}>
+                <li key={w.id}>
                   {fmtWindow(w.start_at, w.end_at)}
                   {w.is_mine ? ' (yours)' : w.user_name ? ` — ${w.user_name}` : ''}
                 </li>
@@ -119,63 +178,97 @@ const ReserveModal = ({ plug, onClose, onBooked }) => {
           )}
         </div>
 
-        <form onSubmit={handleSubmit}>
-          <div className="flex gap-3" style={{ flexWrap: 'wrap', marginBottom: '1rem' }}>
-            <label style={{ flex: 1, minWidth: '140px', fontSize: '0.85rem' }}>
-              Date
+        <form onSubmit={handleSubmit} className="stack">
+          <div className="reserve-when">
+            <div className="field">
+              <label className="field-label" htmlFor="reserve-date">
+                Date
+              </label>
               <input
+                id="reserve-date"
                 type="date"
                 className="input"
-                aria-label="Reservation date"
                 value={date}
                 onChange={(e) => setDate(e.target.value)}
-                style={{ width: '100%', marginTop: '0.25rem' }}
               />
-            </label>
-            <label style={{ flex: 1, minWidth: '120px', fontSize: '0.85rem' }}>
-              Start time
+            </div>
+            <div className="field">
+              <label className="field-label" htmlFor="reserve-time">
+                Start time
+              </label>
               <input
+                id="reserve-time"
                 type="time"
                 className="input"
-                aria-label="Reservation start time"
                 value={time}
                 onChange={(e) => setTime(e.target.value)}
-                style={{ width: '100%', marginTop: '0.25rem' }}
               />
-            </label>
+            </div>
           </div>
 
-          <div style={{ marginBottom: '1rem' }}>
-            <div style={{ fontSize: '0.85rem', marginBottom: '0.35rem' }}>Duration</div>
-            <div className="flex gap-2" role="group" aria-label="Duration">
+          <div className="field">
+            <span className="field-label" id="reserve-duration-label">
+              Duration
+            </span>
+            <div className="reserve-chips" role="group" aria-labelledby="reserve-duration-label">
               {DURATIONS.map((d) => (
                 <button
-                  key={d.minutes}
+                  key={d.id}
                   type="button"
-                  className={`btn btn-sm ${duration === d.minutes ? 'btn-accent' : 'btn-ghost'}`}
-                  aria-pressed={duration === d.minutes}
-                  onClick={() => setDuration(d.minutes)}
+                  className={`btn btn-sm ${duration === d.id ? 'btn-primary' : 'btn-quiet'}`}
+                  aria-pressed={duration === d.id}
+                  onClick={() => setDuration(d.id)}
                 >
                   {d.label}
                 </button>
               ))}
             </div>
+            {duration === 'custom' && (
+              <>
+                <label className="field-label" htmlFor="reserve-end">
+                  End time
+                </label>
+                <input
+                  id="reserve-end"
+                  type="time"
+                  className="input"
+                  value={customEnd}
+                  onChange={(e) => setCustomEnd(e.target.value)}
+                  aria-invalid={Boolean(customEndInvalid)}
+                />
+                {customEndInvalid && (
+                  <p className="field-error">End time must be after the start time.</p>
+                )}
+              </>
+            )}
           </div>
 
-          {error && <div className="error-text mt-2" style={{ marginBottom: '0.75rem' }}>{error}</div>}
+          {overlap && (
+            <p className="field-error" role="alert">
+              That time overlaps an existing reservation (
+              {fmtWindow(overlap.start_at, overlap.end_at)}) — pick another slot.
+            </p>
+          )}
+          {error && (
+            <p className="field-error" role="alert">
+              {error}
+            </p>
+          )}
 
           <div className="modal-actions">
-            <button type="button" className="btn btn-ghost" onClick={onClose}>
+            <button type="button" className="btn btn-quiet" onClick={onClose} disabled={busy}>
               Cancel
             </button>
-            <button type="submit" className="btn btn-accent" disabled={submitting}>
-              {submitting ? '...' : 'Reserve'}
+            <button
+              type="submit"
+              className="btn btn-primary"
+              disabled={busy || Boolean(overlap)}
+            >
+              {busy ? 'Reserving…' : 'Reserve'}
             </button>
           </div>
         </form>
       </div>
-    </div>
+    </Modal>
   );
-};
-
-export default ReserveModal;
+}

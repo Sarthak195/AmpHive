@@ -47,14 +47,29 @@ export const AuthProvider = ({ children }) => {
     restoreSession();
   }, []);
 
+  // Update local user state (e.g. after a wallet top-up changes the balance)
+  const refreshUser = useCallback(async () => {
+    try {
+      const userData = await api.get('/api/auth/me');
+      setUser(userData);
+      localStorage.setItem('amphive_user', JSON.stringify(userData));
+    } catch (err) {
+      console.error('Failed to refresh user:', err.message);
+    }
+  }, []);
+
   const login = useCallback(async (email, password) => {
     const data = await api.post('/api/auth/login', { email, password });
     // Save JWT token and user data to localStorage
     localStorage.setItem('amphive_token', data.token);
     localStorage.setItem('amphive_user', JSON.stringify(data.user));
+    // Optimistic set for responsiveness, then refresh from /me — the
+    // AuthResponse's user shape lacks fields like available_balance,
+    // created_at, is_disabled that the rest of the app expects.
     setUser(data.user);
+    await refreshUser();
     return data;
-  }, []);
+  }, [refreshUser]);
 
   const register = useCallback(async (email, password, fullName) => {
     const data = await api.post('/api/auth/register', {
@@ -65,9 +80,12 @@ export const AuthProvider = ({ children }) => {
     // Save JWT token and user data to localStorage
     localStorage.setItem('amphive_token', data.token);
     localStorage.setItem('amphive_user', JSON.stringify(data.user));
+    // Optimistic set for responsiveness, then refresh from /me — same as
+    // login (see comment there).
     setUser(data.user);
+    await refreshUser();
     return data;
-  }, []);
+  }, [refreshUser]);
 
   const logout = useCallback(async () => {
     // Revoke the token server-side (bumps token_version → all this user's
@@ -83,20 +101,11 @@ export const AuthProvider = ({ children }) => {
     localStorage.removeItem('amphive_user');
   }, []);
 
-  // Update local user state (e.g. after a wallet top-up changes the balance)
-  const refreshUser = useCallback(async () => {
-    try {
-      const userData = await api.get('/api/auth/me');
-      setUser(userData);
-      localStorage.setItem('amphive_user', JSON.stringify(userData));
-    } catch (err) {
-      console.error('Failed to refresh user:', err.message);
-    }
-  }, []);
-
+  // Children always render — consumers branch on `loading` themselves
+  // (App holds the route tree behind <BootSplash/> until restore settles).
   return (
     <AuthContext.Provider value={{ user, login, register, logout, refreshUser, loading }}>
-      {!loading && children}
+      {children}
     </AuthContext.Provider>
   );
 };

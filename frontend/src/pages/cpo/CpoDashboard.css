@@ -1,0 +1,52 @@
+/* CpoDashboard — layout only (identity comes from tokens/primitives). */
+
+.dash-kpi-label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.dash-kpi-badge {
+  margin-left: var(--sp-2);
+  vertical-align: middle;
+}
+
+.dash-charts-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: var(--sp-4);
+}
+
+.dash-chart h2,
+.card > h2 {
+  margin: 0 0 var(--sp-4);
+  font-size: var(--text-lg);
+}
+
+.dash-chart-head {
+  margin-bottom: var(--sp-4);
+}
+
+.dash-chart-head h2 {
+  margin: 0;
+}
+
+.dash-tooltip {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-md);
+  padding: var(--sp-2) var(--sp-3);
+  font-size: var(--text-xs);
+}
+
+.dash-tooltip-label {
+  color: var(--ink-3);
+  margin: 0 0 var(--sp-1);
+}
+
+.dash-tooltip-row {
+  margin: 0;
+  font-weight: 600;
+  font-family: var(--font-data);
+}

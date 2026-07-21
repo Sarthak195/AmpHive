@@ -30,6 +30,7 @@ def _user(user_id=1, email="driver@amphive.test", password="correct-horse", toke
     u.role.value = role
     u.coin_balance = 0.0
     u.token_version = token_version
+    u.is_disabled = False  # a bare MagicMock attr is truthy → spurious 403
     return u
 
 

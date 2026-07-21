@@ -1,55 +1,102 @@
 /**
  * AmpHive App Component
  * =====================
- * Root router with all page routes.
- * Includes protected route wrapper that redirects unauthenticated users
- * to the login page for protected routes.
+ * Root router — redesign v3. Three route trees keyed off the hostname
+ * partition (utils/appHost.js):
  *
- * Hostname partition (2026-07-20): the single bundle serves two hosts.
- * On the driver host (amphive.duckdns.org) only the driver experience
- * renders and /cpo/* hard-redirects to the CPO origin; on the CPO host
- * (cpo.amphive.duckdns.org, or VITE_FORCE_CPO_HOST=true for dev) only the
- * operator portal renders and driver routes hard-redirect back. See
- * utils/appHost.js and components/HostRouting.jsx.
+ *   driver host   driver app + marketing; /cpo/* hard-redirects to the CPO
+ *                 origin (ExternalRedirect).
+ *   CPO host      operator portal + platform admin; driver routes bounce
+ *                 back to the driver origin.
+ *   unsplit       bare-IP / localhost fallback — everything internal.
  *
- * CPO routes (added in Phase 2.5) are gated by a CpoProtectedRoute
- * wrapper that checks the user's role. Non-CPO users accessing /cpo
- * are shown the setup page instead.
+ * Pages load via React.lazy so each surface (marketing, driver, console,
+ * admin) ships as its own chunk; BootSplash is both the auth-restore gate
+ * and the Suspense fallback. Driver chrome (AppBar + MobileTabBar) renders
+ * inside the driver route trees via DriverShell — console routes bring
+ * their own layout chrome, and the auth pages (Login/Signup/ForgotPassword/
+ * ResetPassword) render standalone outside any shell (their own AuthShell
+ * frame is the only chrome they get).
  */
 
-import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
-import Navbar from './components/Navbar';
-import Home from './pages/Home';
-import TopUp from './pages/TopUp';
-import Session from './pages/Session';
-import Login from './pages/Login';
-import Groups from './pages/Groups';
-import History from './pages/History';
-import PublicMap from './pages/PublicMap';
-import ForgotPassword from './pages/ForgotPassword';
-import ResetPassword from './pages/ResetPassword';
-import { ProtectedRoute, CpoProtectedRoute } from './components/ProtectedRoutes';
+import { lazy, Suspense } from 'react';
+import { BrowserRouter as Router, Routes, Route, Navigate, Outlet, useLocation } from 'react-router-dom';
+import AppBar from './components/AppBar';
+import MobileTabBar from './components/MobileTabBar';
+import BootSplash from './components/BootSplash';
+import ErrorBoundary from './components/ErrorBoundary';
+import AdminLayout from './components/AdminLayout';
+import { ProtectedRoute, CpoProtectedRoute, AdminProtectedRoute } from './components/ProtectedRoutes';
 import { ExternalRedirect, CpoLanding } from './components/HostRouting';
+import { useAuth } from './contexts/AuthContext';
 import { isCpoHost, isSplitHost, cpoOrigin, driverOrigin } from './utils/appHost';
 
-// CPO Admin Dashboard pages
-import CpoSetup from './pages/cpo/CpoSetup';
-import CpoDashboard from './pages/cpo/CpoDashboard';
-import CpoGateways from './pages/cpo/CpoGateways';
-import CpoPlugs from './pages/cpo/CpoPlugs';
-import CpoGroups from './pages/cpo/CpoGroups';
-import CpoSessions from './pages/cpo/CpoSessions';
-import CpoReservations from './pages/cpo/CpoReservations';
-import CpoFaults from './pages/cpo/CpoFaults';
-import CpoEarnings from './pages/cpo/CpoEarnings';
-import CpoTariffs from './pages/cpo/CpoTariffs';
-import CpoInvoices from './pages/cpo/CpoInvoices';
-import CpoDisputes from './pages/cpo/CpoDisputes';
-import CpoSettings from './pages/cpo/CpoSettings';
+// ---- lazy page chunks -----------------------------------------------------
+// Marketing
+const Marketing = lazy(() => import('./pages/Marketing'));
+// Driver pages
+const Dashboard = lazy(() => import('./pages/Dashboard'));
+const MapPage = lazy(() => import('./pages/MapPage'));
+const Session = lazy(() => import('./pages/Session'));
+const Wallet = lazy(() => import('./pages/Wallet'));
+const Activity = lazy(() => import('./pages/Activity'));
+const Groups = lazy(() => import('./pages/Groups'));
+const Account = lazy(() => import('./pages/Account'));
+const Login = lazy(() => import('./pages/Login'));
+const Signup = lazy(() => import('./pages/Signup'));
+const ForgotPassword = lazy(() => import('./pages/ForgotPassword'));
+const ResetPassword = lazy(() => import('./pages/ResetPassword'));
+// Console (CPO) pages
+const CpoSetup = lazy(() => import('./pages/cpo/CpoSetup'));
+const CpoDashboard = lazy(() => import('./pages/cpo/CpoDashboard'));
+const CpoGateways = lazy(() => import('./pages/cpo/CpoGateways'));
+const CpoChargers = lazy(() => import('./pages/cpo/CpoChargers'));
+const CpoGroups = lazy(() => import('./pages/cpo/CpoGroups'));
+const CpoSessions = lazy(() => import('./pages/cpo/CpoSessions'));
+const CpoReservations = lazy(() => import('./pages/cpo/CpoReservations'));
+const CpoHealth = lazy(() => import('./pages/cpo/CpoHealth'));
+const CpoEarnings = lazy(() => import('./pages/cpo/CpoEarnings'));
+const CpoPricing = lazy(() => import('./pages/cpo/CpoPricing'));
+const CpoInvoices = lazy(() => import('./pages/cpo/CpoInvoices'));
+const CpoDisputes = lazy(() => import('./pages/cpo/CpoDisputes'));
+const CpoSettings = lazy(() => import('./pages/cpo/CpoSettings'));
+// Admin pages
+const AdminOverview = lazy(() => import('./pages/admin/AdminOverview'));
+const AdminTenants = lazy(() => import('./pages/admin/AdminTenants'));
+const AdminTenantDetail = lazy(() => import('./pages/admin/AdminTenantDetail'));
+const AdminUsers = lazy(() => import('./pages/admin/AdminUsers'));
+const AdminPayouts = lazy(() => import('./pages/admin/AdminPayouts'));
+const AdminGateways = lazy(() => import('./pages/admin/AdminGateways'));
+const AdminDisputes = lazy(() => import('./pages/admin/AdminDisputes'));
+const AdminAudit = lazy(() => import('./pages/admin/AdminAudit'));
 
-/** CPO dashboard route table — shared by both hosts' route trees below
-    (on the driver host they never render: a catch-all ExternalRedirect
-    for /cpo/* shadows them). */
+/** Driver-host "/": Dashboard when signed in, Marketing otherwise. The
+    printed-QR deep link `/?plug=<id>` keeps working: anonymous visitors go
+    to login with the full location preserved as state.from (Login returns
+    them here), signed-in drivers land on Dashboard which reads ?plug=. */
+const HomeGate = () => {
+  const { user } = useAuth();
+  const location = useLocation();
+  if (user) return <Dashboard />;
+  if (new URLSearchParams(location.search).get('plug')) {
+    return <Navigate to="/login" replace state={{ from: location }} />;
+  }
+  return <Marketing />;
+};
+
+/** Driver chrome: AppBar on top, bottom tab bar for signed-in users, and
+    .has-tabbar padding so page content never hides behind the tabs. */
+const DriverShell = () => {
+  const { user } = useAuth();
+  return (
+    <div className={user ? 'has-tabbar' : undefined}>
+      <AppBar />
+      <Outlet />
+      {user && <MobileTabBar />}
+    </div>
+  );
+};
+
 /** Password reset — public on every host (operators forget passwords too);
     the emailed link lands on /reset-password?token=... */
 const passwordResetRoutes = (
@@ -59,6 +106,52 @@ const passwordResetRoutes = (
   </>
 );
 
+/** Auth pages render standalone — no AppBar/MobileTabBar chrome. They bring
+    their own AuthShell frame, so mounting them inside DriverShell would show
+    double chrome (this app bar AND the auth card's own header). */
+const authRoutes = (
+  <>
+    <Route path="/login" element={<Login />} />
+    <Route path="/signup" element={<Signup />} />
+    {passwordResetRoutes}
+  </>
+);
+
+/** Driver experience — shared verbatim by the driver host and the unsplit
+    fallback tree. Legacy paths redirect: /topup → /wallet, /history →
+    /activity. */
+const driverRoutes = (
+  <>
+    {authRoutes}
+    <Route element={<DriverShell />}>
+      <Route path="/" element={<HomeGate />} />
+      {/* Public charger-discovery map — no account needed. */}
+      <Route path="/map" element={<MapPage />} />
+      <Route path="/session" element={
+        <ProtectedRoute><Session /></ProtectedRoute>
+      } />
+      <Route path="/wallet" element={
+        <ProtectedRoute><Wallet /></ProtectedRoute>
+      } />
+      <Route path="/activity" element={
+        <ProtectedRoute><Activity /></ProtectedRoute>
+      } />
+      <Route path="/groups" element={
+        <ProtectedRoute><Groups /></ProtectedRoute>
+      } />
+      <Route path="/account" element={
+        <ProtectedRoute><Account /></ProtectedRoute>
+      } />
+      {/* Renamed pages keep their old URLs working. */}
+      <Route path="/topup" element={<Navigate to="/wallet" replace />} />
+      <Route path="/history" element={<Navigate to="/activity" replace />} />
+    </Route>
+  </>
+);
+
+/** CPO console route table — shared by the CPO host and unsplit trees.
+    Renamed sections redirect: plugs → chargers, faults → health,
+    tariffs → pricing. */
 const cpoDashboardRoutes = (
   <>
     <Route path="/cpo/dashboard" element={
@@ -67,8 +160,8 @@ const cpoDashboardRoutes = (
     <Route path="/cpo/gateways" element={
       <CpoProtectedRoute><CpoGateways /></CpoProtectedRoute>
     } />
-    <Route path="/cpo/plugs" element={
-      <CpoProtectedRoute><CpoPlugs /></CpoProtectedRoute>
+    <Route path="/cpo/chargers" element={
+      <CpoProtectedRoute><CpoChargers /></CpoProtectedRoute>
     } />
     <Route path="/cpo/groups" element={
       <CpoProtectedRoute><CpoGroups /></CpoProtectedRoute>
@@ -76,17 +169,17 @@ const cpoDashboardRoutes = (
     <Route path="/cpo/sessions" element={
       <CpoProtectedRoute><CpoSessions /></CpoProtectedRoute>
     } />
-    <Route path="/cpo/tariffs" element={
-      <CpoProtectedRoute><CpoTariffs /></CpoProtectedRoute>
-    } />
     <Route path="/cpo/reservations" element={
       <CpoProtectedRoute><CpoReservations /></CpoProtectedRoute>
     } />
-    <Route path="/cpo/faults" element={
-      <CpoProtectedRoute><CpoFaults /></CpoProtectedRoute>
+    <Route path="/cpo/health" element={
+      <CpoProtectedRoute><CpoHealth /></CpoProtectedRoute>
     } />
     <Route path="/cpo/earnings" element={
       <CpoProtectedRoute><CpoEarnings /></CpoProtectedRoute>
+    } />
+    <Route path="/cpo/pricing" element={
+      <CpoProtectedRoute><CpoPricing /></CpoProtectedRoute>
     } />
     <Route path="/cpo/invoices" element={
       <CpoProtectedRoute><CpoInvoices /></CpoProtectedRoute>
@@ -97,11 +190,29 @@ const cpoDashboardRoutes = (
     <Route path="/cpo/settings" element={
       <CpoProtectedRoute><CpoSettings /></CpoProtectedRoute>
     } />
+    <Route path="/cpo/plugs" element={<Navigate to="/cpo/chargers" replace />} />
+    <Route path="/cpo/faults" element={<Navigate to="/cpo/health" replace />} />
+    <Route path="/cpo/tariffs" element={<Navigate to="/cpo/pricing" replace />} />
   </>
 );
 
-/** Route tree for the CPO host: operator portal only; driver routes bounce
-    to the driver origin. */
+/** Platform-admin routes — admin role only; AdminLayout stamps the volt
+    theme + admin accent. Registered on the CPO host and unsplit trees. */
+const adminRoutes = (
+  <Route element={<AdminProtectedRoute><AdminLayout /></AdminProtectedRoute>}>
+    <Route path="/admin" element={<AdminOverview />} />
+    <Route path="/admin/tenants" element={<AdminTenants />} />
+    <Route path="/admin/tenants/:id" element={<AdminTenantDetail />} />
+    <Route path="/admin/users" element={<AdminUsers />} />
+    <Route path="/admin/payouts" element={<AdminPayouts />} />
+    <Route path="/admin/gateways" element={<AdminGateways />} />
+    <Route path="/admin/disputes" element={<AdminDisputes />} />
+    <Route path="/admin/audit" element={<AdminAudit />} />
+  </Route>
+);
+
+/** Route tree for the CPO host: operator portal + admin only; driver routes
+    bounce to the driver origin. */
 const CpoHostRoutes = () => (
   <Routes>
     {/* Landing: anonymous → login; role-routed after that (CpoLanding). */}
@@ -109,14 +220,15 @@ const CpoHostRoutes = () => (
     <Route path="/login" element={<Login />} />
     {passwordResetRoutes}
 
-    {/* CPO self-serve setup ("Become a Host") lives on this host. */}
+    {/* CPO self-serve setup ("Become a host") lives on this host. */}
     <Route path="/cpo" element={
       <ProtectedRoute><CpoSetup /></ProtectedRoute>
     } />
     {cpoDashboardRoutes}
+    {adminRoutes}
 
     {/* Driver-only routes → driver origin (same path preserved). */}
-    {['/map', '/topup', '/session', '/groups', '/history'].map((path) => (
+    {['/map', '/session', '/wallet', '/activity', '/groups', '/account', '/signup', '/topup', '/history'].map((path) => (
       <Route key={path} path={path} element={<ExternalRedirect origin={driverOrigin()} />} />
     ))}
 
@@ -126,77 +238,52 @@ const CpoHostRoutes = () => (
 );
 
 /** Route tree for the driver host: everything except the operator portal;
-    /cpo/* bounces to the CPO origin. */
+    /cpo/* and /admin/* bounce to the CPO origin. */
 const DriverHostRoutes = () => (
   <Routes>
-    {/* Public routes */}
-    <Route path="/" element={<Home />} />
-    <Route path="/login" element={<Login />} />
-    {passwordResetRoutes}
-    {/* Public charger-discovery map — browse nearby public chargers
-        without an account (starting a charge still routes to sign-in). */}
-    <Route path="/map" element={<PublicMap />} />
+    {driverRoutes}
 
-    {/* Protected routes — require authentication */}
-    <Route path="/topup" element={
-      <ProtectedRoute><TopUp /></ProtectedRoute>
-    } />
-    <Route path="/session" element={
-      <ProtectedRoute><Session /></ProtectedRoute>
-    } />
-    <Route path="/groups" element={
-      <ProtectedRoute><Groups /></ProtectedRoute>
-    } />
-    <Route path="/history" element={
-      <ProtectedRoute><History /></ProtectedRoute>
-    } />
-
-    {/* Operator portal moved to the CPO origin — hard-redirect, path kept. */}
+    {/* Operator portal + admin live on the CPO origin — hard-redirect. */}
     <Route path="/cpo/*" element={<ExternalRedirect origin={cpoOrigin()} />} />
     <Route path="/cpo" element={<ExternalRedirect origin={cpoOrigin()} />} />
+    <Route path="/admin/*" element={<ExternalRedirect origin={cpoOrigin()} />} />
+    <Route path="/admin" element={<ExternalRedirect origin={cpoOrigin()} />} />
 
     {/* Catch-all — redirect to home */}
     <Route path="*" element={<Navigate to="/" replace />} />
   </Routes>
 );
 
-/** Unsplit hosts (bare IP DNS-outage fallback, localhost dev): the original
-    combined tree — internal /cpo, no cross-origin redirects. Without this a
-    DuckDNS outage would lock operators out of the portal entirely. */
+/** Unsplit hosts (bare IP DNS-outage fallback, localhost dev): the combined
+    tree — internal /cpo and /admin, no cross-origin redirects. Without this
+    a DNS outage would lock operators out of the portal entirely. */
 const UnsplitRoutes = () => (
   <Routes>
-    <Route path="/" element={<Home />} />
-    <Route path="/login" element={<Login />} />
-    {passwordResetRoutes}
-    <Route path="/map" element={<PublicMap />} />
-    <Route path="/topup" element={
-      <ProtectedRoute><TopUp /></ProtectedRoute>
-    } />
-    <Route path="/session" element={
-      <ProtectedRoute><Session /></ProtectedRoute>
-    } />
-    <Route path="/groups" element={
-      <ProtectedRoute><Groups /></ProtectedRoute>
-    } />
-    <Route path="/history" element={
-      <ProtectedRoute><History /></ProtectedRoute>
-    } />
+    {driverRoutes}
     <Route path="/cpo" element={
       <ProtectedRoute><CpoSetup /></ProtectedRoute>
     } />
     {cpoDashboardRoutes}
+    {adminRoutes}
     <Route path="*" element={<Navigate to="/" replace />} />
   </Routes>
 );
 
 function App() {
+  const { loading } = useAuth();
+
+  // Hold the whole tree behind the splash until the session restore
+  // settles — guards no longer flash anonymous redirects on reload.
+  if (loading) return <BootSplash />;
+
   return (
     <Router>
-      <div style={{ minHeight: '100vh' }}>
-        <Navbar />
-        {!isSplitHost() ? <UnsplitRoutes />
-          : isCpoHost() ? <CpoHostRoutes /> : <DriverHostRoutes />}
-      </div>
+      <ErrorBoundary>
+        <Suspense fallback={<BootSplash />}>
+          {!isSplitHost() ? <UnsplitRoutes />
+            : isCpoHost() ? <CpoHostRoutes /> : <DriverHostRoutes />}
+        </Suspense>
+      </ErrorBoundary>
     </Router>
   );
 }

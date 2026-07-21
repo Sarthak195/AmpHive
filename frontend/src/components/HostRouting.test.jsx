@@ -1,8 +1,8 @@
 /**
  * Host-partition routing tests: CpoLanding role routing on the CPO host
- * ("/" → login / dashboard / not-an-operator message) and ExternalRedirect's
- * cross-origin bounce link (jsdom can't actually navigate, so the visible
- * fallback anchor is what gets asserted).
+ * ("/" → login / admin overview / cpo dashboard / not-an-operator message)
+ * and ExternalRedirect's cross-origin bounce link (jsdom can't actually
+ * navigate, so the visible fallback anchor is what gets asserted).
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen } from '@testing-library/react';
@@ -21,6 +21,7 @@ const renderLanding = () =>
       <Routes>
         <Route path="/" element={<CpoLanding />} />
         <Route path="/login" element={<div>login page</div>} />
+        <Route path="/admin" element={<div>admin overview</div>} />
         <Route path="/cpo/dashboard" element={<div>cpo dashboard</div>} />
         <Route path="/cpo" element={<div>cpo setup page</div>} />
       </Routes>
@@ -38,10 +39,16 @@ describe('CpoLanding', () => {
     expect(screen.getByText('login page')).toBeInTheDocument();
   });
 
-  it.each(['cpo', 'admin'])('sends the %s role to the dashboard', (role) => {
-    useAuth.mockReturnValue({ user: { email: 'op@amphive.test', role } });
+  it('sends the cpo role to the operator dashboard', () => {
+    useAuth.mockReturnValue({ user: { email: 'op@amphive.test', role: 'cpo' } });
     renderLanding();
     expect(screen.getByText('cpo dashboard')).toBeInTheDocument();
+  });
+
+  it('sends the admin role to the platform admin overview', () => {
+    useAuth.mockReturnValue({ user: { email: 'root@amphive.test', role: 'admin' } });
+    renderLanding();
+    expect(screen.getByText('admin overview')).toBeInTheDocument();
   });
 
   it('shows the not-an-operator message to driver-role logins, with a driver-origin link and a become-a-host link', () => {

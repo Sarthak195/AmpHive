@@ -198,4 +198,15 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
+    # [Admin] Disabled accounts are rejected on EVERY request, not just at
+    # login — an admin disable (PATCH /api/admin/users/{id}) must kill tokens
+    # already in the wild immediately. 403, not 401: the token is valid and
+    # we know exactly who this is; they are just not allowed in. The machine
+    # detail matches login's, so the frontend maps both to one message.
+    if user.is_disabled:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="account_disabled",
+        )
+
     return user

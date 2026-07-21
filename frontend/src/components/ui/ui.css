@@ -1,0 +1,16 @@
+/**
+ * Layout-only glue for the ui kit (identity comes from primitives.css /
+ * tokens.css — nothing here sets color, radius or type).
+ */
+
+.status-dot {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.status-dot-label {
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+  white-space: nowrap;
+}

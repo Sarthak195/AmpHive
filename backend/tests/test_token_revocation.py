@@ -25,6 +25,7 @@ def _user(user_id=1, token_version=0):
     u.id = user_id
     u.email = "driver@amphive.test"
     u.token_version = token_version
+    u.is_disabled = False  # a bare MagicMock attr is truthy → spurious 403
     return u
 
 

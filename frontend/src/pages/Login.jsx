@@ -1,176 +1,124 @@
 /**
- * AmpHive Login Page
- * ==================
- * Combined login/register form with glassmorphic styling.
- * Toggles between "Sign In" and "Create Account" modes.
- * On success, redirects back to wherever the driver was headed (ProtectedRoute
- * and Home's QR/deep-link guard both stash that as router state.from — e.g.
- * `/?plug=<id>`) or to Home if there's nowhere to return to.
+ * Login — email + password sign-in (day theme, AuthShell frame).
+ * ================================================================
+ * Register mode has moved to its own page (Signup) — this is sign-in only,
+ * with a footer link to "Create an account".
+ *
+ * On success, returns the driver to wherever they were headed: the `?next=`
+ * query param (the api client's 401 handler / Marketing's plug-ID funnel
+ * both append it) wins when it's a safe same-app path, else router
+ * state.from (ProtectedRoute / the Home QR/deep-link guard) — falling back
+ * to Home. This keeps the printed-QR path intact: /login?next=/?plug=7 lands
+ * back on / with the plug param preserved. `next` is validated via
+ * isSafeInternalPath() so an attacker-controlled query string can never
+ * bounce the driver off-origin (open-redirect guard).
  */
 
 import { useState } from 'react';
 import { Link, useNavigate, useLocation } from 'react-router-dom';
+import { Eye, EyeOff } from 'lucide-react';
+import AuthShell from '../components/AuthShell';
 import { useAuth } from '../contexts/AuthContext';
+import { apiErrorCopy } from '../utils/statusCopy';
+import { isSafeInternalPath } from '../utils/safePath';
 
 const Login = () => {
-  const { login, register } = useAuth();
+  const { login } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
 
-  const [isRegister, setIsRegister] = useState(false);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [fullName, setFullName] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
-  const [loading, setLoading] = useState(false);
+  const [busy, setBusy] = useState(false);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError('');
-    setLoading(true);
+    setBusy(true);
 
     try {
-      if (isRegister) {
-        if (!fullName.trim()) {
-          setError('Please enter your full name.');
-          setLoading(false);
-          return;
-        }
-        await register(email, password, fullName);
-      } else {
-        await login(email, password);
-      }
-      // Return to the original destination (ProtectedRoute / the Home
-      // QR-deep-link guard) if there is one, otherwise Home.
+      await login(email, password);
+      // Return to the original destination: a safe ?next= param wins, else
+      // router state.from (ProtectedRoute / the QR-deep-link guard), else Home.
+      const next = new URLSearchParams(location.search).get('next');
       const from = location.state?.from;
-      const target = from ? `${from.pathname}${from.search || ''}${from.hash || ''}` : '/';
+      const fromTarget = from ? `${from.pathname}${from.search || ''}${from.hash || ''}` : null;
+      const target = (next && isSafeInternalPath(next) ? next : null) || fromTarget || '/';
       navigate(target, { replace: true });
     } catch (err) {
-      setError(err.message || 'Something went wrong. Please try again.');
+      setError(apiErrorCopy(err));
     } finally {
-      setLoading(false);
+      setBusy(false);
     }
   };
 
   return (
-    <div className="page-container animate-fade-in" style={{ maxWidth: '440px', marginTop: '4rem' }}>
-      {/* Logo Header */}
-      <div className="text-center" style={{ marginBottom: '2.5rem' }}>
-        <div style={{
-          fontSize: '3rem',
-          marginBottom: '0.5rem',
-          filter: 'drop-shadow(0 0 20px var(--color-primary-glow))',
-        }}>
-          ⚡
+    <AuthShell
+      title="Sign in"
+      footer={
+        <>
+          New here? <Link to="/signup">Create an account</Link>
+        </>
+      }
+    >
+      <form onSubmit={handleSubmit} className="stack">
+        <div className="field">
+          <label className="field-label" htmlFor="email">Email address</label>
+          <input
+            id="email"
+            type="email"
+            className="input"
+            placeholder="you@example.com"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            required
+            autoComplete="email"
+            autoFocus
+          />
         </div>
-        <h1 style={{ color: 'var(--color-primary)', fontSize: '2.2rem', marginBottom: '0.25rem' }}>
-          AmpHive
-        </h1>
-        <p style={{ fontSize: '1rem' }}>Shared EV Charging Network</p>
-      </div>
 
-      {/* Auth Form */}
-      <div className="glass glass-panel animate-slide-up">
-        <h2 style={{ marginBottom: '1.5rem', textAlign: 'center' }}>
-          {isRegister ? 'Create Account' : 'Sign In'}
-        </h2>
-
-        <form onSubmit={handleSubmit} className="flex flex-col gap-4">
-          {/* Full Name (register only) */}
-          {isRegister && (
-            <div className="input-group">
-              <label htmlFor="fullName">Full Name</label>
-              <input
-                id="fullName"
-                type="text"
-                className="input"
-                placeholder="Enter your full name"
-                value={fullName}
-                onChange={(e) => setFullName(e.target.value)}
-                autoComplete="name"
-              />
-            </div>
-          )}
-
-          {/* Email */}
-          <div className="input-group">
-            <label htmlFor="email">Email Address</label>
-            <input
-              id="email"
-              type="email"
-              className="input"
-              placeholder="you@example.com"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              required
-              autoComplete="email"
-            />
-          </div>
-
-          {/* Password */}
-          <div className="input-group">
-            <label htmlFor="password">Password</label>
+        <div className="field">
+          <label className="field-label" htmlFor="password">Password</label>
+          <div className="auth-password-row">
             <input
               id="password"
-              type="password"
+              type={showPassword ? 'text' : 'password'}
               className="input"
               placeholder="Enter your password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               required
-              minLength={6}
-              autoComplete={isRegister ? 'new-password' : 'current-password'}
+              autoComplete="current-password"
             />
+            <button
+              type="button"
+              className="btn btn-ghost btn-icon auth-password-toggle"
+              onClick={() => setShowPassword((v) => !v)}
+              aria-label={showPassword ? 'Hide password' : 'Show password'}
+              aria-pressed={showPassword}
+            >
+              {showPassword ? <EyeOff size={18} aria-hidden="true" /> : <Eye size={18} aria-hidden="true" />}
+            </button>
           </div>
+        </div>
 
-          {/* Forgot password (sign-in mode only) */}
-          {!isRegister && (
-            <p style={{ textAlign: 'right', fontSize: '0.9rem', marginTop: '-0.5rem' }}>
-              <Link to="/forgot-password" style={{ color: 'var(--color-primary)', fontWeight: 600 }}>
-                Forgot password?
-              </Link>
-            </p>
-          )}
-
-          {/* Error Message */}
-          {error && (
-            <div className="error-text" style={{ textAlign: 'center', padding: '0.5rem' }}>
-              {error}
-            </div>
-          )}
-
-          {/* Submit Button */}
-          <button
-            type="submit"
-            className="btn btn-primary btn-lg btn-full"
-            disabled={loading}
-            style={{ marginTop: '0.5rem' }}
-          >
-            {loading ? 'Please wait...' : (isRegister ? 'Create Account' : 'Sign In')}
-          </button>
-        </form>
-
-        {/* Toggle between login/register */}
-        <div className="divider" />
-        <p style={{ textAlign: 'center', fontSize: '0.95rem' }}>
-          {isRegister ? 'Already have an account?' : "Don't have an account?"}{' '}
-          <button
-            onClick={() => { setIsRegister(!isRegister); setError(''); }}
-            style={{
-              background: 'none',
-              border: 'none',
-              color: 'var(--color-primary)',
-              cursor: 'pointer',
-              fontWeight: 600,
-              fontSize: '0.95rem',
-              fontFamily: 'var(--font-family)',
-            }}
-          >
-            {isRegister ? 'Sign In' : 'Create Account'}
-          </button>
+        <p className="auth-forgot-link">
+          <Link to="/forgot-password">Forgot password?</Link>
         </p>
-      </div>
-    </div>
+
+        {error && (
+          <div className="banner banner-danger" role="alert">
+            <p>{error}</p>
+          </div>
+        )}
+
+        <button type="submit" className="btn btn-primary btn-lg btn-full" disabled={busy}>
+          {busy ? 'Signing in…' : 'Sign in'}
+        </button>
+      </form>
+    </AuthShell>
   );
 };
 

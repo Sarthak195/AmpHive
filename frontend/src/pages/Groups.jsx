@@ -1,160 +1,177 @@
 /**
- * AmpHive Groups Page
- * ====================
- * Allows users to:
- * 1. Join a private charger group by entering an access code.
- * 2. View all groups they have access to (public + joined private).
- * 3. See plug count per group.
+ * Groups — join a private charger group by access code, browse every group
+ * the driver already has access to (public + joined-private via
+ * GET /api/groups/my), and leave a private group (DELETE
+ * /api/groups/{id}/leave — redesign/ui-v3 contract §4 "Driver gaps"; public
+ * groups have no membership to leave, so the action is private-only).
  */
 
-import { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { useAuth } from '../contexts/AuthContext';
+import { useCallback, useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
+import { Users } from 'lucide-react';
+import PageHeader from '../components/ui/PageHeader';
+import EmptyState from '../components/ui/EmptyState';
+import ErrorState from '../components/ui/ErrorState';
+import Skeleton from '../components/ui/Skeleton';
+import ConfirmDialog from '../components/ui/ConfirmDialog';
+import { useToast } from '../components/ui';
 import api from '../api/client';
+import { apiErrorCopy } from '../utils/statusCopy';
+import './Groups.css';
 
-const Groups = () => {
-  const { user } = useAuth();
-  const navigate = useNavigate();
+export default function Groups() {
+  const toast = useToast();
 
   const [groups, setGroups] = useState([]);
-  const [accessCode, setAccessCode] = useState('');
   const [loading, setLoading] = useState(true);
-  const [joining, setJoining] = useState(false);
-  const [error, setError] = useState('');
-  const [success, setSuccess] = useState('');
+  const [error, setError] = useState(null);
 
-  const fetchGroups = async () => {
+  const [code, setCode] = useState('');
+  const [joining, setJoining] = useState(false);
+
+  const [leaveTarget, setLeaveTarget] = useState(null);
+  const [leaving, setLeaving] = useState(false);
+
+  const fetchGroups = useCallback(async () => {
+    setLoading(true);
+    setError(null);
     try {
       const data = await api.get('/api/groups/my');
-      setGroups(data);
+      setGroups(data || []);
     } catch (err) {
-      console.error('Failed to fetch groups:', err);
+      setError(err);
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
-  // Fetch user's groups on mount
   useEffect(() => {
-    if (!user) return;
     fetchGroups();
-  }, [user]);
+  }, [fetchGroups]);
 
-  const handleJoinGroup = async (e) => {
+  const handleJoin = async (e) => {
     e.preventDefault();
-    if (!accessCode.trim()) return;
-
+    const trimmed = code.trim().toUpperCase();
+    if (!trimmed) return;
     setJoining(true);
-    setError('');
-    setSuccess('');
-
     try {
-      const result = await api.post('/api/groups/join', { access_code: accessCode.trim() });
-      setSuccess(`Joined "${result.group_name}" successfully!`);
-      setAccessCode('');
-      // Refresh the groups list
+      const result = await api.post('/api/groups/join', { access_code: trimmed });
+      toast.ok(`Joined "${result.group_name}"`);
+      setCode('');
       await fetchGroups();
     } catch (err) {
-      setError(err.message);
+      toast.error(apiErrorCopy(err));
     } finally {
       setJoining(false);
     }
   };
 
-  if (!user) {
-    return (
-      <div className="page-container text-center animate-fade-in">
-        <h2>Sign in to manage groups</h2>
-        <p>You need an account to join and browse charger groups.</p>
-        <button className="btn btn-primary mt-4" onClick={() => navigate('/login')}>Sign In</button>
-      </div>
-    );
-  }
+  const handleLeave = async () => {
+    if (!leaveTarget) return;
+    setLeaving(true);
+    try {
+      await api.delete(`/api/groups/${leaveTarget.id}/leave`);
+      toast.ok(`Left "${leaveTarget.name}"`);
+      setLeaveTarget(null);
+      await fetchGroups();
+    } catch (err) {
+      toast.error(apiErrorCopy(err));
+    } finally {
+      setLeaving(false);
+    }
+  };
 
   return (
-    <div className="page-container animate-fade-in">
-      <h1 style={{ marginBottom: '0.25rem' }}>Charger Groups</h1>
-      <p style={{ marginBottom: '2rem' }}>
-        Join private groups using an access code, or browse public charger networks.
-      </p>
+    <main className="page">
+      <PageHeader title="Groups" sub="Join private charger groups, or browse public ones." />
 
-      {/* Join Group Form */}
-      <div className="glass glass-panel animate-slide-up" style={{ marginBottom: '2rem' }}>
-        <h3 style={{ marginBottom: '0.5rem' }}>🔑 Join a Private Group</h3>
-        <p style={{ marginBottom: '1.25rem', fontSize: '0.9rem' }}>
-          Enter the access code shared by the charger operator.
-        </p>
-
-        <form onSubmit={handleJoinGroup} className="flex gap-3">
-          <input
-            type="text"
-            className="input"
-            placeholder="Enter access code (e.g. SUNRISE2024)"
-            value={accessCode}
-            onChange={(e) => setAccessCode(e.target.value.toUpperCase())}
-            style={{ flex: 1, letterSpacing: '0.05em', fontWeight: 600 }}
-          />
-          <button
-            type="submit"
-            className="btn btn-primary"
-            disabled={joining || !accessCode.trim()}
-          >
-            {joining ? 'Joining...' : 'Join'}
+      <section className="card groups-join-card">
+        <h2>Join a group</h2>
+        <form className="groups-join-form" onSubmit={handleJoin}>
+          <div className="field">
+            <label className="field-label" htmlFor="groups-access-code">
+              Access code
+            </label>
+            <input
+              id="groups-access-code"
+              className="input mono"
+              value={code}
+              onChange={(e) => setCode(e.target.value.toUpperCase())}
+              placeholder="SUNRISE24"
+              autoComplete="off"
+            />
+            <p className="field-help">Codes look like SUNRISE24 — your host shares them.</p>
+          </div>
+          <button type="submit" className="btn btn-primary" disabled={joining || !code.trim()}>
+            {joining ? 'Joining…' : 'Join'}
           </button>
         </form>
+      </section>
 
-        {error && <div className="error-text mt-2">{error}</div>}
-        {success && (
-          <div style={{ color: 'var(--color-success)', fontSize: '0.9rem', marginTop: '0.5rem', fontWeight: 500 }}>
-            ✓ {success}
-          </div>
-        )}
-      </div>
+      <section>
+        <h2 className="groups-list-heading">Your groups</h2>
 
-      {/* Groups List */}
-      <h3 style={{ marginBottom: '1rem' }}>Your Groups</h3>
-
-      {loading ? (
-        <div className="flex flex-col gap-3">
-          {[1, 2, 3].map(i => (
-            <div key={i} className="skeleton" style={{ height: '80px', width: '100%' }} />
-          ))}
-        </div>
-      ) : groups.length === 0 ? (
-        <div className="glass glass-panel text-center" style={{ padding: '3rem 2rem' }}>
-          <p style={{ fontSize: '2rem', marginBottom: '0.5rem' }}>📭</p>
-          <p>You haven't joined any groups yet.</p>
-          <p style={{ fontSize: '0.9rem', marginTop: '0.5rem' }}>
-            Enter an access code above, or browse public chargers on the Home page.
-          </p>
-        </div>
-      ) : (
-        <div className="flex flex-col gap-3">
-          {groups.map((group, index) => (
-            <div
-              key={group.id}
-              className="glass glass-card flex justify-between items-center animate-slide-up"
-              style={{ animationDelay: `${index * 0.08}s` }}
-              onClick={() => navigate('/')}
-            >
-              <div>
-                <div className="flex items-center gap-2" style={{ marginBottom: '0.25rem' }}>
-                  <span style={{ fontWeight: 600, fontSize: '1.05rem' }}>{group.name}</span>
-                  <span className={`badge ${group.is_public ? 'badge-success' : 'badge-primary'}`}>
+        {loading ? (
+          <Skeleton lines={4} />
+        ) : error ? (
+          <ErrorState error={error} onRetry={fetchGroups} />
+        ) : groups.length === 0 ? (
+          <EmptyState
+            icon={Users}
+            title="No groups yet"
+            body="Join a private group with an access code, or find public chargers on the map."
+            action={
+              <Link to="/map" className="btn btn-quiet">
+                Browse the map
+              </Link>
+            }
+          />
+        ) : (
+          <div className="groups-grid">
+            {groups.map((group) => (
+              <article key={group.id} className="card groups-card">
+                <header className="groups-card-header">
+                  <h3>{group.name}</h3>
+                  <span className={`badge ${group.is_public ? 'badge-ok' : 'badge-info'}`}>
                     {group.is_public ? 'Public' : 'Private'}
                   </span>
-                </div>
-                <span style={{ color: 'var(--color-text-secondary)', fontSize: '0.9rem' }}>
+                </header>
+                <p className="groups-card-meta">
                   {group.plug_count} {group.plug_count === 1 ? 'charger' : 'chargers'}
-                </span>
-              </div>
-              <span style={{ color: 'var(--color-text-muted)', fontSize: '1.25rem' }}>→</span>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-};
+                </p>
+                <div className="groups-card-actions">
+                  <Link
+                    to={`/?group=${encodeURIComponent(group.name)}`}
+                    className="btn btn-quiet btn-sm"
+                  >
+                    View chargers
+                  </Link>
+                  {!group.is_public && (
+                    <button
+                      type="button"
+                      className="btn btn-danger btn-sm"
+                      onClick={() => setLeaveTarget(group)}
+                    >
+                      Leave
+                    </button>
+                  )}
+                </div>
+              </article>
+            ))}
+          </div>
+        )}
+      </section>
 
-export default Groups;
+      <ConfirmDialog
+        open={Boolean(leaveTarget)}
+        onClose={() => setLeaveTarget(null)}
+        onConfirm={handleLeave}
+        title={`Leave ${leaveTarget?.name || 'this group'}?`}
+        body="You'll lose access to its private chargers unless you rejoin with the access code."
+        confirmLabel="Leave group"
+        tone="danger"
+        busy={leaving}
+      />
+    </main>
+  );
+}

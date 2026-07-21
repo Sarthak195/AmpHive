@@ -1,16 +1,18 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="day">
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>AmpHive — Shared EV Charging</title>
-    <meta name="description" content="AmpHive is a shared EV charging platform. Top up your wallet, enter a Plug ID, and start charging your electric vehicle instantly." />
-    <meta name="theme-color" content="#0f1419" />
-    <!-- Leaflet CSS is bundled from node_modules (components/MapComponent.jsx)
-         — no unpkg.com CDN dependency, so the CSP style-src stays 'self'. -->
-    <!-- Razorpay Checkout JS SDK for payment modal integration -->
-    <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+    <title>AmpHive — Shared EV charging</title>
+    <meta name="description" content="AmpHive is a shared EV charging platform. Find a charger nearby, plug in, and pay from your wallet — or host your own chargers and earn." />
+    <meta name="theme-color" content="#FAF7EF" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <!-- Fonts are self-hosted via @fontsource imports in src/main.jsx; their
+         woff2 URLs are content-hashed by Vite at build time, so static
+         <link rel="preload"> tags here would 404 — deliberately omitted. -->
+    <!-- Razorpay Checkout loads on demand (src/utils/razorpay.js) — no
+         page-load script tag. Leaflet CSS is bundled from node_modules. -->
   </head>
   <body>
     <div id="root"></div>

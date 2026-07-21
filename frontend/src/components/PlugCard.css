@@ -1,0 +1,50 @@
+/* PlugCard — layout only (identity comes from tokens/primitives). */
+
+.plug-card {
+  display: grid;
+  gap: var(--sp-2);
+  align-content: start;
+}
+
+.plug-card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-3);
+}
+
+.plug-card-name {
+  font-size: var(--text-md);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.plug-card-head .status-dot {
+  flex-shrink: 0;
+  font-size: var(--text-sm);
+}
+
+.plug-card-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  font-size: var(--text-sm);
+}
+
+.plug-card-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+
+.plug-card-hint {
+  margin: 0;
+}
+
+.plug-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  margin-top: var(--sp-1);
+}

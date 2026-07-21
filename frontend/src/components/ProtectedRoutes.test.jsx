@@ -1,12 +1,13 @@
 /**
- * Route-guard tests: ProtectedRoute (auth required) and CpoProtectedRoute
- * (cpo/admin role required, driver → /cpo onboarding, anonymous → /login).
+ * Route-guard tests: ProtectedRoute (auth required), CpoProtectedRoute
+ * (cpo/admin role required, driver → /cpo onboarding, anonymous → /login)
+ * and AdminProtectedRoute (admin only, non-admins → /cpo/dashboard).
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { MemoryRouter, Routes, Route, useLocation } from 'react-router-dom';
 
-import { ProtectedRoute, CpoProtectedRoute } from './ProtectedRoutes';
+import { ProtectedRoute, CpoProtectedRoute, AdminProtectedRoute } from './ProtectedRoutes';
 import { useAuth } from '../contexts/AuthContext';
 
 vi.mock('../contexts/AuthContext', () => ({
@@ -36,6 +37,7 @@ const renderGuarded = (guardedElement, initialEntry = '/secret') =>
         <Route path="/secret" element={guardedElement} />
         <Route path="/login" element={<LoginFromProbe />} />
         <Route path="/cpo" element={<div>cpo setup page</div>} />
+        <Route path="/cpo/dashboard" element={<div>cpo dashboard page</div>} />
       </Routes>
     </MemoryRouter>
   );
@@ -83,5 +85,27 @@ describe('CpoProtectedRoute', () => {
     useAuth.mockReturnValue({ user: { email: 'op@amphive.test', role } });
     renderGuarded(<CpoProtectedRoute><div>cpo dashboard</div></CpoProtectedRoute>);
     expect(screen.getByText('cpo dashboard')).toBeInTheDocument();
+  });
+});
+
+describe('AdminProtectedRoute', () => {
+  it('redirects anonymous users to /login, carrying the original location', () => {
+    useAuth.mockReturnValue({ user: null });
+    renderGuarded(<AdminProtectedRoute><div>admin content</div></AdminProtectedRoute>, '/secret?x=1');
+    expect(screen.getByText('login page')).toBeInTheDocument();
+    expect(screen.getByTestId('from-probe')).toHaveTextContent('/secret?x=1');
+  });
+
+  it.each(['driver', 'cpo'])('redirects the authenticated %s role to /cpo/dashboard', (role) => {
+    useAuth.mockReturnValue({ user: { email: 'user@amphive.test', role } });
+    renderGuarded(<AdminProtectedRoute><div>admin content</div></AdminProtectedRoute>);
+    expect(screen.getByText('cpo dashboard page')).toBeInTheDocument();
+    expect(screen.queryByText('admin content')).not.toBeInTheDocument();
+  });
+
+  it('renders children for the admin role', () => {
+    useAuth.mockReturnValue({ user: { email: 'root@amphive.test', role: 'admin' } });
+    renderGuarded(<AdminProtectedRoute><div>admin content</div></AdminProtectedRoute>);
+    expect(screen.getByText('admin content')).toBeInTheDocument();
   });
 });

@@ -1,0 +1,378 @@
+/**
+ * Marketing page layout — co-located per the v3 contract. Arrangement only:
+ * identity (color, type, elevation) comes from tokens.css + primitives.css.
+ */
+
+/* ---- deep-link banner (/?plug= for anonymous visitors) ------------------- */
+.mkt-deeplink-wrap { padding-top: var(--sp-6); }
+
+.mkt-deeplink {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-4);
+}
+
+.mkt-deeplink > svg { color: var(--brand); flex-shrink: 0; }
+
+.mkt-deeplink-copy {
+  flex: 1;
+  min-width: 220px;
+  display: grid;
+  gap: 2px;
+}
+
+/* ---- hero ------------------------------------------------------------------ */
+.mkt-hero-section { padding-bottom: var(--sp-12); }
+
+.mkt-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
+  gap: var(--sp-12);
+  align-items: center;
+}
+
+.mkt-hero-copy {
+  display: grid;
+  gap: var(--sp-5);
+  justify-items: start;
+}
+
+.mkt-hero-copy .mkt-eyebrow { margin-bottom: 0; }
+
+.mkt-hero-h { font-size: var(--text-display); }
+
+.mkt-ctas {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-3);
+}
+
+/* One entrance animation, hero only — children rise in top to bottom. */
+.mkt-hero-copy > :nth-child(1) { --stagger-i: 0; }
+.mkt-hero-copy > :nth-child(2) { --stagger-i: 1; }
+.mkt-hero-copy > :nth-child(3) { --stagger-i: 2; }
+.mkt-hero-copy > :nth-child(4) { --stagger-i: 3; }
+.mkt-hero-visual { --stagger-i: 4; }
+
+.mkt-hero-visual {
+  position: relative;
+  isolation: isolate;
+  display: grid;
+  gap: var(--sp-6);
+  justify-items: center;
+}
+
+/* Soft warm glow behind the sticker. Decorative only. */
+.mkt-hero-visual::before {
+  content: '';
+  position: absolute;
+  inset: -12% -8%;
+  z-index: -1;
+  background: radial-gradient(closest-side, var(--brand-soft), transparent 72%);
+}
+
+/* ---- bay-label sticker (the signature card) -------------------------------- */
+.mkt-sticker {
+  width: min(340px, 100%);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+  transform: rotate(-1.5deg);
+}
+
+.mkt-sticker-band {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-4);
+  background: var(--brand-glow);
+  color: var(--ink);
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: var(--text-sm);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.mkt-sticker-inner {
+  margin: var(--sp-4);
+  padding: var(--sp-6) var(--sp-4);
+  border: 2px dashed var(--border-strong);
+  border-radius: var(--r-md);
+  display: grid;
+  justify-items: center;
+  gap: var(--sp-1);
+  text-align: center;
+}
+
+.mkt-sticker-label {
+  font-size: var(--text-xs);
+  font-weight: 700;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+.mkt-sticker-num {
+  font-family: var(--font-data);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--text-4xl);
+  font-weight: 700;
+  line-height: 1.1;
+  color: var(--ink);
+}
+
+.mkt-sticker-hint {
+  font-size: var(--text-xs);
+  color: var(--ink-3);
+}
+
+/* ---- plug-ID funnel form ----------------------------------------------------- */
+.mkt-plug-form {
+  width: min(340px, 100%);
+  display: grid;
+  gap: var(--sp-2);
+}
+
+.mkt-plug-form-row {
+  display: flex;
+  gap: var(--sp-2);
+}
+
+.mkt-plug-form-row .input {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-data);
+}
+
+/* ---- live network proof -------------------------------------------------------- */
+.mkt-proof {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+}
+
+.mkt-proof-skeleton { width: min(280px, 100%); height: 1em; }
+
+/* ---- how it works ---------------------------------------------------------------- */
+.mkt-steps {
+  list-style: none;
+  margin-top: var(--sp-8);
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--sp-8);
+}
+
+.mkt-steps li {
+  display: grid;
+  gap: var(--sp-2);
+  align-content: start;
+  padding-top: var(--sp-4);
+  border-top: 2px solid var(--border);
+}
+
+.mkt-step-num {
+  font-size: var(--text-2xl);
+  font-weight: 700;
+  color: var(--brand);
+}
+
+.mkt-footnote {
+  margin-top: var(--sp-8);
+  font-size: var(--text-sm);
+  color: var(--ink-3);
+}
+
+/* ---- for drivers ------------------------------------------------------------------- */
+.mkt-driver-cards {
+  list-style: none;
+  margin-top: var(--sp-8);
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--sp-5);
+}
+
+.mkt-driver-cards .card {
+  display: grid;
+  gap: var(--sp-2);
+  align-content: start;
+}
+
+.mkt-card-icon {
+  width: 40px;
+  height: 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--r-md);
+  background: var(--brand-soft);
+  color: var(--brand);
+  margin-bottom: var(--sp-2);
+}
+
+/* ---- for hosts (volt band) ------------------------------------------------------------ */
+.mkt-volt {
+  background: var(--bg);
+  color: var(--ink);
+}
+
+.mkt-volt-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr);
+  gap: var(--sp-12);
+  align-items: center;
+}
+
+.mkt-volt-copy {
+  display: grid;
+  gap: var(--sp-5);
+  justify-items: start;
+}
+
+.mkt-volt-copy .mkt-eyebrow { margin-bottom: 0; }
+
+.mkt-volt-list {
+  list-style: none;
+  display: grid;
+  gap: var(--sp-3);
+}
+
+.mkt-volt-list li {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  color: var(--ink-2);
+}
+
+.mkt-volt-list svg {
+  color: var(--brand);
+  flex-shrink: 0;
+  margin-top: 3px;
+}
+
+/* Mini console mock (decorative) */
+.mkt-console-mock {
+  display: grid;
+  gap: var(--sp-4);
+  width: 100%;
+}
+
+.mkt-mock-title {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+.mkt-mock-title svg { color: var(--brand); }
+
+.mkt-mock-kpis {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--sp-3);
+}
+
+.mkt-console-mock .kpi-value { font-size: var(--text-xl); }
+
+.mkt-mock-meter {
+  display: grid;
+  gap: var(--sp-2);
+  color: var(--ink-2);
+}
+
+.mkt-mock-meter .meter-fill { width: 64%; }
+
+/* ---- safety strip -------------------------------------------------------------------------- */
+.mkt-safety {
+  border-top: 1px solid var(--border);
+  background: var(--bg-deep);
+  padding: var(--sp-6) 0;
+}
+
+.mkt-safety-list {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-4) var(--sp-8);
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+}
+
+.mkt-safety-list li {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.mkt-safety-list svg {
+  color: var(--ink-3);
+  flex-shrink: 0;
+}
+
+/* ---- footer ------------------------------------------------------------------------------------ */
+.mkt-footer-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) repeat(3, minmax(0, 1fr));
+  gap: var(--sp-8);
+}
+
+.mkt-footer-brand {
+  display: grid;
+  gap: var(--sp-3);
+  justify-items: start;
+  align-content: start;
+}
+
+.mkt-footer-brand p { max-width: 30ch; }
+
+.mkt-footer-h {
+  font-size: var(--text-xs);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  margin-bottom: var(--sp-3);
+}
+
+.mkt-footer nav ul {
+  list-style: none;
+  display: grid;
+  gap: var(--sp-2);
+}
+
+.mkt-footer nav a { color: var(--ink-2); }
+.mkt-footer nav a:hover { color: var(--ink); }
+
+/* ---- responsive: everything stacks at 720px ------------------------------------------------------- */
+@media (max-width: 720px) {
+  .mkt-section { padding: var(--sp-12) 0; }
+
+  .mkt-hero,
+  .mkt-volt-grid {
+    grid-template-columns: 1fr;
+    gap: var(--sp-8);
+  }
+
+  .mkt-hero-visual { justify-items: stretch; }
+
+  .mkt-sticker,
+  .mkt-plug-form { width: 100%; }
+
+  .mkt-steps,
+  .mkt-driver-cards {
+    grid-template-columns: 1fr;
+    gap: var(--sp-5);
+  }
+
+  .mkt-footer-grid { grid-template-columns: 1fr 1fr; }
+  .mkt-footer-brand { grid-column: 1 / -1; }
+}

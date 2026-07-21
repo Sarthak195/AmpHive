@@ -1,9 +1,9 @@
 # AmpHive — Backend API Reference
 
-*Verified against `backend/` on 2026-07-02; endpoint list refreshed 2026-07-10.*
+*Verified against `backend/` on 2026-07-02; endpoint list refreshed 2026-07-21.*
 
 Routes live in `backend/routers/*.py` (`{auth,groups,plugs,sessions,payments,
-direct,cpo,notifications,reservations}.py`), each an `APIRouter` mounted on the FastAPI `app` in
+direct,cpo,notifications,reservations,admin}.py`), each an `APIRouter` mounted on the FastAPI `app` in
 `backend/main.py` (the 2026-07-07 `main.py` split — TD#7). Every path is
 hard-coded under `/api` (no router `prefix=`). The app title is
 **"AmpHive Shared EV Charging API"**, version **2.0.0**.
@@ -11,15 +11,24 @@ Interactive docs: `http://<host>:8000/docs`.
 
 - **Auth:** routes marked **JWT** require `Authorization: Bearer <token>`
   (FastAPI `HTTPBearer` → `get_current_user`). The user is loaded fresh from the
-  DB on every request, so balance/role are always current.
+  DB on every request, so balance/role are always current. A **disabled** account
+  (`users.is_disabled`, admin kill switch — migration `0025_user_disable`,
+  redesign/ui-v3) is rejected with **403 `account_disabled`** on every request
+  (and at login), so existing tokens die immediately.
 - Routes marked **cpo/admin** additionally require the caller's DB role to be
   `cpo` or `admin`, enforced by `require_role(...)` (`backend/services/rbac.py`).
+  Routes marked **admin** require the `admin` role (platform admins have
+  `tenant_id NULL` by design).
+- **Pagination convention** (redesign/ui-v3 contract §4): paginated list
+  endpoints take `limit` (default 50, capped at 200) + `offset` query params and
+  return `{"total": <full filtered count>, "items": [...]}` — `total` always
+  describes the whole filtered set, never the page.
 - **CORS:** explicit allowlist (localhost dev origins, `amphive.app`, `cpo.amphive.app`) —
   locked down 2026-07-06.
-- **86 `@router` route decorators total** across 9 routers (see Swagger
-  `/docs` for the live, authoritative list): auth (6), cpo (43), direct (5),
-  groups (2), notifications (6), payments (4), plugs (6), reservations (4),
-  sessions (10).
+- **104 `@router` route decorators total** across 10 routers (see Swagger
+  `/docs` for the live, authoritative list): admin (10), auth (6), cpo (46),
+  direct (5), groups (3), notifications (6), payments (4), plugs (7),
+  reservations (4), sessions (13).
   (The legacy SSE endpoint `/api/sessions/live/{id}` was retired 2026-07-07 —
   live telemetry is Socket.io only. The CPO gateway OTA-trigger endpoint was
   added 2026-07-07; the `/api/auth/logout` revocation endpoint 2026-07-08; the
@@ -44,7 +53,7 @@ Interactive docs: `http://<host>:8000/docs`.
 | Method | Path | Auth | Body | Response |
 |--------|------|------|------|----------|
 | POST | `/api/auth/register` | none | `{email, password, full_name}` | `{token, user}` — creates a `driver`, `coin_balance=0`. 400 on duplicate email. |
-| POST | `/api/auth/login` | none | `{email, password}` | `{token, user}` — 401 on bad credentials. |
+| POST | `/api/auth/login` | none | `{email, password}` | `{token, user}` — 401 on bad credentials; **403 `account_disabled`** for an admin-disabled account (checked AFTER the password, so it's only shown to the real owner — no disabled-account oracle; redesign/ui-v3, migration `0025_user_disable`). |
 | GET | `/api/auth/me` | JWT | — | `{id, email, full_name, role, coin_balance, available_balance}` — `available_balance` (added 2026-07-12) is `coin_balance` minus coins held by the driver's OTHER active sessions' authorization holds (`services/wallet.py available_balance`); additive, `coin_balance` unchanged |
 | POST | `/api/auth/logout` | JWT | — | Revokes every token for the caller (bumps `users.token_version`; "log out everywhere") → `{status:"logged_out"}`. |
 | POST | `/api/auth/forgot-password` | none | `{email}` | Issues a single-use reset token (SHA-256 digest stored in `password_reset_tokens`, `RESET_TOKEN_TTL_MIN` expiry, prior unused tokens voided) and emails `FRONTEND_ORIGIN/reset-password?token=...` via `services/email.py` (SMTP if `SMTP_HOST` set, else the link is logged at WARNING). **Always the same generic 200** — no account enumeration. Rate-limited (`FORGOT_PASSWORD_RATE_LIMIT`). |
@@ -59,6 +68,7 @@ Token: HS256 JWT, claims `sub`/`role`/`email`/`iat`/`exp`, **7-day** expiry.
 |--------|------|------|------|-----------|
 | POST | `/api/groups/join` | JWT | `{access_code}` | Join a private group by code. 404 if unknown, 400 if the group is public or already joined. → `{status:"joined", group_id, group_name}` |
 | GET | `/api/groups/my` | JWT | — | All public groups + private groups the user joined, deduped → `[{id, name, is_public, plug_count}]` |
+| DELETE | `/api/groups/{group_id}/leave` | JWT | path `group_id:int` | Leave a private group the caller previously joined — deletes their membership row (the `join` inverse; redesign/ui-v3). 404 when the caller isn't a member (covers unknown groups too; public groups have no memberships to leave). → `{status:"left", group_id}` |
 
 ## Plugs
 
@@ -69,6 +79,7 @@ Token: HS256 JWT, claims `sub`/`role`/`email`/`iat`/`exp`, **7-day** expiry.
 | GET | `/api/plugs/{plug_id}` | JWT | path `plug_id:int` | Single plug; 404 if missing, 403 if in a private group the user hasn't joined. Response also carries `gateway_online`, `is_private`, `watching`, and the reservation fields (as above) |
 | POST | `/api/plugs/{plug_id}/watch` | JWT | path `plug_id:int` | Arm a **one-shot "notify me when free" watch** (2026-07-12): when the plug next flips back to AVAILABLE (session end or CPO maintenance-clear), the caller gets a `plug_available` notification through the standard pipeline (feed + Socket.io + Web Push, `services/plug_watch.py`) and the watch deletes itself. Idempotent (re-arming returns the same 200; a concurrent double-tap is absorbed via the `UNIQUE(user_id, plug_id)` constraint). Access = the `GET /api/plugs/{id}` rule (403 for a non-member on a private-group plug; 404 unknown plug). Occupied/offline/maintenance plugs are all watchable; the one rejection is 409 when the plug is startable right now (AVAILABLE **and** its gateway live). → `{status:"watching", plug_id, watching:true}` |
 | DELETE | `/api/plugs/{plug_id}/watch` | JWT | path `plug_id:int` | Disarm the caller's watch. Idempotent — a watch that doesn't exist (never armed / already fired / plug gone) is a no-op 200; deliberately no access check (the row is the caller's own — a driver who left the plug's private group can still clear it). → `{status:"not_watching", plug_id, watching:false}` |
+| GET | `/api/plugs/{plug_id}/tariff-preview` | JWT (any role) | path `plug_id:int` | **(redesign/ui-v3)** The plug's EFFECTIVE price schedule, previewed before starting → `{base_price_per_kwh, price_now, slots:[{days, start_minute, end_minute, price_per_kwh}]}`. Resolves through the SAME chain billing uses (`services/pricing.py`: plug → group → tenant default → env fallback), so preview and billing can never disagree; `price_now` re-resolves at "now" in the tenant's local zone. `days` is weekday indices (0=Mon…6=Sun) expanded from the slot's `days_mask`; no tariff anywhere in the chain → the env default rate with `slots: []`. Visibility follows `GET /api/plugs/{id}` (403 on an unjoined private-group plug; 404 unknown). |
 
 > **Provisioning moved.** The old unauthenticated `POST /api/plugs/register` and
 > `POST /api/gateways/register` have been **removed**. Gateways and plugs are now
@@ -84,7 +95,10 @@ Token: HS256 JWT, claims `sub`/`role`/`email`/`iat`/`exp`, **7-day** expiry.
 | POST | `/api/sessions/stop` | JWT | `{session_id}` | Owner+active check → MQTT `OFF` (best-effort) → finalize from telemetry → debit wallet → ledger `session_debit` → plug AVAILABLE → the receipt payload `{status:"completed", session_id, plug_id, plug_name, energy_kwh, peak_power_w, price_per_kwh, coins_spent, shortfall_coins, balance_before, balance_remaining, duration_sec, started_at, ended_at, max_kwh, max_duration_seconds, reason}` — `max_kwh`/`max_duration_seconds` (added 2026-07-12; NULL for legacy pre-limit sessions) are the limits the session ran with, so the UI can say which one an auto-stop hit alongside `reason` |
 | GET | `/api/sessions/active` | JWT | — | Retrieve **all** active sessions for the logged-in user, newest first → `{active:true, sessions:[{session_id, plug_id, plug_name, started_at, max_kwh, max_duration_seconds}, …], session_id, plug_id, plug_name, started_at}` (`max_kwh`/`max_duration_seconds` added 2026-07-12 — NULL for legacy sessions; the top-level single-session fields mirror the newest entry for older clients) or `{active:false, sessions:[]}` |
 | — | `Socket.io` connection | JWT | connection query or auth dict | Real-time bi-directional channel for telemetry updates and session status (sole live-telemetry transport since 2026-07-07). |
-| GET | `/api/sessions/history` | JWT | — | Last 50 sessions, newest first → `[{id, plug_id, started_at, ended_at, energy_kwh, coins_spent, status}]` |
+| GET | `/api/sessions/history` | JWT | query `limit=50` (max 200), `offset=0` | The caller's past sessions, newest first. **Shape changed (redesign/ui-v3):** now paginated per the house convention → `{total, items:[{id, plug_id, plug_name, started_at, ended_at, energy_kwh, coins_spent, status}]}` (`plug_name` joined in — the list stays N+1-free). |
+| GET | `/api/sessions/{session_id}` | JWT | path `session_id:int` | **(redesign/ui-v3)** Full receipt/detail for ONE session — the same field shape the stop response returns (so a receipt component renders either interchangeably): `{status, session_id, plug_id, plug_name, energy_kwh, peak_power_w, price_per_kwh, settled_cost_coins, coins_spent, shortfall_coins, balance_before, balance_remaining, duration_sec, started_at, ended_at, max_kwh, max_duration_seconds, reason}` — `status` carries the session's REAL status (a live session is viewable too). Access mirrors `/{id}/invoice`: the owning driver, or a cpo/admin of the owning tenant — anyone else gets 404 (existence not leaked). `balance_before`/`balance_remaining`/`reason` are recovered from the session's `SESSION_DEBIT` ledger row (None while ACTIVE / for pre-ledger rows). Registered LAST in the router so the static `/active`/`/history`/`/queued`/`/disputes/my` siblings always win; a non-integer segment 422s. |
+| GET | `/api/me/stats` | JWT | — | **(redesign/ui-v3)** Current-UTC-calendar-month + lifetime charging aggregates for the caller → `{month:{energy_kwh, spend_coins, sessions}, lifetime:{…}}`. Only finished sessions count (status ≠ ACTIVE — `coins_spent` is only written at finalize). Lives in `routers/sessions.py`. |
+| GET | `/api/sessions/disputes/my` | JWT | — | **(redesign/ui-v3)** The caller's disputes, newest first — the driver-side mirror of the CPO's `GET /api/cpo/disputes` (which owns resolution) → `[{id, session_id, status, reason, resolution_note, refund_coins, created_at, resolved_at}]` |
 
 ### Socket.io Events Reference
 - **Connection**: Pass JWT token via connection auth dict: `{ token: "<JWT_TOKEN>" }` or in connection query string: `?token=<JWT_TOKEN>`.
@@ -190,13 +204,15 @@ scoped to the caller's `tenant_id`, so operators only ever see their own assets.
 | POST | `/api/cpo/groups` | cpo/admin | `{name, is_public?}` | Create a group; private groups get a generated access code. |
 | PUT | `/api/cpo/groups/{id}` | cpo/admin | `{name?, is_public?, regenerate_access_code?}` | Update a group / rotate access code. |
 | DELETE | `/api/cpo/groups/{id}` | cpo/admin | — | Delete a group; assigned plugs become ungrouped. |
+| GET | `/api/cpo/groups/{id}/members` | cpo/admin | path `id:int` | **(redesign/ui-v3)** Members of one of the tenant's groups (the drivers who joined via its access code), oldest joiner first → bare list `[{user_id, email, full_name, joined_at}]`. 404 for another tenant's group (indistinguishable from "doesn't exist"). |
+| DELETE | `/api/cpo/groups/{id}/members/{user_id}` | cpo/admin | path ids | **(redesign/ui-v3)** Remove a member (revokes their access without rotating the code for everyone else). Tenant-scoped on the group; 404 if the user isn't a member. Audited as `group.member_remove`. → `{status:"removed", group_id, user_id}` |
 | GET | `/api/cpo/analytics/overview` | cpo/admin | — | Plugs/gateways/active-session counts + today & all-time energy/revenue. |
-| GET | `/api/cpo/analytics/sessions` | cpo/admin | query `plug_id?, status_filter?, days=30, limit=50` | Session history enriched with plug name, user email, duration. |
+| GET | `/api/cpo/analytics/sessions` | cpo/admin | query `plug_id?, status_filter?, days=30, limit=50` (max 200), `offset=0` | Session history enriched with plug name, user email, duration. **Shape changed (redesign/ui-v3):** paginated → `{total, totals:{count, energy_kwh, revenue_coins}, items, sessions}` — `totals` is computed SERVER-SIDE over the full filtered set (the page slice never truncates the aggregates); `sessions` aliases `items` for pre-contract callers. |
 | GET | `/api/cpo/analytics/sessions.csv` | cpo/admin | query `plug_id?, status_filter?, days=30` | Same tenant scope/filters as above, returned as a downloadable `text/csv` attachment (capped 10k rows). |
 | GET | `/api/cpo/analytics/revenue` | cpo/admin | query `days=30` | Daily `{date, revenue_coins, session_count}` series. |
 | GET | `/api/cpo/analytics/energy` | cpo/admin | query `days=30` | Daily `{date, energy_kwh, session_count}` series. |
 | GET | `/api/cpo/analytics/telemetry` | cpo/admin | query `plug_id?, days=1, bucket=hour` | `date_trunc`-bucketed time-series from `telemetry_readings` (bucket ∈ {minute, hour, day}; 400 otherwise) → `[{timestamp, avg_power_w, max_power_w, energy_kwh, avg_current_a, max_current_a, sample_count}]`. Powers the dashboard load graph (peak W + A). |
-| GET | `/api/cpo/events` | cpo/admin | query `limit=50` (max 200), `unacknowledged_only?` (bool), `severity?` (e.g. `critical`) | Gateway/plug operational events (safety cutoffs, `UNAUTHORIZED_ON` alarms, OTA notices) for the CPO's tenant, newest first → `[{id, gateway_id, plug_id, event_type, severity, detail, acknowledged, created_at}]`. (Added 2026-07-10.) |
+| GET | `/api/cpo/events` | cpo/admin | query `limit=50` (max 200), `offset=0`, `unacknowledged_only?` (bool), `severity?` (e.g. `critical`) | Gateway/plug operational events (safety cutoffs, `UNAUTHORIZED_ON` alarms, OTA notices) for the CPO's tenant, newest first. **Shape changed (redesign/ui-v3):** paginated → `{total, items:[{id, gateway_id, plug_id, event_type, severity, detail, acknowledged, created_at}]}` — `total` counts the full filtered set. (Added 2026-07-10.) |
 | POST | `/api/cpo/events/{event_id}/ack` | cpo/admin | path `event_id:int` | Acknowledge (clear from the active feed) one event; tenant-scoped. → `{status:"acknowledged", event_id}` |
 | GET | `/api/cpo/audit` | cpo/admin | query `limit=50` (max 200), `offset=0` | Admin action audit trail (TD#26) for the CPO's tenant, newest first → `[{id, actor_user_id, actor_email, action, target_type, target_id, detail, created_at}]`. Covers gateway create, plug create, plug status change, plug maintenance enter/clear, group create/delete, access-code regen, and the payout money ops (`payout.request` / `payout.mark_paid` / `payout.cancel` — a payout audit row always lands in the *payout's* tenant, so an admin's mark_paid/cancel shows up in the owning CPO's trail) — written non-fatally by `services/audit.py` (a write failure is logged, never breaks the admin action). Gateway/plug delete aren't recorded yet — no such CPO endpoints exist. (Added 2026-07-12.) |
 | GET | `/api/cpo/earnings` | cpo/admin | — | Lifetime + unsettled (settlement watermark → now) earnings for the caller's tenant → `{watermark, as_of, platform_fee_pct, lifetime:{gross_coins, platform_fee_coins, net_coins}, unsettled:{period_start, period_end, gross_coins, platform_fee_coins, net_coins}}`. Coins are ₹-equivalent (1 coin = ₹1); fee = `PLATFORM_FEE_PCT` (default 10%). Powers `/cpo/earnings`. |
@@ -204,7 +220,34 @@ scoped to the caller's `tenant_id`, so operators only ever see their own assets.
 | GET | `/api/cpo/payouts` | cpo/admin | — | The tenant's payouts, newest request first → `[{id, tenant_id, period_start, period_end, gross_coins, platform_fee_coins, net_coins, status, requested_by_user_id, requested_at, paid_at, note}]` (`status` ∈ requested/paid/cancelled). |
 | POST | `/api/cpo/payouts/{id}/mark_paid` | **admin only** | path `id:int` | Record that a REQUESTED payout was settled **out-of-band** (bank/UPI outside the app — no money moves here). 404 unknown id, 409 if not REQUESTED (row-locked, replay-safe). Audited as `payout.mark_paid` into the payout's tenant. |
 | POST | `/api/cpo/payouts/{id}/cancel` | owner cpo/admin | path `id:int` | Cancel a REQUESTED payout, freeing its window for a future request. Cross-tenant callers get 404 (indistinguishable from "doesn't exist"); 409 if not REQUESTED. Audited as `payout.cancel` into the payout's tenant. |
-| GET | `/api/cpo/reservations` | cpo/admin | query `status?` (booked/cancelled/fulfilled/expired; 400 otherwise), `upcoming_only?` (bool), `limit=50` (max 200), `offset=0` | The tenant's plug reservations, newest window first, each with `plug_name` + the driver's `user_email`/`user_name`. Lazily expires lapsed holds first (so a no-show is never shown as BOOKED). Cancelling uses the shared `POST /api/reservations/{id}/cancel`, which admits the owning tenant's cpo/admin. (Added 2026-07-12.) |
+| GET | `/api/cpo/reservations` | cpo/admin | query `status?` (booked/cancelled/fulfilled/expired; 400 otherwise), `upcoming_only?` (bool), `limit=50` (max 200), `offset=0` | The tenant's plug reservations, newest window first, each with `plug_name` + the driver's `user_email`/`user_name`. Lazily expires lapsed holds first (so a no-show is never shown as BOOKED). Cancelling uses the shared `POST /api/reservations/{id}/cancel`, which admits the owning tenant's cpo/admin. (Added 2026-07-12.) **Shape changed (redesign/ui-v3):** paginated → `{total, items}` — `total` counts the full filtered set. |
+| GET | `/api/cpo/invoices` | cpo/admin | query `limit=50` (max 200), `offset=0` | The tenant's issued GST invoices, newest first. **Shape changed (redesign/ui-v3):** paginated → `{total, items}` (rows via `invoice_to_dict` — same shape as `GET /api/sessions/{id}/invoice`). |
+| GET | `/api/cpo/invoices.csv` | cpo/admin | query `days?` | **(redesign/ui-v3)** Export the tenant's issued GST invoices as a downloadable `text/csv` attachment — mirrors `sessions.csv` (capped 10k rows). `days` is optional (invoices are a legal ledger, so the default export is the FULL history); pass `days=N` to window to invoices issued in the last N days. Columns: invoice_number, issued_at, session_id, driver_user_id, energy_kwh, rate_coins_per_kwh, amount_coins, taxable_value_inr, gst_rate_pct, gst_amount_inr, total_inr, seller_legal_name, seller_gstin. |
+
+## Platform Admin Console (`/api/admin/*`, `routers/admin.py`, redesign/ui-v3)
+
+The admin console's API surface (2026-07-21 — `plans/redesign-v3-contract.md` §4):
+cross-tenant visibility plus the two platform-level user mutations. Every endpoint
+requires the **`admin`** role via `require_role("admin")` and deliberately does
+NOT require a `tenant_id` on the caller — platform admins have `tenant_id NULL`
+by design. All paginated lists follow the house `{total, items}` + `limit`
+(max 200) / `offset` convention. Mutations are audited via `services/audit.py`
+(`AuditLog.tenant_id` was relaxed to nullable in migration `0025_user_disable`
+so platform-level actions on tenant-less users are recordable; NULL rows never
+surface in the tenant-scoped `GET /api/cpo/audit`).
+
+| Method | Path | Auth | Body/Params | Behaviour |
+|--------|------|------|-------------|-----------|
+| GET | `/api/admin/stats/overview` | admin | — | Cross-tenant platform KPIs → `{tenants, users:{total, drivers, cpos, admins}, gateways:{total, online}, plugs:{total}, sessions:{active, today, total}, energy_kwh:{today, total}, revenue_coins:{today, total}, payouts:{requested_count, requested_net_coins}, disputes:{open}}`. Revenue/energy count COMPLETED/PAID sessions; "today" = UTC midnight. |
+| GET | `/api/admin/tenants` | admin | query `q?` (name substring, case-insensitive), `limit`, `offset` | All tenants with per-tenant fleet/usage aggregates, newest first → items `{id, name, created_at, user_count, gateway_count, gateways_online, plug_count, sessions_30d, revenue_30d_coins, pending_payouts}` (correlated scalar subqueries — no N+1). |
+| GET | `/api/admin/tenants/{id}` | admin | path `id:int` | The list row's aggregates + `{gst_number, legal_name, default_tariff_id, recent_sessions:[…10 rows with plug_name/user_email], payouts:[…50, same shape as GET /api/cpo/payouts]}`. 404 unknown. |
+| GET | `/api/admin/users` | admin | query `q?` (email/name substring), `role?` (400 on unknown), `limit`, `offset` | All accounts, newest first → items `{id, email, full_name, role, tenant_id, tenant_name, coin_balance, is_disabled, created_at}`. |
+| PATCH | `/api/admin/users/{id}` | admin | `{role?, is_disabled?}` (400 if both omitted / unknown role) | Change a user's role and/or disabled flag. **403 on self-demote/self-disable** (a lone admin can't lock themselves out). A role change or a disable bumps `token_version` (every outstanding JWT dies immediately; `get_current_user` also rejects disabled users directly — belt and braces). Audited as `user.update`. → `{status:"updated", id, role, is_disabled, tokens_revoked}` |
+| POST | `/api/admin/users/{id}/adjust-balance` | admin | `{amount_coins, reason}` (signed, non-zero; reason 3–200 chars mandatory) | Manual wallet adjustment (goodwill credit / clawback). Row-locked; a debit is **floored at 0** (the DB CHECK forbids negative balances) and the ledger row records the ACTUAL applied delta (typed `topup` for a credit, `session_debit` for a debit; description carries "Admin balance adjustment: <reason>"). Audited as `user.adjust_balance`. → `{new_balance}` |
+| GET | `/api/admin/payouts` | admin | query `status?` (requested/paid/cancelled; 400 otherwise), `limit`, `offset` | Every tenant's payouts, newest request first → items = the `GET /api/cpo/payouts` row shape + `tenant_name`. Settling stays on the existing admin-only `POST /api/cpo/payouts/{id}/mark_paid`. |
+| GET | `/api/admin/gateways` | admin | query `online?` (bool), `limit`, `offset` | Cross-tenant gateway fleet, most recently seen first → items `{id, gateway_id, name, tenant_id, tenant_name, online, last_seen_at, firmware_version, plug_count}`. `online` derives from `Gateway.status == ONLINE` — the same flag the CPO OTA gate uses. |
+| GET | `/api/admin/disputes` | admin | query `status?` (open/approved/rejected; 400 otherwise), `limit`, `offset` | Every tenant's disputes, newest first → items = dispute fields + `{tenant_name, user_email, session_cost_coins}`. Resolution stays on the tenant-scoped `POST /api/cpo/disputes/{id}/resolve`. |
+| GET | `/api/admin/audit` | admin | query `tenant_id?`, `limit`, `offset` | Cross-tenant audit trail, newest first (row shape mirrors `GET /api/cpo/audit` + `tenant_id`/`tenant_name`). Platform-level rows (admin user actions) carry `tenant_id NULL` and appear only in the unfiltered view. |
 
 ---
 

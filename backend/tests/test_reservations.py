@@ -858,10 +858,13 @@ async def test_cpo_reservations_tenant_scoped(factory):
     )
 
     async with factory() as db:
-        rows = await cpo_list_reservations(
+        resp = await cpo_list_reservations(
             user=_fake_user(cpo_a, role=UserRole.CPO, tenant_id=tenant_a), db=db
         )
 
+    # [redesign/ui-v3 contract §4] paginated {total, items} shape
+    rows = resp["items"]
+    assert resp["total"] == 1
     assert [r["id"] for r in rows] == [a_id]  # only tenant A's rows
     assert rows[0]["plug_name"] == "A-Plug"
     assert rows[0]["user_name"] == "Reservation Tester"

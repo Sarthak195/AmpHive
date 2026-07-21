@@ -1,0 +1,26 @@
+/* BootSplash layout — identity (colors, radius) comes from tokens/layouts. */
+
+.boot-splash {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+}
+
+.boot-splash-bolt {
+  width: 44px;
+  height: 44px;
+  border-radius: var(--r-md);
+  animation: boot-pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes boot-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.55;
+    transform: scale(0.9);
+  }
+}

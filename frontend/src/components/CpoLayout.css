@@ -1,0 +1,65 @@
+/* CpoLayout — layout only (identity comes from tokens/primitives/layouts). */
+
+/* The content column (topbar + main) fills the second console grid track. */
+.console-column {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.console-column > .console-main {
+  flex: 1;
+  width: 100%;
+}
+
+.console-topbar-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  font-size: var(--text-sm);
+}
+
+/* Grouped nav sections; Settings pins to the bottom of the nav column. */
+.console-sidebar .console-nav {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.console-nav-section {
+  display: grid;
+  gap: var(--sp-1);
+}
+
+.console-nav-end {
+  margin-top: auto;
+  padding-top: var(--sp-3);
+}
+
+/* Footer rows: email + driver-app link + sign out. */
+.console-footer-email {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.console-footer-action {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: 0;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font: inherit;
+  color: var(--ink-2);
+  text-decoration: none;
+}
+
+.console-footer-action:hover {
+  color: var(--ink);
+  text-decoration: none;
+}

@@ -1,413 +1,336 @@
 /**
- * AmpHive CPO Earnings & Payouts Page
- * ====================================
- * Shows the tenant's lifetime + unsettled earnings (gross / platform fee /
- * net) and the payout ledger, and lets the CPO snapshot its unsettled
- * earnings into a payout request.
+ * CpoEarnings (redesign v3, D7) — the operator's earnings + payout ledger.
  *
- * Record-keeping only: the actual money transfer happens OUTSIDE the app
- * (bank transfer / UPI). The platform operator (admin) marks a payout PAID
- * once that transfer has happened — the admin-only "Mark paid" action shows
- * up here when the logged-in user's role is `admin`.
+ * Payouts are RECORDS only: requesting one snapshots the tenant's unsettled
+ * earnings (watermark -> now); the money itself moves outside AmpHive
+ * (bank/UPI) and the platform operator's admin console marks it paid once
+ * that transfer has happened — this page never shows a "Mark paid" action.
  *
- * Coins are ₹-equivalent (1 coin = ₹1), labelled as such throughout.
- *
- * Data source: /api/cpo/earnings, /api/cpo/payouts, /api/cpo/profile
+ * Data: GET /api/cpo/earnings (lifetime + unsettled legs), GET
+ * /api/cpo/payouts (bare array, newest request first).
+ * Mutations: POST /api/cpo/payouts (request), POST
+ * /api/cpo/payouts/{id}/cancel (owner or admin; only while REQUESTED).
  */
 
-import { useState, useEffect, useCallback } from 'react';
+import { useCallback, useEffect, useState } from 'react';
+import { Wallet } from 'lucide-react';
 import CpoLayout from '../../components/CpoLayout';
+import { PageHeader, DataTable, ConfirmDialog, Money, ErrorState, useToast } from '../../components/ui';
 import api from '../../api/client';
-import { useAuth } from '../../contexts/AuthContext';
+import { useConfig } from '../../contexts/ConfigContext';
+import { formatINR } from '../../utils/money';
+import { apiErrorCopy, payoutStatusLabel } from '../../utils/statusCopy';
+import './CpoEarnings.css';
 
-/**
- * Map payout status to badge class.
- */
-const STATUS_BADGE = {
-  requested: 'badge-warning',
-  paid: 'badge-success',
+const PAYOUT_BADGE = {
+  requested: 'badge-warn',
+  paid: 'badge-ok',
   cancelled: 'badge-danger',
 };
 
-/**
- * Format a coin amount (₹-equivalent) to two decimals.
- */
-const formatCoins = (value) => Number(value || 0).toFixed(2);
+const formatDate = (iso) =>
+  iso
+    ? new Date(iso).toLocaleDateString('en-IN', { year: 'numeric', month: 'short', day: 'numeric' })
+    : '—';
 
-/**
- * Format an ISO timestamp to a readable date (period bounds span months,
- * so include the year).
- */
-const formatDate = (isoStr) => {
-  if (!isoStr) return '—';
-  return new Date(isoStr).toLocaleDateString('en-IN', {
-    year: 'numeric', month: 'short', day: 'numeric',
-  });
-};
+const formatDateTime = (iso) =>
+  iso
+    ? new Date(iso).toLocaleString('en-IN', {
+        year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+      })
+    : '—';
 
-/**
- * Format an ISO timestamp to a readable datetime.
- */
-const formatDateTime = (isoStr) => {
-  if (!isoStr) return '—';
-  return new Date(isoStr).toLocaleString('en-IN', {
-    year: 'numeric', month: 'short', day: 'numeric',
-    hour: '2-digit', minute: '2-digit',
-  });
-};
-
-/**
- * One gross / platform-fee / net summary block (used for both the
- * "Lifetime" and "Unsettled" legs of GET /api/cpo/earnings).
- */
-const EarningsSummaryCard = ({ title, subtitle, leg, feePct, highlightNet }) => (
-  <div className="glass glass-card" style={{ cursor: 'default', flex: '1 1 280px' }}>
-    <div style={{ marginBottom: '0.75rem' }}>
-      <h3 style={{ margin: 0, fontSize: '1.05rem' }}>{title}</h3>
-      {subtitle && (
-        <p style={{ color: 'var(--color-text-muted)', fontSize: '0.78rem', margin: '0.25rem 0 0' }}>
-          {subtitle}
-        </p>
-      )}
-    </div>
-    <div className="flex gap-4" style={{ flexWrap: 'wrap' }}>
-      <div>
-        <span style={{ color: 'var(--color-text-muted)', fontSize: '0.78rem' }}>Gross</span>
-        <p style={{ color: 'var(--color-text-primary)', fontWeight: 600, margin: '0.1rem 0 0', fontSize: '1.1rem' }}>
-          🪙 {formatCoins(leg?.gross_coins)}
-        </p>
-      </div>
-      <div>
-        <span style={{ color: 'var(--color-text-muted)', fontSize: '0.78rem' }}>
-          Platform fee{feePct != null ? ` (${feePct}%)` : ''}
-        </span>
-        <p style={{ color: 'var(--color-text-secondary)', fontWeight: 600, margin: '0.1rem 0 0', fontSize: '1.1rem' }}>
-          🪙 {formatCoins(leg?.platform_fee_coins)}
-        </p>
-      </div>
-      <div>
-        <span style={{ color: 'var(--color-text-muted)', fontSize: '0.78rem' }}>Net (yours)</span>
-        <p style={{
-          color: highlightNet ? 'var(--color-accent)' : 'var(--color-text-primary)',
-          fontWeight: 600, margin: '0.1rem 0 0', fontSize: '1.1rem',
-        }}>
-          🪙 {formatCoins(leg?.net_coins)}
-        </p>
+function EarningsCard({ title, sub, leg, feePct, rate, highlight }) {
+  return (
+    <div className="card earnings-card">
+      <h2 className="earnings-card-title">{title}</h2>
+      {sub && <p className="text-3 text-sm">{sub}</p>}
+      <div className="earnings-stat-row">
+        <div className="earnings-stat">
+          <span className="earnings-stat-label">Gross</span>
+          <span className="earnings-stat-value">
+            <Money coins={leg?.gross_coins} rate={rate} showCoins />
+          </span>
+        </div>
+        <div className="earnings-stat">
+          <span className="earnings-stat-label">
+            Platform fee{feePct != null ? ` (${feePct}%)` : ''}
+          </span>
+          <span className="earnings-stat-value">
+            <Money coins={leg?.platform_fee_coins} rate={rate} showCoins />
+          </span>
+        </div>
+        <div className="earnings-stat">
+          <span className="earnings-stat-label">Net (yours)</span>
+          <span className={`earnings-stat-value${highlight ? ' earnings-stat-value--net' : ''}`}>
+            <Money coins={leg?.net_coins} rate={rate} showCoins />
+          </span>
+        </div>
       </div>
     </div>
-  </div>
-);
+  );
+}
 
-const CpoEarnings = () => {
-  const { user } = useAuth();
-  const isAdmin = user?.role === 'admin';
+export default function CpoEarnings() {
+  const { coin_inr_rate: rate = 1 } = useConfig();
+  const toast = useToast();
 
   const [earnings, setEarnings] = useState(null);
   const [payouts, setPayouts] = useState([]);
-  const [tenantName, setTenantName] = useState('');
   const [loading, setLoading] = useState(true);
-
-  // Request-payout modal state
-  const [showRequestConfirm, setShowRequestConfirm] = useState(false);
-  const [requestError, setRequestError] = useState('');
-  const [requestLoading, setRequestLoading] = useState(false);
-
-  // Row-action (cancel / mark paid) confirm state
-  const [confirmAction, setConfirmAction] = useState(null); // { type: 'cancel'|'mark_paid', payout }
-  const [actionError, setActionError] = useState('');
-  const [actionLoading, setActionLoading] = useState(false);
+  const [error, setError] = useState(null);
 
   const fetchData = useCallback(async () => {
+    setLoading(true);
+    setError(null);
     try {
-      const [earningsRes, payoutsRes, profileRes] = await Promise.all([
+      const [earningsRes, payoutsRes] = await Promise.all([
         api.get('/api/cpo/earnings'),
         api.get('/api/cpo/payouts'),
-        api.get('/api/cpo/profile'),
       ]);
       setEarnings(earningsRes);
-      setPayouts(payoutsRes);
-      setTenantName(profileRes.tenant?.name || '');
+      setPayouts(Array.isArray(payoutsRes) ? payoutsRes : payoutsRes?.items || []);
     } catch (err) {
-      console.error('Failed to load earnings:', err);
+      setError(err);
     } finally {
       setLoading(false);
     }
   }, []);
 
-  useEffect(() => { fetchData(); }, [fetchData]);
-
-  /**
-   * Snapshot the unsettled window into a REQUESTED payout.
-   * The backend answers 400 ("No unsettled earnings to pay out.") or
-   * 409 ("A payout request is already pending for this tenant.") — both
-   * are surfaced inline in the confirm dialog.
-   */
-  const handleRequestPayout = async () => {
-    setRequestLoading(true);
-    setRequestError('');
-    try {
-      await api.post('/api/cpo/payouts', {});
-      setShowRequestConfirm(false);
-      await fetchData();
-    } catch (err) {
-      setRequestError(err.message || 'Failed to request payout.');
-    } finally {
-      setRequestLoading(false);
-    }
-  };
-
-  /**
-   * Cancel (owner/admin) or mark paid (admin only) a REQUESTED payout.
-   */
-  const handleConfirmAction = async () => {
-    if (!confirmAction) return;
-    const { type, payout } = confirmAction;
-    setActionLoading(true);
-    setActionError('');
-    try {
-      await api.post(`/api/cpo/payouts/${payout.id}/${type === 'cancel' ? 'cancel' : 'mark_paid'}`, {});
-      setConfirmAction(null);
-      await fetchData();
-    } catch (err) {
-      setActionError(err.message || 'Action failed.');
-    } finally {
-      setActionLoading(false);
-    }
-  };
+  useEffect(() => {
+    fetchData();
+  }, [fetchData]);
 
   const unsettled = earnings?.unsettled;
   const hasUnsettled = Number(unsettled?.net_coins || 0) > 0;
+  const alreadyPending = payouts.some((p) => p.status === 'requested');
+  const disabledReason = alreadyPending
+    ? 'A payout request is already pending.'
+    : !hasUnsettled
+      ? "There's nothing unsettled to pay out yet."
+      : '';
+
+  // ---- Request payout ----------------------------------------------------
+  const [requestOpen, setRequestOpen] = useState(false);
+  const [requestBusy, setRequestBusy] = useState(false);
+  const [requestError, setRequestError] = useState('');
+
+  const openRequest = () => {
+    setRequestError('');
+    setRequestOpen(true);
+  };
+
+  const confirmRequest = async () => {
+    setRequestBusy(true);
+    setRequestError('');
+    try {
+      await api.post('/api/cpo/payouts', {});
+      setRequestOpen(false);
+      toast.ok('Payout requested.');
+      await fetchData();
+    } catch (err) {
+      setRequestError(apiErrorCopy(err));
+    } finally {
+      setRequestBusy(false);
+    }
+  };
+
+  // ---- Cancel a REQUESTED payout ------------------------------------------
+  const [cancelTarget, setCancelTarget] = useState(null);
+  const [cancelBusy, setCancelBusy] = useState(false);
+  const [cancelError, setCancelError] = useState('');
+
+  const openCancel = (payout) => {
+    setCancelError('');
+    setCancelTarget(payout);
+  };
+
+  const confirmCancel = async () => {
+    if (!cancelTarget) return;
+    setCancelBusy(true);
+    setCancelError('');
+    try {
+      await api.post(`/api/cpo/payouts/${cancelTarget.id}/cancel`, {});
+      setCancelTarget(null);
+      toast.ok('Payout cancelled.');
+      await fetchData();
+    } catch (err) {
+      setCancelError(apiErrorCopy(err));
+    } finally {
+      setCancelBusy(false);
+    }
+  };
+
+  const columns = [
+    { key: 'id', label: 'ID', render: (p) => <span className="text-3">#{p.id}</span> },
+    {
+      key: 'period',
+      label: 'Period',
+      render: (p) => `${formatDate(p.period_start)} → ${formatDate(p.period_end)}`,
+    },
+    { key: 'gross_coins', label: 'Gross', num: true, render: (p) => <Money coins={p.gross_coins} rate={rate} /> },
+    { key: 'platform_fee_coins', label: 'Fee', num: true, render: (p) => <Money coins={p.platform_fee_coins} rate={rate} /> },
+    {
+      key: 'net_coins',
+      label: 'Net',
+      num: true,
+      render: (p) => <span className="earnings-stat-value--net"><Money coins={p.net_coins} rate={rate} /></span>,
+    },
+    {
+      key: 'status',
+      label: 'Status',
+      render: (p) => (
+        <span className={`badge ${PAYOUT_BADGE[p.status] || 'badge-info'}`}>{payoutStatusLabel(p.status)}</span>
+      ),
+    },
+    { key: 'requested_at', label: 'Requested', render: (p) => formatDateTime(p.requested_at) },
+    { key: 'paid_at', label: 'Paid', render: (p) => formatDateTime(p.paid_at) },
+    {
+      key: 'actions',
+      label: 'Actions',
+      render: (p) =>
+        p.status === 'requested' ? (
+          <button type="button" className="btn btn-quiet btn-sm" onClick={() => openCancel(p)}>
+            Cancel
+          </button>
+        ) : (
+          <span aria-hidden="true">—</span>
+        ),
+    },
+  ];
 
   return (
-    <CpoLayout tenantName={tenantName}>
-      {/* Page Header */}
-      <div className="cpo-page-header flex justify-between items-center" style={{ flexWrap: 'wrap', gap: '1rem' }}>
-        <div>
-          <h1>Earnings &amp; Payouts</h1>
-          <p>What your chargers have earned, and settlement of what you're owed</p>
-        </div>
-        <button
-          className="btn btn-cpo"
-          onClick={() => { setRequestError(''); setShowRequestConfirm(true); }}
-          disabled={loading}
-        >
-          Request payout
-        </button>
+    <CpoLayout>
+      <PageHeader
+        title="Earnings & payouts"
+        sub="What your chargers have earned, and settlement of what you're owed."
+        actions={
+          <div className="earnings-request-action">
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={openRequest}
+              disabled={loading || Boolean(disabledReason)}
+            >
+              Request payout
+            </button>
+            {disabledReason && <span className="text-3 text-sm">{disabledReason}</span>}
+          </div>
+        }
+      />
+
+      <div className="banner banner-info earnings-settlement-banner">
+        Payouts are records — the transfer itself happens outside AmpHive (bank
+        transfer / UPI). Requesting one snapshots what you're owed; the
+        platform operator marks it paid once the transfer is made.
       </div>
 
-      {/* Earnings Summary Cards */}
-      {loading ? (
-        <div className="flex gap-4" style={{ flexWrap: 'wrap', marginBottom: '1.5rem' }}>
-          {[1, 2].map((i) => (
-            <div key={i} className="glass glass-card" style={{ cursor: 'default', flex: '1 1 280px' }}>
-              <div className="skeleton" style={{ width: '50%', height: '18px', marginBottom: '1rem' }} />
-              <div className="skeleton" style={{ width: '80%', height: '28px' }} />
-            </div>
-          ))}
-        </div>
-      ) : earnings && (
-        <div className="flex gap-4 animate-fade-in" style={{ flexWrap: 'wrap', marginBottom: '1.5rem' }}>
-          <EarningsSummaryCard
-            title="Lifetime earnings"
-            subtitle="All completed sessions to date"
-            leg={earnings.lifetime}
-            feePct={earnings.platform_fee_pct}
-          />
-          <EarningsSummaryCard
-            title="Unsettled earnings"
-            subtitle={`Window: ${formatDate(unsettled?.period_start)} → ${formatDate(unsettled?.period_end)}`}
-            leg={unsettled}
-            feePct={earnings.platform_fee_pct}
-            highlightNet
-          />
-        </div>
-      )}
-
-      {/* Coin denomination note */}
-      <p style={{ color: 'var(--color-text-muted)', fontSize: '0.8rem', margin: '0 0 1.5rem' }}>
-        Amounts are in coins — ₹-equivalent (1 coin = ₹1).
-      </p>
-
-      {/* Payout History Table */}
-      <div className="cpo-page-header" style={{ marginBottom: '0.75rem' }}>
-        <h2 style={{ fontSize: '1.2rem', margin: 0 }}>Payout history</h2>
-      </div>
-
-      {actionError && <p className="error-text" style={{ marginBottom: '0.75rem' }}>{actionError}</p>}
-
-      {loading ? (
-        <div className="data-table-container">
-          {[1, 2, 3].map((i) => (
-            <div key={i} style={{ padding: '1rem', borderBottom: '1px solid hsla(0,0%,100%,0.04)' }}>
-              <div className="skeleton" style={{ width: '100%', height: '18px' }} />
-            </div>
-          ))}
-        </div>
-      ) : payouts.length > 0 ? (
-        <div className="data-table-container animate-fade-in">
-          <table className="data-table">
-            <thead>
-              <tr>
-                <th>ID</th>
-                <th>Period</th>
-                <th>Gross</th>
-                <th>Fee</th>
-                <th>Net</th>
-                <th>Status</th>
-                <th>Requested</th>
-                <th>Paid</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {payouts.map((payout) => (
-                <tr key={payout.id}>
-                  <td style={{ color: 'var(--color-text-muted)' }}>#{payout.id}</td>
-                  <td>
-                    {formatDate(payout.period_start)} → {formatDate(payout.period_end)}
-                  </td>
-                  <td>🪙 {formatCoins(payout.gross_coins)}</td>
-                  <td>🪙 {formatCoins(payout.platform_fee_coins)}</td>
-                  <td style={{ color: 'var(--color-accent)', fontWeight: 600 }}>
-                    🪙 {formatCoins(payout.net_coins)}
-                  </td>
-                  <td>
-                    <span className={`badge ${STATUS_BADGE[payout.status] || 'badge-warning'}`}>
-                      {payout.status}
-                    </span>
-                  </td>
-                  <td>{formatDateTime(payout.requested_at)}</td>
-                  <td>{formatDateTime(payout.paid_at)}</td>
-                  <td>
-                    {payout.status === 'requested' && (
-                      <div className="flex gap-2">
-                        <button
-                          className="btn btn-ghost btn-sm"
-                          style={{ color: 'var(--color-danger)' }}
-                          onClick={() => { setActionError(''); setConfirmAction({ type: 'cancel', payout }); }}
-                        >
-                          Cancel
-                        </button>
-                        {isAdmin && (
-                          <button
-                            className="btn btn-ghost btn-sm"
-                            style={{ color: 'var(--color-success)' }}
-                            onClick={() => { setActionError(''); setConfirmAction({ type: 'mark_paid', payout }); }}
-                          >
-                            Mark paid
-                          </button>
-                        )}
-                      </div>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+      {error ? (
+        <ErrorState error={error} onRetry={fetchData} />
       ) : (
-        <div className="empty-state glass">
-          <div className="empty-state-icon">🪙</div>
-          <h3>No payouts yet</h3>
-          <p>
-            Once your chargers have earned unsettled coins, request a payout to
-            snapshot what you're owed. The transfer itself happens outside the app.
+        <>
+          {loading ? (
+            <div className="earnings-card-grid" aria-hidden="true">
+              {[1, 2].map((i) => (
+                <div key={i} className="card earnings-card">
+                  <div className="skeleton skeleton-title" />
+                  <div className="earnings-stat-row">
+                    {[1, 2, 3].map((j) => (
+                      <div key={j} className="skeleton skeleton-text" />
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="earnings-card-grid">
+              <EarningsCard
+                title="Lifetime earnings"
+                sub="All completed sessions to date"
+                leg={earnings?.lifetime}
+                feePct={earnings?.platform_fee_pct}
+                rate={rate}
+              />
+              <EarningsCard
+                title="Unsettled earnings"
+                sub={`Window: ${formatDate(unsettled?.period_start)} → ${formatDate(unsettled?.period_end)}`}
+                leg={unsettled}
+                feePct={earnings?.platform_fee_pct}
+                rate={rate}
+                highlight
+              />
+            </div>
+          )}
+
+          <p className="text-3 text-sm earnings-coin-note">
+            Coins are AmpHive's internal ledger unit — 1 coin = {formatINR(rate)}.
           </p>
-        </div>
+
+          <h2 className="earnings-section-title">Payout history</h2>
+
+          <DataTable
+            columns={columns}
+            rows={payouts}
+            loading={loading}
+            error={null}
+            emptyIcon={Wallet}
+            emptyTitle="No payouts yet"
+            emptyBody="Once your chargers have unsettled earnings, request a payout to snapshot what you're owed. The transfer itself happens outside the app."
+            collapse
+          />
+        </>
       )}
 
-      {/* Out-of-band settlement footnote */}
-      <p style={{ color: 'var(--color-text-muted)', fontSize: '0.8rem', marginTop: '1rem' }}>
-        Note: payment itself happens outside the app (bank transfer / UPI).
-        Requesting a payout records what you're owed; the platform operator marks
-        it paid once the transfer has been made.
-      </p>
-
-      {/* Request Payout Confirm Modal */}
-      {showRequestConfirm && (
-        <div className="modal-overlay" onClick={() => setShowRequestConfirm(false)}>
-          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-header">
-              <h2>Request payout</h2>
-              <button className="modal-close" onClick={() => setShowRequestConfirm(false)}>✕</button>
-            </div>
-
-            <p style={{ marginBottom: '0.5rem' }}>
+      <ConfirmDialog
+        open={requestOpen}
+        onClose={() => !requestBusy && setRequestOpen(false)}
+        onConfirm={confirmRequest}
+        title="Request payout"
+        confirmLabel="Request payout"
+        tone="primary"
+        busy={requestBusy}
+        busyLabel="Requesting…"
+        body={
+          <div className="stack-sm">
+            <p className="text-2">
               This snapshots your unsettled earnings
               {hasUnsettled && (
-                <> — net <strong style={{ color: 'var(--color-accent)' }}>🪙 {formatCoins(unsettled?.net_coins)}</strong> (₹-equivalent)</>
+                <>
+                  {' '}— net <strong><Money coins={unsettled?.net_coins} rate={rate} showCoins /></strong>
+                </>
               )}
               {' '}into a payout request for the platform operator to settle.
             </p>
-            <p style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>
-              The transfer happens outside the app (bank/UPI). Only one payout
-              request can be pending at a time; you can cancel it later if needed.
+            <p className="text-3 text-sm">
+              The transfer happens outside the app (bank/UPI). Only one request
+              can be pending at a time; you can cancel it later if needed.
             </p>
-
-            {requestError && <p className="error-text mt-4">{requestError}</p>}
-
-            <div className="modal-actions">
-              <button type="button" className="btn btn-ghost" onClick={() => setShowRequestConfirm(false)}>
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="btn btn-cpo"
-                onClick={handleRequestPayout}
-                disabled={requestLoading}
-              >
-                {requestLoading ? 'Requesting...' : 'Request payout'}
-              </button>
-            </div>
+            {requestError && <p className="field-error">{requestError}</p>}
           </div>
-        </div>
-      )}
+        }
+      />
 
-      {/* Cancel / Mark-Paid Confirm Modal */}
-      {confirmAction && (
-        <div className="modal-overlay" onClick={() => setConfirmAction(null)}>
-          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-header">
-              <h2>{confirmAction.type === 'cancel' ? 'Cancel payout' : 'Mark payout paid'}</h2>
-              <button className="modal-close" onClick={() => setConfirmAction(null)}>✕</button>
-            </div>
-
-            {confirmAction.type === 'cancel' ? (
-              <p style={{ marginBottom: '0.5rem' }}>
-                Cancel payout <strong>#{confirmAction.payout.id}</strong> (net
-                🪙 {formatCoins(confirmAction.payout.net_coins)})? Its earnings
-                window is freed and will be covered by your next payout request.
-              </p>
-            ) : (
-              <p style={{ marginBottom: '0.5rem' }}>
-                Mark payout <strong>#{confirmAction.payout.id}</strong> (net
-                🪙 {formatCoins(confirmAction.payout.net_coins)}) as paid? Only do
-                this after the bank/UPI transfer has actually been made — this
-                records the settlement, it does not move money.
-              </p>
-            )}
-
-            {actionError && <p className="error-text mt-4">{actionError}</p>}
-
-            <div className="modal-actions">
-              <button className="btn btn-ghost" onClick={() => setConfirmAction(null)}>
-                Keep as is
-              </button>
-              <button
-                className={`btn ${confirmAction.type === 'cancel' ? 'btn-danger' : 'btn-cpo'}`}
-                onClick={handleConfirmAction}
-                disabled={actionLoading}
-              >
-                {actionLoading
-                  ? 'Working...'
-                  : confirmAction.type === 'cancel' ? 'Cancel payout' : 'Mark paid'}
-              </button>
-            </div>
+      <ConfirmDialog
+        open={Boolean(cancelTarget)}
+        onClose={() => !cancelBusy && setCancelTarget(null)}
+        onConfirm={confirmCancel}
+        title="Cancel payout"
+        confirmLabel="Cancel payout"
+        tone="danger"
+        busy={cancelBusy}
+        busyLabel="Cancelling…"
+        body={
+          <div className="stack-sm">
+            <p className="text-2">
+              Cancel payout <strong>#{cancelTarget?.id}</strong> (net{' '}
+              <Money coins={cancelTarget?.net_coins} rate={rate} showCoins />)? Its
+              earnings window is freed and will be covered by your next payout
+              request.
+            </p>
+            {cancelError && <p className="field-error">{cancelError}</p>}
           </div>
-        </div>
-      )}
+        }
+      />
     </CpoLayout>
   );
-};
-
-export default CpoEarnings;
+}

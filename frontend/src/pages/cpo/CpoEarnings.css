@@ -1,0 +1,63 @@
+/**
+ * CpoEarnings — layout only. Visual identity (color/radius/elevation) comes
+ * from primitives (.card, .banner, .badge); this file just arranges them.
+ */
+
+.earnings-request-action {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--sp-1);
+}
+
+.earnings-settlement-banner {
+  margin-bottom: var(--sp-5);
+}
+
+.earnings-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: var(--sp-4);
+  margin-bottom: var(--sp-3);
+}
+
+.earnings-card-title {
+  font-size: var(--text-md);
+  margin-bottom: var(--sp-1);
+}
+
+.earnings-stat-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-5);
+  margin-top: var(--sp-3);
+}
+
+.earnings-stat {
+  display: grid;
+  gap: 2px;
+}
+
+.earnings-stat-label {
+  font-size: var(--text-xs);
+  color: var(--ink-3);
+}
+
+.earnings-stat-value {
+  font-family: var(--font-data);
+  font-size: var(--text-lg);
+  font-weight: 600;
+}
+
+.earnings-stat-value--net {
+  color: var(--brand);
+}
+
+.earnings-coin-note {
+  margin-bottom: var(--sp-5);
+}
+
+.earnings-section-title {
+  font-size: var(--text-lg);
+  margin-bottom: var(--sp-3);
+}

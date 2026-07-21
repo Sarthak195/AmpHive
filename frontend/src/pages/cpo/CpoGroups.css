@@ -1,0 +1,190 @@
+/* CpoGroups — master-detail layout only (identity comes from tokens/primitives). */
+
+.groups-layout {
+  display: grid;
+  grid-template-columns: minmax(280px, 360px) 1fr;
+  gap: var(--sp-5);
+  align-items: start;
+}
+
+.groups-list-heading {
+  margin-bottom: var(--sp-3);
+}
+
+.groups-list {
+  display: grid;
+  gap: var(--sp-3);
+}
+
+.groups-card {
+  display: grid;
+  gap: var(--sp-3);
+  align-content: start;
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+}
+
+.groups-card.is-active {
+  border-color: var(--brand);
+  box-shadow: 0 0 0 1px var(--brand);
+}
+
+.groups-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+}
+
+.groups-card-counts {
+  display: flex;
+  gap: var(--sp-4);
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+}
+
+.groups-card-meter {
+  display: grid;
+  gap: 4px;
+}
+
+.groups-card-meter-label {
+  display: flex;
+  justify-content: space-between;
+  font-size: var(--text-xs);
+  color: var(--ink-3);
+}
+
+.groups-card .badge-warn {
+  justify-self: start;
+}
+
+.groups-detail {
+  position: sticky;
+  top: var(--sp-6);
+}
+
+.groups-detail-card {
+  display: grid;
+  gap: var(--sp-5);
+}
+
+.groups-detail-header {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+
+.groups-detail-header h2 {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: break-word;
+}
+
+.groups-detail-back {
+  display: none;
+}
+
+.groups-detail-edit {
+  margin-left: auto;
+}
+
+.groups-section {
+  display: grid;
+  gap: var(--sp-3);
+}
+
+.groups-section + .groups-section {
+  border-top: 1px solid var(--border);
+  padding-top: var(--sp-5);
+}
+
+.groups-access-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+}
+
+.groups-access-code {
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--surface-2);
+  border-radius: var(--r-md);
+  font-family: var(--font-data);
+  font-size: var(--text-lg);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.groups-members-list {
+  display: grid;
+  gap: 0;
+  list-style: none;
+}
+
+.groups-member-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  padding: var(--sp-2) 0;
+  border-top: 1px solid var(--border);
+}
+
+.groups-member-row:first-child {
+  border-top: none;
+}
+
+.groups-charger-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+
+.groups-circuit-form {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+}
+
+.groups-circuit-form .field {
+  max-width: 200px;
+}
+
+.groups-danger {
+  background: var(--danger-soft);
+  border-radius: var(--r-md);
+  padding: var(--sp-4);
+  display: grid;
+  gap: var(--sp-3);
+  justify-items: start;
+}
+
+.groups-danger h3,
+.groups-danger p {
+  color: var(--danger);
+}
+
+@media (max-width: 900px) {
+  .groups-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .groups-detail {
+    position: static;
+  }
+
+  .groups-layout.has-selection .groups-list {
+    display: none;
+  }
+
+  .groups-layout:not(.has-selection) .groups-detail {
+    display: none;
+  }
+
+  .groups-detail-back {
+    display: inline-flex;
+  }
+}

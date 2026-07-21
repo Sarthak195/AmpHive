@@ -1,18 +1,22 @@
 /**
- * AmpHive Reset Password Page
- * ===========================
- * Landing page for the emailed reset link (/reset-password?token=...).
- * New-password form → POST /api/auth/reset-password. The backend enforces the
- * same 8-72 char rule as registration, revokes every existing session
- * (token_version bump), and consumes the single-use token — an expired/used/
- * unknown token gets a uniform 400 which is surfaced verbatim. On success the
- * driver is pointed back to Sign In. Styling mirrors Login (glass panel +
- * shared form classes — no new colors).
+ * ResetPassword — landing page for the emailed reset link
+ * (/reset-password?token=...). New-password form → POST
+ * /api/auth/reset-password. The backend enforces the same 8-72 char rule as
+ * registration, revokes every existing session (token_version bump), and
+ * consumes the single-use token — an expired/used/unknown token gets a
+ * uniform 400 which is surfaced verbatim, with an inline "Request a new
+ * link" button (the #1 stale-link path: reset emails sit unread for days).
+ * Password mismatch is validated live as the driver types the confirmation.
  */
 
 import { useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
+import AuthShell from '../components/AuthShell';
 import api from '../api/client';
+import { apiErrorCopy } from '../utils/statusCopy';
+
+const MIN_LEN = 8;
+const MAX_LEN = 72;
 
 const ResetPassword = () => {
   const [searchParams] = useSearchParams();
@@ -22,108 +26,137 @@ const ResetPassword = () => {
   const [password, setPassword] = useState('');
   const [confirm, setConfirm] = useState('');
   const [error, setError] = useState('');
-  const [loading, setLoading] = useState(false);
+  const [busy, setBusy] = useState(false);
   const [done, setDone] = useState(false);
+  const [tokenFailed, setTokenFailed] = useState(false);
+
+  const mismatch = confirm.length > 0 && password !== confirm;
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError('');
+    setTokenFailed(false);
+
+    if (password.length < MIN_LEN || password.length > MAX_LEN) {
+      setError(`Password must be ${MIN_LEN}-${MAX_LEN} characters.`);
+      return;
+    }
     if (password !== confirm) {
       setError('Passwords do not match.');
       return;
     }
-    setLoading(true);
+
+    setBusy(true);
     try {
       await api.post('/api/auth/reset-password', { token, password });
       setDone(true);
     } catch (err) {
-      setError(err.message || 'Something went wrong. Please try again.');
+      setError(apiErrorCopy(err));
+      setTokenFailed(true);
     } finally {
-      setLoading(false);
+      setBusy(false);
     }
   };
 
-  return (
-    <div className="page-container animate-fade-in" style={{ maxWidth: '440px', marginTop: '4rem' }}>
-      <div className="glass glass-panel animate-slide-up">
-        <h2 style={{ marginBottom: '0.75rem', textAlign: 'center' }}>Reset Password</h2>
+  if (!token) {
+    return (
+      <AuthShell title="Reset password">
+        <div className="stack">
+          <p className="auth-body">
+            This reset link is missing its token. Please use the link from
+            your email, or request a new one.
+          </p>
+          <Link to="/forgot-password" className="btn btn-primary btn-lg btn-full">
+            Request a new link
+          </Link>
+        </div>
+      </AuthShell>
+    );
+  }
 
-        {!token ? (
-          <>
-            <p style={{ textAlign: 'center', marginBottom: '1.5rem' }}>
-              This reset link is missing its token. Please use the link from
-              your email, or request a new one.
-            </p>
-            <Link to="/forgot-password" className="btn btn-primary btn-lg btn-full" style={{ textAlign: 'center' }}>
-              Request a New Link
-            </Link>
-          </>
-        ) : done ? (
-          <>
-            <p style={{ textAlign: 'center', marginBottom: '1.5rem', color: 'var(--color-success)' }}>
+  if (done) {
+    return (
+      <AuthShell title="Password updated">
+        <div className="stack" role="status">
+          <div className="banner banner-ok">
+            <p>
               Password updated. All your existing sessions have been signed
               out — sign in with your new password.
             </p>
-            <button
-              type="button"
-              className="btn btn-primary btn-lg btn-full"
-              onClick={() => navigate('/login', { replace: true })}
-            >
-              Go to Sign In
-            </button>
-          </>
-        ) : (
-          <form onSubmit={handleSubmit} className="flex flex-col gap-4">
-            <div className="input-group">
-              <label htmlFor="password">New Password</label>
-              <input
-                id="password"
-                type="password"
-                className="input"
-                placeholder="8-72 characters"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                required
-                minLength={8}
-                maxLength={72}
-                autoComplete="new-password"
-              />
+          </div>
+          <button
+            type="button"
+            className="btn btn-primary btn-lg btn-full"
+            onClick={() => navigate('/login', { replace: true })}
+          >
+            Go to sign in
+          </button>
+        </div>
+      </AuthShell>
+    );
+  }
+
+  return (
+    <AuthShell title="Reset password">
+      <form onSubmit={handleSubmit} className="stack">
+        <div className="field">
+          <label className="field-label" htmlFor="password">New password</label>
+          <input
+            id="password"
+            type="password"
+            className="input"
+            placeholder="8-72 characters"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            required
+            minLength={MIN_LEN}
+            maxLength={MAX_LEN}
+            autoComplete="new-password"
+            autoFocus
+          />
+        </div>
+
+        <div className="field">
+          <label className="field-label" htmlFor="confirm">Confirm new password</label>
+          <input
+            id="confirm"
+            type="password"
+            className="input"
+            placeholder="Repeat the new password"
+            value={confirm}
+            onChange={(e) => setConfirm(e.target.value)}
+            required
+            minLength={MIN_LEN}
+            maxLength={MAX_LEN}
+            autoComplete="new-password"
+            aria-invalid={mismatch ? 'true' : undefined}
+            aria-describedby={mismatch ? 'confirm-mismatch' : undefined}
+          />
+          {mismatch && (
+            <p className="field-error" id="confirm-mismatch" aria-live="polite">
+              Passwords do not match.
+            </p>
+          )}
+        </div>
+
+        {error && (
+          <div className="banner banner-danger" role="alert">
+            <div>
+              <p>{error}</p>
+              {tokenFailed && (
+                <Link to="/forgot-password" className="btn btn-quiet btn-sm auth-inline-action">
+                  Request a new link
+                </Link>
+              )}
             </div>
-
-            <div className="input-group">
-              <label htmlFor="confirm">Confirm New Password</label>
-              <input
-                id="confirm"
-                type="password"
-                className="input"
-                placeholder="Repeat the new password"
-                value={confirm}
-                onChange={(e) => setConfirm(e.target.value)}
-                required
-                minLength={8}
-                maxLength={72}
-                autoComplete="new-password"
-              />
-            </div>
-
-            {error && (
-              <div className="error-text" style={{ textAlign: 'center', padding: '0.5rem' }}>
-                {error}
-              </div>
-            )}
-
-            <button
-              type="submit"
-              className="btn btn-primary btn-lg btn-full"
-              disabled={loading}
-              style={{ marginTop: '0.5rem' }}
-            >
-              {loading ? 'Please wait...' : 'Set New Password'}
-            </button>
-          </form>
+          </div>
         )}
-      </div>
-    </div>
+
+        <button type="submit" className="btn btn-primary btn-lg btn-full" disabled={busy}>
+          {busy ? 'Updating…' : 'Set new password'}
+        </button>
+      </form>
+    </AuthShell>
   );
 };
 

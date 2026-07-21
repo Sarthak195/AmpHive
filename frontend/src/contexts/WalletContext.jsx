@@ -19,6 +19,10 @@ export const WalletProvider = ({ children }) => {
 
   // Balance comes from the user object (updated from backend)
   const balance = user?.coin_balance ?? 0;
+  // Available balance accounts for holds from other concurrent sessions
+  // (a second active session's hold reduces what's free to spend/estimate
+  // against). Falls back to the raw balance for backends that don't send it.
+  const availableBalance = user?.available_balance ?? balance;
 
   /**
    * Refresh the wallet balance from the backend.
@@ -29,7 +33,7 @@ export const WalletProvider = ({ children }) => {
   }, [refreshUser]);
 
   return (
-    <WalletContext.Provider value={{ balance, refreshBalance }}>
+    <WalletContext.Provider value={{ balance, availableBalance, refreshBalance }}>
       {children}
     </WalletContext.Provider>
   );

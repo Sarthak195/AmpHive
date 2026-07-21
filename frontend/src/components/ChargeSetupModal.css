@@ -1,0 +1,12 @@
+/* ChargeSetupModal — layout only. */
+
+.charge-setup-plug {
+  font-weight: 600;
+  margin-bottom: var(--sp-1);
+}
+
+.charge-setup-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}

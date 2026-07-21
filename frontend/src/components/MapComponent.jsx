@@ -1,16 +1,36 @@
-import { MapContainer, TileLayer, Marker, Popup } from 'react-leaflet';
+/**
+ * MapComponent — the Leaflet map surface for pages/MapPage.jsx.
+ * ===============================================================
+ * Renders OSM tiles (bundled leaflet.css, no CDN — CSP img-src allows OSM
+ * tile images) with one colored dot marker per plug that has coordinates.
+ * Marker color + popup state label come from the shared availability
+ * classification (utils/plugAvailability.js) — never the raw `status` field,
+ * so a reachable-but-unpowered or gateway-offline plug never reads as
+ * "available" here.
+ *
+ * The popup action is gated the same way: authed drivers only get an enabled
+ * "Charge" button when the plug is actually available; everyone else (any
+ * other state) sees the state instead of a dead-end button. Anonymous
+ * visitors always get "Sign in to charge" — signing in doesn't depend on the
+ * plug's state, only starting a session does.
+ *
+ * `flyTo` lets the page pan the (already-mounted) map imperatively — used
+ * for the geolocate button — via a tiny useMap child, since MapContainer's
+ * own `center`/`bounds` props only apply once, at creation.
+ */
+import { useEffect } from 'react';
+import { MapContainer, TileLayer, Marker, Popup, useMap } from 'react-leaflet';
 import L from 'leaflet';
-// Bundled from node_modules (was an unpkg.com <link> in index.html) so the
-// CSP style-src needs no CDN origin. Safe to bundle: markers are divIcon
-// (below), so Leaflet's default-icon PNG path detection is never exercised.
 import 'leaflet/dist/leaflet.css';
+import { StatusDot, Money } from './ui';
+import { useConfig } from '../contexts/ConfigContext';
 import { AVAILABILITY_CSS_VAR, getPlugAvailability } from '../utils/plugAvailability';
+import '../pages/MapPage.css';
 
-// Colored dot markers (Available / In use / Offline) instead of Leaflet's
-// default blue pin, so marker color encodes the same state as the Home
-// legend + badges — see utils/plugAvailability.js for the shared mapping.
-// `L.divIcon` renders arbitrary HTML, which avoids shipping separate PNG
-// icon assets for each color.
+// Colored dot markers (Available / In use / No power / Offline / Maintenance)
+// instead of Leaflet's default blue pin, so marker color encodes the same
+// state as the legend + list + badges. `L.divIcon` renders arbitrary HTML,
+// which avoids shipping separate PNG icon assets for each color.
 const markerIcon = (state) => L.divIcon({
   className: 'plug-marker-icon',
   html: `<span class="plug-marker-dot" style="background: var(${AVAILABILITY_CSS_VAR[state]})"></span>`,
@@ -19,22 +39,41 @@ const markerIcon = (state) => L.divIcon({
   popupAnchor: [0, -10],
 });
 
-export default function MapComponent({ plugs, onPlugSelect, selectLabel = 'Select' }) {
-  // Center roughly on India, or a default location
+const userLocationIcon = L.divIcon({
+  className: 'user-location-icon',
+  html: '<span class="user-location-dot"></span>',
+  iconSize: [16, 16],
+  iconAnchor: [8, 8],
+});
+
+/** Imperatively pans an already-mounted map — MapContainer's center/bounds
+ *  props only take effect at creation, so a later "use my location" click
+ *  needs useMap + setView instead. */
+function ViewController({ flyTo }) {
+  const map = useMap();
+  useEffect(() => {
+    if (flyTo) map.setView([flyTo.lat, flyTo.lng], flyTo.zoom ?? 15);
+  }, [flyTo, map]);
+  return null;
+}
+
+export default function MapComponent({ plugs, authed, onSelectPlug, flyTo, userLocation }) {
+  const { coin_inr_rate: rate } = useConfig();
+
+  // Center roughly on India, or a default location, when nothing has coordinates.
   const center = [20.5937, 78.9629];
   const zoom = 4;
 
-  // Only plot plugs with real coordinates (the backend fills these from
-  // the plug's own lat/long, falling back to its gateway's location).
-  // Previously this used Math.random() as a fallback, which scattered
-  // markers AND moved them on every re-render. Plugs without a known
-  // location are simply omitted from the map (they stay in the list).
+  // Only plot plugs with real coordinates (the backend fills these from the
+  // plug's own lat/long, falling back to its gateway's location). Plugs
+  // without a known location are simply omitted from the map (the page's
+  // list still shows them, with a "not on the map yet" note).
   const located = plugs.filter((plug) => plug.latitude != null && plug.longitude != null);
 
-  // Open on the markers, not the whole subcontinent: fit the initial view
-  // to the plotted plugs (padded; maxZoom keeps a single plug from
-  // rendering at rooftop level). Falls back to the India-wide default
-  // when nothing has coordinates.
+  // Open on the markers, not the whole subcontinent: fit the initial view to
+  // the plotted plugs (padded; maxZoom keeps a single plug from rendering at
+  // rooftop level). Falls back to the India-wide default when nothing has
+  // coordinates.
   const bounds = located.length > 0
     ? L.latLngBounds(located.map((p) => [p.latitude, p.longitude]))
     : null;
@@ -49,28 +88,49 @@ export default function MapComponent({ plugs, onPlugSelect, selectLabel = 'Selec
           attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
           url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
         />
-        {located
-          .map((plug) => {
-          const lat = plug.latitude;
-          const lng = plug.longitude;
+        <ViewController flyTo={flyTo} />
+        {userLocation && (
+          <Marker
+            position={[userLocation.lat, userLocation.lng]}
+            icon={userLocationIcon}
+            interactive={false}
+          />
+        )}
+        {located.map((plug) => {
           const state = getPlugAvailability(plug);
+          const canCharge = authed && state === 'available';
 
           return (
-            <Marker key={plug.id} position={[lat, lng]} icon={markerIcon(state)}>
+            <Marker key={plug.id} position={[plug.latitude, plug.longitude]} icon={markerIcon(state)}>
               <Popup>
-                <div style={{ textAlign: 'center' }}>
-                  <strong>{plug.name}</strong><br />
-                  <span style={{ fontSize: '0.85rem' }}>ID: {plug.id} | Status: {plug.status}</span><br />
-                  {plug.status === 'available' && (
+                <div className="map-popup">
+                  <strong className="map-popup-name">{plug.name}</strong>
+                  <StatusDot state={state} label />
+                  {plug.price_per_kwh != null && (
+                    <div className="map-popup-price">
+                      <Money coins={plug.price_per_kwh} rate={rate} />
+                      <span>/kWh</span>
+                    </div>
+                  )}
+                  {authed ? (
+                    canCharge ? (
+                      <button
+                        type="button"
+                        className="btn btn-primary btn-sm btn-full"
+                        onClick={() => onSelectPlug(plug.id)}
+                      >
+                        Charge
+                      </button>
+                    ) : (
+                      <p className="map-popup-note">Can&rsquo;t start a charge right now</p>
+                    )
+                  ) : (
                     <button
-                      className="btn btn-primary btn-sm"
-                      style={{ marginTop: '0.5rem', padding: '0.2rem 0.5rem' }}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onPlugSelect(plug.id);
-                      }}
+                      type="button"
+                      className="btn btn-primary btn-sm btn-full"
+                      onClick={() => onSelectPlug(plug.id)}
                     >
-                      {selectLabel}
+                      Sign in to charge
                     </button>
                   )}
                 </div>

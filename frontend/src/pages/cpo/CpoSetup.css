@@ -1,0 +1,82 @@
+/* CpoSetup — AuthShell-like centered card, but volt-themed (console onboarding
+   happens before the user has a tenant, so it can't live inside CpoLayout).
+   Layout only; color/type/elevation come from tokens + primitives. */
+
+.cposetup-shell {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--sp-8) var(--sp-4);
+  background: var(--bg-deep);
+}
+
+.cposetup-inner {
+  width: 100%;
+  max-width: 460px;
+  display: grid;
+  gap: var(--sp-6);
+}
+
+.cposetup-brand {
+  justify-self: center;
+  font-size: var(--text-xl);
+}
+
+.cposetup-card {
+  display: grid;
+  gap: var(--sp-5);
+}
+
+.cposetup-title {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: var(--text-xl);
+  text-align: center;
+}
+
+.cposetup-sub {
+  margin-top: calc(-1 * var(--sp-3));
+  color: var(--ink-2);
+  font-size: var(--text-sm);
+  text-align: center;
+}
+
+.cposetup-checklist {
+  display: grid;
+  gap: var(--sp-3);
+  padding-top: var(--sp-4);
+  border-top: 1px solid var(--border);
+}
+
+.cposetup-checklist h2 {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--ink-2);
+}
+
+.cposetup-checklist ol {
+  display: grid;
+  gap: var(--sp-3);
+  list-style: none;
+}
+
+.cposetup-checklist li {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+}
+
+.cposetup-step {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--r-full);
+  background: var(--surface-2);
+  color: var(--brand);
+}

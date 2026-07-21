@@ -1,0 +1,114 @@
+/* CpoChargers (D2) — layout only; identity (color/type) comes from
+   tokens/primitives. Covers the search box, bulk-action bar, edit-modal
+   sections, and the printable QR bay label. */
+
+.cpo-chargers-search {
+  flex: 1 1 220px;
+  min-width: 180px;
+}
+
+.cpo-chargers-search-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  color: var(--ink-3);
+}
+
+.cpo-chargers-search-row .input {
+  width: 100%;
+}
+
+.cpo-chargers-gw-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.cpo-chargers-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+
+.cpo-chargers-bulkbar {
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-4);
+}
+
+.cpo-chargers-bulkbar > span:first-child {
+  font-weight: 600;
+}
+
+.cpo-chargers-bulkbar > button:last-child {
+  margin-left: auto;
+}
+
+/* ---- edit modal sections ------------------------------------------------- */
+.cpo-chargers-form {
+  display: grid;
+  gap: var(--sp-5);
+}
+
+.cpo-chargers-section {
+  display: grid;
+  gap: var(--sp-3);
+  padding-top: var(--sp-4);
+  border-top: 1px solid var(--border);
+}
+
+.cpo-chargers-section:first-child {
+  padding-top: 0;
+  border-top: none;
+}
+
+.cpo-chargers-section-title {
+  font-size: var(--text-xs);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+/* ---- QR bay label --------------------------------------------------------- */
+.cpo-chargers-qr-sheet {
+  display: grid;
+  justify-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-6) var(--sp-4);
+  text-align: center;
+}
+
+.cpo-chargers-qr-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-family: var(--font-display);
+  font-weight: 800;
+  color: var(--ink);
+}
+
+.cpo-chargers-qr-box {
+  padding: var(--sp-4);
+  /* Deliberate literal white: the QR quiet zone must stay white for scanner
+     contrast (and print), on the volt theme's dark surfaces too. */
+  background: #fff;
+  border-radius: var(--r-md);
+}
+
+.cpo-chargers-qr-name {
+  font-weight: 700;
+  font-size: var(--text-lg);
+  color: var(--ink);
+}
+
+.cpo-chargers-qr-hint {
+  color: var(--ink-2);
+  font-size: var(--text-sm);
+}
+
+.cpo-chargers-qr-footnote {
+  text-align: center;
+  margin-top: var(--sp-3);
+}

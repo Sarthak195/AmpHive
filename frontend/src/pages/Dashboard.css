@@ -1,0 +1,203 @@
+/* Dashboard — layout only (identity comes from tokens/primitives). */
+
+.dash-layout {
+  display: grid;
+  gap: var(--sp-6);
+  align-items: start;
+}
+
+.dash-main {
+  display: grid;
+  gap: var(--sp-6);
+  min-width: 0;
+}
+
+/* Rail: desktop only, sticky under the app bar. */
+.dash-rail {
+  display: none;
+}
+
+@media (min-width: 960px) {
+  .dash-layout {
+    grid-template-columns: minmax(0, 1fr) 300px;
+  }
+
+  .dash-rail {
+    display: grid;
+    gap: var(--sp-4);
+    position: sticky;
+    top: calc(var(--nav-h) + var(--sp-4));
+  }
+}
+
+/* -- active session banner ------------------------------------------------ */
+.dash-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--sp-3);
+}
+
+.dash-banner-info {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+
+.dash-banner-title {
+  font-weight: 600;
+}
+
+/* -- charge now ------------------------------------------------------------ */
+.dash-charge-now {
+  display: grid;
+  gap: var(--sp-3);
+}
+
+.dash-plug-input {
+  font-family: var(--font-data);
+  font-size: var(--text-xl);
+  letter-spacing: 0.04em;
+}
+
+.dash-lookup-preview {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--sp-3);
+}
+
+.dash-lookup-info {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+
+.dash-lookup-name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.dash-lookup-action {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+
+/* -- up next ---------------------------------------------------------------- */
+.dash-upnext {
+  display: grid;
+  gap: var(--sp-3);
+}
+
+.dash-upnext-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--sp-2);
+}
+
+.dash-upnext-item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+
+.dash-upnext-icon {
+  flex-shrink: 0;
+  color: var(--ink-3);
+}
+
+.dash-upnext-body {
+  min-width: 0;
+  flex: 1;
+}
+
+.dash-upnext-name {
+  font-weight: 600;
+}
+
+/* -- chargers --------------------------------------------------------------- */
+.dash-chargers {
+  display: grid;
+  gap: var(--sp-4);
+}
+
+.dash-chargers-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-3);
+}
+
+.dash-map-link {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+.dash-plug-grid {
+  display: grid;
+  gap: var(--sp-4);
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+}
+
+.dash-empty-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--sp-3);
+}
+
+/* -- rail wallet card -------------------------------------------------------- */
+.dash-wallet {
+  display: grid;
+  gap: var(--sp-3);
+}
+
+.dash-wallet-label {
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 600;
+}
+
+.dash-wallet-amount {
+  font-size: var(--text-3xl);
+  font-weight: 700;
+  line-height: 1;
+}
+
+.dash-stats {
+  margin: 0;
+  display: grid;
+  gap: var(--sp-3);
+  padding-top: var(--sp-3);
+  border-top: 1px solid var(--border);
+}
+
+.dash-stat {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-3);
+}
+
+.dash-stat dd {
+  margin: 0;
+  font-weight: 600;
+}
+
+/* Inline retry inside the up-next banner (scoped to this page). */
+.dash .banner .btn {
+  margin-left: auto;
+  flex-shrink: 0;
+}
