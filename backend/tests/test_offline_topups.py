@@ -63,13 +63,16 @@ def test_topup_request_rejects_non_positive_amount():
         CpoTopupCreateRequest(driver_email="driver@example.com", amount_coins=-5)
 
 
-def test_topup_request_rejects_bad_email():
-    import pydantic
-
+def test_topup_request_accepts_any_email_string():
+    # driver_email is deliberately a plain str (see CpoTopupCreateRequest's
+    # docstring): it names an EXISTING account and the router 404s unknowns,
+    # while EmailStr would reject the seeded @amphive.test accounts
+    # (reserved TLD — caught by CI 2026-07-21). A malformed value is simply
+    # an account that doesn't exist.
     from backend.schemas import CpoTopupCreateRequest
 
-    with pytest.raises(pydantic.ValidationError):
-        CpoTopupCreateRequest(driver_email="not-an-email", amount_coins=10)
+    req = CpoTopupCreateRequest(driver_email="not-an-email", amount_coins=10)
+    assert req.driver_email == "not-an-email"
 
 
 # ===========================================================================
