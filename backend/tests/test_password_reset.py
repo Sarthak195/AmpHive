@@ -19,7 +19,10 @@ import pytest
 from fastapi import HTTPException
 
 from backend.routers.auth import (
-    RESET_TOKEN_TTL_MIN, _hash_reset_token, forgot_password, reset_password,
+    RESET_TOKEN_TTL_MIN,
+    _hash_reset_token,
+    forgot_password,
+    reset_password,
 )
 from backend.schemas import ForgotPasswordRequest, ResetPasswordRequest
 from backend.services import email as email_service

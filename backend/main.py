@@ -23,14 +23,15 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-from backend.database.db import init_db, async_session_factory
+from backend.database.db import async_session_factory, init_db
 from backend.logging_config import configure_logging, set_correlation_id
 from backend.services.mqtt_manager import MQTTManager
-from backend.services.telemetry import COINS_PER_KWH
-from backend.services.telemetry_persistence import TelemetryPersistenceService
 from backend.services.session_reaper import SessionReaperService
+
 # [Direct Mode] Import the Tapo direct driver for ESP32-bypass plug control
 from backend.services.tapo_direct import TapoDirectDriver
+from backend.services.telemetry import COINS_PER_KWH
+from backend.services.telemetry_persistence import TelemetryPersistenceService
 
 # Load environment variables from .env file (for local development)
 load_dotenv()
@@ -58,7 +59,7 @@ TAPO_PLUG_IP = os.getenv("TAPO_PLUG_IP", "")
 # --- Shared runtime state + session-lifecycle helpers (TD#7 split) ---
 # Mutable runtime handles live in backend/state.py (set below in lifespan);
 # the session helpers moved verbatim to services/session_lifecycle.py.
-from backend import state
+from backend import state  # noqa: E402
 from backend.services.session_lifecycle import (  # noqa: E402
     finalize_charging_session,
 )
@@ -213,8 +214,16 @@ def public_config():
 # ===========================================================================
 
 from backend.routers import (  # noqa: E402
-    admin, auth, cpo, direct, groups, notifications, payments, plugs,
-    reservations, sessions,
+    admin,
+    auth,
+    cpo,
+    direct,
+    groups,
+    notifications,
+    payments,
+    plugs,
+    reservations,
+    sessions,
 )
 
 app.include_router(auth.router)
@@ -232,7 +241,9 @@ app.include_router(reservations.router)
 # last, same OpenAPI-order rationale as reservations.
 app.include_router(admin.router)
 
-import socketio
-from backend.services.socketio_manager import sio
+import socketio  # noqa: E402
+
+from backend.services.socketio_manager import sio  # noqa: E402
+
 app = socketio.ASGIApp(sio, other_asgi_app=app)
 

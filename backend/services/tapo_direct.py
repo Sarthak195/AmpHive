@@ -38,11 +38,11 @@ Environment Variables:
     DIRECT_MODE:    Set to 'true' to enable direct control endpoints
 """
 
+import json
 import logging
 import os
 import urllib.request
-import json
-from typing import Optional, Dict, Any
+from typing import Any, Dict, Optional
 
 from tapo import ApiClient
 
@@ -83,7 +83,7 @@ class TapoDirectDriver:
         if TAPO_RELAY_URL:
             try:
                 self._call_relay("/on")
-                logger.info(f"✅ Plug turned ON successfully via relay")
+                logger.info("✅ Plug turned ON successfully via relay")
                 return True
             except Exception as e:
                 logger.error(f"❌ Failed to turn ON plug via relay: {e}")
@@ -103,7 +103,7 @@ class TapoDirectDriver:
         if TAPO_RELAY_URL:
             try:
                 self._call_relay("/off")
-                logger.info(f"✅ Plug turned OFF successfully via relay")
+                logger.info("✅ Plug turned OFF successfully via relay")
                 return True
             except Exception as e:
                 logger.error(f"❌ Failed to turn OFF plug via relay: {e}")

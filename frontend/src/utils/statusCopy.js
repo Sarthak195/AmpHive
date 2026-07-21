@@ -116,6 +116,7 @@ export const TX_TYPE_LABELS = {
   refund: 'Refund',
   hold: 'Hold',
   hold_release: 'Hold released',
+  cpo_topup: 'Top-up by operator (cash)',
 };
 
 export function txTypeLabel(type) {

@@ -15,8 +15,8 @@ in the environment; without it, steps 1–2 still work and push is skipped.
 Subscriptions the push service reports gone (404/410) are pruned.
 """
 import asyncio
-import logging
 import json
+import logging
 import os
 from typing import Optional
 
@@ -140,7 +140,7 @@ def _send_one_push(sub: dict, payload: dict) -> bool:
     (404/410) and should be pruned; False otherwise (success or transient
     failure — transient failures are logged and dropped, not retried)."""
     try:
-        from pywebpush import webpush, WebPushException
+        from pywebpush import WebPushException, webpush
     except ImportError:
         logger.warning("pywebpush not installed — web push disabled.")
         return False

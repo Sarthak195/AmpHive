@@ -18,7 +18,7 @@ stay ``float`` — they are measurements, not currency, and don't need base-10
 exactness.
 """
 
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import ROUND_HALF_UP, Decimal
 
 # Two decimal places — coins mirror rupees (paise-level granularity).
 MONEY_QUANT = Decimal("0.01")

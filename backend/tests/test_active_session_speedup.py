@@ -13,9 +13,9 @@ The mock result mirrors SQLAlchemy semantics: `scalars().all()` returns every
 row, while `scalar_one_or_none()` raises on more than one — so the old code
 path fails these tests and the fixed one passes.
 """
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from sqlalchemy.exc import MultipleResultsFound
 
 from backend.services.session_lifecycle import check_and_speed_up_active_session

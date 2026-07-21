@@ -298,6 +298,38 @@ been fixed by the 2026-07-08…11 work — see the shipped sections below).*
       "Continue with Google" button on `Login`. Consider generalizing to a
       provider table so more IdPs (Apple, etc.) can be added later.
 
+## Wallet & payments features (backlog)
+
+- [x] **CPO offline coin top-up, funded by the CPO's own earnings.** Done
+      2026-07-21 — lets a CPO manually credit a driver's coin wallet for a
+      cash payment collected offline, without creating coins out of thin
+      air: `POST /api/cpo/topups` `{driver_email, amount_coins, note?}`
+      computes the tenant's currently-available top-up pool (unsettled net
+      session earnings since the settlement watermark, minus offline
+      top-ups already issued in that same window —
+      `services/payouts.py tenant_earnings_summary`'s `available_pool_coins`,
+      the exact math `GET /api/cpo/earnings` displays as `topup_pool`),
+      409s with the actual available figure if the amount would exceed it,
+      row-locks the tenant then the driver, credits via `credit_wallet()`,
+      and writes a driver-side `LedgerTransaction` (new `tx_type` enum value
+      `cpo_topup`, added by `ALTER TYPE` in migration `0026` — the first
+      migration in this repo to extend a native Postgres enum) plus a new
+      `offline_topups` audit-ledger row and a driver notification.
+      `GET /api/cpo/topups` lists the tenant's history (paginated
+      `{total,items}`). The existing `POST /api/cpo/payouts` bank-payout
+      request now pays out that same reduced figure (net minus top-ups
+      already issued since the watermark) instead of the raw unsettled net,
+      so a CPO can never draw the same earnings out twice — once as cash,
+      once by bank/UPI; 400s cleanly when top-ups have already consumed the
+      whole window. Console: `/cpo/earnings` gets an "Offline top-ups" card
+      (available-pool figure + explainer, a Modal-then-ConfirmDialog
+      "Credit a driver" flow stating the money math plainly, and a history
+      table); the driver wallet ledger renders the credit as "Top-up by
+      operator (cash)" (`utils/statusCopy.js` `txTypeLabel`). Tests:
+      `backend/tests/test_offline_topups.py` (pool math, the
+      payout-watermark interaction incl. a real-concurrency race test,
+      409/404 paths, ledger reconciliation, tenant scoping, role gating).
+
 ## Long term — productionization
 
 - [x] **[2026-07-06 audit] Multi-plug ESP32 gateway support** (shipped fw

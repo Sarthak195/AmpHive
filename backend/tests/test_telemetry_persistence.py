@@ -17,8 +17,8 @@ left as a skipped test to be fleshed out against a throwaway PG container in CI.
 
 import pytest
 
-from backend.services.mqtt_manager import MQTTManager
 import backend.services.telemetry_persistence as tp
+from backend.services.mqtt_manager import MQTTManager
 
 
 class _FakePersistence:

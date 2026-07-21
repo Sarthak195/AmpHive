@@ -38,6 +38,19 @@ request can't re-snapshot a window that's still pending admin settlement;
 CANCELLED payouts are excluded, which frees their window for a future
 request. See routers/cpo.py for how the request endpoint makes the
 watermark-read + insert atomic per tenant.
+
+Offline top-up pool
+--------------------
+A CPO can also credit a driver's wallet directly for cash collected offline
+(routers/cpo/_topups.py POST /api/cpo/topups) — funded from the SAME
+unsettled net earnings, never from thin air. `tenant_earnings_summary`'s
+``available_pool_coins`` is therefore ``unsettled_net_coins`` minus every
+OfflineTopup issued since the same watermark (clamped at zero), and
+``cpo_request_payout`` (routers/cpo/_payouts.py) pays out that reduced figure
+— not the raw unsettled net — so a CPO can never draw the same earnings out
+twice: once as a cash top-up, once as a bank/UPI payout. Both endpoints read
+this one function, so the two can never disagree (same principle as the
+gross/fee/net split above).
 """
 import os
 from datetime import datetime, timezone
@@ -47,8 +60,14 @@ from typing import Optional, Tuple
 from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.database.models import ChargingSession, Payout, PayoutStatus, SessionStatus
-from backend.services.money import to_money
+from backend.database.models import (
+    ChargingSession,
+    OfflineTopup,
+    Payout,
+    PayoutStatus,
+    SessionStatus,
+)
+from backend.services.money import ZERO_MONEY, to_money
 
 # A tenant with no payout history yet has watermark = EPOCH, so "unsettled"
 # runs from the beginning of time to now (i.e. all of its lifetime earnings).
@@ -107,6 +126,30 @@ async def sum_completed_session_coins(
     return to_money(result.scalar() or 0)
 
 
+async def sum_offline_topups(
+    db: AsyncSession,
+    tenant_id: int,
+    window_start: Optional[datetime] = None,
+    window_end: Optional[datetime] = None,
+) -> Decimal:
+    """SUM(amount_coins) of this tenant's OfflineTopup rows with created_at in
+    the half-open window [window_start, window_end). Same shape as
+    sum_completed_session_coins above — single aggregate query, no join
+    (OfflineTopup.tenant_id is a direct column, not derived)."""
+    conditions = [OfflineTopup.tenant_id == tenant_id]
+    if window_start is not None:
+        conditions.append(OfflineTopup.created_at >= window_start)
+    if window_end is not None:
+        conditions.append(OfflineTopup.created_at < window_end)
+
+    result = await db.execute(
+        select(func.coalesce(func.sum(OfflineTopup.amount_coins), 0)).where(
+            and_(*conditions)
+        )
+    )
+    return to_money(result.scalar() or 0)
+
+
 async def tenant_settlement_watermark(db: AsyncSession, tenant_id: int) -> datetime:
     """MAX(period_end) over this tenant's non-CANCELLED payouts, or EPOCH if
     it has none yet."""
@@ -137,6 +180,18 @@ async def tenant_earnings_summary(db: AsyncSession, tenant_id: int) -> dict:
     )
     unsettled_fee, unsettled_net = compute_fee_and_net(unsettled_gross)
 
+    # Offline top-ups already issued in this same unsettled window must come
+    # back out of the pool available for further top-ups AND out of what a
+    # bank payout can claim — see the module docstring's "Offline top-up
+    # pool" section. Clamped at zero: a CPO can never issue more in top-ups
+    # than the pool held (the 409 in POST /api/cpo/topups enforces that going
+    # forward), but clamp anyway so a data inconsistency can't produce a
+    # negative pool figure on this read-only dashboard endpoint.
+    topups_since_watermark = await sum_offline_topups(
+        db, tenant_id, window_start=watermark, window_end=now
+    )
+    available_pool_coins = to_money(max(unsettled_net - topups_since_watermark, ZERO_MONEY))
+
     return {
         "watermark": watermark,
         "now": now,
@@ -146,4 +201,6 @@ async def tenant_earnings_summary(db: AsyncSession, tenant_id: int) -> dict:
         "unsettled_gross_coins": unsettled_gross,
         "unsettled_platform_fee_coins": unsettled_fee,
         "unsettled_net_coins": unsettled_net,
+        "topups_since_watermark_coins": topups_since_watermark,
+        "available_pool_coins": available_pool_coins,
     }

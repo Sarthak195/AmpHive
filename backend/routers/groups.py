@@ -10,8 +10,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database.db import get_db
 from backend.database.models import (
-    ChargerGroup, GroupMembership,
-    Plug, User,
+    ChargerGroup,
+    GroupMembership,
+    Plug,
+    User,
 )
 from backend.schemas import (
     GroupResponse,
@@ -92,7 +94,7 @@ async def get_my_groups(
             ),
         )
         .outerjoin(Plug, Plug.group_id == ChargerGroup.id)
-        .where(or_(ChargerGroup.is_public == True, GroupMembership.id.is_not(None)))
+        .where(or_(ChargerGroup.is_public == True, GroupMembership.id.is_not(None)))  # noqa: E712 (SQL boolean, not Python)
         .group_by(ChargerGroup.id)
     )
 

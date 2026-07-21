@@ -59,7 +59,11 @@ async def factory():
     """Engine + fresh schema per test; yields a session factory (same shape
     as test_auth_holds.py)."""
     from sqlalchemy import text
-    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+    from sqlalchemy.ext.asyncio import (
+        AsyncSession,
+        async_sessionmaker,
+        create_async_engine,
+    )
     from sqlalchemy.pool import NullPool
 
     from backend.database.models import Base
@@ -244,10 +248,9 @@ async def test_finalize_receipt_carries_limits(factory, monkeypatch):
     """The stop receipt exposes the session's limits (and the reason), so the
     UI can say which limit an auto-stop hit. Legacy NULL-limit sessions
     surface None — additive, nothing else about finalize changes."""
-    from backend.database.models import ChargingSession, SessionStatus
-
     import backend.services.session_lifecycle as sl_mod
     from backend import state as state_module
+    from backend.database.models import ChargingSession, SessionStatus
 
     tenant_id = await _seed_tenant(factory)
     gw = await _seed_gateway(factory, tenant_id, "gw-lim-4")
@@ -530,7 +533,12 @@ async def test_patch_resizes_hold_when_only_max_duration_raised_into_higher_rate
     from sqlalchemy import select
 
     from backend.database.models import (
-        ChargingSession, Plug, Tariff as TariffModel, TariffSlot,
+        ChargingSession,
+        Plug,
+        TariffSlot,
+    )
+    from backend.database.models import (
+        Tariff as TariffModel,
     )
 
     tenant_id = await _seed_tenant(factory)
@@ -925,7 +933,8 @@ def _db_with_limit_rows(rows):
 @pytest.mark.asyncio
 async def test_reaper_backstop_finalizes_only_overdue_sessions():
     from backend.services.session_reaper import (
-        TIME_LIMIT_REAP_REASON, SessionReaperService,
+        TIME_LIMIT_REAP_REASON,
+        SessionReaperService,
     )
 
     now = datetime.now(timezone.utc)

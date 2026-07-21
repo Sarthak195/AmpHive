@@ -55,7 +55,11 @@ def _now():
 async def factory():
     """Engine + fresh schema per test; yields a session factory."""
     from sqlalchemy import text
-    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+    from sqlalchemy.ext.asyncio import (
+        AsyncSession,
+        async_sessionmaker,
+        create_async_engine,
+    )
     from sqlalchemy.pool import NullPool
 
     from backend.database.models import Base

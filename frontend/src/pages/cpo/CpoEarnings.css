@@ -61,3 +61,16 @@
   font-size: var(--text-lg);
   margin-bottom: var(--sp-3);
 }
+
+.earnings-topup-card {
+  margin-bottom: var(--sp-5);
+}
+
+.earnings-topup-header {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-2);
+}

@@ -13,10 +13,28 @@ Phase 2 additions (marked with [P2]):
 
 import enum
 from datetime import datetime
-from typing import List, Optional
 from decimal import Decimal
-from sqlalchemy import CheckConstraint, Integer, BigInteger, SmallInteger, String, Float, Numeric, Boolean, ForeignKey, DateTime, Enum as SQLEnum, Index, Text, UniqueConstraint, text
+from typing import List, Optional
+
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    Numeric,
+    SmallInteger,
+    String,
+    Text,
+    UniqueConstraint,
+    text,
+)
+from sqlalchemy import Enum as SQLEnum
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
 
 class Base(DeclarativeBase):
     pass
@@ -48,6 +66,12 @@ class TransactionType(str, enum.Enum):
     TOPUP = "topup"
     SESSION_DEBIT = "session_debit"
     REFUND = "refund"
+    # [Offline top-ups] A CPO manually credited this driver's wallet for cash
+    # collected offline (see OfflineTopup below + routers/cpo/_topups.py).
+    # Added via ALTER TYPE in migration 0026_offline_topups — the first
+    # migration in this repo to extend a native Postgres enum rather than
+    # create one.
+    CPO_TOPUP = "cpo_topup"
 
 # --- SQLAlchemy Model Classes ---
 
@@ -590,7 +614,8 @@ class AuditLog(Base):
     # e.g. "gateway.create", "gateway.delete", "plug.create", "plug.delete",
     # "plug.status_change", "plug.maintenance_enter"/"..._clear",
     # "group.create", "group.delete", "access_code.regen", and the payout
-    # money ops "payout.request", "payout.mark_paid", "payout.cancel"
+    # money ops "payout.request", "payout.mark_paid", "payout.cancel",
+    # "topup.create" (offline cash top-up)
     action: Mapped[str] = mapped_column(String(64), nullable=False)
     # e.g. "gateway", "plug", "group", "payout"
     target_type: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -711,7 +736,13 @@ class Payout(Base):
     period_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     period_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     # Money: NUMERIC(12,2) -> Decimal, via services.money.to_money (see the
-    # money note in that module). platform_fee_coins + net_coins == gross_coins.
+    # money note in that module). platform_fee_coins + net_coins == gross_coins
+    # for a tenant with no offline top-ups in the window; if the CPO already
+    # issued OfflineTopup cash credits since the watermark, net_coins is
+    # reduced by that amount (services.payouts.tenant_earnings_summary's
+    # available_pool_coins) so the same earnings are never paid out twice —
+    # once as cash, once by bank/UPI. gross_coins/platform_fee_coins still
+    # reflect the tenant's true session earnings for the window either way.
     gross_coins: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     platform_fee_coins: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     net_coins: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
@@ -726,6 +757,54 @@ class Payout(Base):
     # leading column, so it also serves tenant_id-only lookups).
     __table_args__ = (
         Index("idx_payouts_tenant_status", "tenant_id", "status"),
+    )
+
+
+# --- CPO Offline (cash) Top-ups ---
+
+class OfflineTopup(Base):
+    """
+    A CPO-initiated cash top-up: an operator collects a payment from a driver
+    offline (cash) and credits the equivalent coins to their AmpHive wallet,
+    funded entirely from the CPO's OWN unsettled net earnings pool — never
+    coins created from nothing. routers/cpo/_topups.py POST /api/cpo/topups
+    is the only writer; the amount is capped at
+    services.payouts.tenant_earnings_summary()'s available_pool_coins
+    (unsettled net earnings since the settlement watermark, minus top-ups
+    already issued in that same window).
+
+    Every top-up also writes a driver-side LedgerTransaction (transaction_type
+    CPO_TOPUP) so it appears in the driver's own wallet ledger like any other
+    credit — this table is the CPO-side accounting record (which tenant
+    funded it, which operator actioned it, for which driver) that the
+    earnings/payout-watermark math reads back so a CPO can never draw a bank
+    payout AND a cash top-up from the same earnings (see Payout.gross_coins's
+    comment above).
+
+    Design notes mirror AuditLog:
+    - actor_user_id / driver_user_id are nullable + SET NULL: the acting
+      operator's or the driver's account may later be deleted without erasing
+      the tenant's top-up history — the payout-watermark math must keep
+      reading it correctly for the life of the tenant, not just while both
+      users still exist.
+    - note is free-form, capped short (unlike AuditLog.detail's Text): this is
+      a driver-facing/CPO-facing memo ("cash, pump 3"), not an internal log.
+    """
+    __tablename__ = "offline_topups"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    actor_user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    driver_user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    amount_coins: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    note: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+
+    # Leading tenant_id backs both the tenant-scoped listing and the
+    # watermark-window SUM query (services.payouts.sum_offline_topups) —
+    # same shape as Payout/GatewayEvent/AuditLog's tenant+created_at index.
+    __table_args__ = (
+        Index("idx_offline_topups_tenant_created", "tenant_id", "created_at"),
     )
 
 

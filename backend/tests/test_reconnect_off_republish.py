@@ -8,8 +8,9 @@ nobody billing (observed on-device 2026-07-07). When a gateway reports
 "online", the backend must re-send OFF to each of its plugs that has no
 ACTIVE session, and leave plugs with a live session alone.
 """
-import pytest
 from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 from backend.services.mqtt_manager import MQTTManager
 

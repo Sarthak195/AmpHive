@@ -62,7 +62,11 @@ def _now():
 async def factory():
     """Engine + fresh schema per test; yields a session factory."""
     from sqlalchemy import text
-    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+    from sqlalchemy.ext.asyncio import (
+        AsyncSession,
+        async_sessionmaker,
+        create_async_engine,
+    )
     from sqlalchemy.pool import NullPool
 
     from backend.database.models import Base
@@ -794,7 +798,7 @@ async def test_available_plugs_carry_reservation_fields(factory):
     tenant_id = await _seed_tenant(factory)
     gw = await _seed_gateway(factory, tenant_id)
     reserved_plug = await _seed_plug(factory, gw, "Reserved")
-    free_plug = await _seed_plug(factory, gw, "Free")
+    await _seed_plug(factory, gw, "Free")
     holder = await _seed_user(factory, tenant_id=tenant_id)
     viewer = await _seed_user(factory, tenant_id=tenant_id)
 

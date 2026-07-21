@@ -1,6 +1,6 @@
 # AmpHive — Data Model
 
-*Verified against `backend/database/models.py` on 2026-07-07.*
+*Verified against `backend/database/models.py` on 2026-07-07; table list refreshed 2026-07-21.*
 
 > **Source of truth is `models.py`, applied via Alembic** (adopted 2026-07-07).
 > `init_db()` (`backend/database/db.py`) runs `alembic upgrade head` at startup
@@ -24,7 +24,7 @@ ORM: SQLAlchemy 2.0 `DeclarativeBase` with `mapped_column`. Enums use
 | `GatewayStatus` (`gateway_status`) | `online`, `offline` |
 | `PlugStatus` (`plug_status`) | `available`, `occupied`, `offline`, `maintenance` |
 | `SessionStatus` (`session_status`) | `active`, `completed`, `paid`, `cancelled` |
-| `TransactionType` (`tx_type`) | `topup`, `session_debit`, `refund` |
+| `TransactionType` (`tx_type`) | `topup`, `session_debit`, `refund`, `cpo_topup` (2026-07-21, `0026_offline_topups` — first migration in this repo to `ALTER TYPE ... ADD VALUE` an existing enum rather than create one) |
 | `ReservationStatus` (`reservation_status`) | `booked`, `cancelled`, `fulfilled`, `expired` (2026-07-12, `0016_reservations`) |
 
 ## 2. Tables
@@ -219,6 +219,54 @@ on the plug list/detail responses) + index on `plug_id`
 (`idx_plug_watches_plug`, the per-plug fan-out read). Added by Alembic
 revision `0014_plug_watches` (2026-07-12).
 
+### Tables added since (doc-drift catch-up, flagged 2026-07-21)
+
+The table-by-table sections above stopped at `0014_plug_watches`; the
+following landed in later revisions and are documented here tersely rather
+than re-flowing the whole chapter — see `backend/database/models.py` for the
+full column list of each:
+
+- **`payouts`** (`0009_payouts.py`) — a per-tenant settlement snapshot
+  (`Payout`: gross/fee/net coins over `[period_start, period_end)`,
+  `requested → paid | cancelled`). Backs `GET/POST /api/cpo/payouts`.
+- **`tariffs`** (`0010_tariffs.py`) — a named coins-per-kWh pricing plan
+  (`Tariff`) a tenant assigns to a plug/group/tenant-default, replacing the
+  single global `COINS_PER_KWH` env rate. Backs `/api/cpo/tariffs*`.
+- **`tariff_slots`** (`0018_pricing_v2_slots.py`) — time-of-day price
+  refinements on a `Tariff` (`TariffSlot`: half-open minute-of-day window +
+  weekday `days_mask`). Backs `/api/cpo/tariffs/{id}/slots*`.
+- **`session_disputes`** (`0011_disputes.py`) — a driver-filed, CPO-resolved
+  coins-only refund dispute on a finished session (`SessionDispute`;
+  partial-unique "one OPEN dispute per session"). Backs
+  `POST /api/sessions/{id}/dispute` + `GET /api/cpo/disputes` +
+  `POST /api/cpo/disputes/{id}/resolve`.
+- **`invoices`** (`0012_gst_invoices.py`) — an immutable, sequentially
+  numbered GST tax invoice snapshot per session (`Invoice`; `UNIQUE
+  session_id`, idempotent issuance). Backs `GET /api/sessions/{id}/invoice`
+  and `GET /api/cpo/invoices*`.
+- **`capacity_requests`** (`0020_capacity_requests.py`) — a one-shot "notify
+  when the shared circuit has room" arm (`CapacityRequest`; `UNIQUE
+  (user_id, plug_id)`, self-deletes on fan-out — mirrors `plug_watches`).
+  Backs `POST /api/plugs/{id}/request-capacity`.
+- **`queued_charges`** (`0022_queued_charge.py`) — a driver's auto-start
+  request on a plug with no line power but a live gateway (`QueuedCharge`;
+  `waiting → started | cancelled | expired | failed`, reaped by
+  `services/session_reaper.py`). Backs `/api/sessions/queue*`.
+- **`password_reset_tokens`** (`0023_password_reset_tokens.py`) — a
+  single-use, SHA-256-digest-only "forgot password" token
+  (`PasswordResetToken`). Backs `POST /api/auth/forgot-password` +
+  `POST /api/auth/reset-password`.
+- **`offline_topups`** (`0026_offline_topups.py`) — a CPO's cash top-up of a
+  driver's coin wallet, funded from the tenant's own unsettled net earnings
+  (`OfflineTopup`; `actor_user_id`/`driver_user_id` nullable + SET NULL, same
+  survives-account-deletion rationale as `audit_logs`). Read back by
+  `services/payouts.py tenant_earnings_summary`'s `available_pool_coins` so
+  neither a top-up nor a later bank payout can draw the same earnings twice.
+  Backs `POST/GET /api/cpo/topups`.
+
+The live schema is now **24 tables** (up from the 15 documented in the
+sections above), all applied via Alembic per §4 below.
+
 ## 3. Relationships
 
 ```
@@ -247,10 +295,11 @@ joined via `access_code`.
 - **`backend/migrations/versions/0001_baseline.py`** — frozen PostgreSQL DDL
   snapshot of the full 9-table schema at adoption (includes everything the
   retired `_INPLACE_UPGRADES` produced). Never edit or regenerate it. (The
-  live schema is now **13 tables** — `gateway_events` arrived via
-  `0005_gateway_events` (2026-07-10), `audit_logs` via `0007_audit_log`
-  (2026-07-12), and `notifications` + `push_subscriptions` via
-  `0008_notifications` (2026-07-11, renumbered from 0007 at merge).)
+  live schema was **13 tables** as of `0008_notifications` — `gateway_events`
+  arrived via `0005_gateway_events` (2026-07-10), `audit_logs` via
+  `0007_audit_log` (2026-07-12), and `notifications` + `push_subscriptions`
+  via `0008_notifications` (2026-07-11, renumbered from 0007 at merge); it's
+  **24 tables** today — see "Tables added since" in §2 above for the rest.)
 - **New schema change** = new revision: `alembic -c backend/alembic.ini
   revision --autogenerate -m "..."` (autogenerate needs a reachable database —
   use the CI postgres or the VM; dev boxes run no DB by policy).

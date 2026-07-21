@@ -31,8 +31,12 @@ import pytest
 from starlette.responses import Response
 
 from backend.logging_config import (
-    CorrelationIdFilter, JsonFormatter, PlainFormatter,
-    UNSET_CORRELATION_ID, get_correlation_id, set_correlation_id,
+    UNSET_CORRELATION_ID,
+    CorrelationIdFilter,
+    JsonFormatter,
+    PlainFormatter,
+    get_correlation_id,
+    set_correlation_id,
 )
 
 

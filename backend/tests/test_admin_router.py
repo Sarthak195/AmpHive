@@ -18,18 +18,30 @@ from fastapi.routing import APIRoute
 from fastapi.security import HTTPAuthorizationCredentials
 
 from backend.database.models import (
-    GatewayStatus, TransactionType, UserRole,
+    GatewayStatus,
+    TransactionType,
+    UserRole,
 )
 from backend.routers.admin import (
-    admin_adjust_balance, admin_list_gateways, admin_list_payouts,
-    admin_stats_overview, admin_update_user, router as admin_router,
+    admin_adjust_balance,
+    admin_list_gateways,
+    admin_list_payouts,
+    admin_stats_overview,
+    admin_update_user,
+)
+from backend.routers.admin import (
+    router as admin_router,
 )
 from backend.routers.auth import login
 from backend.schemas import (
-    AdminAdjustBalanceRequest, AdminUserUpdateRequest, LoginRequest,
+    AdminAdjustBalanceRequest,
+    AdminUserUpdateRequest,
+    LoginRequest,
 )
 from backend.services.auth import (
-    create_access_token, get_current_user, hash_password,
+    create_access_token,
+    get_current_user,
+    hash_password,
 )
 from backend.services.rbac import require_role
 

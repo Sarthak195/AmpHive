@@ -34,7 +34,6 @@ from types import SimpleNamespace
 import pytest
 import pytest_asyncio
 
-
 # =============================================================================
 # 1. DB-free: _slot_rate_and_bound (the pure time-of-day resolution core)
 # =============================================================================
@@ -325,8 +324,9 @@ async def test_reprice_at_boundary_same_rate_just_advances(monkeypatch):
 async def test_mark_tenant_sessions_for_reprice_gated_off_is_noop(monkeypatch):
     """[Phase 3] With AUTO_REPRICE_ACTIVE_SESSIONS off, an operator edit issues
     NO reprice UPDATE (edits then only affect sessions that start afterwards)."""
-    import backend.services.pricing as pricing_mod
     from unittest.mock import AsyncMock
+
+    import backend.services.pricing as pricing_mod
 
     monkeypatch.setattr(pricing_mod, "AUTO_REPRICE_ACTIVE_SESSIONS", False)
     db = AsyncMock()
@@ -338,8 +338,9 @@ async def test_mark_tenant_sessions_for_reprice_gated_off_is_noop(monkeypatch):
 async def test_mark_tenant_sessions_for_reprice_issues_update_when_on(monkeypatch):
     """When on (default), it issues exactly one UPDATE (the frame hook/reaper do
     the actual per-session reprice + notify — this only expires the segment)."""
-    import backend.services.pricing as pricing_mod
     from unittest.mock import AsyncMock
+
+    import backend.services.pricing as pricing_mod
 
     monkeypatch.setattr(pricing_mod, "AUTO_REPRICE_ACTIVE_SESSIONS", True)
     db = AsyncMock()
@@ -399,7 +400,11 @@ async def factory():
     """Engine + fresh schema per test; yields a session factory (same shape as
     test_session_limits.py / test_pricing.py)."""
     from sqlalchemy import text
-    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+    from sqlalchemy.ext.asyncio import (
+        AsyncSession,
+        async_sessionmaker,
+        create_async_engine,
+    )
     from sqlalchemy.pool import NullPool
 
     from backend.database.models import Base

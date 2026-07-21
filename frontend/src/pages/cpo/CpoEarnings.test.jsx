@@ -40,6 +40,18 @@ const EARNINGS = {
     platform_fee_coins: 20.0,
     net_coins: 180.0,
   },
+  topup_pool: { available_coins: 150.0, already_issued_coins: 30.0 },
+};
+
+const TOPUPS = {
+  total: 1,
+  items: [
+    {
+      id: 5, tenant_id: 1, actor_user_id: 1, actor_email: 'cpo@example.com',
+      driver_user_id: 9, driver_email: 'driver@example.com',
+      amount_coins: 30.0, note: 'cash, pump 3', created_at: '2026-07-10T09:00:00+00:00',
+    },
+  ],
 };
 
 const PAYOUTS = [
@@ -64,10 +76,11 @@ const PAYOUTS = [
 // pending #3, which is itself the subject of the disabled-reason test).
 const PAYOUTS_NO_PENDING = [PAYOUTS[1]];
 
-const mockApiGet = ({ earnings = EARNINGS, payouts = PAYOUTS } = {}) => {
+const mockApiGet = ({ earnings = EARNINGS, payouts = PAYOUTS, topups = TOPUPS } = {}) => {
   api.get.mockImplementation((url) => {
     if (url === '/api/cpo/earnings') return Promise.resolve(earnings);
     if (url === '/api/cpo/payouts') return Promise.resolve(payouts);
+    if (url.startsWith('/api/cpo/topups')) return Promise.resolve(topups);
     return Promise.reject(new Error(`unhandled url ${url}`));
   });
 };
@@ -178,6 +191,97 @@ describe('CpoEarnings', () => {
 
     expect(api.post).toHaveBeenCalledWith('/api/cpo/payouts/3/cancel', {});
     await waitFor(() => expect(toast.ok).toHaveBeenCalled());
+  });
+
+  it('renders the offline top-up pool figure and history table', async () => {
+    renderPage();
+
+    expect(await screen.findByText('Offline top-ups')).toBeInTheDocument();
+    expect(screen.getByText('Available to top up')).toBeInTheDocument();
+    expect(screen.getByText('₹150.00')).toBeInTheDocument();
+    expect(screen.getByText('Already credited this window')).toBeInTheDocument();
+    expect(screen.getAllByText('₹30.00').length).toBeGreaterThan(0);
+
+    expect(await screen.findByText('driver@example.com')).toBeInTheDocument();
+    expect(screen.getByText('cash, pump 3')).toBeInTheDocument();
+    expect(screen.getByText('cpo@example.com')).toBeInTheDocument();
+  });
+
+  it('validates the credit-a-driver form before opening the confirm dialog', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText('Offline top-ups');
+
+    await user.click(screen.getByRole('button', { name: 'Credit a driver' }));
+    const modal = await screen.findByRole('heading', { name: 'Credit a driver' });
+    const modalEl = modal.closest('.modal');
+
+    // Amount too high for the pool (150 available) — kept in the form modal.
+    await user.type(within(modalEl).getByLabelText("Driver's email"), 'driver@example.com');
+    await user.type(within(modalEl).getByLabelText('Amount (coins)'), '999');
+    await user.click(within(modalEl).getByRole('button', { name: 'Continue' }));
+
+    expect(await screen.findByText(/more than your available pool/)).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Credit a driver' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Credit this driver?' })).not.toBeInTheDocument();
+  });
+
+  it('credits a driver through the two-step confirm flow and refreshes on success', async () => {
+    api.post.mockResolvedValue({ id: 6, driver_email: 'driver@example.com', amount_coins: 50 });
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText('Offline top-ups');
+
+    await user.click(screen.getByRole('button', { name: 'Credit a driver' }));
+    const formModal = (await screen.findByRole('heading', { name: 'Credit a driver' })).closest('.modal');
+    await user.type(within(formModal).getByLabelText("Driver's email"), 'driver@example.com');
+    await user.type(within(formModal).getByLabelText('Amount (coins)'), '50');
+    await user.type(within(formModal).getByLabelText('Note (optional)'), 'cash at charger');
+    await user.click(within(formModal).getByRole('button', { name: 'Continue' }));
+
+    const confirmModal = (await screen.findByRole('heading', { name: 'Credit this driver?' })).closest('.modal');
+    expect(within(confirmModal).getByText('driver@example.com')).toBeInTheDocument();
+    await user.click(within(confirmModal).getByRole('button', { name: 'Credit driver' }));
+
+    expect(api.post).toHaveBeenCalledWith('/api/cpo/topups', {
+      driver_email: 'driver@example.com',
+      amount_coins: 50,
+      note: 'cash at charger',
+    });
+    await waitFor(() =>
+      expect(screen.queryByRole('heading', { name: 'Credit this driver?' })).not.toBeInTheDocument()
+    );
+    expect(toast.ok).toHaveBeenCalled();
+  });
+
+  it('surfaces a 409 (over-pool) from the backend inline and keeps the confirm dialog open', async () => {
+    api.post.mockRejectedValue(new Error('That would exceed your available top-up pool (150.00 coins available).'));
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText('Offline top-ups');
+
+    await user.click(screen.getByRole('button', { name: 'Credit a driver' }));
+    const formModal = (await screen.findByRole('heading', { name: 'Credit a driver' })).closest('.modal');
+    await user.type(within(formModal).getByLabelText("Driver's email"), 'driver@example.com');
+    await user.type(within(formModal).getByLabelText('Amount (coins)'), '100');
+    await user.click(within(formModal).getByRole('button', { name: 'Continue' }));
+
+    const confirmModal = (await screen.findByRole('heading', { name: 'Credit this driver?' })).closest('.modal');
+    await user.click(within(confirmModal).getByRole('button', { name: 'Credit driver' }));
+
+    expect(
+      await screen.findByText('That would exceed your available top-up pool (150.00 coins available).')
+    ).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Credit this driver?' })).toBeInTheDocument();
+  });
+
+  it('disables Credit a driver when there is nothing available to top up with', async () => {
+    mockApiGet({ earnings: { ...EARNINGS, topup_pool: { available_coins: 0, already_issued_coins: 0 } } });
+    renderPage();
+    await screen.findByText('Offline top-ups');
+
+    expect(screen.getByRole('button', { name: 'Credit a driver' })).toBeDisabled();
+    expect(screen.getByText("There's nothing unsettled to top up with right now.")).toBeInTheDocument();
   });
 
   it('shows a retryable ErrorState on fetch failure', async () => {

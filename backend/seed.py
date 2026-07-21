@@ -22,13 +22,25 @@ from datetime import datetime, timedelta, timezone
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from sqlalchemy import select
+
 from backend.database.db import async_session_factory, init_db
 from backend.database.models import (
-    Tenant, User, UserRole, Gateway, GatewayStatus, Plug, PlugStatus,
-    ChargerGroup, GroupMembership, ChargingSession, SessionStatus,
-    LedgerTransaction, TransactionType
+    ChargerGroup,
+    ChargingSession,
+    Gateway,
+    GatewayStatus,
+    GroupMembership,
+    LedgerTransaction,
+    Plug,
+    PlugStatus,
+    SessionStatus,
+    Tenant,
+    TransactionType,
+    User,
+    UserRole,
 )
 from backend.services.auth import hash_password
+
 
 async def seed():
     print("[*] Initializing database tables...")
@@ -167,7 +179,7 @@ async def seed():
                 group_id=charger_groups["VoltNetwork Corporate (Private)"].id
             )
             db.add(membership)
-            print(f"✓ Added Priya Patel to private group: VoltNetwork Corporate (Private)")
+            print("✓ Added Priya Patel to private group: VoltNetwork Corporate (Private)")
         else:
             print("  Priya Patel already a member of private group")
 
@@ -265,13 +277,13 @@ async def seed():
         # GreenCharge: CPO Tenant ID = 2
         now = datetime.now(timezone.utc)
         print("[*] Generating historical sessions & ledger logs for CPO charts...")
-        
+
         # Check if sessions already exist to prevent duplicate seed generation on rerun
         session_check = await db.execute(select(ChargingSession).limit(1))
         if not session_check.scalar():
             for i in range(15):
                 date_offset = now - timedelta(days=15 - i)
-                
+
                 # VoltNetwork session
                 s1 = ChargingSession(
                     tenant_id=tenants["VoltNetwork"].id,
@@ -285,7 +297,7 @@ async def seed():
                     status=SessionStatus.COMPLETED
                 )
                 db.add(s1)
-                
+
                 # GreenCharge session
                 s2 = ChargingSession(
                     tenant_id=tenants["GreenCharge"].id,
@@ -299,7 +311,7 @@ async def seed():
                     status=SessionStatus.COMPLETED
                 )
                 db.add(s2)
-                
+
                 # Create corresponding top-up ledger entries to justify driver wallet balances
                 if i % 3 == 0:
                     t1 = LedgerTransaction(
@@ -323,11 +335,11 @@ async def seed():
                 status=SessionStatus.ACTIVE
             )
             db.add(active_s)
-            
+
             # Lock Volt-CorpPlug-02 as occupied
             plugs["Volt-CorpPlug-02"].status = PlugStatus.OCCUPIED
             plugs["Volt-CorpPlug-02"].current_power_w = 7400.0
-            
+
             print("✓ Generated 30 historical completed sessions, 5 ledger transactions, and 1 active session.")
         else:
             print("  Sessions database already populated with records.")

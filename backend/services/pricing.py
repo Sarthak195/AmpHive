@@ -44,7 +44,14 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import and_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.database.models import ChargerGroup, Gateway, Plug, Tariff, TariffSlot, Tenant
+from backend.database.models import (
+    ChargerGroup,
+    Gateway,
+    Plug,
+    Tariff,
+    TariffSlot,
+    Tenant,
+)
 from backend.services.money import to_money
 from backend.services.telemetry import COINS_PER_KWH
 

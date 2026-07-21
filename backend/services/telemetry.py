@@ -16,9 +16,9 @@ Design decisions:
 import asyncio
 import os
 import time
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from decimal import Decimal
-from typing import Dict, Optional, AsyncGenerator, Union
+from typing import AsyncGenerator, Dict, Optional, Union
 
 from backend.services.money import energy_cost
 

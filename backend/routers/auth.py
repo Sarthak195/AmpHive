@@ -15,19 +15,31 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database.db import get_db
 from backend.database.models import (
-    PasswordResetToken, User, UserRole,
+    PasswordResetToken,
+    User,
+    UserRole,
 )
 from backend.schemas import (
-    AuthResponse, ForgotPasswordRequest, LoginRequest, RegisterRequest, ResetPasswordRequest, UserResponse,
-)
-from backend.services.auth import (
-    create_access_token, get_current_user,
-    hash_password, verify_password,
+    AuthResponse,
+    ForgotPasswordRequest,
+    LoginRequest,
+    RegisterRequest,
+    ResetPasswordRequest,
+    UserResponse,
 )
 from backend.services import email as email_service
+from backend.services.auth import (
+    create_access_token,
+    get_current_user,
+    hash_password,
+    verify_password,
+)
 from backend.services.rate_limit import (
-    forgot_password_rate_limiter, login_rate_limiter, rate_limit_dependency,
-    register_rate_limiter, reset_password_rate_limiter,
+    forgot_password_rate_limiter,
+    login_rate_limiter,
+    rate_limit_dependency,
+    register_rate_limiter,
+    reset_password_rate_limiter,
 )
 from backend.services.session_lifecycle import (
     check_and_speed_up_active_session,

@@ -7,10 +7,10 @@ the SELECT (it can't see the twin's uncommitted row) and hits the unique
 index at commit/flush — which used to escape as a raw IntegrityError 500.
 The race must map to the same 400 the sequential duplicate path returns.
 """
-import pytest
-from fastapi import HTTPException
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+from fastapi import HTTPException
 from sqlalchemy.exc import IntegrityError
 
 from backend.routers.auth import register

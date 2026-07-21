@@ -9,10 +9,9 @@ OCCUPIED and billed nothing.
 DB-free: uses the mocked-AsyncSession pattern from test_max_active_sessions.
 """
 from datetime import datetime, timedelta, timezone
-
-import pytest
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from fastapi import HTTPException
 
 from backend.database.models import GatewayStatus, PlugStatus

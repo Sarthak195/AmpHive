@@ -30,9 +30,13 @@ from fastapi import HTTPException
 from sqlalchemy.exc import IntegrityError
 
 from backend.database.models import PlugStatus, PlugWatch, SessionStatus
-from backend.routers.plugs import get_available_plugs, get_plug, unwatch_plug, watch_plug
+from backend.routers.plugs import (
+    get_available_plugs,
+    get_plug,
+    unwatch_plug,
+    watch_plug,
+)
 from backend.services.plug_watch import notify_watchers_plug_available
-
 
 # ---------------------------------------------------------------- helpers ---
 

@@ -12,7 +12,6 @@ import pytest
 import backend.services.notifications as notif_mod
 from backend.services.mqtt_manager import MQTTManager
 
-
 # ---------------------------------------------------------------- fakes ----
 
 class _FakeSession:
@@ -293,6 +292,7 @@ def test_notification_routes_registered():
 def test_finalize_notifies_on_stop_reasons():
     """The stop-notification title mapping covers every finalize reason."""
     import inspect
+
     from backend.services import session_lifecycle
     src = inspect.getsource(session_lifecycle.finalize_charging_session)
     assert "session_stopped" in src
