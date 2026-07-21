@@ -44,19 +44,19 @@ describe('sessionStatusLabel', () => {
 
 describe('txTypeLabel', () => {
   it('covers the ledger transaction types', () => {
-    expect(txTypeLabel('topup')).toBe('Top-up');
+    expect(txTypeLabel('topup')).toBe('Credit added');
     expect(txTypeLabel('session_debit')).toBe('Charging');
     expect(txTypeLabel('refund')).toBe('Refund');
     expect(txTypeLabel('hold')).toBe('Hold');
     expect(txTypeLabel('hold_release')).toBe('Hold released');
-    expect(txTypeLabel('cpo_topup')).toBe('Top-up by operator (cash)');
+    expect(txTypeLabel('cpo_topup')).toBe('Credit added by operator (cash)');
   });
 });
 
 describe('stopReasonCopy', () => {
   it('maps the backend finalize reasons to friendly copy', () => {
     expect(stopReasonCopy('auto-stopped: wallet balance exhausted')).toBe(
-      'Stopped automatically — wallet balance used up'
+      'Stopped automatically — charging credit used up'
     );
     expect(stopReasonCopy('auto-stopped: session hold exhausted')).toBe(
       'Stopped automatically — session hold used up'

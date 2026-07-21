@@ -1,5 +1,5 @@
 /**
- * Wallet — driver's coin balance, top-up (Razorpay), and the full money
+ * Charging credit — driver's balance, add-credit (Razorpay), and the full money
  * trail (ledger). Balance/available-balance come from AuthContext's user
  * object (GET /api/auth/me — coin_balance + available_balance, the latter
  * accounting for what any currently-running session already holds). The
@@ -36,9 +36,9 @@ const MAX_AMOUNT_INR = 10000;
 const formatDate = (isoString) => (isoString ? new Date(isoString).toLocaleString() : '—');
 
 const validateAmount = (value) => {
-  if (value == null || Number.isNaN(value) || value <= 0) return 'Enter an amount to top up.';
-  if (value < MIN_AMOUNT_INR) return `Minimum top-up is ${formatINR(MIN_AMOUNT_INR)}.`;
-  if (value > MAX_AMOUNT_INR) return `Maximum top-up is ${formatINR(MAX_AMOUNT_INR)}.`;
+  if (value == null || Number.isNaN(value) || value <= 0) return 'Enter an amount to add.';
+  if (value < MIN_AMOUNT_INR) return `Minimum credit is ${formatINR(MIN_AMOUNT_INR)}.`;
+  if (value > MAX_AMOUNT_INR) return `Maximum credit is ${formatINR(MAX_AMOUNT_INR)}.`;
   return '';
 };
 
@@ -132,7 +132,7 @@ export default function Wallet() {
       currency: order.currency,
       order_id: order.order_id,
       name: 'AmpHive',
-      description: `Wallet top-up: ${formatINR(amount)}`,
+      description: `AmpHive charging credit: ${formatINR(amount)}`,
       prefill: { email: user?.email || '', name: user?.full_name || '' },
       modal: {
         ondismiss: () => {
@@ -149,7 +149,7 @@ export default function Wallet() {
           });
           await refreshUser();
           await fetchLedger();
-          toast.ok(`${formatINR(amount)} added to your wallet.`);
+          toast.ok(`${formatINR(amount)} added to your charging credit.`);
           setNotice({
             tone: 'ok',
             body: `Payment successful — new balance ${formatINR(result.new_balance)}.`,
@@ -205,7 +205,7 @@ export default function Wallet() {
 
   return (
     <main className="page">
-      <PageHeader title="Wallet" sub="Add money and see where it went." />
+      <PageHeader title="Charging credit" sub="Add credit and see where it went." />
 
       <div className="stack">
         <section className="card wallet-balance-card">
@@ -222,14 +222,14 @@ export default function Wallet() {
             </p>
           )}
           {rate === 1 && (
-            <p className="text-3 text-sm">1 coin = ₹1 — your balance is prepaid credit.</p>
+            <p className="text-3 text-sm">1 coin = ₹1 — credit redeemable only for charging on AmpHive.</p>
           )}
         </section>
 
         <section className="card wallet-topup-card">
-          <h2>Add money</h2>
+          <h2>Add credit</h2>
 
-          <div className="wallet-amount-row" role="group" aria-label="Choose a top-up amount">
+          <div className="wallet-amount-row" role="group" aria-label="Choose an amount to add">
             {QUICK_AMOUNTS_INR.map((amt) => {
               const selected = customAmount === '' && amount === amt;
               return (
@@ -295,6 +295,12 @@ export default function Wallet() {
           <button type="button" className="btn btn-primary btn-lg btn-full" onClick={handlePay} disabled={busy}>
             {busy ? 'Processing…' : amount ? `Pay ${formatINR(amount)}` : 'Pay'}
           </button>
+
+          <p className="text-3 text-sm">
+            Charging credit is prepaid balance for EV charging on AmpHive only —
+            not a wallet, not transferable, and never withdrawable as cash. See the{' '}
+            <Link to="/terms">charging credit terms</Link>.
+          </p>
         </section>
 
         <section>
@@ -306,8 +312,8 @@ export default function Wallet() {
             error={ledgerError}
             onRetry={fetchLedger}
             emptyIcon={Receipt}
-            emptyTitle="No wallet activity yet"
-            emptyBody="Top up to add coins — every top-up and charge shows up here."
+            emptyTitle="No credit activity yet"
+            emptyBody="Add credit — every credit and charge shows up here."
             collapse
           />
         </section>

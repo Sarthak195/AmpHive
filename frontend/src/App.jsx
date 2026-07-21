@@ -42,6 +42,7 @@ const Wallet = lazy(() => import('./pages/Wallet'));
 const Activity = lazy(() => import('./pages/Activity'));
 const Groups = lazy(() => import('./pages/Groups'));
 const Account = lazy(() => import('./pages/Account'));
+const Terms = lazy(() => import('./pages/Terms'));
 const Login = lazy(() => import('./pages/Login'));
 const Signup = lazy(() => import('./pages/Signup'));
 const ForgotPassword = lazy(() => import('./pages/ForgotPassword'));
@@ -118,7 +119,7 @@ const authRoutes = (
 );
 
 /** Driver experience — shared verbatim by the driver host and the unsplit
-    fallback tree. Legacy paths redirect: /topup → /wallet, /history →
+    fallback tree. Legacy paths redirect: /topup & /wallet → /credit, /history →
     /activity. */
 const driverRoutes = (
   <>
@@ -127,10 +128,12 @@ const driverRoutes = (
       <Route path="/" element={<HomeGate />} />
       {/* Public charger-discovery map — no account needed. */}
       <Route path="/map" element={<MapPage />} />
+      {/* Public charging-credit terms — no account needed. */}
+      <Route path="/terms" element={<Terms />} />
       <Route path="/session" element={
         <ProtectedRoute><Session /></ProtectedRoute>
       } />
-      <Route path="/wallet" element={
+      <Route path="/credit" element={
         <ProtectedRoute><Wallet /></ProtectedRoute>
       } />
       <Route path="/activity" element={
@@ -143,7 +146,8 @@ const driverRoutes = (
         <ProtectedRoute><Account /></ProtectedRoute>
       } />
       {/* Renamed pages keep their old URLs working. */}
-      <Route path="/topup" element={<Navigate to="/wallet" replace />} />
+      <Route path="/topup" element={<Navigate to="/credit" replace />} />
+      <Route path="/wallet" element={<Navigate to="/credit" replace />} />
       <Route path="/history" element={<Navigate to="/activity" replace />} />
     </Route>
   </>
@@ -228,7 +232,7 @@ const CpoHostRoutes = () => (
     {adminRoutes}
 
     {/* Driver-only routes → driver origin (same path preserved). */}
-    {['/map', '/session', '/wallet', '/activity', '/groups', '/account', '/signup', '/topup', '/history'].map((path) => (
+    {['/map', '/terms', '/session', '/credit', '/wallet', '/activity', '/groups', '/account', '/signup', '/topup', '/history'].map((path) => (
       <Route key={path} path={path} element={<ExternalRedirect origin={driverOrigin()} />} />
     ))}
 

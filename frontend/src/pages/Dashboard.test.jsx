@@ -291,8 +291,8 @@ describe('Dashboard — sessions banner and rail', () => {
     renderDash();
     await screen.findByText('Lobby Plug');
     expect(screen.queryByText('Energy this month')).not.toBeInTheDocument();
-    // The wallet card itself still renders.
-    expect(screen.getByText('Wallet balance')).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'Top up' })).toHaveAttribute('href', '/wallet');
+    // The charging-credit card itself still renders.
+    expect(screen.getByText('Charging credit')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Add credit' })).toHaveAttribute('href', '/credit');
   });
 });

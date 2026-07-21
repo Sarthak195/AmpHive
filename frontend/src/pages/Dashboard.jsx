@@ -14,7 +14,7 @@
  *    charges, each with a live countdown and a ConfirmDialog'd cancel.
  * 4. "Your chargers" — [Your groups | Public] segments, state + group
  *    filters, "See map" link, and the PlugCard grid (5-state machine).
- * 5. Desktop rail — wallet balance (₹-first) + "Top up", and month stats
+ * 5. Desktop rail — charging credit (₹-first) + "Add credit", and month stats
  *    from GET /api/me/stats (the stats block hides if that endpoint errors).
  *
  * Live updates: socket plug_status / plug_connectivity patches cards in
@@ -669,14 +669,14 @@ const Dashboard = () => {
         </div>
 
         {/* 5 — desktop rail */}
-        <aside className="dash-rail" aria-label="Wallet and monthly stats">
+        <aside className="dash-rail" aria-label="Charging credit and monthly stats">
           <section className="card dash-wallet">
-            <p className="dash-wallet-label text-3 text-sm">Wallet balance</p>
+            <p className="dash-wallet-label text-3 text-sm">Charging credit</p>
             <p className="dash-wallet-amount num">
               <Money coins={balance} rate={coin_inr_rate} />
             </p>
-            <Link to="/wallet" className="btn btn-primary btn-full">
-              Top up
+            <Link to="/credit" className="btn btn-primary btn-full">
+              Add credit
             </Link>
             {stats?.month && (
               <dl className="dash-stats">

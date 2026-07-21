@@ -111,12 +111,12 @@ export function payoutStatusLabel(status) {
 /* ---- wallet ledger transaction types -------------------------------------- */
 
 export const TX_TYPE_LABELS = {
-  topup: 'Top-up',
+  topup: 'Credit added',
   session_debit: 'Charging',
   refund: 'Refund',
   hold: 'Hold',
   hold_release: 'Hold released',
-  cpo_topup: 'Top-up by operator (cash)',
+  cpo_topup: 'Credit added by operator (cash)',
 };
 
 export function txTypeLabel(type) {
@@ -131,7 +131,7 @@ export function txTypeLabel(type) {
 
 const STOP_REASON_PATTERNS = [
   [/hold exhausted/i, 'Stopped automatically — session hold used up'],
-  [/balance exhausted/i, 'Stopped automatically — wallet balance used up'],
+  [/balance exhausted/i, 'Stopped automatically — charging credit used up'],
   [/energy limit/i, 'Stopped automatically — energy limit reached'],
   [/time limit/i, 'Stopped automatically — time limit reached'],
   [/overheat|thermal/i, 'Stopped for safety — the plug reported overheating'],
@@ -184,7 +184,7 @@ export const API_ERROR_COPY = {
   queue_disabled: "Queued charging isn't available for this charger",
   plug_powered: 'This charger has power now — start charging directly',
   queue_cap: "You've reached the limit of queued charges",
-  balance_too_low: 'Add money to your wallet first',
+  balance_too_low: 'Add charging credit first',
 };
 
 const GENERIC_ERROR = 'Something went wrong. Please try again.';

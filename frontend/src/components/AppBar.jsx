@@ -98,7 +98,7 @@ const AppBar = () => {
 
         <div className="appbar-side">
           {user && !cpoHost && (
-            <Link to="/wallet" className="wallet-pill" aria-label="Wallet balance">
+            <Link to="/credit" className="wallet-pill" aria-label="Charging credit balance">
               <WalletIcon size={15} aria-hidden="true" />
               <Money coins={balance} />
             </Link>

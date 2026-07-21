@@ -176,8 +176,8 @@ const STEPS = [
     body: 'Spot a charger on the map, or scan the bay label right in front of you.',
   },
   {
-    title: 'Top up a prepaid wallet',
-    body: 'Add money with UPI or cards. Your balance covers every charge you start.',
+    title: 'Add charging credit',
+    body: 'Add credit with UPI or cards — it pays only for charging on AmpHive.',
   },
   {
     title: 'Charge with a live meter',
@@ -220,8 +220,8 @@ const DRIVER_CARDS = [
   },
   {
     icon: ReceiptText,
-    title: 'Wallet with receipts',
-    body: 'A prepaid wallet with a receipt for every session — GST invoices included when you need them.',
+    title: 'Charging credit with receipts',
+    body: 'Prepaid charging credit with a receipt for every session — GST invoices included when you need them.',
   },
 ];
 
@@ -309,7 +309,7 @@ const ForHosts = () => (
 
 const SAFETY_POINTS = [
   { icon: ShieldCheck, text: 'Outbound-only connectivity — hosts never open up their network' },
-  { icon: Lock, text: 'Prepaid wallets with per-session holds — no surprise bills' },
+  { icon: Lock, text: 'Prepaid charging credit with per-session holds — no surprise bills' },
   { icon: PowerOff, text: 'Charging stops automatically on faults' },
 ];
 
@@ -348,8 +348,9 @@ const MktFooter = () => {
           <h3 className="mkt-footer-h">Drivers</h3>
           <ul>
             <li><Link to="/map">Find a charger</Link></li>
-            <li><Link to="/wallet">Wallet</Link></li>
+            <li><Link to="/credit">Charging credit</Link></li>
             <li><Link to="/activity">Activity</Link></li>
+            <li><Link to="/terms">Charging credit terms</Link></li>
           </ul>
         </nav>
         <nav aria-label="Hosts">

@@ -9,7 +9,7 @@
  *                      rate line from /api/plugs/{id}/tariff-preview (hidden
  *                      on fetch failure — never the global config rate).
  *   - notices        — .banner rows: stale telemetry, gateway alarms
- *                      (eventTypeCopy), low balance (with a Top up link).
+ *                      (eventTypeCopy), low balance (with an Add credit link).
  *   - limit target   — progress toward the auto-stop target + inline editor
  *                      (PATCH limits via SessionContext.updateLimits).
  *   - stop           — ConfirmDialog stating the kWh/₹ consequence.
@@ -267,8 +267,8 @@ const SessionMonitor = () => {
                 <strong>Low balance</strong> — about{' '}
                 <span className="num">{formatINR(coinsToINR(Math.max(0, remainingCoins), coin_inr_rate))}</span>
                 {kwhLeft != null && <> (≈ {formatKwh(kwhLeft)})</>} left before charging
-                stops automatically. <Link to="/wallet?next=/session">Top up</Link> —
-                charging continues while you top up.
+                stops automatically. <Link to="/credit?next=/session">Add credit</Link> —
+                charging continues while you add credit.
               </p>
             </div>
           )}

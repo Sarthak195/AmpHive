@@ -111,7 +111,7 @@ describe('SessionReceipt — summary', () => {
     });
     renderReceipt();
     expect(
-      screen.getByText('Stopped automatically — wallet balance used up')
+      screen.getByText('Stopped automatically — charging credit used up')
     ).toBeInTheDocument();
   });
 });

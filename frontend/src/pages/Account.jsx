@@ -204,7 +204,7 @@ export default function Account() {
           {pushState === 'off' && (
             <div className="stack-sm">
               <p className="text-2 text-sm">
-                Get session updates, low-balance warnings and top-up confirmations even when the app isn&apos;t open.
+                Get session updates, low-balance warnings and credit confirmations even when the app isn&apos;t open.
               </p>
               <button
                 type="button"

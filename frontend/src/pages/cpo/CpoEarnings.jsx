@@ -422,7 +422,7 @@ export default function CpoEarnings() {
             onRetry={() => fetchTopups(topupsOffset)}
             emptyIcon={HandCoins}
             emptyTitle="No offline top-ups yet"
-            emptyBody="Credit a driver's wallet for a cash payment collected at the charger — it draws from your own unsettled earnings."
+            emptyBody="Credit a driver's balance for a cash payment collected at the charger — it draws from your own unsettled earnings."
             pagination={{
               total: topupsTotal,
               offset: topupsOffset,
@@ -575,7 +575,7 @@ export default function CpoEarnings() {
               <strong>
                 <Money coins={Number(creditForm.amount_coins) || 0} rate={rate} showCoins />
               </strong>
-              . Their wallet balance rises immediately, and this comes straight out of your
+              . Their credit balance rises immediately, and this comes straight out of your
               unsettled earnings pool — it will reduce any bank payout you request later for
               this same window.
             </p>

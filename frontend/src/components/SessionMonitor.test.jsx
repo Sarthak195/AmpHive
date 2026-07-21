@@ -176,10 +176,10 @@ describe('SessionMonitor — notices', () => {
     );
     await renderMonitor();
     expect(screen.getByText(/Low balance/)).toBeInTheDocument();
-    expect(screen.getByText(/charging continues while you top up/)).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'Top up' })).toHaveAttribute(
+    expect(screen.getByText(/charging continues while you add credit/)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Add credit' })).toHaveAttribute(
       'href',
-      '/wallet?next=/session'
+      '/credit?next=/session'
     );
   });
 

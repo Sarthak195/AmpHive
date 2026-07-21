@@ -187,7 +187,7 @@ describe('page sections', () => {
       expect(within(footer).getByRole('link', { name })).toHaveAttribute('href', href);
 
     expectHref('Find a charger', '/map');
-    expectHref('Wallet', '/wallet');
+    expectHref('Charging credit', '/credit');
     expectHref('Activity', '/activity');
     expectHref('Host console', `${cpoOrigin()}/cpo/dashboard`);
     expectHref('Become a host', `${cpoOrigin()}/cpo`);

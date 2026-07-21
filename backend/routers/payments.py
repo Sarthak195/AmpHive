@@ -98,8 +98,8 @@ async def _credit_topup(
     await notify(
         user_id,
         "topup_credited",
-        "Wallet topped up",
-        f"{credit:.2f} coins credited — balance is now {new_balance:.2f}.",
+        "Charging credit added",
+        f"₹{credit:.2f} added — your charging credit is now ₹{new_balance:.2f}.",
     )
     return new_balance
 
@@ -265,7 +265,7 @@ async def verify_payment(
         user_id=user.id,
         coins=coins,
         payment_id=req.razorpay_payment_id,
-        description=f"Wallet top-up: ₹{amount_inr:.2f} → {coins:.2f} coins (Razorpay: {req.razorpay_payment_id})",
+        description=f"Charging credit added: ₹{amount_inr:.2f} → {coins:.2f} credit (Razorpay: {req.razorpay_payment_id})",
     )
     if credited is None:
         # Lost the race to the webhook (or a duplicate submit). Not an error.
@@ -339,7 +339,7 @@ async def razorpay_webhook(request: Request, db: AsyncSession = Depends(get_db))
         user_id=payment["user_id"],
         coins=coins,
         payment_id=payment_id,
-        description=f"Wallet top-up (webhook): ₹{payment['amount_inr']:.2f} → {coins:.2f} coins (Razorpay: {payment_id})",
+        description=f"Charging credit added (webhook): ₹{payment['amount_inr']:.2f} → {coins:.2f} credit (Razorpay: {payment_id})",
     )
     if new_balance is None:
         # Either the user doesn't exist, or /verify won the race. Distinguish
