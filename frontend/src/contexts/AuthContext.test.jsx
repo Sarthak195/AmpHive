@@ -1,6 +1,8 @@
 /**
  * AuthContext tests: session restore on mount, login persisting the JWT,
- * failed-restore cleanup, and logout clearing everything.
+ * failed-restore cleanup, and logout clearing everything. Children render
+ * during the restore too — consumers branch on `loading` themselves (the
+ * BootSplash gate lives in App, not here).
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
@@ -14,10 +16,11 @@ vi.mock('../api/client', () => ({
 }));
 
 const Probe = () => {
-  const { user, login, logout } = useAuth();
+  const { user, login, logout, loading } = useAuth();
   return (
     <div>
       <div data-testid="user">{user ? user.email : 'anonymous'}</div>
+      <div data-testid="loading">{String(loading)}</div>
       <button onClick={() => login('driver@amphive.test', 'pw').catch(() => {})}>login</button>
       <button onClick={logout}>logout</button>
     </div>
@@ -37,6 +40,23 @@ beforeEach(() => {
 });
 
 describe('session restore on mount', () => {
+  it('renders children immediately while the restore is still in flight (loading=true)', async () => {
+    localStorage.setItem('amphive_token', 'jwt-123');
+    let resolveMe;
+    api.get.mockReturnValue(new Promise((resolve) => { resolveMe = resolve; }));
+
+    renderProbe();
+
+    // Children are NOT withheld during loading — App-level code (BootSplash)
+    // decides what to show; the context just exposes `loading`.
+    expect(screen.getByTestId('user')).toHaveTextContent('anonymous');
+    expect(screen.getByTestId('loading')).toHaveTextContent('true');
+
+    resolveMe({ email: 'driver@amphive.test', role: 'driver' });
+    await waitFor(() => expect(screen.getByTestId('loading')).toHaveTextContent('false'));
+    expect(screen.getByTestId('user')).toHaveTextContent('driver@amphive.test');
+  });
+
   it('restores the user via /api/auth/me when a token exists', async () => {
     localStorage.setItem('amphive_token', 'jwt-123');
     api.get.mockResolvedValue({ email: 'driver@amphive.test', role: 'driver' });

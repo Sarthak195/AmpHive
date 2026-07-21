@@ -1,0 +1,209 @@
+/**
+ * AmpHive design tokens — redesign v3 (2026-07-21)
+ * =================================================
+ * One token vocabulary, two atmospheres:
+ *
+ *   [data-theme="day"]   Driver app + marketing. Warm paper, honey-amber
+ *                        actions, volt-lime reserved for the brand mark.
+ *   [data-theme="volt"]  Operator/Admin console. Charcoal + amp-lime
+ *                        (the shipped brand identity), de-aliased semantic
+ *                        colors (success is no longer the brand lime).
+ *
+ * Rules:
+ *  - Components read ONLY semantic vars (--bg, --ink-2, --ok, ...) — never
+ *    raw hsl() literals. Adding a third theme must require zero component edits.
+ *  - Fonts are self-hosted via @fontsource (prod CSP blocks font CDNs).
+ *  - Status colors are independent axes: brand ≠ success, warning ≠ accent.
+ */
+
+:root {
+  /* ---- type ------------------------------------------------------------ */
+  --font-display: 'Bricolage Grotesque', 'Inter', system-ui, sans-serif;
+  --font-ui: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  --font-data: 'JetBrains Mono', ui-monospace, 'Cascadia Code', Consolas, monospace;
+
+  --text-xs: 0.75rem;
+  --text-sm: 0.8125rem;
+  --text-md: 0.9375rem;
+  --text-base: 1rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.375rem;
+  --text-2xl: 1.75rem;
+  --text-3xl: 2.25rem;
+  --text-4xl: 3rem;
+  --text-display: clamp(2.5rem, 6vw, 4.25rem);
+
+  /* ---- spacing scale ----------------------------------------------------- */
+  --sp-1: 0.25rem;
+  --sp-2: 0.5rem;
+  --sp-3: 0.75rem;
+  --sp-4: 1rem;
+  --sp-5: 1.25rem;
+  --sp-6: 1.5rem;
+  --sp-8: 2rem;
+  --sp-10: 2.5rem;
+  --sp-12: 3rem;
+  --sp-16: 4rem;
+
+  /* ---- radii ------------------------------------------------------------- */
+  --r-sm: 8px;
+  --r-md: 12px;
+  --r-lg: 16px;
+  --r-xl: 24px;
+  --r-full: 999px;
+
+  /* ---- z scale (fixes the modal-under-notification bug) ------------------ */
+  --z-nav: 50;
+  --z-drawer: 60;   /* sidebars, notification panel, mobile sheets */
+  --z-modal: 100;
+  --z-toast: 110;
+  --z-tooltip: 120;
+
+  /* ---- motion ------------------------------------------------------------ */
+  --t-fast: 140ms cubic-bezier(0.4, 0, 0.2, 1);
+  --t-smooth: 260ms cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* ---- layout ------------------------------------------------------------ */
+  --w-page: 1200px;
+  --w-console: 1440px;
+  --w-narrow: 640px;
+  --nav-h: 60px;
+  --tabbar-h: 60px;
+  --sidebar-w: 248px;
+}
+
+/* ==========================================================================
+   DAY — driver app + marketing. Warm paper, honey action, volt brand mark.
+   ========================================================================== */
+:root,
+[data-theme='day'] {
+  color-scheme: light;
+
+  --bg: hsl(46 41% 97%);
+  --bg-deep: hsl(46 35% 94%);            /* page bands, wells                */
+  --surface: hsl(0 0% 100%);
+  --surface-2: hsl(46 30% 95%);          /* inset fields, table headers      */
+  --border: hsl(48 16% 87%);
+  --border-strong: hsl(48 13% 76%);
+
+  --ink: hsl(75 12% 13%);
+  --ink-2: hsl(75 8% 34%);
+  --ink-3: hsl(75 6% 44%);               /* muted — keeps AA on surface      */
+  --ink-inverse: hsl(46 41% 97%);
+
+  /* Brand mark: volt-lime, darkened for light-surface contrast. The bright
+     glow variant is decorative only (LED pulses, ring gradients) and never
+     carries text. */
+  --brand: hsl(73 85% 27%);
+  --brand-glow: hsl(73 100% 52%);
+  --brand-soft: hsl(73 70% 92%);
+
+  /* Primary action: honey amber (dark ink on fills — amber fails with white text) */
+  --primary: hsl(36 92% 50%);
+  --primary-hover: hsl(33 90% 45%);
+  --primary-ink: hsl(30 45% 12%);
+  --primary-soft: hsl(40 90% 92%);
+
+  /* Semantic (text-safe main value + dot + soft tint per tone) */
+  --ok: hsl(145 65% 27%);
+  --ok-dot: hsl(145 60% 38%);
+  --ok-soft: hsl(145 45% 92%);
+  --warn: hsl(33 95% 30%);
+  --warn-dot: hsl(36 92% 50%);
+  --warn-soft: hsl(42 92% 90%);
+  --danger: hsl(6 75% 40%);
+  --danger-dot: hsl(6 75% 50%);
+  --danger-soft: hsl(6 70% 94%);
+  --info: hsl(215 65% 38%);
+  --info-dot: hsl(215 60% 50%);
+  --info-soft: hsl(215 60% 93%);
+  --neutral: hsl(75 5% 42%);
+  --neutral-dot: hsl(75 5% 58%);
+  --neutral-soft: hsl(60 8% 92%);
+
+  /* Plug availability states (utils/plugAvailability.js reads these names) */
+  --state-available: var(--ok-dot);
+  --state-in-use: var(--warn-dot);
+  --state-unpowered: hsl(215 25% 48%);
+  --state-offline: var(--danger-dot);
+  --state-maintenance: var(--neutral-dot);
+
+  --focus: hsl(215 85% 45%);
+
+  --shadow-sm: 0 1px 2px hsl(48 30% 55% / 0.16);
+  --shadow-md: 0 4px 16px hsl(48 30% 45% / 0.13);
+  --shadow-lg: 0 18px 44px hsl(48 30% 35% / 0.16);
+
+  --overlay-tint: hsl(60 10% 10% / 0.45);
+}
+
+/* ==========================================================================
+   VOLT — operator + admin console. Charcoal, amp-lime brand, meter voice.
+   ========================================================================== */
+[data-theme='volt'] {
+  color-scheme: dark;
+
+  --bg: hsl(72 14% 6%);
+  --bg-deep: hsl(72 14% 4.5%);
+  --surface: hsl(73 12% 10%);
+  --surface-2: hsl(73 11% 14%);
+  --border: hsl(73 30% 60% / 0.14);
+  --border-strong: hsl(73 40% 60% / 0.30);
+
+  --ink: hsl(75 20% 93%);
+  --ink-2: hsl(75 10% 72%);
+  --ink-3: hsl(75 8% 60%);               /* raised from 44% — AA fix         */
+  --ink-inverse: hsl(72 14% 7%);
+
+  --brand: hsl(73 100% 55%);
+  --brand-glow: hsl(73 100% 55%);
+  --brand-soft: hsl(73 80% 55% / 0.12);
+
+  --primary: hsl(73 100% 55%);
+  --primary-hover: hsl(73 100% 64%);
+  --primary-ink: hsl(72 14% 7%);
+  --primary-soft: hsl(73 80% 55% / 0.12);
+
+  /* De-aliased semantics — success is its own green, lime is brand-only */
+  --ok: hsl(145 65% 58%);
+  --ok-dot: hsl(145 65% 52%);
+  --ok-soft: hsl(145 60% 50% / 0.13);
+  --warn: hsl(38 95% 62%);
+  --warn-dot: hsl(38 95% 56%);
+  --warn-soft: hsl(38 90% 55% / 0.13);
+  --danger: hsl(8 95% 68%);
+  --danger-dot: hsl(8 95% 62%);
+  --danger-soft: hsl(8 90% 60% / 0.13);
+  --info: hsl(190 85% 62%);
+  --info-dot: hsl(190 85% 55%);
+  --info-soft: hsl(190 80% 55% / 0.12);
+  --neutral: hsl(75 8% 64%);
+  --neutral-dot: hsl(75 8% 52%);
+  --neutral-soft: hsl(75 10% 60% / 0.12);
+
+  --state-available: var(--ok-dot);
+  --state-in-use: var(--warn-dot);
+  --state-unpowered: hsl(215 35% 62%);
+  --state-offline: var(--danger-dot);
+  --state-maintenance: var(--neutral-dot);
+
+  --focus: hsl(190 90% 60%);
+
+  --shadow-sm: 0 1px 3px hsl(0 0% 0% / 0.4);
+  --shadow-md: 0 6px 20px hsl(0 0% 0% / 0.42);
+  --shadow-lg: 0 24px 56px hsl(0 0% 0% / 0.55);
+
+  --overlay-tint: hsl(72 14% 3% / 0.6);
+}
+
+/* Admin wears the console theme with a violet thread so operators and
+   platform admins always know which hat they have on. */
+[data-accent='admin'] {
+  --brand: hsl(265 85% 72%);
+  --brand-glow: hsl(265 85% 72%);
+  --brand-soft: hsl(265 70% 65% / 0.14);
+  --primary: hsl(265 85% 72%);
+  --primary-hover: hsl(265 90% 79%);
+  --primary-ink: hsl(265 40% 12%);
+  --primary-soft: hsl(265 70% 65% / 0.14);
+}

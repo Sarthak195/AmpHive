@@ -40,10 +40,14 @@ const Login = () => {
       } else {
         await login(email, password);
       }
-      // Return to the original destination (ProtectedRoute / the Home
-      // QR-deep-link guard) if there is one, otherwise Home.
+      // Return to the original destination: router state.from (ProtectedRoute
+      // / the QR-deep-link guard), else the ?next= param the api client's
+      // 401 handler appends (same-app paths only), else Home.
       const from = location.state?.from;
-      const target = from ? `${from.pathname}${from.search || ''}${from.hash || ''}` : '/';
+      const next = new URLSearchParams(location.search).get('next');
+      const target = from
+        ? `${from.pathname}${from.search || ''}${from.hash || ''}`
+        : (next && next.startsWith('/') ? next : '/');
       navigate(target, { replace: true });
     } catch (err) {
       setError(err.message || 'Something went wrong. Please try again.');

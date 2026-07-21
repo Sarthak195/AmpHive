@@ -1,8 +1,8 @@
 /**
- * MapComponent tests: marker color now encodes the same 3-state
- * availability (Available/In use/Offline) as the Home legend and badges
- * (see utils/plugAvailability.js), instead of Leaflet's default blue pin
- * for every plug regardless of status.
+ * MapComponent tests: marker color encodes the shared availability
+ * classification (see utils/plugAvailability.js — `--state-*` tokens)
+ * instead of Leaflet's default blue pin for every plug regardless of
+ * status.
  *
  * react-leaflet is mocked out — these tests aren't about Leaflet's map
  * engine, just that MapComponent hands each Marker the right icon/position,
@@ -44,22 +44,22 @@ const PLUGS = [
 describe('MapComponent marker colors', () => {
   it('colors an available plug with the success color', () => {
     render(<MapComponent plugs={[PLUGS[0]]} onPlugSelect={vi.fn()} />);
-    expect(screen.getByTestId('marker').dataset.iconHtml).toContain('var(--color-success)');
+    expect(screen.getByTestId('marker').dataset.iconHtml).toContain('var(--state-available)');
   });
 
   it('colors an occupied ("in use") plug with the warning color', () => {
     render(<MapComponent plugs={[PLUGS[1]]} onPlugSelect={vi.fn()} />);
-    expect(screen.getByTestId('marker').dataset.iconHtml).toContain('var(--color-warning)');
+    expect(screen.getByTestId('marker').dataset.iconHtml).toContain('var(--state-in-use)');
   });
 
   it('colors an offline-status plug with the danger color', () => {
     render(<MapComponent plugs={[PLUGS[2]]} onPlugSelect={vi.fn()} />);
-    expect(screen.getByTestId('marker').dataset.iconHtml).toContain('var(--color-danger)');
+    expect(screen.getByTestId('marker').dataset.iconHtml).toContain('var(--state-offline)');
   });
 
   it('colors an "available" plug with an unreachable gateway as offline (danger), not available', () => {
     render(<MapComponent plugs={[PLUGS[3]]} onPlugSelect={vi.fn()} />);
-    expect(screen.getByTestId('marker').dataset.iconHtml).toContain('var(--color-danger)');
+    expect(screen.getByTestId('marker').dataset.iconHtml).toContain('var(--state-offline)');
   });
 
   it('omits plugs with no known location from the map', () => {

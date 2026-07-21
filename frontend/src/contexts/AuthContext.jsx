@@ -94,9 +94,11 @@ export const AuthProvider = ({ children }) => {
     }
   }, []);
 
+  // Children always render — consumers branch on `loading` themselves
+  // (App holds the route tree behind <BootSplash/> until restore settles).
   return (
     <AuthContext.Provider value={{ user, login, register, logout, refreshUser, loading }}>
-      {!loading && children}
+      {children}
     </AuthContext.Provider>
   );
 };
