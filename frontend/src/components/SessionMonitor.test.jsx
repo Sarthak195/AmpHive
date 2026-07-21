@@ -1,24 +1,30 @@
 /**
- * SessionMonitor tests: the live-feed robustness UX added alongside the
- * firmware relay/amps work — the staleness ("Reconnecting…") banner, the
- * gateway-alarm banner, and the voltage/relay secondary line.
+ * SessionMonitor tests (redesign v3, C4): the ₹-first ring hero (determinate
+ * vs indeterminate), the tariff-preview rate line (hidden on failure), the
+ * stale/alarm/low-balance banners, the ConfirmDialog-gated stop with the
+ * kWh/₹ estimate, and the mid-session limit editor PATCH.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, act } from '@testing-library/react';
+import { render, screen, fireEvent, act, within } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
 
 import SessionMonitor from './SessionMonitor';
 import { useSession } from '../contexts/SessionContext';
 import { useWallet } from '../contexts/WalletContext';
+import api from '../api/client';
 
-vi.mock('../contexts/SessionContext', () => ({
-  useSession: vi.fn(),
+vi.mock('../contexts/SessionContext', () => ({ useSession: vi.fn() }));
+vi.mock('../contexts/WalletContext', () => ({ useWallet: vi.fn() }));
+vi.mock('../contexts/ConfigContext', () => ({
+  useConfig: () => ({ coins_per_kwh: 5, coin_inr_rate: 1 }),
 }));
-vi.mock('../contexts/WalletContext', () => ({
-  useWallet: vi.fn(() => ({ balance: 1000 })), // plenty by default → no low-balance banner
+vi.mock('../api/client', () => ({
+  default: { get: vi.fn(), post: vi.fn(), patch: vi.fn() },
 }));
 
 const baseData = {
   plug_id: 2,
+  plug_name: 'Garage plug',
   power_w: 1000,
   energy_kwh: 0.25,
   current_a: 4.3,
@@ -28,200 +34,207 @@ const baseData = {
   duration_sec: 60,
 };
 
+const baseSession = (overrides = {}) => ({
+  sessionData: { ...baseData, is_stale: false },
+  sessionId: 7,
+  isActive: true,
+  stopSession: vi.fn().mockResolvedValue({}),
+  updateLimits: vi.fn(),
+  lastFrameAt: Date.now(),
+  focusedStartedAt: new Date().toISOString(),
+  focusedLimits: null,
+  alarms: [],
+  ...overrides,
+});
+
+const renderMonitor = async () => {
+  const utils = render(
+    <MemoryRouter>
+      <SessionMonitor />
+    </MemoryRouter>
+  );
+  // Flush the tariff-preview fetch promise.
+  await act(async () => {});
+  return utils;
+};
+
 beforeEach(() => {
   vi.clearAllMocks();
-  vi.useFakeTimers();
-  // Default: ample balance so the low-balance banner is off unless a test opts in.
   useWallet.mockReturnValue({ balance: 1000 });
+  api.get.mockResolvedValue({ base_price_per_kwh: 6, price_now: 6, slots: [] });
 });
 
 afterEach(() => {
   vi.useRealTimers();
 });
 
-describe('SessionMonitor', () => {
-  it('shows Active (not stale) with a recent telemetry frame', () => {
-    useSession.mockReturnValue({
-      sessionData: { ...baseData, is_stale: false },
-      isActive: true,
-      stopSession: vi.fn(),
-      lastFrameAt: Date.now(),
-      focusedStartedAt: new Date().toISOString(),
-      alarms: [],
-    });
-    render(<SessionMonitor />);
-    expect(screen.getByText('Active')).toBeInTheDocument();
-    expect(screen.queryByText('Reconnecting…')).not.toBeInTheDocument();
-    // Voltage + relay secondary line
-    expect(screen.getByText('231 V')).toBeInTheDocument();
-    expect(screen.getByText('ON')).toBeInTheDocument();
+describe('SessionMonitor — hero + meters', () => {
+  it('renders the ₹ cost hero, kWh, the meter row and the Charging status', async () => {
+    useSession.mockReturnValue(baseSession());
+    await renderMonitor();
+    expect(screen.getByText('Charging')).toBeInTheDocument();
+    expect(screen.getByText('₹1.25')).toBeInTheDocument(); // cost, ₹-first
+    expect(screen.getByText('0.25 kWh')).toBeInTheDocument();
+    expect(screen.getByText('1.0 kW')).toBeInTheDocument(); // power now
+    expect(screen.getByText('Garage plug')).toBeInTheDocument();
   });
 
-  it('shows the Reconnecting banner when no frame has arrived recently', () => {
-    useSession.mockReturnValue({
-      sessionData: { ...baseData, is_stale: false },
-      isActive: true,
-      stopSession: vi.fn(),
-      lastFrameAt: Date.now() - 30000, // 30 s ago → stale (>15 s)
-      focusedStartedAt: new Date().toISOString(),
-      alarms: [],
-    });
-    render(<SessionMonitor />);
+  it('shows the plug rate line from the tariff preview — never the config rate', async () => {
+    useSession.mockReturnValue(baseSession());
+    await renderMonitor();
+    expect(api.get).toHaveBeenCalledWith('/api/plugs/2/tariff-preview');
+    expect(screen.getByText('₹6.00')).toBeInTheDocument();
+    expect(screen.getByText(/\/kWh now/)).toBeInTheDocument();
+  });
+
+  it('hides the rate line when the tariff preview fails (e.g. 404)', async () => {
+    api.get.mockRejectedValue(Object.assign(new Error('Not found'), { status: 404 }));
+    useSession.mockReturnValue(baseSession());
+    await renderMonitor();
+    expect(screen.queryByText(/\/kWh now/)).not.toBeInTheDocument();
+  });
+});
+
+describe('SessionMonitor — ring', () => {
+  it('is indeterminate (no progressbar) without a limit', async () => {
+    useSession.mockReturnValue(baseSession({ focusedLimits: null }));
+    await renderMonitor();
+    expect(screen.queryByRole('progressbar')).not.toBeInTheDocument();
+  });
+
+  it('is determinate toward the kWh limit when one is set', async () => {
+    useSession.mockReturnValue(
+      baseSession({
+        sessionData: { ...baseData, energy_kwh: 0.42, is_stale: false },
+        focusedLimits: { max_kwh: 1.0, max_duration_seconds: null },
+      })
+    );
+    await renderMonitor();
+    expect(screen.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '42');
+    expect(screen.getByText(/stops automatically/)).toBeInTheDocument();
+    expect(screen.getByText(/0\.42 \/ 1\.00 kWh/)).toBeInTheDocument();
+  });
+});
+
+describe('SessionMonitor — notices', () => {
+  it('shows the reconnecting banner when no frame has arrived recently', async () => {
+    useSession.mockReturnValue(baseSession({ lastFrameAt: Date.now() - 30000 }));
+    await renderMonitor();
     expect(screen.getByText('Reconnecting…')).toBeInTheDocument();
     expect(screen.getByText(/Live readings paused/)).toBeInTheDocument();
   });
 
-  it('honors the server-side is_stale flag even with a fresh frame timestamp', () => {
-    useSession.mockReturnValue({
-      sessionData: { ...baseData, is_stale: true },
-      isActive: true,
-      stopSession: vi.fn(),
-      lastFrameAt: Date.now(),
-      focusedStartedAt: new Date().toISOString(),
-      alarms: [],
-    });
-    render(<SessionMonitor />);
+  it('honors the server-side is_stale flag even with a fresh frame timestamp', async () => {
+    useSession.mockReturnValue(
+      baseSession({ sessionData: { ...baseData, is_stale: true } })
+    );
+    await renderMonitor();
     expect(screen.getByText('Reconnecting…')).toBeInTheDocument();
   });
 
-  it('surfaces a gateway alarm for the focused plug', () => {
-    useSession.mockReturnValue({
-      sessionData: { ...baseData, is_stale: false },
-      isActive: true,
-      stopSession: vi.fn(),
-      lastFrameAt: Date.now(),
-      focusedStartedAt: new Date().toISOString(),
-      alarms: [
-        { plug_id: 2, event_type: 'UNAUTHORIZED_ON', detail: 'Plug switched ON with no active session', received_at: Date.now() },
-      ],
-    });
-    render(<SessionMonitor />);
-    expect(screen.getByText(/Plug switched ON with no active session/)).toBeInTheDocument();
+  it('surfaces a gateway alarm for this plug through eventTypeCopy', async () => {
+    useSession.mockReturnValue(
+      baseSession({
+        alarms: [
+          {
+            plug_id: 2,
+            event_type: 'OVERCURRENT_CUTOFF',
+            detail: 'Plug drew 18 A',
+            received_at: Date.now(),
+          },
+        ],
+      })
+    );
+    await renderMonitor();
+    expect(screen.getByText('Current safety cutoff')).toBeInTheDocument();
+    expect(screen.getByText(/Plug drew 18 A/)).toBeInTheDocument();
   });
 
-  it('shows a low-balance warning as accrued cost nears the wallet balance', () => {
-    useWallet.mockReturnValue({ balance: 12 }); // cost 10 → remaining 2, below the 10-coin floor
-    useSession.mockReturnValue({
-      sessionData: { ...baseData, cost_coins: 10, is_stale: false },
-      isActive: true,
-      stopSession: vi.fn(),
-      lastFrameAt: Date.now(),
-      focusedStartedAt: new Date().toISOString(),
-      alarms: [],
-    });
-    render(<SessionMonitor />);
+  it('ignores an alarm for a different plug', async () => {
+    useSession.mockReturnValue(
+      baseSession({
+        alarms: [
+          { plug_id: 99, event_type: 'UNAUTHORIZED_ON', detail: 'other plug', received_at: Date.now() },
+        ],
+      })
+    );
+    await renderMonitor();
+    expect(screen.queryByText(/other plug/)).not.toBeInTheDocument();
+  });
+
+  it('warns on low balance with a Top up link back to this session', async () => {
+    useWallet.mockReturnValue({ balance: 12 }); // cost 10 → ₹2 left, under the floor
+    useSession.mockReturnValue(
+      baseSession({ sessionData: { ...baseData, cost_coins: 10, is_stale: false } })
+    );
+    await renderMonitor();
     expect(screen.getByText(/Low balance/)).toBeInTheDocument();
-    expect(screen.getByText(/stop\s+automatically/)).toBeInTheDocument();
+    expect(screen.getByText(/charging continues while you top up/)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Top up' })).toHaveAttribute(
+      'href',
+      '/wallet?next=/session'
+    );
   });
 
-  it('does not warn when the balance comfortably covers the accrued cost', () => {
+  it('does not warn when the balance comfortably covers the accrued cost', async () => {
     useWallet.mockReturnValue({ balance: 1000 });
-    useSession.mockReturnValue({
-      sessionData: { ...baseData, cost_coins: 10, is_stale: false },
-      isActive: true,
-      stopSession: vi.fn(),
-      lastFrameAt: Date.now(),
-      focusedStartedAt: new Date().toISOString(),
-      alarms: [],
-    });
-    render(<SessionMonitor />);
+    useSession.mockReturnValue(
+      baseSession({ sessionData: { ...baseData, cost_coins: 10, is_stale: false } })
+    );
+    await renderMonitor();
     expect(screen.queryByText(/Low balance/)).not.toBeInTheDocument();
   });
+});
 
-  it('ignores an alarm for a different plug', () => {
-    useSession.mockReturnValue({
-      sessionData: { ...baseData, is_stale: false },
-      isActive: true,
-      stopSession: vi.fn(),
-      lastFrameAt: Date.now(),
-      focusedStartedAt: new Date().toISOString(),
-      alarms: [
-        { plug_id: 99, event_type: 'UNAUTHORIZED_ON', detail: 'other plug', received_at: Date.now() },
-      ],
+describe('SessionMonitor — stop', () => {
+  it('confirms the kWh/₹ consequence before stopping', async () => {
+    const stopSession = vi.fn().mockResolvedValue({});
+    useSession.mockReturnValue(baseSession({ stopSession }));
+    await renderMonitor();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Stop charging' }));
+    const dialog = screen.getByRole('dialog', { name: 'Stop charging?' });
+    expect(
+      within(dialog).getByText(/You'll be billed for 0\.25 kWh — about ₹1\.25\./)
+    ).toBeInTheDocument();
+    expect(stopSession).not.toHaveBeenCalled();
+
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Stop charging' }));
     });
-    render(<SessionMonitor />);
-    expect(screen.queryByText('other plug')).not.toBeInTheDocument();
+    expect(stopSession).toHaveBeenCalled();
   });
 
-  it('shows energy-limit progress toward the session max_kwh', () => {
-    useSession.mockReturnValue({
-      sessionData: { ...baseData, energy_kwh: 0.42, is_stale: false },
-      isActive: true,
-      stopSession: vi.fn(),
-      lastFrameAt: Date.now(),
-      focusedStartedAt: new Date().toISOString(),
-      focusedLimits: { max_kwh: 1.0, max_duration_seconds: null },
-      alarms: [],
-    });
-    render(<SessionMonitor />);
-    expect(screen.getByText('0.42 / 1.00 kWh')).toBeInTheDocument();
-    expect(screen.getByText(/stops automatically/)).toBeInTheDocument();
-  });
+  it('does not stop when the confirmation is cancelled', async () => {
+    const stopSession = vi.fn();
+    useSession.mockReturnValue(baseSession({ stopSession }));
+    await renderMonitor();
 
-  it('shows elapsed-vs-limit time when a duration limit is set', () => {
-    useSession.mockReturnValue({
-      sessionData: { ...baseData, is_stale: false },
-      isActive: true,
-      stopSession: vi.fn(),
-      lastFrameAt: Date.now(),
-      focusedStartedAt: new Date().toISOString(),
-      focusedLimits: { max_kwh: null, max_duration_seconds: 14400 },
-      alarms: [],
-    });
-    render(<SessionMonitor />);
-    // Elapsed ticks from ~0; the limit side is the fixed 4 h cap.
-    expect(screen.getByText(/\/ 04:00:00/)).toBeInTheDocument();
-    expect(screen.getByText(/stops automatically/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Stop charging' }));
+    const dialog = screen.getByRole('dialog', { name: 'Stop charging?' });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    expect(stopSession).not.toHaveBeenCalled();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
+});
 
-  it('shows both limits when both are set', () => {
-    useSession.mockReturnValue({
-      sessionData: { ...baseData, energy_kwh: 0.42, is_stale: false },
-      isActive: true,
-      stopSession: vi.fn(),
-      lastFrameAt: Date.now(),
-      focusedStartedAt: new Date().toISOString(),
-      focusedLimits: { max_kwh: 1.0, max_duration_seconds: 1800 },
-      alarms: [],
-    });
-    render(<SessionMonitor />);
-    expect(screen.getByText('0.42 / 1.00 kWh')).toBeInTheDocument();
-    expect(screen.getByText(/\/ 00:30:00/)).toBeInTheDocument();
-  });
-
-  it('renders no limit banner for a legacy session without limits', () => {
-    useSession.mockReturnValue({
-      sessionData: { ...baseData, is_stale: false },
-      isActive: true,
-      stopSession: vi.fn(),
-      lastFrameAt: Date.now(),
-      focusedStartedAt: new Date().toISOString(),
-      focusedLimits: null,
-      alarms: [],
-    });
-    render(<SessionMonitor />);
-    expect(screen.queryByText(/stops automatically/)).not.toBeInTheDocument();
-  });
-
-  it('opens the limit editor and PATCHes the new target on save', async () => {
+describe('SessionMonitor — limit editor', () => {
+  it('opens prefilled and PATCHes the new target on save', async () => {
     const updateLimits = vi.fn().mockResolvedValue({
-      status: 'updated', max_kwh: 2, max_duration_seconds: 1800,
+      status: 'updated',
+      max_kwh: 2,
+      max_duration_seconds: 1800,
     });
-    useSession.mockReturnValue({
-      sessionData: { ...baseData, energy_kwh: 0.42, is_stale: false },
-      isActive: true,
-      stopSession: vi.fn(),
-      updateLimits,
-      sessionId: 7,
-      lastFrameAt: Date.now(),
-      focusedStartedAt: new Date().toISOString(),
-      focusedLimits: { max_kwh: 1.0, max_duration_seconds: 1800 },
-      alarms: [],
-    });
-    render(<SessionMonitor />);
+    useSession.mockReturnValue(
+      baseSession({
+        sessionData: { ...baseData, energy_kwh: 0.42, is_stale: false },
+        updateLimits,
+        focusedLimits: { max_kwh: 1.0, max_duration_seconds: 1800 },
+      })
+    );
+    await renderMonitor();
 
     fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
-    // Prefilled from the current limits; bump the energy target 1 → 2 kWh.
     fireEvent.change(screen.getByLabelText(/Energy limit/i), { target: { value: '2' } });
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: /Save limit/i }));
@@ -231,20 +244,15 @@ describe('SessionMonitor', () => {
     expect(updateLimits).toHaveBeenCalledWith(7, { max_kwh: 2, max_duration_seconds: 1800 });
   });
 
-  it('rejects an empty limit edit without calling the API', () => {
+  it('rejects an empty limit edit without calling the API', async () => {
     const updateLimits = vi.fn();
-    useSession.mockReturnValue({
-      sessionData: { ...baseData, is_stale: false },
-      isActive: true,
-      stopSession: vi.fn(),
-      updateLimits,
-      sessionId: 7,
-      lastFrameAt: Date.now(),
-      focusedStartedAt: new Date().toISOString(),
-      focusedLimits: { max_kwh: 1.0, max_duration_seconds: 1800 },
-      alarms: [],
-    });
-    render(<SessionMonitor />);
+    useSession.mockReturnValue(
+      baseSession({
+        updateLimits,
+        focusedLimits: { max_kwh: 1.0, max_duration_seconds: 1800 },
+      })
+    );
+    await renderMonitor();
 
     fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
     fireEvent.change(screen.getByLabelText(/Energy limit/i), { target: { value: '' } });

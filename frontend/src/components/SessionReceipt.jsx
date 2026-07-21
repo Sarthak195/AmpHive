@@ -1,120 +1,163 @@
 /**
- * AmpHive Session Receipt
- * =======================
- * Post-session summary shown after a driver stops charging (or a session is
- * auto-finalized): energy delivered, duration, peak power, the coins billed,
- * and the wallet balance before → after. Reads the stop response from
- * SessionContext (`receipt`). "Charge Again" / "View History" dismiss it.
+ * SessionReceipt — post-session summary (redesign v3, C4).
+ *
+ * Reads the stop response from SessionContext (`receipt`): energy, duration,
+ * ₹ charged, balance after, an uncollected-shortfall row with plain-language
+ * help, and the auto-stop reason via stopReasonCopy. Actions: download the
+ * GST invoice (raw fetch — HTML, needs the Bearer header), report an issue
+ * (DisputeModal) and charge again.
  */
 
+import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useSession } from '../contexts/SessionContext';
+import { CheckCircle2 } from 'lucide-react';
 
-const fmtDuration = (sec) => {
-  if (sec == null || sec < 0) return '—';
-  const h = Math.floor(sec / 3600);
-  const m = Math.floor((sec % 3600) / 60);
-  const s = Math.floor(sec % 60);
-  if (h > 0) return `${h}h ${m}m ${s}s`;
-  if (m > 0) return `${m}m ${s}s`;
-  return `${s}s`;
-};
+import { useSession } from '../contexts/SessionContext';
+import { useConfig } from '../contexts/ConfigContext';
+import { Money, useToast } from './ui';
+import DisputeModal from './DisputeModal';
+import { stopReasonCopy, isAutoStopReason } from '../utils/statusCopy';
+import { formatINR, coinsToINR, formatKwh, formatKw, formatDuration } from '../utils/money';
 
 const Row = ({ label, children, strong }) => (
-  <div className="flex justify-between items-center" style={{ padding: '0.5rem 0' }}>
-    <span style={{ color: 'var(--color-text-muted)', fontSize: '0.9rem' }}>{label}</span>
-    <span style={{
-      color: strong ? 'var(--color-text-primary)' : 'var(--color-text-secondary)',
-      fontWeight: strong ? 700 : 500,
-    }}>
-      {children}
-    </span>
+  <div className="receipt-row">
+    <dt className="text-3 text-sm">{label}</dt>
+    <dd className={strong ? 'receipt-strong' : undefined}>{children}</dd>
   </div>
 );
 
 const SessionReceipt = () => {
   const { receipt, dismissReceipt } = useSession();
+  const { coin_inr_rate } = useConfig();
   const navigate = useNavigate();
+  const toast = useToast();
+
+  const [disputeOpen, setDisputeOpen] = useState(false);
+  const [invoiceBusy, setInvoiceBusy] = useState(false);
 
   if (!receipt) return null;
 
   const {
-    plug_name, energy_kwh, peak_power_w, coins_spent, shortfall_coins,
-    balance_before, balance_remaining, duration_sec, ended_at, reason,
+    session_id, plug_name, energy_kwh, peak_power_w, coins_spent,
+    shortfall_coins, balance_before, balance_remaining, duration_sec,
+    ended_at, reason,
   } = receipt;
 
-  const goHome = () => { dismissReceipt(); navigate('/'); };
-  const goHistory = () => { dismissReceipt(); navigate('/history'); };
+  const chargedInr = coinsToINR(coins_spent ?? 0, coin_inr_rate);
+  const shortfallInr = coinsToINR(shortfall_coins ?? 0, coin_inr_rate);
+  const autoStopped = isAutoStopReason(reason);
+  // The invoice endpoint 400s on a zero-cost session — only offer it when the
+  // session actually billed something.
+  const canInvoice = session_id != null && Number(coins_spent) > 0;
 
-  const autoStopped = reason && /auto-stopped|telemetry lost|exhaust/i.test(reason);
+  const chargeAgain = () => {
+    dismissReceipt();
+    navigate('/');
+  };
+
+  // The GST invoice endpoint returns printable HTML (not JSON) and needs the
+  // Bearer header, so it can't go through the api client — raw-fetch the blob
+  // and open it in a new tab. Issues the invoice server-side on first view.
+  const viewInvoice = async () => {
+    setInvoiceBusy(true);
+    try {
+      const base = import.meta.env.VITE_API_URL || '';
+      const token = localStorage.getItem('amphive_token');
+      const res = await fetch(`${base}/api/sessions/${session_id}/invoice?format=html`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) throw new Error("Couldn't load the invoice. Please try again.");
+      const blob = await res.blob();
+      window.open(URL.createObjectURL(blob), '_blank');
+    } catch (err) {
+      toast.error(err?.message || "Couldn't load the invoice. Please try again.");
+    } finally {
+      setInvoiceBusy(false);
+    }
+  };
 
   return (
-    <div className="glass glass-panel flex flex-col gap-4 animate-fade-in">
-      {/* Header */}
-      <div className="flex flex-col items-center gap-2" style={{ textAlign: 'center' }}>
-        <div style={{
-          width: '52px', height: '52px', borderRadius: '50%',
-          background: 'hsla(73, 100%, 50%, 0.12)',
-          border: '2px solid var(--color-success)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          fontSize: '1.6rem',
-        }}>
-          ✓
-        </div>
-        <h2 style={{ margin: 0 }}>Session Complete</h2>
-        <p style={{ margin: 0, color: 'var(--color-text-muted)', fontSize: '0.9rem' }}>
+    <section className="session-receipt card anim-rise" aria-label="Charging receipt">
+      <header className="receipt-head">
+        <CheckCircle2 className="receipt-check" aria-hidden="true" />
+        <h2>Charging complete</h2>
+        <p className="text-3 text-sm">
           {plug_name || 'Charger'}
           {ended_at && ` · ${new Date(ended_at).toLocaleString()}`}
         </p>
-      </div>
+      </header>
 
       {autoStopped && (
-        <div
-          style={{
-            padding: '0.6rem 0.85rem',
-            borderRadius: 'var(--radius-md)',
-            background: 'hsla(38, 90%, 50%, 0.12)',
-            border: '1px solid hsla(38, 90%, 50%, 0.4)',
-            color: 'var(--color-warning, #f0a020)',
-            fontSize: '0.85rem',
-            textAlign: 'center',
-          }}
-        >
-          This session was stopped automatically ({reason.replace(/^auto-stopped:\s*/i, '')}).
+        <div className="banner banner-warn">
+          <p>{stopReasonCopy(reason)}</p>
         </div>
       )}
 
-      {/* Delivered */}
-      <div style={{ borderTop: '1px solid var(--color-surface-border, hsla(0,0%,100%,0.08))' }}>
-        <Row label="Energy delivered" strong>{(energy_kwh ?? 0).toFixed(3)} kWh</Row>
-        <Row label="Duration">{fmtDuration(duration_sec)}</Row>
-        <Row label="Peak power">{(peak_power_w ?? 0).toFixed(0)} W</Row>
-      </div>
-
-      {/* Billing */}
-      <div style={{
-        borderTop: '1px solid var(--color-surface-border, hsla(0,0%,100%,0.08))',
-        paddingTop: '0.25rem',
-      }}>
-        <Row label="Charged" strong>
-          <span style={{ color: 'var(--color-danger)' }}>−{(coins_spent ?? 0).toFixed(2)} coins</span>
+      <dl className="receipt-rows">
+        <Row label="Energy delivered" strong>
+          <span className="num">{formatKwh(energy_kwh ?? 0)}</span>
         </Row>
-        <Row label="Balance">
-          {(balance_before ?? 0).toFixed(2)} → <strong style={{ color: 'var(--color-text-primary)' }}>{(balance_remaining ?? 0).toFixed(2)}</strong> coins
+        <Row label="Duration">
+          <span className="num">{formatDuration(duration_sec)}</span>
         </Row>
-        {shortfall_coins > 0 && (
-          <Row label="Uncollected (low balance)">
-            <span style={{ color: 'var(--color-warning, #f0a020)' }}>{shortfall_coins.toFixed(2)} coins</span>
+        {peak_power_w != null && (
+          <Row label="Peak power">
+            <span className="num">{formatKw(peak_power_w)}</span>
           </Row>
         )}
+        <Row label="Charged" strong>
+          <span className="receipt-debit num">−{formatINR(chargedInr)}</span>
+        </Row>
+        <Row label="Balance after">
+          <span className="text-3 num">{formatINR(coinsToINR(balance_before ?? 0, coin_inr_rate))} → </span>
+          <strong><Money coins={balance_remaining ?? 0} rate={coin_inr_rate} /></strong>
+        </Row>
+        {shortfall_coins > 0 && (
+          <Row label="Couldn't be collected">
+            <span className="receipt-shortfall num">{formatINR(shortfallInr)}</span>
+          </Row>
+        )}
+      </dl>
+
+      {shortfall_coins > 0 && (
+        <p className="receipt-help text-3 text-sm">
+          The remaining {formatINR(shortfallInr)} couldn&apos;t be collected — it stays owed
+          on your account.
+        </p>
+      )}
+
+      <div className="receipt-actions">
+        {canInvoice && (
+          <button
+            type="button"
+            className="btn btn-quiet"
+            onClick={viewInvoice}
+            disabled={invoiceBusy}
+          >
+            {invoiceBusy ? 'Opening…' : 'Download GST invoice'}
+          </button>
+        )}
+        {session_id != null && (
+          <button type="button" className="btn btn-quiet" onClick={() => setDisputeOpen(true)}>
+            Report an issue
+          </button>
+        )}
+        <button type="button" className="btn btn-primary" onClick={chargeAgain}>
+          Charge again
+        </button>
       </div>
 
-      {/* Actions */}
-      <div className="flex gap-3" style={{ marginTop: '0.5rem' }}>
-        <button className="btn btn-ghost btn-full" onClick={goHistory}>View History</button>
-        <button className="btn btn-accent btn-full" onClick={goHome}>Charge Again</button>
-      </div>
-    </div>
+      {/* Rendered only while open so both the current and the rebuilt modal
+          ({open,onClose,sessionId,onSubmitted} contract) behave. */}
+      {disputeOpen && (
+        <DisputeModal
+          open
+          onClose={() => setDisputeOpen(false)}
+          sessionId={session_id}
+          onSubmitted={() => setDisputeOpen(false)}
+        />
+      )}
+    </section>
   );
 };
 

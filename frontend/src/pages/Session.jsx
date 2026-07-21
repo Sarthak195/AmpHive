@@ -1,63 +1,104 @@
 /**
- * AmpHive Session Page
- * ====================
- * Displays the live charging session monitor.
- * Redirects to home if no session is active.
+ * Session page (redesign v3, C4) — the live charging surface.
+ *
+ * - No active session and no receipt → a friendly interstitial ("No active
+ *   charge" + Find a charger / Recent activity) instead of a redirect.
+ * - Multiple active sessions → seg pills with each session's last-known
+ *   live ₹; picking one refocuses the monitor (SessionContext.switchSession).
+ * - After a stop → the receipt replaces the frozen monitor.
+ *
+ * SessionContext owns the socket/telemetry lifecycle — this page only reads.
  */
 
-import { useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
+import { PlugZap } from 'lucide-react';
+
 import SessionMonitor from '../components/SessionMonitor';
 import SessionReceipt from '../components/SessionReceipt';
 import { useSession } from '../contexts/SessionContext';
+import { useConfig } from '../contexts/ConfigContext';
+import { PageHeader, EmptyState } from '../components/ui';
+import { formatINR, coinsToINR } from '../utils/money';
+import './Session.css';
 
 const Session = () => {
-  const { isActive, sessionData, activeSessions, sessionId, switchSession, receipt } = useSession();
-  const navigate = useNavigate();
+  const { isActive, sessionData, activeSessions, sessionId, switchSession, receipt } =
+    useSession();
+  const { coin_inr_rate } = useConfig();
 
-  // If user navigated here manually without a session (and no receipt to show),
-  // bounce them back to home.
+  // Last-known live cost per session — telemetry only streams for the focused
+  // session, so remember each one's cost as it's focused to keep the seg
+  // pills' ₹ meaningful after switching away.
+  const [costs, setCosts] = useState({});
+  const focusedCost = sessionData?.cost_coins;
   useEffect(() => {
-    if (!isActive && !sessionData && !receipt) {
-      navigate('/');
-    }
-  }, [isActive, sessionData, receipt, navigate]);
+    if (sessionId == null || focusedCost == null) return;
+    setCosts((prev) =>
+      prev[sessionId] === focusedCost ? prev : { ...prev, [sessionId]: focusedCost }
+    );
+  }, [sessionId, focusedCost]);
+
+  const hasSession = isActive || Boolean(sessionData);
 
   return (
-    <div className="page-container" style={{ maxWidth: '800px' }}>
-      <header style={{ marginBottom: '1.5rem' }}>
-        <button
-          onClick={() => navigate('/')}
-          className="btn btn-ghost btn-sm"
-          style={{ marginBottom: '0.5rem' }}
-        >
-          ← Back to Dashboard
-        </button>
-      </header>
+    <div className="page session-page">
+      <PageHeader
+        eyebrow="Live"
+        title="Charging"
+        sub={
+          receipt
+            ? 'Your session has ended — here’s the summary.'
+            : hasSession
+              ? 'Live view of your charging session.'
+              : undefined
+        }
+      />
 
-      {/* After a stop, show the receipt instead of the frozen live monitor. */}
       {receipt ? (
         <SessionReceipt />
-      ) : (
+      ) : hasSession ? (
         <>
-          {/* With more than one active session, let the user pick which one the
-              live monitor follows (the stop button acts on the focused session) */}
           {activeSessions.length > 1 && (
-            <div className="flex gap-2" style={{ marginBottom: '1rem', flexWrap: 'wrap' }}>
-              {activeSessions.map((s) => (
-                <button
-                  key={s.session_id}
-                  className={`btn btn-sm ${s.session_id === sessionId ? 'btn-primary' : 'btn-ghost'}`}
-                  onClick={() => switchSession(s)}
-                >
-                  ⚡ {s.plug_name}
-                </button>
-              ))}
+            <div className="seg session-seg" aria-label="Active sessions">
+              {activeSessions.map((s) => {
+                const focused = s.session_id === sessionId;
+                const cost = costs[s.session_id];
+                return (
+                  <button
+                    key={s.session_id}
+                    type="button"
+                    className={`seg-item${focused ? ' active' : ''}`}
+                    aria-pressed={focused}
+                    onClick={() => switchSession(s)}
+                  >
+                    {s.plug_name}
+                    <span className="num text-xs">
+                      {cost != null ? formatINR(coinsToINR(cost, coin_inr_rate)) : '—'}
+                    </span>
+                  </button>
+                );
+              })}
             </div>
           )}
-
           <SessionMonitor />
         </>
+      ) : (
+        <EmptyState
+          icon={PlugZap}
+          title="No active charge"
+          body="When you start charging, your live progress and cost show up here."
+          action={
+            <div className="session-empty-actions">
+              <Link className="btn btn-primary" to="/">
+                Find a charger
+              </Link>
+              <Link className="btn btn-quiet" to="/activity">
+                Recent activity
+              </Link>
+            </div>
+          }
+        />
       )}
     </div>
   );

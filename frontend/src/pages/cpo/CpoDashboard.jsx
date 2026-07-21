@@ -1,387 +1,380 @@
 /**
- * AmpHive CPO Dashboard Page
- * ===========================
- * Main analytics overview for Charge Point Operators.
- * Shows stat cards, revenue/energy charts (Recharts), recent sessions table,
- * and gateway status indicators.
+ * CpoDashboard (redesign v3, D1) — the console's landing analytics overview.
  *
- * Data source: /api/cpo/analytics/overview, /revenue, /energy, /sessions
+ * Five independently-loaded sections so one flaky endpoint never blanks the
+ * whole page: KPI row (GET /api/cpo/analytics/overview), revenue (GET
+ * /api/cpo/analytics/revenue?days=30), energy (GET
+ * /api/cpo/analytics/energy?days=30), 24h load (GET
+ * /api/cpo/analytics/telemetry?days=1&bucket=hour) and recent sessions (GET
+ * /api/cpo/analytics/sessions?limit=8). Each section renders its own
+ * skeleton -> ErrorState-with-retry -> content/EmptyState; a failure in one
+ * card never hides the others. Polls every 30s while the tab is visible.
+ *
+ * CpoLayout (mounted by this page, per file ownership) already renders
+ * CpoAlerts and provides TenantContext — this page no longer fetches the
+ * profile or passes tenantName anywhere.
  */
 
-import { useState, useEffect } from 'react';
+import { useCallback, useState } from 'react';
+import { Link } from 'react-router-dom';
 import {
-  AreaChart, Area, BarChart, Bar,
+  AreaChart, Area, BarChart, Bar, Line, ComposedChart,
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
 } from 'recharts';
-import CpoLayout from '../../components/CpoLayout';
-import CpoAlerts from '../../components/CpoAlerts';
-import CpoSummary from '../../components/CpoSummary';
-import api from '../../api/client';
+import { Banknote, Zap, BatteryCharging, Radio } from 'lucide-react';
 
-/**
- * Custom Recharts tooltip styled to match the glassmorphic dark theme.
- */
-const CustomTooltip = ({ active, payload, label }) => {
+import CpoLayout from '../../components/CpoLayout';
+import { PageHeader, DataTable, Skeleton, SkeletonTitle, ErrorState, EmptyState, Money } from '../../components/ui';
+import api from '../../api/client';
+import usePoll from '../../hooks/usePoll';
+import { useConfig } from '../../contexts/ConfigContext';
+import { formatKwh, formatINR, coinsToINR } from '../../utils/money';
+import { sessionStatusLabel } from '../../utils/statusCopy';
+import './CpoDashboard.css';
+
+const POLL_MS = 30_000;
+const RECENT_SESSIONS_LIMIT = 8;
+
+const SESSION_STATUS_TONE = {
+  active: 'badge-info',
+  completed: 'badge-ok',
+  paid: 'badge-ok',
+  billed: 'badge-ok',
+  cancelled: 'badge-danger',
+  orphaned: 'badge-warn',
+};
+
+const formatDateShort = (dateStr) =>
+  dateStr ? new Date(dateStr).toLocaleDateString('en-IN', { month: 'short', day: 'numeric' }) : '';
+
+const formatDateTime = (isoStr) =>
+  isoStr
+    ? new Date(isoStr).toLocaleString('en-IN', {
+        month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+      })
+    : '—';
+
+const formatHour = (isoStr) =>
+  isoStr ? new Date(isoStr).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: false }) : '';
+
+/** Empty async section state: not yet loaded, no error, nothing fetched. */
+const initSection = () => ({ data: null, error: null, loading: true });
+
+/** Shared card tooltip — surface, border, ₹/kWh/W formatting per series. */
+function ChartTooltip({ active, payload, label, labelFormatter, valueFormatter }) {
   if (!active || !payload?.length) return null;
   return (
-    <div style={{
-      background: 'hsl(74, 14%, 14%)',
-      border: '1px solid hsla(0,0%,100%,0.1)',
-      borderRadius: '8px',
-      padding: '0.6rem 0.85rem',
-      fontSize: '0.8rem',
-    }}>
-      <p style={{ color: 'var(--color-text-muted)', margin: '0 0 0.25rem' }}>{label}</p>
-      {payload.map((entry, i) => (
-        <p key={i} style={{ color: entry.color, margin: 0, fontWeight: 600 }}>
-          {entry.name}: {typeof entry.value === 'number' ? entry.value.toLocaleString() : entry.value}
+    <div className="dash-tooltip">
+      <p className="dash-tooltip-label">{labelFormatter ? labelFormatter(label) : label}</p>
+      {payload.map((entry) => (
+        <p key={entry.dataKey} className="dash-tooltip-row" style={{ color: entry.color }}>
+          {entry.name}: {valueFormatter ? valueFormatter(entry.value) : entry.value}
         </p>
       ))}
     </div>
   );
-};
+}
+
+const axisTick = { fill: 'var(--ink-3)', fontSize: 11, fontFamily: 'var(--font-data)' };
 
 const CpoDashboard = () => {
-  const [overview, setOverview] = useState(null);
-  const [revenueData, setRevenueData] = useState([]);
-  const [energyData, setEnergyData] = useState([]);
-  const [loadData, setLoadData] = useState([]);
-  const [recentSessions, setRecentSessions] = useState([]);
-  const [tenantName, setTenantName] = useState('');
-  const [loading, setLoading] = useState(true);
+  const { coin_inr_rate: rate = 1 } = useConfig();
 
-  useEffect(() => {
-    const fetchData = async () => {
-      try {
-        // Fetch all dashboard data in parallel
-        const [overviewRes, revenueRes, energyRes, loadRes, sessionsRes, profileRes] = await Promise.all([
-          api.get('/api/cpo/analytics/overview'),
-          api.get('/api/cpo/analytics/revenue?days=30'),
-          api.get('/api/cpo/analytics/energy?days=30'),
-          api.get('/api/cpo/analytics/telemetry?days=1&bucket=hour'),
-          api.get('/api/cpo/analytics/sessions?limit=10'),
-          api.get('/api/cpo/profile'),
-        ]);
+  const [overview, setOverview] = useState(initSection);
+  const [revenue, setRevenue] = useState(initSection);
+  const [energy, setEnergy] = useState(initSection);
+  const [load, setLoad] = useState(initSection);
+  const [sessions, setSessions] = useState(initSection);
 
-        setOverview(overviewRes);
-        setRevenueData(revenueRes);
-        setEnergyData(energyRes);
-        setLoadData(loadRes);
-        setRecentSessions(sessionsRes);
-        setTenantName(profileRes.tenant?.name || '');
-      } catch (err) {
-        console.error('Failed to load CPO dashboard:', err);
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    fetchData();
+  const loadOverview = useCallback(async () => {
+    try {
+      const data = await api.get('/api/cpo/analytics/overview');
+      setOverview({ data, error: null, loading: false });
+    } catch (err) {
+      setOverview((s) => ({ ...s, error: err, loading: false }));
+    }
   }, []);
 
-  /**
-   * Format a date string (YYYY-MM-DD) to a shorter display (e.g. "Jun 28").
-   */
-  const formatDate = (dateStr) => {
-    if (!dateStr) return '';
-    const d = new Date(dateStr);
-    return d.toLocaleDateString('en-IN', { month: 'short', day: 'numeric' });
-  };
+  const loadRevenue = useCallback(async () => {
+    try {
+      const data = await api.get('/api/cpo/analytics/revenue?days=30');
+      setRevenue({ data, error: null, loading: false });
+    } catch (err) {
+      setRevenue((s) => ({ ...s, error: err, loading: false }));
+    }
+  }, []);
 
-  /**
-   * Format an ISO timestamp to a human-readable datetime.
-   */
-  const formatDateTime = (isoStr) => {
-    if (!isoStr) return '—';
-    const d = new Date(isoStr);
-    return d.toLocaleString('en-IN', {
-      month: 'short', day: 'numeric',
-      hour: '2-digit', minute: '2-digit',
-    });
-  };
+  const loadEnergy = useCallback(async () => {
+    try {
+      const data = await api.get('/api/cpo/analytics/energy?days=30');
+      setEnergy({ data, error: null, loading: false });
+    } catch (err) {
+      setEnergy((s) => ({ ...s, error: err, loading: false }));
+    }
+  }, []);
 
-  /**
-   * Format an ISO timestamp to an hour label (e.g. "14:00") for the load graph.
-   */
-  const formatHour = (isoStr) => {
-    if (!isoStr) return '';
-    const d = new Date(isoStr);
-    return d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: false });
-  };
+  const loadLoad = useCallback(async () => {
+    try {
+      const data = await api.get('/api/cpo/analytics/telemetry?days=1&bucket=hour');
+      setLoad({ data, error: null, loading: false });
+    } catch (err) {
+      setLoad((s) => ({ ...s, error: err, loading: false }));
+    }
+  }, []);
 
-  /**
-   * Get a CSS class for a session status badge.
-   */
-  const getStatusBadge = (status) => {
-    const map = {
-      active: 'badge-success',
-      completed: 'badge-primary',
-      paid: 'badge-primary',
-      cancelled: 'badge-danger',
-    };
-    return map[status] || 'badge-warning';
-  };
+  const loadSessions = useCallback(async () => {
+    try {
+      const res = await api.get(`/api/cpo/analytics/sessions?limit=${RECENT_SESSIONS_LIMIT}`);
+      const items = Array.isArray(res) ? res : res?.items || [];
+      setSessions({ data: items, error: null, loading: false });
+    } catch (err) {
+      setSessions((s) => ({ ...s, error: err, loading: false }));
+    }
+  }, []);
 
-  if (loading) {
-    return (
-      <CpoLayout tenantName={tenantName}>
-        <div className="cpo-page-header">
-          <h1>Dashboard</h1>
-          <p>Loading analytics...</p>
-        </div>
-        <div className="stat-cards">
-          {[1, 2, 3, 4].map((i) => (
-            <div key={i} className="stat-card">
-              <div className="skeleton" style={{ width: '60px', height: '14px', marginBottom: '0.75rem' }} />
-              <div className="skeleton" style={{ width: '80px', height: '28px', marginBottom: '0.5rem' }} />
-              <div className="skeleton" style={{ width: '100px', height: '12px' }} />
+  const loadAll = useCallback(() => {
+    loadOverview();
+    loadRevenue();
+    loadEnergy();
+    loadLoad();
+    loadSessions();
+  }, [loadOverview, loadRevenue, loadEnergy, loadLoad, loadSessions]);
+
+  usePoll(loadAll, POLL_MS);
+
+  const ov = overview.data;
+  const gatewaysTotal = ov?.gateways?.total ?? 0;
+  const gatewaysOnline = ov?.gateways?.online ?? 0;
+  const gatewaysGap = Math.max(0, gatewaysTotal - gatewaysOnline);
+
+  const sessionColumns = [
+    { key: 'plug_name', label: 'Charger' },
+    { key: 'user_email', label: 'Driver' },
+    { key: 'started_at', label: 'Started', render: (row) => formatDateTime(row.started_at) },
+    { key: 'energy_kwh', label: 'Energy', num: true, render: (row) => formatKwh(row.energy_kwh) },
+    {
+      key: 'coins_spent',
+      label: 'Revenue',
+      num: true,
+      render: (row) => <Money coins={row.coins_spent} rate={rate} />,
+    },
+    {
+      key: 'status',
+      label: 'Status',
+      render: (row) => (
+        <span className={`badge ${SESSION_STATUS_TONE[row.status] || 'badge'}`}>
+          {sessionStatusLabel(row.status)}
+        </span>
+      ),
+    },
+  ];
+
+  const peakW = load.data?.length ? Math.max(...load.data.map((d) => d.max_power_w || 0)) : null;
+  const peakA = load.data?.length ? Math.max(...load.data.map((d) => d.max_current_a || 0)) : null;
+
+  return (
+    <CpoLayout>
+      <PageHeader
+        eyebrow="Console"
+        title="Dashboard"
+        sub="How your charging network is doing right now."
+      />
+
+      <div className="stack">
+      {/* ---- KPI row -------------------------------------------------- */}
+      {overview.loading ? (
+        <div className="kpi-grid" aria-hidden="true">
+          {Array.from({ length: 4 }, (_, i) => (
+            <div className="kpi" key={i}>
+              <SkeletonTitle />
+              <Skeleton lines={1} />
             </div>
           ))}
         </div>
-      </CpoLayout>
-    );
-  }
+      ) : overview.error ? (
+        <ErrorState error={overview.error} onRetry={loadOverview} title="Couldn't load your stats" />
+      ) : (
+        <div className="kpi-grid" aria-live="polite">
+          <Link to="/cpo/sessions" className="kpi">
+            <span className="kpi-label dash-kpi-label">
+              <Banknote size={14} aria-hidden="true" />
+              Today&rsquo;s revenue
+            </span>
+            <span className="kpi-value"><Money coins={ov?.today?.revenue_coins} rate={rate} /></span>
+            <span className="kpi-sub">
+              All-time <Money coins={ov?.all_time?.revenue_coins} rate={rate} />
+            </span>
+          </Link>
 
-  return (
-    <CpoLayout tenantName={tenantName}>
-      {/* Page Header */}
-      <div className="cpo-page-header">
-        <h1>Dashboard</h1>
-        <p>Overview of your charging network performance</p>
-      </div>
+          <Link to="/cpo/sessions" className="kpi">
+            <span className="kpi-label dash-kpi-label">
+              <Zap size={14} aria-hidden="true" />
+              Today&rsquo;s energy
+            </span>
+            <span className="kpi-value">{formatKwh(ov?.today?.energy_kwh)}</span>
+            <span className="kpi-sub">All-time {formatKwh(ov?.all_time?.energy_kwh)}</span>
+          </Link>
 
-      {/* Active alerts (safety cutoffs, unauthorized-on, OTA) */}
-      <CpoAlerts />
+          <Link to="/cpo/sessions?status=active" className="kpi">
+            <span className="kpi-label dash-kpi-label">
+              <BatteryCharging size={14} aria-hidden="true" />
+              Active sessions
+            </span>
+            <span className="kpi-value">{ov?.active_sessions ?? 0}</span>
+            <span className="kpi-sub">{ov?.today?.sessions ?? 0} today &middot; {ov?.all_time?.sessions ?? 0} all-time</span>
+          </Link>
 
-      {/* Stat Cards Row */}
-      <div className="stat-cards">
-        <div className="stat-card accent-cyan animate-fade-in">
-          <div className="stat-card-icon">🔌</div>
-          <div className="stat-card-value">{overview?.plugs?.total || 0}</div>
-          <div className="stat-card-label">Total Plugs</div>
+          <Link to="/cpo/gateways" className="kpi">
+            <span className="kpi-label dash-kpi-label">
+              <Radio size={14} aria-hidden="true" />
+              Gateways online
+            </span>
+            <span className="kpi-value">
+              {gatewaysOnline} / {gatewaysTotal}
+              {gatewaysGap > 0 && (
+                <span className="badge badge-danger dash-kpi-badge">{gatewaysGap} offline</span>
+              )}
+            </span>
+            <span className="kpi-sub">{ov?.plugs?.total ?? 0} chargers total</span>
+          </Link>
         </div>
+      )}
 
-        <div className="stat-card accent-green animate-fade-in animate-delay-1">
-          <div className="stat-card-icon">⚡</div>
-          <div className="stat-card-value">{overview?.active_sessions || 0}</div>
-          <div className="stat-card-label">Active Sessions</div>
-        </div>
-
-        <div className="stat-card accent-amber animate-fade-in animate-delay-2">
-          <div className="stat-card-icon">🔋</div>
-          <div className="stat-card-value">{overview?.today?.energy_kwh || 0}</div>
-          <div className="stat-card-label">Today's Energy (kWh)</div>
-        </div>
-
-        <div className="stat-card accent-purple animate-fade-in animate-delay-3">
-          <div className="stat-card-icon">🪙</div>
-          <div className="stat-card-value">{overview?.today?.revenue_coins || 0}</div>
-          <div className="stat-card-label">Today's Revenue</div>
-        </div>
-      </div>
-
-      {/* All-Time Summary */}
-      <CpoSummary
-        items={[
-          { label: 'All-Time Sessions', value: (overview?.all_time?.sessions ?? 0).toLocaleString() },
-          { label: 'Total Energy', value: `${(overview?.all_time?.energy_kwh ?? 0).toLocaleString()} kWh` },
-          { label: 'Total Revenue', value: `🪙 ${(overview?.all_time?.revenue_coins ?? 0).toLocaleString()}`, tone: 'accent' },
-          { label: 'Gateways Online', value: `${overview?.gateways?.online ?? 0} / ${overview?.gateways?.total ?? 0}`, tone: 'success' },
-        ]}
-      />
-
-      {/* Charts: Revenue and Energy side by side */}
-      <div className="charts-grid">
-        {/* Revenue Area Chart */}
-        <div className="chart-container animate-fade-in">
-          <h3>💰 Revenue (Last 30 Days)</h3>
-          {revenueData.length > 0 ? (
+      {/* ---- Revenue + energy charts ------------------------------------ */}
+      <div className="dash-charts-row">
+        <section className="card dash-chart">
+          <h2>Revenue (last 30 days)</h2>
+          {revenue.loading ? (
+            <Skeleton lines={5} />
+          ) : revenue.error ? (
+            <ErrorState error={revenue.error} onRetry={loadRevenue} title="Couldn't load revenue" />
+          ) : !revenue.data?.length ? (
+            <EmptyState icon={Banknote} title="No revenue yet" body="Billed sessions will chart here." />
+          ) : (
             <ResponsiveContainer width="100%" height={220}>
-              <AreaChart data={revenueData}>
-                <defs>
-                  <linearGradient id="revenueGradient" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="hsl(36, 100%, 56%)" stopOpacity={0.3} />
-                    <stop offset="95%" stopColor="hsl(36, 100%, 56%)" stopOpacity={0} />
-                  </linearGradient>
-                </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke="hsla(0,0%,100%,0.06)" />
-                <XAxis
-                  dataKey="date"
-                  tickFormatter={formatDate}
-                  stroke="hsla(0,0%,100%,0.2)"
-                  tick={{ fill: 'hsl(75, 8%, 50%)', fontSize: 11 }}
+              <AreaChart data={revenue.data}>
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                <XAxis dataKey="date" tickFormatter={formatDateShort} tick={axisTick} axisLine={{ stroke: 'var(--border)' }} tickLine={false} />
+                <YAxis tick={axisTick} axisLine={{ stroke: 'var(--border)' }} tickLine={false} />
+                <Tooltip
+                  content={
+                    <ChartTooltip
+                      labelFormatter={formatDateShort}
+                      valueFormatter={(v) => formatINR(coinsToINR(v, rate))}
+                    />
+                  }
                 />
-                <YAxis
-                  stroke="hsla(0,0%,100%,0.2)"
-                  tick={{ fill: 'hsl(75, 8%, 50%)', fontSize: 11 }}
-                />
-                <Tooltip content={<CustomTooltip />} />
                 <Area
                   type="monotone"
                   dataKey="revenue_coins"
-                  name="Revenue (coins)"
-                  stroke="hsl(36, 100%, 56%)"
+                  name="Revenue"
+                  stroke="var(--brand)"
                   strokeWidth={2}
-                  fill="url(#revenueGradient)"
+                  fill="var(--brand)"
+                  fillOpacity={0.16}
                 />
               </AreaChart>
             </ResponsiveContainer>
-          ) : (
-            <div className="empty-state" style={{ padding: '2rem 1rem' }}>
-              <p>No revenue data yet</p>
-            </div>
           )}
-        </div>
+        </section>
 
-        {/* Energy Bar Chart */}
-        <div className="chart-container animate-fade-in animate-delay-1">
-          <h3>🔋 Energy Consumed (Last 30 Days)</h3>
-          {energyData.length > 0 ? (
+        <section className="card dash-chart">
+          <h2>Energy (last 30 days)</h2>
+          {energy.loading ? (
+            <Skeleton lines={5} />
+          ) : energy.error ? (
+            <ErrorState error={energy.error} onRetry={loadEnergy} title="Couldn't load energy" />
+          ) : !energy.data?.length ? (
+            <EmptyState icon={Zap} title="No energy yet" body="Charging sessions will chart here." />
+          ) : (
             <ResponsiveContainer width="100%" height={220}>
-              <BarChart data={energyData}>
-                <CartesianGrid strokeDasharray="3 3" stroke="hsla(0,0%,100%,0.06)" />
-                <XAxis
-                  dataKey="date"
-                  tickFormatter={formatDate}
-                  stroke="hsla(0,0%,100%,0.2)"
-                  tick={{ fill: 'hsl(75, 8%, 50%)', fontSize: 11 }}
+              <BarChart data={energy.data}>
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                <XAxis dataKey="date" tickFormatter={formatDateShort} tick={axisTick} axisLine={{ stroke: 'var(--border)' }} tickLine={false} />
+                <YAxis tick={axisTick} axisLine={{ stroke: 'var(--border)' }} tickLine={false} />
+                <Tooltip
+                  content={
+                    <ChartTooltip labelFormatter={formatDateShort} valueFormatter={(v) => formatKwh(v)} />
+                  }
                 />
-                <YAxis
-                  stroke="hsla(0,0%,100%,0.2)"
-                  tick={{ fill: 'hsl(75, 8%, 50%)', fontSize: 11 }}
-                />
-                <Tooltip content={<CustomTooltip />} />
-                <Bar
-                  dataKey="energy_kwh"
-                  name="Energy (kWh)"
-                  fill="hsl(73, 100%, 50%)"
-                  radius={[4, 4, 0, 0]}
-                  maxBarSize={24}
-                />
+                <Bar dataKey="energy_kwh" name="Energy" fill="var(--info)" radius={[4, 4, 0, 0]} maxBarSize={24} />
               </BarChart>
             </ResponsiveContainer>
-          ) : (
-            <div className="empty-state" style={{ padding: '2rem 1rem' }}>
-              <p>No energy data yet</p>
-            </div>
           )}
-        </div>
+        </section>
       </div>
 
-      {/* Load Graph — power draw over the last 24h (from persisted telemetry) */}
-      <div className="chart-container animate-fade-in animate-delay-2" style={{ marginBottom: '2rem' }}>
-        <div className="flex justify-between items-center" style={{ flexWrap: 'wrap', gap: '0.5rem' }}>
-          <h3 style={{ margin: 0 }}>⚡ Load (Last 24h)</h3>
-          {loadData.length > 0 && (() => {
-            const peakW = Math.max(...loadData.map((d) => d.max_power_w || 0));
-            const peakA = Math.max(...loadData.map((d) => d.max_current_a || 0));
-            return (
-              <span style={{ color: 'var(--color-text-muted)', fontSize: '0.82rem' }}>
-                Peak <strong style={{ color: 'var(--color-text-secondary)' }}>{peakW.toFixed(0)} W</strong>
-                {' · '}<strong style={{ color: 'var(--color-text-secondary)' }}>{peakA.toFixed(1)} A</strong>
-              </span>
-            );
-          })()}
+      {/* ---- Load (last 24h) --------------------------------------------- */}
+      <section className="card dash-chart">
+        <div className="row-between dash-chart-head">
+          <h2>Load (last 24h)</h2>
+          {peakW != null && (
+            <span className="text-3 text-sm num">
+              Peak {peakW.toFixed(0)} W &middot; {peakA.toFixed(1)} A
+            </span>
+          )}
         </div>
-        {loadData.length > 0 ? (
+        {load.loading ? (
+          <Skeleton lines={5} />
+        ) : load.error ? (
+          <ErrorState error={load.error} onRetry={loadLoad} title="Couldn't load telemetry" />
+        ) : !load.data?.length ? (
+          <EmptyState title="No telemetry in the last 24h" body="Load readings will chart here once a charger reports telemetry." />
+        ) : (
           <ResponsiveContainer width="100%" height={220}>
-            <AreaChart data={loadData}>
-              <defs>
-                <linearGradient id="loadGradient" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="hsl(73, 100%, 50%)" stopOpacity={0.3} />
-                  <stop offset="95%" stopColor="hsl(73, 100%, 50%)" stopOpacity={0} />
-                </linearGradient>
-              </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke="hsla(0,0%,100%,0.06)" />
-              <XAxis
-                dataKey="timestamp"
-                tickFormatter={formatHour}
-                stroke="hsla(0,0%,100%,0.2)"
-                tick={{ fill: 'hsl(75, 8%, 50%)', fontSize: 11 }}
+            <ComposedChart data={load.data}>
+              <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+              <XAxis dataKey="timestamp" tickFormatter={formatHour} tick={axisTick} axisLine={{ stroke: 'var(--border)' }} tickLine={false} />
+              <YAxis tick={axisTick} axisLine={{ stroke: 'var(--border)' }} tickLine={false} />
+              <Tooltip
+                content={
+                  <ChartTooltip
+                    labelFormatter={formatHour}
+                    valueFormatter={(v) => `${Number(v).toFixed(0)} W`}
+                  />
+                }
               />
-              <YAxis
-                stroke="hsla(0,0%,100%,0.2)"
-                tick={{ fill: 'hsl(75, 8%, 50%)', fontSize: 11 }}
-              />
-              <Tooltip content={<CustomTooltip />} labelFormatter={formatHour} />
               <Area
                 type="monotone"
                 dataKey="avg_power_w"
-                name="Avg Power (W)"
-                stroke="hsl(73, 100%, 50%)"
+                name="Avg power"
+                stroke="var(--brand)"
                 strokeWidth={2}
-                fill="url(#loadGradient)"
+                fill="var(--brand)"
+                fillOpacity={0.14}
               />
-              <Area
+              <Line
                 type="monotone"
                 dataKey="max_power_w"
-                name="Peak Power (W)"
-                stroke="hsl(36, 100%, 56%)"
+                name="Peak power"
+                stroke="var(--warn)"
                 strokeWidth={1.5}
                 strokeDasharray="4 3"
-                fill="none"
+                dot={false}
               />
-            </AreaChart>
+            </ComposedChart>
           </ResponsiveContainer>
-        ) : (
-          <div className="empty-state" style={{ padding: '2rem 1rem' }}>
-            <p>No telemetry recorded in the last 24h</p>
-          </div>
         )}
-      </div>
+      </section>
 
-      {/* Recent Sessions Table */}
-      <div className="chart-container animate-fade-in animate-delay-2">
-        <h3>⚡ Recent Sessions</h3>
-        {recentSessions.length > 0 ? (
-          <div className="data-table-container" style={{ border: 'none' }}>
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th>Plug</th>
-                  <th>User</th>
-                  <th>Started</th>
-                  <th>Duration</th>
-                  <th>Energy</th>
-                  <th>Revenue</th>
-                  <th>Status</th>
-                </tr>
-              </thead>
-              <tbody>
-                {recentSessions.map((session) => (
-                  <tr key={session.id}>
-                    <td style={{ color: 'var(--color-text-primary)', fontWeight: 500 }}>
-                      {session.plug_name}
-                    </td>
-                    <td>{session.user_email}</td>
-                    <td>{formatDateTime(session.started_at)}</td>
-                    <td>
-                      {session.duration_minutes != null
-                        ? `${Math.floor(session.duration_minutes / 60)}h ${Math.round(session.duration_minutes % 60)}m`
-                        : '—'
-                      }
-                    </td>
-                    <td>{session.energy_kwh} kWh</td>
-                    <td style={{ color: 'var(--color-accent)', fontWeight: 600 }}>
-                      🪙 {session.coins_spent}
-                    </td>
-                    <td>
-                      <span className={`badge ${getStatusBadge(session.status)}`}>
-                        {session.status}
-                      </span>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <div className="empty-state">
-            <div className="empty-state-icon">⚡</div>
-            <h3>No sessions yet</h3>
-            <p>Sessions will appear here once drivers start charging on your plugs.</p>
-          </div>
-        )}
+      {/* ---- Recent sessions ---------------------------------------------- */}
+      <section className="card">
+        <div className="row-between dash-chart-head">
+          <h2>Recent sessions</h2>
+          <Link to="/cpo/sessions" className="btn btn-quiet btn-sm">View all</Link>
+        </div>
+        <DataTable
+          columns={sessionColumns}
+          rows={sessions.data || []}
+          loading={sessions.loading}
+          error={sessions.error}
+          onRetry={loadSessions}
+          emptyIcon={BatteryCharging}
+          emptyTitle="No sessions yet"
+          emptyBody="Sessions will appear here once drivers start charging on your chargers."
+          collapse
+        />
+      </section>
       </div>
     </CpoLayout>
   );

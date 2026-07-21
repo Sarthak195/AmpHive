@@ -1,0 +1,56 @@
+/* Activity page (C6) — layout only; identity comes from tokens/primitives.
+   Covers the tab panel spacing plus the self-contained session-detail modal
+   markup (this page's own copy — not shared with Session.css). */
+
+.activity-tabpanel {
+  margin-top: var(--sp-4);
+}
+
+.activity-reason-cell {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  max-width: 32ch;
+}
+
+/* ---- session detail modal ------------------------------------------------ */
+
+.activity-detail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.activity-detail-rows {
+  margin: 0;
+  border-top: 1px solid var(--border);
+}
+
+.activity-detail-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--sp-3);
+  padding: var(--sp-2) 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.activity-detail-row dt {
+  margin: 0;
+}
+
+.activity-detail-row dd {
+  margin: 0;
+  text-align: right;
+}
+
+.activity-debit {
+  color: var(--danger);
+  font-weight: 700;
+}
+
+.activity-shortfall {
+  color: var(--warn);
+  font-weight: 600;
+}

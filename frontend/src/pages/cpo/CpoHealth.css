@@ -1,0 +1,48 @@
+/**
+ * CpoHealth — layout only. Visual identity (color/radius/elevation) comes
+ * from primitives (.well, .chip, .banner, .badge); this file just arranges
+ * them.
+ */
+
+.health-maintenance-strip {
+  margin-bottom: var(--sp-4);
+  display: grid;
+  gap: var(--sp-3);
+}
+
+.health-strip-title {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--text-md);
+}
+
+.health-strip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  list-style: none;
+}
+
+.health-strip-chip {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-1) var(--sp-2);
+}
+
+.health-bulk-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-4);
+  flex-wrap: wrap;
+}
+
+.health-row-actions {
+  flex-wrap: wrap;
+}
+
+.health-select-all {
+  margin-bottom: var(--sp-3);
+}

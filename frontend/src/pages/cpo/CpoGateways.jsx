@@ -1,23 +1,26 @@
 /**
- * AmpHive CPO Gateways Page
- * =========================
- * Fleet view of the CPO's ESP32 gateways: online/offline state, the firmware
- * version each one last reported, last-seen, and plug count — plus a one-click
- * OTA firmware update (POST /api/cpo/gateways/{id}/ota). This closes the OTA
- * loop: see which gateways are behind, then push an update without curl.
+ * CpoGateways (redesign v3, D3) — fleet view of the CPO's ESP32 gateways:
+ * online/offline state + last-seen, the firmware version each one last
+ * reported (flagged "behind" against the fleet's newest reporting version),
+ * plug count, and a one-click OTA push. Also registers new gateways.
  *
- * Data source: /api/cpo/gateways, /api/cpo/profile
+ * CpoLayout/TenantContext already own the org name and nav badges — this
+ * page fetches only its own gateway list.
+ *
+ * Data: GET/POST /api/cpo/gateways, POST /api/cpo/gateways/{id}/ota,
+ * GET /api/cpo/audit (best-effort OTA URL prefill only — degrades to an
+ * empty field if nothing OTA-shaped turns up, never a fake default).
  */
 
-import { useState, useEffect, useCallback } from 'react';
+import { useCallback, useState } from 'react';
+import { Plus, Radio, UploadCloud } from 'lucide-react';
 import CpoLayout from '../../components/CpoLayout';
-import CpoSummary from '../../components/CpoSummary';
+import { PageHeader, DataTable, Modal, ConfirmDialog, StatusDot, useToast } from '../../components/ui';
 import api from '../../api/client';
+import usePoll from '../../hooks/usePoll';
+import { apiErrorCopy } from '../../utils/statusCopy';
 
-// Default OTA image (public signed bucket). Operators can edit before pushing;
-// firmware ≥ 1.4.0 requires https + a valid ECDSA signature, and the backend
-// rejects non-https URLs, so keep this an https bucket URL.
-const DEFAULT_FW_URL = 'https://storage.googleapis.com/amphive-fw/amphive-gateway-1.5.0.bin';
+const POLL_MS = 30_000;
 
 const timeAgo = (iso) => {
   if (!iso) return 'never';
@@ -29,201 +32,339 @@ const timeAgo = (iso) => {
   return `${Math.floor(secs / 86400)}d ago`;
 };
 
-const CpoGateways = () => {
+/** Loose numeric-part comparison for firmware strings like "2.3.0" or
+    "1.9.0-direct" — non-numeric suffixes count as 0, which is enough to
+    rank a fleet's reporting versions without a real semver dependency. */
+const versionParts = (v) =>
+  String(v || '')
+    .split(/[.-]/)
+    .map((p) => parseInt(p, 10))
+    .map((n) => (Number.isNaN(n) ? 0 : n));
+
+const compareVersions = (a, b) => {
+  const pa = versionParts(a);
+  const pb = versionParts(b);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const diff = (pa[i] || 0) - (pb[i] || 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+};
+
+const fleetMaxVersion = (gateways) => {
+  const versions = gateways.map((g) => g.firmware_version).filter(Boolean);
+  if (versions.length === 0) return null;
+  return versions.reduce((max, v) => (compareVersions(v, max) > 0 ? v : max));
+};
+
+/** Best-effort OTA URL prefill: scan the audit log for the most recent
+    entry whose action looks OTA-shaped and pull an https URL out of its
+    detail string. Nothing today records this, so this quietly resolves to
+    '' until the backend starts logging it — never invents a default. */
+const extractLastOtaUrl = (auditItems) => {
+  for (const item of auditItems) {
+    if (!/ota/i.test(item.action || '')) continue;
+    const match = /https:\/\/\S+/.exec(item.detail || '');
+    if (match) return match[0];
+  }
+  return '';
+};
+
+export default function CpoGateways() {
+  const toast = useToast();
   const [gateways, setGateways] = useState([]);
-  const [tenantName, setTenantName] = useState('');
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
 
-  // OTA modal state
-  const [otaTarget, setOtaTarget] = useState(null); // the gateway being updated
-  const [otaUrl, setOtaUrl] = useState(DEFAULT_FW_URL);
-  const [otaBusy, setOtaBusy] = useState(false);
-  const [otaError, setOtaError] = useState('');
-  const [otaSuccess, setOtaSuccess] = useState('');
-
-  const fetchData = useCallback(async () => {
+  const fetchGateways = useCallback(async () => {
     try {
-      const [gwRes, profileRes] = await Promise.all([
-        api.get('/api/cpo/gateways'),
-        api.get('/api/cpo/profile'),
-      ]);
-      setGateways(gwRes);
-      setTenantName(profileRes.tenant?.name || '');
+      const res = await api.get('/api/cpo/gateways');
+      setGateways(Array.isArray(res) ? res : res?.items || []);
+      setError(null);
     } catch (err) {
-      console.error('Failed to load gateways:', err);
+      setError(err);
     } finally {
       setLoading(false);
     }
   }, []);
 
-  useEffect(() => { fetchData(); }, [fetchData]);
+  usePoll(fetchGateways, POLL_MS);
 
-  const openOtaModal = (gw) => {
-    setOtaTarget(gw);
-    setOtaUrl(DEFAULT_FW_URL);
-    setOtaError('');
-    setOtaSuccess('');
+  // ---- Add gateway ----------------------------------------------------
+  const [addOpen, setAddOpen] = useState(false);
+  const [addGatewayId, setAddGatewayId] = useState('');
+  const [addName, setAddName] = useState('');
+  const [addBusy, setAddBusy] = useState(false);
+  const [addError, setAddError] = useState('');
+
+  const openAdd = () => {
+    setAddGatewayId('');
+    setAddName('');
+    setAddError('');
+    setAddOpen(true);
   };
 
-  const submitOta = async (e) => {
+  const closeAdd = () => {
+    if (addBusy) return;
+    setAddOpen(false);
+  };
+
+  const submitAdd = async (e) => {
     e.preventDefault();
+    setAddBusy(true);
+    setAddError('');
+    try {
+      await api.post('/api/cpo/gateways', {
+        gateway_id: addGatewayId.trim(),
+        name: addName.trim(),
+      });
+      setAddOpen(false);
+      toast.ok('Gateway registered.');
+      fetchGateways();
+    } catch (err) {
+      setAddError(apiErrorCopy(err));
+    } finally {
+      setAddBusy(false);
+    }
+  };
+
+  // ---- OTA: URL entry, then a named confirm step -----------------------
+  const [otaTarget, setOtaTarget] = useState(null);
+  const [otaUrl, setOtaUrl] = useState('');
+  const [otaConfirming, setOtaConfirming] = useState(false);
+  const [otaBusy, setOtaBusy] = useState(false);
+  const [otaError, setOtaError] = useState('');
+
+  const openOta = async (gw) => {
+    setOtaTarget(gw);
+    setOtaUrl('');
+    setOtaError('');
+    setOtaConfirming(false);
+    try {
+      const audit = await api.get('/api/cpo/audit?limit=100');
+      const items = Array.isArray(audit) ? audit : audit?.items || [];
+      setOtaUrl(extractLastOtaUrl(items));
+    } catch {
+      // Prefill is best-effort only — an empty field is a fine fallback.
+    }
+  };
+
+  const closeOta = () => {
+    if (otaBusy) return;
+    setOtaTarget(null);
+    setOtaConfirming(false);
+  };
+
+  const submitOtaUrl = (e) => {
+    e.preventDefault();
+    setOtaConfirming(true);
+  };
+
+  const confirmOta = async () => {
     if (!otaTarget) return;
     setOtaBusy(true);
     setOtaError('');
-    setOtaSuccess('');
     try {
       await api.post(`/api/cpo/gateways/${otaTarget.id}/ota`, { firmware_url: otaUrl.trim() });
-      setOtaSuccess(
-        'OTA command sent. The gateway will download the image, reboot, and report its new ' +
-        'firmware version here shortly (it refuses the update if a session is active).'
-      );
-      // Refresh after a beat so the status flips as the gateway reboots.
-      setTimeout(fetchData, 4000);
+      toast.ok(`Update pushed to ${otaTarget.name}.`);
+      setOtaTarget(null);
+      setOtaConfirming(false);
+      setTimeout(fetchGateways, 4000);
     } catch (err) {
-      setOtaError(err.message);
+      toast.error(apiErrorCopy(err));
+      setOtaConfirming(false);
     } finally {
       setOtaBusy(false);
     }
   };
 
-  const onlineCount = gateways.filter((g) => g.status === 'online').length;
+  const maxFw = fleetMaxVersion(gateways);
+
+  const columns = [
+    { key: 'name', label: 'Name' },
+    {
+      key: 'gw_status',
+      label: 'Status',
+      render: (gw) => (
+        <span className="row">
+          <StatusDot state={gw.status === 'online' ? 'available' : 'offline'} live={gw.status === 'online'} />
+          <span className="text-2 text-sm">
+            {gw.status === 'online' ? 'Online' : 'Offline'} · {timeAgo(gw.last_seen_at)}
+          </span>
+        </span>
+      ),
+    },
+    {
+      key: 'firmware_version',
+      label: 'Firmware',
+      render: (gw) => (
+        <span className="row">
+          <span className="chip">{gw.firmware_version || 'unknown'}</span>
+          {maxFw && gw.firmware_version && gw.firmware_version !== maxFw && (
+            <span className="badge badge-warn">behind</span>
+          )}
+        </span>
+      ),
+    },
+    { key: 'plug_count', label: 'Chargers', num: true },
+    {
+      key: 'actions',
+      label: 'Actions',
+      render: (gw) => (
+        <button
+          type="button"
+          className="btn btn-quiet btn-sm"
+          disabled={gw.status !== 'online' || gw.plug_count === 0}
+          title={
+            gw.status !== 'online'
+              ? 'Gateway must be online to receive an update'
+              : gw.plug_count === 0
+                ? 'Add a charger to this gateway first'
+                : 'Push a firmware update over the air'
+          }
+          onClick={() => openOta(gw)}
+        >
+          <UploadCloud size={15} aria-hidden="true" />
+          Update firmware
+        </button>
+      ),
+    },
+  ];
 
   return (
-    <CpoLayout tenantName={tenantName}>
-      <div className="cpo-page-header">
-        <h1>Gateways</h1>
-        <p>Your ESP32 gateways — status, firmware, and over-the-air updates</p>
-      </div>
+    <CpoLayout>
+      <PageHeader
+        title="Gateways"
+        sub="Your ESP32 gateways — status, firmware, and over-the-air updates."
+        actions={
+          <button type="button" className="btn btn-primary" onClick={openAdd}>
+            <Plus size={16} aria-hidden="true" />
+            Add gateway
+          </button>
+        }
+      />
 
-      {/* Summary */}
-      {!loading && (
-        <CpoSummary
-          items={[
-            { label: 'Gateways Online', value: `${onlineCount} / ${gateways.length}`, tone: 'success' },
-          ]}
-        />
-      )}
+      <DataTable
+        columns={columns}
+        rows={gateways}
+        loading={loading}
+        error={error}
+        onRetry={fetchGateways}
+        emptyIcon={Radio}
+        emptyTitle="No gateways yet"
+        emptyBody="Register a gateway's device ID to see it here."
+        emptyAction={
+          <button type="button" className="btn btn-primary btn-sm" onClick={openAdd}>
+            Add gateway
+          </button>
+        }
+        collapse
+      />
 
-      {loading ? (
-        <div className="glass glass-panel skeleton" style={{ height: '200px' }} />
-      ) : gateways.length === 0 ? (
-        <div className="glass glass-panel text-center" style={{ padding: '3rem 2rem' }}>
-          <p style={{ fontSize: '2rem', marginBottom: '0.5rem' }}>📡</p>
-          <h2 style={{ marginBottom: '0.5rem' }}>No gateways yet</h2>
-          <p style={{ color: 'var(--color-text-muted)' }}>
-            Register a gateway (from the Plugs page's gateway picker or the API) to see it here.
+      {/* Add gateway */}
+      <Modal open={addOpen} onClose={closeAdd} title="Add gateway">
+        <form className="stack" onSubmit={submitAdd}>
+          <p className="text-2 text-sm">
+            Flash the gateway firmware, then copy the device ID it shows in its own
+            setup portal — that&apos;s the gateway ID below. Give it a name your team
+            will recognize (its parking spot or building).
           </p>
-        </div>
-      ) : (
-        <div className="data-table-container animate-fade-in">
-          <table className="data-table">
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th>Gateway ID</th>
-                <th>Status</th>
-                <th>Firmware</th>
-                <th>Last Seen</th>
-                <th>Plugs</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {gateways.map((gw) => {
-                const online = gw.status === 'online';
-                return (
-                  <tr key={gw.id}>
-                    <td style={{ color: 'var(--color-text-primary)', fontWeight: 500 }}>{gw.name}</td>
-                    <td style={{ fontFamily: 'monospace', fontSize: '0.82rem' }}>{gw.id}</td>
-                    <td>
-                      <span className="flex items-center gap-1">
-                        <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: online ? 'var(--color-success)' : 'var(--color-text-muted)' }} />
-                        <span className={`badge ${online ? 'badge-success' : 'badge-danger'}`}>{gw.status}</span>
-                      </span>
-                    </td>
-                    <td style={{ fontFamily: 'monospace', fontSize: '0.82rem' }}>
-                      {gw.firmware_version || <span style={{ color: 'var(--color-text-muted)' }}>unknown</span>}
-                    </td>
-                    <td style={{ color: 'var(--color-text-secondary)', fontSize: '0.85rem' }}>{timeAgo(gw.last_seen_at)}</td>
-                    <td>{gw.plug_count}</td>
-                    <td>
-                      <button
-                        className="btn btn-ghost btn-sm"
-                        disabled={!online || gw.plug_count === 0}
-                        title={
-                          !online ? 'Gateway must be online to receive an OTA'
-                          : gw.plug_count === 0 ? 'Gateway needs at least one plug to route the OTA command'
-                          : 'Push a firmware update over the air'
-                        }
-                        onClick={() => openOtaModal(gw)}
-                      >
-                        ⬆ Update Firmware
-                      </button>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      )}
-
-      {/* OTA Modal */}
-      {otaTarget && (
-        <div className="modal-overlay" onClick={() => setOtaTarget(null)}>
-          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-header">
-              <h2>Update Firmware</h2>
-              <button className="modal-close" onClick={() => setOtaTarget(null)}>✕</button>
-            </div>
-
-            <form onSubmit={submitOta}>
-              <div className="flex flex-col gap-4">
-                <p style={{ color: 'var(--color-text-secondary)', fontSize: '0.9rem', margin: 0 }}>
-                  Push an OTA update to <strong>{otaTarget.name}</strong> (<span style={{ fontFamily: 'monospace' }}>{otaTarget.id}</span>),
-                  currently on <strong>{otaTarget.firmware_version || 'unknown'}</strong>.
-                  The gateway downloads the image, reboots, and rolls back automatically if the new
-                  image fails to reconnect. It refuses the update while a session is active.
-                </p>
-
-                <div className="input-group">
-                  <label>Firmware image URL (https) *</label>
-                  <input
-                    type="url"
-                    className="input"
-                    value={otaUrl}
-                    onChange={(e) => setOtaUrl(e.target.value)}
-                    placeholder="https://storage.googleapis.com/amphive-fw/amphive-gateway-<ver>.bin"
-                    required
-                    pattern="https://.*"
-                  />
-                  <span style={{ color: 'var(--color-text-muted)', fontSize: '0.75rem' }}>
-                    Must be https and signed (firmware ≥ 1.4.0 verifies the signature and rejects plain http).
-                  </span>
-                </div>
-
-                {otaError && <div className="error-text">{otaError}</div>}
-                {otaSuccess && (
-                  <div style={{ color: 'var(--color-success)', fontSize: '0.9rem' }}>{otaSuccess}</div>
-                )}
-
-                <div className="flex gap-2 justify-end">
-                  <button type="button" className="btn btn-ghost" onClick={() => setOtaTarget(null)}>
-                    {otaSuccess ? 'Close' : 'Cancel'}
-                  </button>
-                  {!otaSuccess && (
-                    <button type="submit" className="btn btn-cpo" disabled={otaBusy}>
-                      {otaBusy ? 'Sending…' : 'Push Update'}
-                    </button>
-                  )}
-                </div>
-              </div>
-            </form>
+          <div className="field">
+            <label className="field-label" htmlFor="gw-add-id">
+              Gateway ID (device MAC)
+            </label>
+            <input
+              id="gw-add-id"
+              className="input"
+              value={addGatewayId}
+              onChange={(e) => setAddGatewayId(e.target.value)}
+              placeholder="a1b2c3d4e5f6"
+              required
+            />
           </div>
-        </div>
-      )}
+          <div className="field">
+            <label className="field-label" htmlFor="gw-add-name">
+              Name
+            </label>
+            <input
+              id="gw-add-name"
+              className="input"
+              value={addName}
+              onChange={(e) => setAddName(e.target.value)}
+              placeholder="Basement gateway"
+              required
+            />
+          </div>
+          {addError && <p className="field-error">{addError}</p>}
+          <div className="modal-actions">
+            <button type="button" className="btn btn-quiet" onClick={closeAdd} disabled={addBusy}>
+              Cancel
+            </button>
+            <button type="submit" className="btn btn-primary" disabled={addBusy}>
+              {addBusy ? 'Registering…' : 'Add gateway'}
+            </button>
+          </div>
+        </form>
+      </Modal>
+
+      {/* OTA: URL entry */}
+      <Modal
+        open={Boolean(otaTarget) && !otaConfirming}
+        onClose={closeOta}
+        title="Update firmware"
+      >
+        {otaTarget && (
+          <form className="stack" onSubmit={submitOtaUrl}>
+            <p className="text-2 text-sm">
+              Push an update to <strong>{otaTarget.name}</strong>, currently on{' '}
+              <strong>{otaTarget.firmware_version || 'unknown'}</strong>. It downloads
+              the image, reboots, and rolls back automatically if it fails to
+              reconnect — it refuses the update while a session is active.
+            </p>
+            <div className="field">
+              <label className="field-label" htmlFor="gw-ota-url">
+                Firmware image URL (https)
+              </label>
+              <input
+                id="gw-ota-url"
+                type="url"
+                className="input"
+                value={otaUrl}
+                onChange={(e) => setOtaUrl(e.target.value)}
+                placeholder="https://storage.googleapis.com/…/amphive-gateway-<version>.bin"
+                pattern="https://.*"
+                required
+              />
+              <span className="field-help">
+                Must be https and signed — firmware ≥ 1.4.0 verifies the signature and
+                rejects plain http.
+              </span>
+            </div>
+            {otaError && <p className="field-error">{otaError}</p>}
+            <div className="modal-actions">
+              <button type="button" className="btn btn-quiet" onClick={closeOta}>
+                Cancel
+              </button>
+              <button type="submit" className="btn btn-primary">
+                Continue
+              </button>
+            </div>
+          </form>
+        )}
+      </Modal>
+
+      {/* OTA: named confirm step */}
+      <ConfirmDialog
+        open={Boolean(otaTarget) && otaConfirming}
+        onClose={() => setOtaConfirming(false)}
+        onConfirm={confirmOta}
+        title="Push firmware update?"
+        body={`${otaTarget?.name || 'This gateway'} will download and install the new firmware now. This can't be undone once it starts.`}
+        confirmLabel="Push update"
+        tone="primary"
+        busy={otaBusy}
+        busyLabel="Sending…"
+      />
     </CpoLayout>
   );
-};
-
-export default CpoGateways;
+}

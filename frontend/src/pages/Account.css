@@ -1,0 +1,23 @@
+/* Account — layout only (identity comes from tokens/primitives). */
+
+.account-stack {
+  max-width: 640px;
+}
+
+.account-card-title {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-3);
+}
+
+.account-profile-grid {
+  display: grid;
+  gap: var(--sp-3);
+}
+
+.account-profile-email {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+}

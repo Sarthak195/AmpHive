@@ -1,0 +1,30 @@
+/* AdminUsers — layout-only tweaks; identity (color/type) comes from
+   primitives.css .filter-bar/.badge/.btn/.field/.banner/.modal. */
+
+.admin-users-search {
+  flex: 1 1 240px;
+  min-width: 200px;
+}
+
+.admin-users-search-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  color: var(--ink-3);
+}
+
+.admin-users-search-row .input {
+  width: 100%;
+}
+
+.admin-users-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+
+.admin-users-role-body,
+.admin-users-balance-form {
+  display: grid;
+  gap: var(--sp-3);
+}

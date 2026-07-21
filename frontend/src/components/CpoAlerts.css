@@ -1,0 +1,36 @@
+/* CpoAlerts — layout only (identity comes from tokens/primitives). */
+
+.console-alerts {
+  display: grid;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-5);
+}
+
+.console-alert {
+  align-items: center;
+}
+
+.console-alert > svg {
+  flex-shrink: 0;
+}
+
+.console-alert-body {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.console-alert-detail {
+  color: var(--ink-2);
+}
+
+.console-alert .btn {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.console-alerts-viewall {
+  justify-self: end;
+  font-size: var(--text-sm);
+}

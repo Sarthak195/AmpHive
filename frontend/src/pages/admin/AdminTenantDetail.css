@@ -1,0 +1,5 @@
+/* AdminTenantDetail — layout only; identity/type/elevation come from tokens. */
+
+.admin-tenant-back {
+  margin-bottom: var(--sp-4);
+}

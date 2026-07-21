@@ -1,95 +1,127 @@
 /**
- * ChargeSetupModal tests: tapping a charger opens this panel (charging does
- * NOT start instantly); the optional timer + kWh fields map to
- * max_duration_seconds / max_kwh, and both-blank starts with no limit.
+ * ChargeSetupModal tests — the shared start/queue setup dialog:
+ * mode-specific copy, preset time chips + custom h:mm (no fractional hours),
+ * the optional energy limit, coverage line from the plug's OWN price,
+ * onConfirm(plugId, limits) payloads, inline errors from a throwing
+ * onConfirm, and the circuit_full → "Ask for capacity" affordance.
  */
-import { describe, it, expect, vi } from 'vitest';
-import { render, screen, fireEvent, act } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 
 import ChargeSetupModal from './ChargeSetupModal';
 import api from '../api/client';
 
 vi.mock('../api/client', () => ({
-  default: { get: vi.fn(), post: vi.fn(), put: vi.fn(), delete: vi.fn() },
+  default: { get: vi.fn(), post: vi.fn(), put: vi.fn(), patch: vi.fn(), delete: vi.fn() },
+}));
+vi.mock('../contexts/ConfigContext', () => ({
+  useConfig: () => ({ coins_per_kwh: 5, coin_inr_rate: 1 }),
+}));
+vi.mock('../contexts/WalletContext', () => ({
+  useWallet: () => ({ balance: 100 }),
 }));
 
-const PLUG = { id: 7, name: 'Tower B — P2', price_per_kwh: 5 };
+const PLUG = { id: 7, name: 'Garage Plug', price_per_kwh: 10 };
 
-const renderModal = (onStart = vi.fn().mockResolvedValue({})) => {
-  render(<ChargeSetupModal plug={PLUG} rate={5} balance={100} onStart={onStart} onClose={vi.fn()} />);
-  return onStart;
+const renderModal = (props = {}) => {
+  const onConfirm = props.onConfirm || vi.fn().mockResolvedValue();
+  const onClose = props.onClose || vi.fn();
+  render(
+    <ChargeSetupModal
+      open
+      onClose={onClose}
+      plug={PLUG}
+      mode={props.mode || 'start'}
+      onConfirm={onConfirm}
+    />
+  );
+  return { onConfirm, onClose };
 };
 
-const clickStart = async () => {
-  await act(async () => {
-    fireEvent.click(screen.getByRole('button', { name: /Start charging/ }));
+beforeEach(() => vi.clearAllMocks());
+
+describe('ChargeSetupModal — copy per mode', () => {
+  it('start mode: "Set up your charge" / "Start charging"', () => {
+    renderModal({ mode: 'start' });
+    expect(screen.getByRole('dialog', { name: 'Set up your charge' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Start charging' })).toBeInTheDocument();
   });
-};
 
-describe('ChargeSetupModal', () => {
-  it('renders the charger name + price and both optional fields', () => {
+  it('queue mode: "Queue this charge" / "Join the queue" + auto-start copy', () => {
+    renderModal({ mode: 'queue' });
+    expect(screen.getByRole('dialog', { name: 'Queue this charge' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Join the queue' })).toBeInTheDocument();
+    expect(screen.getByText(/starts automatically when the circuit has room/i)).toBeInTheDocument();
+  });
+
+  it("coverage line uses the plug's own price", () => {
     renderModal();
-    expect(screen.getByRole('heading', { name: /Set up your charge/i })).toBeInTheDocument();
-    expect(screen.getByText('Tower B — P2')).toBeInTheDocument();
-    expect(screen.getByText(/5 coins\/kWh/)).toBeInTheDocument();
-    expect(screen.getByLabelText(/Timer/i)).toBeInTheDocument();
-    expect(screen.getByLabelText(/kWh to dispense/i)).toBeInTheDocument();
+    // price 10, balance 100 → covers ≈ 10.0 kWh
+    expect(screen.getByText(/₹10\.00/)).toBeInTheDocument();
+    expect(screen.getByText(/covers ≈ 10\.0 kWh/)).toBeInTheDocument();
+  });
+});
+
+describe('ChargeSetupModal — limits payload', () => {
+  it('no limits chosen → onConfirm(plugId, null), then closes', async () => {
+    const { onConfirm, onClose } = renderModal();
+    await userEvent.click(screen.getByRole('button', { name: 'Start charging' }));
+    expect(onConfirm).toHaveBeenCalledWith(7, null);
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
   });
 
-  it('starts with NO limit when both fields are blank', async () => {
-    const onStart = renderModal();
-    await clickStart();
-    expect(onStart).toHaveBeenCalledWith(7, null);
+  it('preset chip + energy field → max_duration_seconds + max_kwh', async () => {
+    const { onConfirm } = renderModal();
+    await userEvent.click(screen.getByRole('button', { name: '2h' }));
+    await userEvent.type(screen.getByLabelText('Energy limit (kWh)'), '5');
+    await userEvent.click(screen.getByRole('button', { name: 'Start charging' }));
+    expect(onConfirm).toHaveBeenCalledWith(7, { max_kwh: 5, max_duration_seconds: 7200 });
   });
 
-  it('sends max_kwh when only kWh is set', async () => {
-    const onStart = renderModal();
-    fireEvent.change(screen.getByLabelText(/kWh to dispense/i), { target: { value: '5' } });
-    await clickStart();
-    expect(onStart).toHaveBeenCalledWith(7, { max_kwh: 5 });
+  it('custom h:mm parses to seconds; an invalid value disables confirm', async () => {
+    const { onConfirm } = renderModal();
+    await userEvent.click(screen.getByRole('button', { name: 'Custom' }));
+    const custom = screen.getByLabelText(/custom time limit/i);
+
+    await userEvent.type(custom, 'abc');
+    expect(screen.getByText(/hours:minutes, like 1:30/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Start charging' })).toBeDisabled();
+
+    await userEvent.clear(custom);
+    await userEvent.type(custom, '1:30');
+    await userEvent.click(screen.getByRole('button', { name: 'Start charging' }));
+    expect(onConfirm).toHaveBeenCalledWith(7, { max_duration_seconds: 5400 });
+  });
+});
+
+describe('ChargeSetupModal — failures', () => {
+  it('a throwing onConfirm surfaces friendly copy inline and keeps the modal open', async () => {
+    const err = Object.assign(new Error('offline'), { code: 'gateway_offline' });
+    const { onClose } = renderModal({ onConfirm: vi.fn().mockRejectedValue(err) });
+    await userEvent.click(screen.getByRole('button', { name: 'Start charging' }));
+
+    expect(
+      await screen.findByText("This charger can't be reached right now")
+    ).toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
   });
 
-  it('sends max_duration_seconds when only the timer is set (hours → seconds)', async () => {
-    const onStart = renderModal();
-    fireEvent.change(screen.getByLabelText(/Timer/i), { target: { value: '2' } });
-    await clickStart();
-    expect(onStart).toHaveBeenCalledWith(7, { max_duration_seconds: 7200 });
-  });
+  it('circuit_full offers "Ask for capacity" which posts request-capacity', async () => {
+    const err = Object.assign(new Error('full'), { code: 'circuit_full' });
+    renderModal({ onConfirm: vi.fn().mockRejectedValue(err) });
+    api.post.mockResolvedValue({});
 
-  it('sends both when both are set', async () => {
-    const onStart = renderModal();
-    fireEvent.change(screen.getByLabelText(/Timer/i), { target: { value: '1' } });
-    fireEvent.change(screen.getByLabelText(/kWh to dispense/i), { target: { value: '3' } });
-    await clickStart();
-    expect(onStart).toHaveBeenCalledWith(7, { max_kwh: 3, max_duration_seconds: 3600 });
-  });
+    await userEvent.click(screen.getByRole('button', { name: 'Start charging' }));
+    expect(
+      await screen.findByText('This circuit is at capacity right now')
+    ).toBeInTheDocument();
 
-  it('surfaces an error from onStart without closing', async () => {
-    const onStart = vi.fn().mockRejectedValue(new Error('Insufficient balance'));
-    renderModal(onStart);
-    await clickStart();
-    expect(await screen.findByText(/Insufficient balance/)).toBeInTheDocument();
-  });
-
-  it('offers "Request capacity" on a circuit_full block and posts the request', async () => {
-    const err = new Error('This circuit is at capacity.');
-    err.code = 'circuit_full';
-    const onStart = vi.fn().mockRejectedValue(err);
-    api.post.mockResolvedValue({ status: 'requested' });
-    renderModal(onStart);
-    await clickStart();
-
-    const reqBtn = await screen.findByRole('button', { name: 'Request capacity' });
-    await act(async () => { fireEvent.click(reqBtn); });
-
+    await userEvent.click(screen.getByRole('button', { name: 'Ask for capacity' }));
     expect(api.post).toHaveBeenCalledWith('/api/plugs/7/request-capacity');
-    expect(await screen.findByText(/notification when this circuit has room/i)).toBeInTheDocument();
-  });
-
-  it('does not offer "Request capacity" for an ordinary start error', async () => {
-    const onStart = vi.fn().mockRejectedValue(new Error('Insufficient balance'));
-    renderModal(onStart);
-    await clickStart();
-    expect(screen.queryByRole('button', { name: 'Request capacity' })).not.toBeInTheDocument();
+    expect(
+      await screen.findByText(/you'll get a notification when this circuit has room/i)
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Ask for capacity' })).not.toBeInTheDocument();
   });
 });

@@ -1,0 +1,195 @@
+/* Session page (C4) — layout only; identity comes from tokens/primitives.
+   Covers the page scaffold plus the SessionMonitor / SessionReceipt layout
+   (both render only inside this page). */
+
+.session-page {
+  max-width: 560px;
+}
+
+/* ---- multi-session seg pills -------------------------------------------- */
+
+.session-seg {
+  margin-bottom: var(--sp-4);
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.session-seg .seg-item {
+  flex-shrink: 0;
+}
+
+/* ---- monitor -------------------------------------------------------------- */
+
+.session-monitor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+
+.session-monitor-top {
+  display: flex;
+  justify-content: center;
+}
+
+.session-status {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-weight: 600;
+}
+
+.session-cost {
+  font-family: var(--font-data);
+  font-size: var(--text-3xl);
+  font-weight: 700;
+  line-height: 1.1;
+}
+
+.session-meters {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--sp-3);
+  margin: 0;
+  text-align: center;
+}
+
+.session-meter {
+  display: grid;
+  gap: 2px;
+}
+
+.session-meter dd {
+  margin: 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.session-rate {
+  text-align: center;
+  margin-top: calc(-1 * var(--sp-2));
+}
+
+.session-notices {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.session-notices p,
+.session-limit p {
+  margin: 0;
+}
+
+.session-limit {
+  align-items: center;
+}
+
+.session-limit p {
+  flex: 1;
+}
+
+.session-limit-add {
+  display: flex;
+  justify-content: center;
+}
+
+.session-limit-editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.session-limit-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: var(--sp-3);
+}
+
+.session-limit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+}
+
+/* ---- receipt -------------------------------------------------------------- */
+
+.session-receipt {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+
+.receipt-head {
+  display: grid;
+  justify-items: center;
+  gap: var(--sp-1);
+  text-align: center;
+}
+
+.receipt-head p {
+  margin: 0;
+}
+
+.receipt-check {
+  width: 44px;
+  height: 44px;
+  color: var(--ok);
+}
+
+.receipt-rows {
+  margin: 0;
+  border-top: 1px solid var(--border);
+}
+
+.receipt-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--sp-3);
+  padding: var(--sp-2) 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.receipt-row dt {
+  margin: 0;
+}
+
+.receipt-row dd {
+  margin: 0;
+  text-align: right;
+}
+
+.receipt-strong {
+  font-weight: 700;
+}
+
+.receipt-debit {
+  color: var(--danger);
+  font-weight: 700;
+}
+
+.receipt-shortfall {
+  color: var(--warn);
+  font-weight: 600;
+}
+
+.receipt-help {
+  margin: 0;
+}
+
+.receipt-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  justify-content: flex-end;
+}
+
+@media (max-width: 480px) {
+  .receipt-actions {
+    flex-direction: column-reverse;
+  }
+
+  .receipt-actions .btn {
+    width: 100%;
+  }
+}

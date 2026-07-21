@@ -28,6 +28,19 @@ export function plugStateLabel(state) {
   return PLUG_STATE_LABELS[state] || humanize(state);
 }
 
+/* Driver-facing sublabel for a non-startable plug state — what it means and
+ * (where there is one) what to do instead. Empty for states needing no hint. */
+export const PLUG_STATE_HINTS = {
+  in_use: 'In use — you can reserve it',
+  unpowered: 'No mains power right now',
+  offline: "Can't be reached right now",
+  maintenance: 'Under maintenance',
+};
+
+export function plugStateHint(state) {
+  return PLUG_STATE_HINTS[state] || '';
+}
+
 /* ---- charging session statuses ------------------------------------------- */
 
 export const SESSION_STATUS_LABELS = {
@@ -41,6 +54,58 @@ export const SESSION_STATUS_LABELS = {
 
 export function sessionStatusLabel(status) {
   return SESSION_STATUS_LABELS[status] || humanize(status);
+}
+
+/* ---- account roles ---------------------------------------------------------
+ * Exactly three roles exist: driver | cpo | admin — never invent others. */
+
+export const ROLE_LABELS = {
+  driver: 'Driver',
+  cpo: 'CPO',
+  admin: 'Admin',
+};
+
+export function roleLabel(role) {
+  return ROLE_LABELS[role] || humanize(role);
+}
+
+/* ---- session dispute statuses ---------------------------------------------- */
+
+export const DISPUTE_STATUS_LABELS = {
+  open: 'Under review',
+  approved: 'Approved',
+  rejected: 'Rejected',
+};
+
+export function disputeStatusLabel(status) {
+  return DISPUTE_STATUS_LABELS[status] || humanize(status);
+}
+
+/* ---- plug reservation statuses --------------------------------------------- */
+
+export const RESERVATION_STATUS_LABELS = {
+  booked: 'Booked',
+  fulfilled: 'Fulfilled',
+  cancelled: 'Cancelled',
+  expired: 'Expired',
+};
+
+export function reservationStatusLabel(status) {
+  return RESERVATION_STATUS_LABELS[status] || humanize(status);
+}
+
+/* ---- payout statuses -------------------------------------------------------
+ * Payout.status enum (backend/database/models.py PayoutStatus): a payout is
+ * a settlement RECORD only — the transfer itself happens outside AmpHive. */
+
+export const PAYOUT_STATUS_LABELS = {
+  requested: 'Requested',
+  paid: 'Paid',
+  cancelled: 'Cancelled',
+};
+
+export function payoutStatusLabel(status) {
+  return PAYOUT_STATUS_LABELS[status] || humanize(status);
 }
 
 /* ---- wallet ledger transaction types -------------------------------------- */

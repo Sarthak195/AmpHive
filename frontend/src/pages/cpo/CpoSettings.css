@@ -1,0 +1,35 @@
+/* CpoSettings — layout only; identity comes from tokens/primitives. */
+
+.settings-card {
+  display: grid;
+  gap: var(--sp-4);
+}
+
+.settings-card-title {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.settings-readonly {
+  margin: 0;
+  font-size: var(--text-md);
+  color: var(--ink);
+}
+
+.settings-field-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--sp-4);
+}
+
+@media (max-width: 640px) {
+  .settings-field-row {
+    grid-template-columns: 1fr;
+  }
+}
+
+.settings-warn-text {
+  font-size: var(--text-xs);
+  color: var(--warn);
+}

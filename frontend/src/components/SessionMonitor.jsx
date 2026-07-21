@@ -1,182 +1,152 @@
 /**
- * AmpHive Session Monitor Component
- * ===================================
- * The live charging screen, regrouped (layout redesign 2026-07-14) so the
- * session SUMMARY leads and the instantaneous readings + warnings stop
- * dominating the scroll:
+ * SessionMonitor — the live charging screen (redesign v3, C4).
  *
- *   - Hero band  — cost, energy, elapsed (the accumulated totals a driver
- *                  actually glances at).
- *   - Meter strip — power, current, voltage, relay, rate (instantaneous
- *                  readings; live but secondary).
- *   - Notices    — one-line alerts (stale feed, gateway alarm, low balance)
- *                  and the auto-stop target, instead of stacked paragraphs.
+ * Anatomy:
+ *   - status row     — Charging / Reconnecting… / Completed pill.
+ *   - ChargeRing     — ₹ cost + kWh in the center; determinate toward a
+ *                      kWh/time limit, indeterminate brand arc otherwise.
+ *   - meter row      — kW now · elapsed · plug name, plus a "₹x/kWh now"
+ *                      rate line from /api/plugs/{id}/tariff-preview (hidden
+ *                      on fetch failure — never the global config rate).
+ *   - notices        — .banner rows: stale telemetry, gateway alarms
+ *                      (eventTypeCopy), low balance (with a Top up link).
+ *   - limit target   — progress toward the auto-stop target + inline editor
+ *                      (PATCH limits via SessionContext.updateLimits).
+ *   - stop           — ConfirmDialog stating the kWh/₹ consequence.
  *
- * Robustness (unchanged): the elapsed timer ticks client-side from the session
- * start time (so it never freezes between telemetry frames), and a stale-feed
- * notice appears when telemetry goes quiet — either the server flags the
- * snapshot `is_stale`, or no frame has arrived for a while (dropped gateway /
- * socket). Gateway alarms affecting this plug surface as an inline notice.
+ * Robustness: the elapsed timer ticks client-side from the session start so it
+ * never freezes between telemetry frames; staleness = server is_stale flag OR
+ * no frame for STALE_AFTER_MS.
  */
 
 import { useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
+import { Target } from 'lucide-react';
+
 import { useSession } from '../contexts/SessionContext';
 import { useConfig } from '../contexts/ConfigContext';
 import { useWallet } from '../contexts/WalletContext';
+import api from '../api/client';
+import { ConfirmDialog, Money, useToast } from './ui';
+import ChargeRing from './ChargeRing';
+import { eventTypeCopy, apiErrorCopy } from '../utils/statusCopy';
+import { formatINR, coinsToINR, formatKw, formatKwh, formatDuration } from '../utils/money';
 
 // Consider the live feed stale after this many ms without a telemetry frame.
 // Matches the backend TELEMETRY_STALE_AFTER_SEC default (15 s).
 const STALE_AFTER_MS = 15000;
 
-// Live status pill (a colored dot + word) — Active / Reconnecting / Completed.
+// Live status pill — Charging / Reconnecting… / Completed.
 const StatusPill = ({ isActive, isStale }) => {
   if (!isActive) {
     return (
-      <span className="session-status">
-        <span className="dot" style={{ background: 'var(--color-text-muted)' }} />
-        Completed
+      <span className="session-status text-3">
+        <span className="dot" aria-hidden="true" /> Completed
       </span>
     );
   }
   if (isStale) {
     return (
-      <span className="session-status" style={{ color: 'var(--color-warning)' }}>
-        <span className="dot" style={{ background: 'var(--color-warning)' }} />
-        Reconnecting…
+      <span className="session-status text-2">
+        <span className="dot dot-warn" aria-hidden="true" /> Reconnecting…
       </span>
     );
   }
   return (
-    <span className="session-status" style={{ color: 'var(--color-success)' }}>
-      <span
-        className="dot animate-pulse"
-        style={{ background: 'var(--color-success)', boxShadow: '0 0 8px var(--color-success-glow)' }}
-      />
-      Active
+    <span className="session-status text-2">
+      <span className="dot dot-ok dot-live" aria-hidden="true" /> Charging
     </span>
   );
 };
-
-// One accumulated headline number (cost / energy / elapsed).
-const HeroMetric = ({ label, value, unit }) => (
-  <div className="session-hero-metric">
-    <span className="session-hero-label">{label}</span>
-    <span className="session-hero-value">
-      {value}
-      {unit && <small>{unit}</small>}
-    </span>
-  </div>
-);
-
-// One instantaneous reading pill (power / current / voltage / relay / rate).
-// The value + unit are kept in a single <b> so they read as one token.
-const MeterPill = ({ label, children }) => (
-  <span className="meter-pill">
-    <span className="meter-pill-label">{label}</span>
-    {children}
-  </span>
-);
-
-// A one-line notice (stale feed / alarm / low balance / auto-stop target).
-const Notice = ({ tone, icon, children }) => (
-  <div className={`session-alert sa-${tone}`}>
-    <span className="sa-icon">{icon}</span>
-    <span className="sa-text">{children}</span>
-  </div>
-);
 
 const SessionMonitor = () => {
   const {
     sessionData, sessionId, isActive, stopSession, updateLimits,
     lastFrameAt, focusedStartedAt, focusedLimits, alarms,
   } = useSession();
-  const { coins_per_kwh } = useConfig();
+  const { coin_inr_rate } = useConfig();
   const { balance } = useWallet();
+  const toast = useToast();
 
-  // A 1 Hz clock so the elapsed timer and the staleness check update smoothly
-  // between telemetry frames.
+  // 1 Hz clock so the elapsed timer and staleness check tick smoothly between
+  // telemetry frames.
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
   }, []);
 
-  // Inline editor for the focused session's stop conditions — "start now, set
-  // the target later" (PATCH /api/sessions/{id}/limits via updateLimits).
+  // Per-plug tariff preview — the ONLY thing allowed to feed the rate line.
+  // Hidden entirely when the fetch fails (404 = endpoint not there yet).
+  const plugId = sessionData?.plug_id;
+  const [tariff, setTariff] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    setTariff(null);
+    if (plugId == null) return undefined;
+    api
+      .get(`/api/plugs/${plugId}/tariff-preview`)
+      .then((res) => { if (!cancelled) setTariff(res); })
+      .catch(() => { if (!cancelled) setTariff(null); });
+    return () => { cancelled = true; };
+  }, [plugId]);
+
+  // Stop-charging confirmation.
+  const [confirmStop, setConfirmStop] = useState(false);
+  const [stopping, setStopping] = useState(false);
+
+  // Inline editor for the focused session's stop conditions.
   const [editingLimit, setEditingLimit] = useState(false);
   const [editKwh, setEditKwh] = useState('');
   const [editHours, setEditHours] = useState('');
   const [savingLimit, setSavingLimit] = useState(false);
   const [limitError, setLimitError] = useState('');
 
-  if (!isActive && !sessionData) {
-    return (
-      <div
-        className="glass glass-panel flex flex-col items-center justify-center gap-4"
-        style={{ minHeight: '300px', textAlign: 'center' }}
-      >
-        <span style={{ fontSize: '3rem' }}>🔌</span>
-        <h2 style={{ marginBottom: 0 }}>No Active Session</h2>
-        <p>Enter a Plug ID on the Home page to start charging.</p>
-      </div>
-    );
-  }
+  if (!isActive && !sessionData) return null;
 
-  const formatTime = (seconds) => {
-    if (!seconds || seconds < 0) return '00:00:00';
-    const h = Math.floor(seconds / 3600);
-    const m = Math.floor((seconds % 3600) / 60);
-    const s = Math.floor(seconds % 60);
-    return [h, m, s].map(v => v.toString().padStart(2, '0')).join(':');
-  };
+  const energyNum = Number(sessionData?.energy_kwh) || 0;
+  const costCoins = Number(sessionData?.cost_coins) || 0;
+  const costInr = coinsToINR(costCoins, coin_inr_rate);
+  const powerW = Number(sessionData?.power_w) || 0;
 
-  const powerW = sessionData?.power_w ? sessionData.power_w.toFixed(0) : '0';
-  const energyKwh = sessionData?.energy_kwh ? sessionData.energy_kwh.toFixed(3) : '0.000';
-  const cost = sessionData?.cost_coins ? sessionData.cost_coins.toFixed(2) : '0.00';
-  const current = sessionData?.current_a ? parseFloat(sessionData.current_a).toFixed(1) : '0.0';
-  const voltage = sessionData?.voltage_v ? parseFloat(sessionData.voltage_v).toFixed(0) : null;
-  const relayOn = sessionData?.relay_on;
-
-  // Elapsed: client-side from the session start (smooth, never frozen); fall
-  // back to the server's duration_sec if we don't yet have a start time.
+  // Elapsed: client-side from the session start; fall back to the server's
+  // duration_sec if we don't yet have a start time.
   const elapsedSec = focusedStartedAt
-    ? Math.floor((now - new Date(focusedStartedAt).getTime()) / 1000)
+    ? Math.max(0, Math.floor((now - new Date(focusedStartedAt).getTime()) / 1000))
     : (sessionData?.duration_sec || 0);
 
-  // Stale when the server flags it OR no frame has arrived recently. Only
-  // meaningful while the session is active (a completed session is done, not
-  // stale). We also require at least one frame to have been expected.
-  const noFrameFor = lastFrameAt ? (now - lastFrameAt) : null;
+  // Stale when the server flags it OR no frame has arrived recently.
+  const noFrameFor = lastFrameAt ? now - lastFrameAt : null;
   const isStale = isActive && (
     sessionData?.is_stale === true ||
     (noFrameFor !== null && noFrameFor > STALE_AFTER_MS)
   );
 
-  // Low-balance warning: the wallet balance was captured at start (it's only
-  // debited on stop), so remaining ≈ balance − accrued cost. Warn as it nears
-  // zero; the backend auto-stops the session when the wallet is exhausted.
+  // Low balance: the wallet is only debited on stop, so remaining ≈ balance −
+  // accrued cost. The kWh-left estimate uses the plug's price_now when known.
   const walletBalance = Number(balance) || 0;
-  const accruedCost = Number(sessionData?.cost_coins) || 0;
-  const remainingCoins = walletBalance - accruedCost;
-  const rate = coins_per_kwh || 5;
-  const lowBalance = isActive && accruedCost > 0 &&
+  const remainingCoins = walletBalance - costCoins;
+  const lowBalance = isActive && costCoins > 0 &&
     remainingCoins <= Math.max(10, walletBalance * 0.15);
+  const priceNow = tariff?.price_now != null ? Number(tariff.price_now) : null;
+  const kwhLeft = priceNow > 0 ? Math.max(0, remainingCoins) / priceNow : null;
 
-  // The most recent unacknowledged alarm for this plug (last 2 minutes).
-  const plugId = sessionData?.plug_id;
+  // The most recent alarm for this plug (last 2 minutes).
   const recentAlarm = (alarms || []).find(
-    (a) => a.plug_id === plugId && (now - (a.received_at || 0)) < 120000
+    (a) => a.plug_id === plugId && now - (a.received_at || 0) < 120000
   );
 
-  // Charging-limit progress: this session's stop conditions (max_kwh /
-  // max_duration_seconds — user-chosen or the standard caps), which the
-  // backend auto-stops at. Informational — an expected, driver-chosen outcome.
+  // Ring progress toward the auto-stop target — the backend stops at whichever
+  // limit trips first, so show the nearer of the two. No limit → indeterminate.
   const limitMaxKwh = focusedLimits?.max_kwh;
   const limitMaxDurationSec = focusedLimits?.max_duration_seconds;
-  const energyNum = Number(sessionData?.energy_kwh) || 0;
-  const hasLimit = isActive && (limitMaxKwh != null || limitMaxDurationSec != null);
+  const hasLimit = limitMaxKwh != null || limitMaxDurationSec != null;
+  const kwhFrac = limitMaxKwh > 0 ? energyNum / Number(limitMaxKwh) : null;
+  const timeFrac = limitMaxDurationSec > 0 ? elapsedSec / Number(limitMaxDurationSec) : null;
+  const ringProgress = isActive && hasLimit
+    ? Math.max(kwhFrac ?? 0, timeFrac ?? 0)
+    : isActive ? null : 1;
 
-  // Open the inline editor prefilled with the current limits (kWh + hours).
   const openLimitEditor = () => {
     setEditKwh(limitMaxKwh != null ? String(limitMaxKwh) : '');
     setEditHours(
@@ -204,103 +174,136 @@ const SessionMonitor = () => {
     try {
       await updateLimits(sessionId, limits);
       setEditingLimit(false);
+      toast.ok('Charging limit updated.');
     } catch (err) {
-      setLimitError(err?.message || 'Could not update the limit.');
+      setLimitError(apiErrorCopy(err));
     } finally {
       setSavingLimit(false);
     }
   };
 
+  const handleStop = async () => {
+    setStopping(true);
+    try {
+      await stopSession();
+      setConfirmStop(false);
+      toast.ok('Charging stopped.');
+    } catch (err) {
+      setConfirmStop(false);
+      toast.error(apiErrorCopy(err));
+    } finally {
+      setStopping(false);
+    }
+  };
+
   return (
-    <div className="glass glass-panel flex flex-col gap-4 animate-fade-in">
-      {/* Header: title + live status pill */}
-      <div className="flex justify-between items-center gap-3" style={{ flexWrap: 'wrap' }}>
-        <h2 style={{ margin: 0 }}>Charging Session</h2>
+    <section className="session-monitor card anim-fade" aria-label="Live charging session">
+      <div className="session-monitor-top">
         <StatusPill isActive={isActive} isStale={isStale} />
       </div>
 
-      {/* Hero band: the session summary — the accumulated totals up front. */}
-      <div className="session-hero">
-        <HeroMetric label="Cost" value={cost} unit="coins" />
-        <HeroMetric label="Energy" value={energyKwh} unit="kWh" />
-        <HeroMetric label="Elapsed" value={formatTime(elapsedSec)} />
-      </div>
+      {/* Hero: the ring with ₹ + kWh in the center. */}
+      <ChargeRing progress={ringProgress}>
+        <span className="session-cost">
+          <Money coins={costCoins} rate={coin_inr_rate} />
+        </span>
+        <span className="session-cost-energy num text-2">{formatKwh(energyNum)}</span>
+      </ChargeRing>
 
-      {/* One-line notices — only what's currently active, stacked tightly
-          instead of as full-height paragraph banners. */}
+      {/* Meter row: kW now · elapsed · plug name (+ the tariff rate line). */}
+      <dl className="session-meters">
+        <div className="session-meter">
+          <dt className="text-3 text-xs">Power now</dt>
+          <dd className="num">{formatKw(powerW)}</dd>
+        </div>
+        <div className="session-meter">
+          <dt className="text-3 text-xs">Elapsed</dt>
+          <dd className="num">{formatDuration(elapsedSec)}</dd>
+        </div>
+        <div className="session-meter">
+          <dt className="text-3 text-xs">Charger</dt>
+          <dd>{sessionData?.plug_name || '—'}</dd>
+        </div>
+      </dl>
+      {priceNow != null && (
+        <p className="session-rate text-3 text-sm">
+          <span className="num">{formatINR(coinsToINR(priceNow, coin_inr_rate))}</span>/kWh now
+        </p>
+      )}
+
+      {/* Notices — only what's currently true. */}
       {(isStale || recentAlarm || lowBalance) && (
-        <div className="flex flex-col gap-2">
+        <div className="session-notices" aria-live="polite">
           {isStale && (
-            <Notice tone="warn" icon="⚠️">
-              <strong>Live readings paused</strong> — reconnecting. Values below are the last
-              known; your session keeps running and billing uses metered energy.
-            </Notice>
+            <div className="banner banner-warn">
+              <p>
+                <strong>Live readings paused</strong> — reconnecting to the charger. Your
+                session keeps running and billing uses metered energy.
+              </p>
+            </div>
           )}
           {recentAlarm && (
-            <Notice tone="danger" icon="🚨">
-              {recentAlarm.detail || `Charger alarm: ${recentAlarm.event_type}`}
-            </Notice>
+            <div className="banner banner-danger">
+              <p>
+                <strong>{eventTypeCopy(recentAlarm.event_type)}</strong>
+                {recentAlarm.detail ? ` — ${recentAlarm.detail}` : ''}
+              </p>
+            </div>
           )}
           {lowBalance && (
-            <Notice tone="warn" icon="🔋">
-              Low balance — about <strong>{Math.max(0, remainingCoins).toFixed(1)}</strong> coins
-              (≈ {Math.max(0, remainingCoins / rate).toFixed(2)} kWh) left. Charging will stop
-              automatically when your wallet is used up.
-            </Notice>
+            <div className="banner banner-warn">
+              <p>
+                <strong>Low balance</strong> — about{' '}
+                <span className="num">{formatINR(coinsToINR(Math.max(0, remainingCoins), coin_inr_rate))}</span>
+                {kwhLeft != null && <> (≈ {formatKwh(kwhLeft)})</>} left before charging
+                stops automatically. <Link to="/wallet?next=/session">Top up</Link> —
+                charging continues while you top up.
+              </p>
+            </div>
           )}
         </div>
       )}
 
-      {/* Auto-stop target ("0.42 / 1.00 kWh · stops automatically") with an
-          inline Edit to change the target mid-session. */}
+      {/* Auto-stop target + inline editor. */}
       {hasLimit && !editingLimit && (
-        <div className="session-alert sa-target">
-          <span className="sa-icon">🎯</span>
-          <span className="sa-text">
+        <div className="banner banner-info session-limit">
+          <Target size={16} aria-hidden="true" />
+          <p>
             Limit:{' '}
             {limitMaxKwh != null && (
-              <strong>
+              <strong className="num">
                 {energyNum.toFixed(2)} / {Number(limitMaxKwh).toFixed(2)} kWh
               </strong>
             )}
             {limitMaxKwh != null && limitMaxDurationSec != null && ' · '}
             {limitMaxDurationSec != null && (
-              <strong>
-                {formatTime(elapsedSec)} / {formatTime(limitMaxDurationSec)}
+              <strong className="num">
+                {formatDuration(elapsedSec)} / {formatDuration(limitMaxDurationSec)}
               </strong>
             )}
             {' · stops automatically'}
-          </span>
+          </p>
           {isActive && updateLimits && (
-            <button
-              type="button"
-              className="btn btn-ghost btn-sm"
-              onClick={openLimitEditor}
-              style={{ flexShrink: 0, padding: '0.3rem 0.75rem', fontSize: '0.78rem' }}
-            >
+            <button type="button" className="btn btn-quiet btn-sm" onClick={openLimitEditor}>
               Edit
             </button>
           )}
         </div>
       )}
+      {isActive && !hasLimit && !editingLimit && updateLimits && (
+        <div className="session-limit-add">
+          <button type="button" className="btn btn-quiet btn-sm" onClick={openLimitEditor}>
+            <Target size={16} aria-hidden="true" /> Set a charging limit
+          </button>
+        </div>
+      )}
 
-      {/* Inline limit editor — change the target after the session started. */}
       {editingLimit && (
-        <div
-          className="glass flex flex-col gap-3"
-          style={{
-            padding: '1rem',
-            borderRadius: 'var(--radius-md)',
-            background: 'hsla(73, 100%, 50%, 0.06)',
-            border: '1px solid hsla(73, 100%, 50%, 0.3)',
-          }}
-        >
-          <div style={{ fontWeight: 600, fontSize: '0.9rem', color: 'var(--color-text-primary)' }}>
-            Change charging limit
-          </div>
-          <div className="flex gap-3 flex-wrap">
-            <div className="input-group" style={{ flex: 1, minWidth: '130px' }}>
-              <label htmlFor="edit-kwh">Energy limit (kWh)</label>
+        <div className="well session-limit-editor">
+          <h3 className="text-sm">Change charging limit</h3>
+          <div className="session-limit-fields">
+            <div className="field">
+              <label className="field-label" htmlFor="edit-kwh">Energy limit (kWh)</label>
               <input
                 id="edit-kwh"
                 className="input"
@@ -312,8 +315,8 @@ const SessionMonitor = () => {
                 placeholder="e.g. 5"
               />
             </div>
-            <div className="input-group" style={{ flex: 1, minWidth: '130px' }}>
-              <label htmlFor="edit-hours">Time limit (hours)</label>
+            <div className="field">
+              <label className="field-label" htmlFor="edit-hours">Time limit (hours)</label>
               <input
                 id="edit-hours"
                 className="input"
@@ -326,15 +329,15 @@ const SessionMonitor = () => {
               />
             </div>
           </div>
-          <p style={{ fontSize: '0.78rem', color: 'var(--color-text-muted)', margin: 0 }}>
-            Takes effect within a few seconds. Raising a limit above what the charger
-            was set at start may be capped by the charger until it updates.
+          <p className="field-help">
+            Takes effect within a few seconds. Raising a limit above what the charger was
+            set at start may be capped by the charger until it updates.
           </p>
-          {limitError && <div className="error-text">{limitError}</div>}
-          <div className="flex gap-2" style={{ justifyContent: 'flex-end' }}>
+          {limitError && <p className="field-error" role="alert">{limitError}</p>}
+          <div className="session-limit-actions">
             <button
               type="button"
-              className="btn btn-ghost btn-sm"
+              className="btn btn-quiet btn-sm"
               onClick={() => setEditingLimit(false)}
               disabled={savingLimit}
             >
@@ -352,33 +355,29 @@ const SessionMonitor = () => {
         </div>
       )}
 
-      {/* Live readings — instantaneous meter values (power / current / voltage
-          / relay / rate). Live but secondary to the summary above. */}
-      <div className="meter-strip">
-        <MeterPill label="Power"><b>{powerW} W</b></MeterPill>
-        <MeterPill label="Current"><b>{current} A</b></MeterPill>
-        {voltage && <MeterPill label="Voltage"><b>{voltage} V</b></MeterPill>}
-        {relayOn !== undefined && (
-          <MeterPill label="Relay">
-            <b style={{ color: relayOn ? 'var(--color-success)' : 'var(--color-text-muted)' }}>
-              {relayOn ? 'ON' : 'OFF'}
-            </b>
-          </MeterPill>
-        )}
-        <MeterPill label="Rate"><b>{coins_per_kwh}/kWh</b></MeterPill>
-      </div>
-
-      {/* Stop button */}
+      {/* Stop — destructive/billing action, so it confirms the consequence. */}
       {isActive && (
         <button
+          type="button"
           className="btn btn-danger btn-lg btn-full"
-          onClick={stopSession}
-          style={{ marginTop: '0.25rem' }}
+          onClick={() => setConfirmStop(true)}
         >
-          Stop Charging
+          Stop charging
         </button>
       )}
-    </div>
+
+      <ConfirmDialog
+        open={confirmStop}
+        onClose={() => setConfirmStop(false)}
+        onConfirm={handleStop}
+        title="Stop charging?"
+        body={`You'll be billed for ${formatKwh(energyNum)} — about ${formatINR(costInr)}.`}
+        confirmLabel="Stop charging"
+        tone="danger"
+        busy={stopping}
+        busyLabel="Stopping…"
+      />
+    </section>
   );
 };
 

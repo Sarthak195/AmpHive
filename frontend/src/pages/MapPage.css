@@ -1,0 +1,260 @@
+/**
+ * MapPage layout — the one page that deliberately breaks out of the
+ * standard `.page` scaffold: the map wants to fill the viewport, with the
+ * chargers list floating on top of it rather than pushing it aside.
+ * Colors/type/elevation all still come from tokens + primitives; this file
+ * is positioning only. Shared with components/MapComponent.jsx (marker +
+ * popup classes), which imports this same file.
+ */
+
+.map-page-root {
+  display: flex;
+  flex-direction: column;
+  max-width: none;
+  height: calc(100vh - var(--nav-h));
+  padding: var(--sp-5) var(--sp-6) 0;
+}
+
+.map-page-root .page-header {
+  flex: none;
+  margin-bottom: var(--sp-4);
+}
+
+@media (max-width: 720px) {
+  .map-page-root { padding: var(--sp-4) var(--sp-4) 0; }
+  /* Only signed-in drivers get the fixed bottom tab bar (DriverShell stamps
+     .has-tabbar on its wrapper only when a user is present) — subtract its
+     height here too so the map+sheet never hides behind it. */
+  .has-tabbar .map-page-root {
+    height: calc(100vh - var(--nav-h) - var(--tabbar-h) - env(safe-area-inset-bottom, 0px));
+  }
+}
+
+/* ==== map + list shell ==================================================== */
+.map-shell {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  border-radius: var(--r-lg);
+  overflow: hidden;
+  margin-bottom: var(--sp-5);
+}
+
+.map-canvas,
+.map-container {
+  position: absolute;
+  inset: 0;
+}
+
+.map-geolocate-btn {
+  position: absolute;
+  right: var(--sp-4);
+  bottom: var(--sp-4);
+  z-index: 500;
+  background: var(--surface);
+  box-shadow: var(--shadow-md);
+}
+
+@media (max-width: 720px) {
+  /* Keep the geolocate button clear of the bottom sheet. */
+  .map-geolocate-btn { bottom: calc(40vh + var(--sp-4)); }
+}
+
+/* ==== list panel: desktop floating card / mobile bottom sheet ============= */
+.map-list-panel {
+  position: absolute;
+  top: var(--sp-4);
+  left: var(--sp-4);
+  bottom: var(--sp-4);
+  width: 360px;
+  z-index: 400;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+}
+
+@media (max-width: 720px) {
+  .map-list-panel {
+    top: auto;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    width: auto;
+    height: 40vh;
+    border-radius: var(--r-xl) var(--r-xl) 0 0;
+  }
+}
+
+.map-list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  padding: var(--sp-4) var(--sp-4) var(--sp-2);
+  flex: none;
+}
+
+.map-list-title {
+  font-family: var(--font-display);
+  font-size: var(--text-lg);
+  font-weight: 700;
+}
+
+.map-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1) var(--sp-3);
+  padding: 0 var(--sp-4) var(--sp-3);
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+
+.map-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  font-size: var(--text-xs);
+  color: var(--ink-2);
+}
+
+.map-list-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--sp-3) var(--sp-4) var(--sp-4);
+}
+
+.map-list-skeleton { display: grid; gap: var(--sp-4); }
+
+.map-unlocated-note {
+  font-size: var(--text-xs);
+  color: var(--ink-3);
+  margin-bottom: var(--sp-3);
+}
+
+.map-list {
+  display: grid;
+  gap: var(--sp-1);
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.map-list-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-1);
+  border-bottom: 1px solid var(--border);
+}
+
+.map-list-row:last-child { border-bottom: none; }
+
+.map-list-row-main {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.map-list-row-name {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.map-list-row-meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  flex: none;
+  text-align: right;
+}
+
+.map-list-row-price {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 3px;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.map-list-row-price span { font-size: var(--text-xs); color: var(--ink-3); font-weight: 500; }
+
+.map-list-row-distance {
+  font-size: var(--text-xs);
+  color: var(--ink-3);
+}
+
+/* ==== marker + popup (used by components/MapComponent.jsx) =============== */
+.plug-marker-icon { background: transparent; border: none; }
+
+.plug-marker-dot {
+  display: block;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  /* Deliberate literal white: markers sit on OSM tiles, which are always
+     light regardless of app theme — theming this border would break it. */
+  border: 2px solid hsl(0 0% 100% / 0.9);
+  box-shadow: var(--shadow-sm);
+}
+
+.user-location-icon { background: transparent; border: none; }
+
+.user-location-dot {
+  display: block;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--info-dot);
+  /* Literal white for the same OSM-tile reason as .plug-marker-dot above. */
+  border: 2px solid hsl(0 0% 100% / 0.9);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--info-dot) 25%, transparent);
+}
+
+.map-popup {
+  display: grid;
+  gap: var(--sp-2);
+  min-width: 160px;
+  text-align: center;
+  font-family: var(--font-ui);
+}
+
+.map-popup-name { font-size: var(--text-md); color: var(--ink); }
+
+.map-popup-price {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 3px;
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+}
+
+.map-popup-price span { font-size: var(--text-xs); }
+
+.map-popup-note {
+  font-size: var(--text-xs);
+  color: var(--ink-3);
+  margin: 0;
+}
+
+/* Leaflet ships its own inline styles for popup chrome; keep just enough
+   override so the popup content uses our surface tokens instead of
+   Leaflet's default white-on-light-theme-only look. */
+.leaflet-popup-content-wrapper,
+.leaflet-popup-tip {
+  background: var(--surface);
+  color: var(--ink);
+}

@@ -1,0 +1,88 @@
+/* CpoReservations — layout only (identity comes from tokens/primitives). */
+
+.resv-day-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-4);
+}
+
+.resv-day-legend {
+  margin-bottom: var(--sp-3);
+}
+
+.resv-day-grid {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  overflow-x: auto;
+  padding: var(--sp-3) var(--sp-3) var(--sp-4);
+}
+
+.resv-day-row {
+  display: grid;
+  grid-template-columns: 140px 1fr;
+  align-items: center;
+  gap: var(--sp-3);
+  min-height: 40px;
+  border-bottom: 1px solid var(--border);
+}
+
+.resv-day-row:last-child { border-bottom: none; }
+
+.resv-day-head { min-height: 24px; margin-bottom: var(--sp-2); }
+
+.resv-day-label {
+  position: sticky;
+  left: 0;
+  background: var(--surface);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding-right: var(--sp-2);
+}
+
+.resv-day-track {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(96, minmax(6px, 1fr));
+  grid-auto-rows: 26px;
+  align-items: center;
+  min-width: 960px;
+}
+
+.resv-day-hours {
+  grid-auto-rows: auto;
+}
+
+.resv-day-hour {
+  grid-column: span 4;
+  font-size: var(--text-xs);
+  color: var(--ink-3);
+  font-family: var(--font-data);
+  font-variant-numeric: tabular-nums;
+  border-left: 1px solid var(--border);
+  padding-left: 3px;
+}
+
+.resv-block {
+  grid-row: 1;
+  border-radius: var(--r-sm);
+  padding: 0 var(--sp-2);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--ink-inverse);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  height: 22px;
+  line-height: 22px;
+}
+
+.resv-block-booked { background: var(--ok-dot); }
+.resv-block-fulfilled { background: var(--info-dot); }
+.resv-block-cancelled { background: var(--danger-dot); opacity: 0.55; }
+.resv-block-expired { background: var(--warn-dot); opacity: 0.65; }

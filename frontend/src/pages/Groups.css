@@ -1,0 +1,53 @@
+/* Groups — layout only (identity comes from tokens/primitives). */
+
+.groups-join-card {
+  margin-bottom: var(--sp-6);
+}
+
+.groups-join-form {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+  margin-top: var(--sp-3);
+}
+
+.groups-join-form .field {
+  flex: 1;
+  min-width: 220px;
+}
+
+.groups-list-heading {
+  margin-bottom: var(--sp-4);
+}
+
+.groups-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: var(--sp-4);
+}
+
+.groups-card {
+  display: grid;
+  gap: var(--sp-2);
+  align-content: start;
+}
+
+.groups-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+}
+
+.groups-card-meta {
+  color: var(--ink-2);
+  font-size: var(--text-sm);
+}
+
+.groups-card-actions {
+  display: flex;
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
+  flex-wrap: wrap;
+}

@@ -1,0 +1,25 @@
+/* ReserveModal — layout only. */
+
+.reserve-schedule-title {
+  font-size: var(--text-sm);
+  margin-bottom: var(--sp-2);
+}
+
+.reserve-window-list {
+  margin: 0;
+  padding-left: var(--sp-5);
+  display: grid;
+  gap: var(--sp-1);
+}
+
+.reserve-when {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: var(--sp-3);
+}
+
+.reserve-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}

@@ -151,34 +151,53 @@ POST /api/sessions/stop              (JWT required)
 React 19 + Vite SPA in `frontend/`. Served by Nginx, which also reverse-proxies
 `/api/` to the backend (so the SPA and API are same-origin in production).
 
+**Redesign v3 (2026-07-21)** rebuilt the whole surface as three role portals on
+one bundle, with route-level code splitting (`React.lazy`: marketing / driver /
+console / admin chunks) and a two-theme hand-rolled design system:
+`styles/tokens.css` defines semantic tokens under `data-theme="day"` (driver +
+marketing: warm light, honey-amber actions) and `data-theme="volt"` (operator +
+admin console: charcoal + amp-lime; admin adds a violet `data-accent="admin"`).
+`base.css`/`primitives.css`/`layouts.css` carry the reset, shared component
+classes, and shell scaffolding; shared JSX primitives live in
+`components/ui/` (Modal/ConfirmDialog/Toast/Tabs/DataTable/Empty-vs-ErrorState/
+StatusDot/Money/PageHeader). Machine strings reach users only through
+`utils/statusCopy.js`; money renders ₹-first via `utils/money.js`. Fonts
+(Inter, Bricolage Grotesque, JetBrains Mono) and icons (`lucide-react`) are
+bundled — prod CSP allows no CDN assets.
+
+Driver host routes (day theme; mobile gets a bottom tab bar):
+
 | Route | Page | Access | Purpose |
 |-------|------|--------|---------|
-| `/` | `Home.jsx` | public (content gated on login) | Wallet card + available chargers + "start by Plug ID" |
-| `/login` | `Login.jsx` | public | Combined sign-in / register |
-| `/session` | `Session.jsx` | protected | Live session monitor (`SessionMonitor` + Socket.io) |
-| `/topup` | `TopUp.jsx` | protected | Razorpay checkout to buy coins |
-| `/groups` | `Groups.jsx` | protected | Join private charger groups by access code |
+| `/` | `Marketing.jsx` / `Dashboard.jsx` | public / authed | Marketing homepage for visitors; charge-now dashboard (plug-ID lookup, PlugCard grid, reservations/queued strip, wallet rail) when signed in |
+| `/map` | `MapPage.jsx` | public (richer when authed) | Unified map+list discovery (replaces `/map` public page + Home's map tab) |
+| `/session` | `Session.jsx` | protected | Live monitor (ChargeRing dial + Socket.io) and post-stop receipt w/ invoice + dispute |
+| `/wallet` | `Wallet.jsx` | protected | Balance, Razorpay top-up (lazy-loaded SDK), ledger (replaces `/topup`, which redirects) |
+| `/activity` | `Activity.jsx` | protected | Paginated session history + receipt revisit + dispute tracking (replaces `/history`) |
+| `/groups`, `/account` | `Groups.jsx`, `Account.jsx` | protected | Group join/leave; profile, push-notification prefs, become-a-host |
+| `/login`, `/signup`, `/forgot-password`, `/reset-password` | auth pages | public | Split sign-in/sign-up on a shared `AuthShell` |
 
-State lives in three React contexts: `AuthContext` (JWT in `localStorage`,
-`/api/auth/me` on load), `SessionContext` (manages Socket.io connection and subscription
-for live telemetry), and `WalletContext` (derives balance from the user object). Razorpay
-is loaded via a CDN `<script>` and used through `window.Razorpay`. Home renders a
-**Leaflet/OpenStreetMap** map (`MapComponent`, `react-leaflet`) of available
-plugs — plug **coordinates are persisted** (`Plug.latitude`/`longitude`, falling
-back to the gateway's coords); markers use real coordinates and plugs without a
-known location are omitted (the old `Math.random()` fallback is gone). Markers are
-color-coded by availability (Available/In use/Offline, `utils/plugAvailability.js`)
-with a legend + live counts, and availability/group-name filters narrow both the
-list and the map together. Visiting `/?plug=<id>` (e.g. from a QR code printed via
-`/cpo/plugs`) prefills and focuses the Plug ID start input — still fully
-auth-gated: `ProtectedRoute`/`CpoProtectedRoute` and this deep-link guard all stash
-the origin location as router `state.from` so `Login.jsx` returns the driver to it
-(query string included) after signing in, instead of always landing on `/`.
+`/?plug=<id>` (printed QR bay labels) still deep-links into the charge flow —
+anonymous visitors are funneled through `/login?next=` and land back on the
+prefilled dashboard. State lives in `AuthContext` (JWT in `localStorage`, boot no
+longer blanks the app — `BootSplash` renders while `/api/auth/me` resolves),
+`SessionContext` (Socket.io + telemetry), `WalletContext`, `ConfigContext`, plus
+`TenantContext` on the console (one `/api/cpo/profile` fetch + nav badge counts).
+`api/client.js` adds a 20s timeout and preserves the interrupted location on 401
+(`/login?next=…`).
 
-**CPO operator portal** — a second set of pages under `frontend/src/pages/cpo/`
-(`CpoSetup`, `CpoDashboard`, `CpoPlugs`, `CpoGroups`, `CpoSessions`) sits behind
-a `CpoProtectedRoute` that requires the `cpo` role and drives the `/api/cpo/*`
-endpoints (tenant setup, gateway/plug/group CRUD, and analytics).
+**CPO console** (`pages/cpo/`, volt theme, grouped sidebar with live badge
+counts): Dashboard, Chargers (bulk actions + tariff assignment), Gateways,
+Groups (member management + circuit meters), Health (bulk-ack fault console),
+Sessions/Reservations (server-side totals; day timeline), Pricing (tariff CRUD +
+7×24 slot coverage grid + assignment), Earnings, Invoices (CSV), Disputes
+(partial refunds), Settings. Old paths `/cpo/plugs|faults|tariffs` redirect to
+`/cpo/chargers|health|pricing`.
+
+**Admin portal** (`pages/admin/`, volt theme + violet accent, new in v3) sits
+behind `AdminProtectedRoute` on the CPO host at `/admin/*`: platform overview,
+tenants, users (role/disable/balance adjust), cross-tenant payout queue
+(mark-paid), gateway fleet, disputes, audit — driven by `/api/admin/*`.
 
 **Hostname partition (2026-07-20)** — one bundle, two hostnames. The portal
 is served on `cpo.amphive.app` (the real `amphive.app` domain went live
@@ -187,18 +206,19 @@ no DuckDNS updater cron remains). `CADDY_CPO_DOMAIN` in `.env` makes
 `deploy.ps1` emit a second, identical Caddy site block.
 `frontend/src/utils/appHost.js` (`isCpoHost()`,
 with a `VITE_FORCE_CPO_HOST` dev/test override, plus `cpoOrigin()` /
-`driverOrigin()`) drives the split in `App.jsx` and `Navbar.jsx`:
+`driverOrigin()`) drives the split in `App.jsx` and `AppBar.jsx`:
 
-- **Driver host** — driver routes only; `/cpo/*` hard-redirects to the CPO
-  origin (`components/HostRouting.jsx` `ExternalRedirect`). The navbar's
-  in-app CPO links are gone; signed-in users get a modest external
-  "Apply to host chargers" link to `<cpo-origin>/cpo`.
-- **CPO host** — operator portal only. `/` role-routes (`CpoLanding`):
-  anonymous → `/login` (same `Login.jsx`), `cpo`/`admin` → `/cpo/dashboard`,
-  a driver-role login gets a "not an operator account" notice linking to the
-  driver origin and to the `/cpo` become-a-host flow. Driver routes
-  (`/map`, `/topup`, `/session`, `/groups`, `/history`) hard-redirect to the
-  driver origin. Both hostnames are in the backend CORS/Socket.io allowlists.
+- **Driver host** — marketing + driver routes only; `/cpo/*` and `/admin/*`
+  hard-redirect to the CPO origin (`components/HostRouting.jsx`
+  `ExternalRedirect`). Signed-in drivers get a "Host your chargers" entry in
+  the account menu linking to `<cpo-origin>/cpo`.
+- **CPO host** — operator portal + admin portal. `/` role-routes
+  (`CpoLanding`): anonymous → `/login` (same `Login.jsx`), `cpo` →
+  `/cpo/dashboard`, `admin` → `/admin`, a driver-role login gets a "not an
+  operator account" notice linking to the driver origin and to the `/cpo`
+  become-a-host flow. Driver routes (`/map`, `/wallet`, `/session`, `/groups`,
+  `/activity`, `/account`) hard-redirect to the driver origin. Both hostnames
+  are in the backend CORS/Socket.io allowlists.
 
 ---
 

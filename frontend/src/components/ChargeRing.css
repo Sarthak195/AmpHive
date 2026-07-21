@@ -1,0 +1,55 @@
+/* ChargeRing — layout + motion for the live-charge ring (identity comes from
+   tokens: brand gradient stops, border track). */
+
+.charge-ring {
+  position: relative;
+  width: 260px;
+  max-width: min(70vw, 260px);
+  margin-inline: auto;
+}
+
+.charge-ring svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.charge-ring-track {
+  fill: none;
+  stroke: var(--border);
+}
+
+.charge-ring-arc {
+  fill: none;
+  stroke-linecap: round;
+  transition: stroke-dasharray 0.6s ease;
+}
+
+.charge-ring-stop-a { stop-color: var(--brand); }
+.charge-ring-stop-b { stop-color: var(--brand-glow); }
+
+/* Indeterminate (no limit): the arc slowly orbits the ring. */
+.charge-ring-spin {
+  animation: charge-ring-rotate 3.2s linear infinite;
+  transform-origin: 50% 50%;
+}
+
+@keyframes charge-ring-rotate {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .charge-ring-spin { animation: none; }
+  .charge-ring-arc { transition: none; }
+}
+
+.charge-ring-center {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: var(--sp-1);
+  text-align: center;
+  padding: var(--sp-6);
+}

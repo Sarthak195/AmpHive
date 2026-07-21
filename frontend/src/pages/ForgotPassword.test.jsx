@@ -41,8 +41,8 @@ describe('ForgotPassword page', () => {
     api.post.mockResolvedValue({ status: 'ok' });
     renderPage();
 
-    await userEvent.type(screen.getByLabelText('Email Address'), 'driver@amphive.test');
-    await userEvent.click(screen.getByRole('button', { name: 'Send Reset Link' }));
+    await userEvent.type(screen.getByLabelText('Email address'), 'driver@amphive.test');
+    await userEvent.click(screen.getByRole('button', { name: 'Send reset link' }));
 
     expect(api.post).toHaveBeenCalledWith('/api/auth/forgot-password', {
       email: 'driver@amphive.test',
@@ -51,28 +51,28 @@ describe('ForgotPassword page', () => {
       await screen.findByText(/if an account exists for that email/i)
     ).toBeInTheDocument();
     // The form is gone — no way to tell whether the address matched.
-    expect(screen.queryByLabelText('Email Address')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Email address')).not.toBeInTheDocument();
   });
 
   it('surfaces an API error (e.g. rate limit) inline and keeps the form', async () => {
     api.post.mockRejectedValue(new Error('Too many password reset attempts. Try again in 60 s.'));
     renderPage();
 
-    await userEvent.type(screen.getByLabelText('Email Address'), 'driver@amphive.test');
-    await userEvent.click(screen.getByRole('button', { name: 'Send Reset Link' }));
+    await userEvent.type(screen.getByLabelText('Email address'), 'driver@amphive.test');
+    await userEvent.click(screen.getByRole('button', { name: 'Send reset link' }));
 
     expect(await screen.findByText(/too many password reset attempts/i)).toBeInTheDocument();
-    expect(screen.getByLabelText('Email Address')).toBeInTheDocument();
+    expect(screen.getByLabelText('Email address')).toBeInTheDocument();
   });
 
-  it('links back to Sign In', () => {
+  it('links back to Sign in', () => {
     renderPage();
-    expect(screen.getByRole('link', { name: 'Sign In' })).toHaveAttribute('href', '/login');
+    expect(screen.getByRole('link', { name: 'Sign in' })).toHaveAttribute('href', '/login');
   });
 });
 
 describe('Login page entry point', () => {
-  it('shows a "Forgot password?" link in sign-in mode', () => {
+  it('shows a "Forgot password?" link', () => {
     render(
       <MemoryRouter initialEntries={['/login']}>
         <Routes>

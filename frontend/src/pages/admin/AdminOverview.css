@@ -1,0 +1,8 @@
+/* AdminOverview — layout-only tweaks; identity (color/type) comes from
+   primitives.css .kpi/.kpi-label/.kpi-value/.kpi-sub. */
+
+.admin-kpi-label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
