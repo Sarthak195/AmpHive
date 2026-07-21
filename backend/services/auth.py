@@ -9,8 +9,8 @@ Design decisions:
   than RS256 asymmetric keys and sufficient for a single-backend deployment.
 - Token expiry: 7 days. Long-lived because this is a mobile-first web app
   and frequent re-login hurts UX. Can be shortened for the CPO admin portal.
-- Password hashing uses bcrypt via passlib — industry standard, resistant to
-  GPU-based brute force attacks.
+- Password hashing uses bcrypt (pyca/bcrypt, direct) — industry standard,
+  resistant to GPU-based brute force attacks.
 """
 
 import logging
@@ -19,10 +19,10 @@ import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+import bcrypt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jose import JWTError, jwt
-from passlib.context import CryptContext
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -60,19 +60,37 @@ JWT_EXPIRY_DAYS = int(os.getenv("JWT_EXPIRY_DAYS", "7"))
 
 # --- Password Hashing ---
 
-# bcrypt context for hashing and verifying passwords.
-# "auto" scheme enables automatic hash migration if we ever switch algorithms.
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# pyca/bcrypt directly — passlib (the previous wrapper) is abandoned upstream
+# and breaks against bcrypt>=4.1, so it was dropped (audit L6). Stored hashes
+# are standard `$2b$12$…` either way: everything passlib wrote before the swap
+# keeps verifying unchanged.
+_BCRYPT_ROUNDS = 12  # same cost passlib used; leave existing hashes comparable
+
+
+def _password_bytes(plain_password: str) -> bytes:
+    # bcrypt reads only the first 72 BYTES of a password. passlib silently
+    # truncated to that limit while pyca/bcrypt raises — truncate explicitly so
+    # a >72-byte password registered under passlib still verifies, and hashing
+    # long input never 500s.
+    return plain_password.encode("utf-8")[:72]
 
 
 def hash_password(plain_password: str) -> str:
-    """Hash a plain-text password using bcrypt."""
-    return pwd_context.hash(plain_password)
+    """Hash a plain-text password using bcrypt ($2b$, cost 12)."""
+    return bcrypt.hashpw(
+        _password_bytes(plain_password), bcrypt.gensalt(rounds=_BCRYPT_ROUNDS)
+    ).decode("ascii")
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """Verify a plain-text password against a bcrypt hash."""
-    return pwd_context.verify(plain_password, hashed_password)
+    """Verify a plain-text password against a stored bcrypt hash. A malformed
+    stored hash counts as no-match (login fails clean) instead of raising."""
+    try:
+        return bcrypt.checkpw(
+            _password_bytes(plain_password), hashed_password.encode("utf-8")
+        )
+    except ValueError:
+        return False
 
 
 # --- JWT Token Management ---

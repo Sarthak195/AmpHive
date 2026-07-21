@@ -7,14 +7,54 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 
 ---
 
-## 0. Latest — 2026-07-20 audit + quick-wins hardening (PR #72, merged, **pending deploy**)
+## 0. Latest — 2026-07-21 audit-backlog batch: batched plug pricing, passlib → bcrypt, self-hosted fonts + tighter CSP
+
+Three audit items deferred from the 2026-07-20 batches as "needs dedicated
+careful work", now done:
+
+- **Plug-list pricing N+1 (the audit money-path perf item):**
+  `GET /api/plugs/available` and the unauthenticated `GET /api/plugs/public`
+  resolved the tariff chain per plug (up to 5 queries each). Both now use
+  `services/pricing.resolve_price_display_batch` — two fixed IN-queries
+  (tariffs, then slots of the winning tariffs) for the whole list; the chain
+  inputs (plug/group tariff ids, tenant) already ride the endpoints' joins.
+  Per-plug results are identical (same fallback chain incl. dangling-id
+  fallthrough, tenant timezone, same-local-day "next price" rule), and the
+  whole list prices at one consistent instant. Single-plug
+  `GET /api/plugs/{id}` keeps the scalar resolver. DB-free coverage:
+  `tests/test_pricing_batch.py`.
+- **passlib replaced with direct pyca/bcrypt (audit dependency-health):**
+  passlib is abandoned upstream and pinned us to `bcrypt==4.0.1`;
+  `services/auth.py` now calls `bcrypt` directly (`>=4.1`). Hashes are the
+  same `$2b$12$…` — every pre-swap hash keeps verifying, and passlib's silent
+  72-byte truncation is now explicit (a >72-byte password registered under
+  passlib still logs in). Coverage incl. a frozen passlib-era hash:
+  `tests/test_auth_hashing.py`.
+- **CSP third-party style/font origins dropped (the CSP-saga follow-up):**
+  Inter is self-hosted via `@fontsource/inter` and Leaflet CSS is bundled
+  from node_modules (map markers are `divIcon`, so Leaflet's default-icon
+  path detection is never used) — `unpkg.com` / `fonts.googleapis.com` /
+  `fonts.gstatic.com` are gone from both the frontend and the Caddy CSP in
+  `deploy.ps1` (now `style-src 'self' 'unsafe-inline'; font-src 'self'
+  data:`). Per the 2026-07-20 lesson, smoke-test the CSP in a real browser
+  (Playwright) right after the next deploy: map + fonts render, Razorpay
+  modal opens, zero CSP violations.
+
+Still open from the audit backlog: split the `cpo.py` god router and the
+`MQTTManager` god object; a backend deps lockfile; frontend code-splitting;
+CI ruff full-lint / mypy / coverage beyond F401.
+
+---
+
+## 0.1 — 2026-07-20 audit + quick-wins hardening (PR #72; deployed 2026-07-20, backlog batch PR #75 deployed same day)
 
 A 7-level codebase audit (architecture / security / quality / performance /
 testing / dependencies / docs) surfaced **68 findings (0 Critical, 2 High, 24
 Medium, 30 Low, 12 Info)**. The low-effort/high-impact subset shipped as **PR
-#72 (merged to `main` @ `7669bce`)** — **not yet deployed to prod, so prod
-trails `main` by this batch**; a `deploy.ps1` run (which applies migration
-`0024` via `init_db` and re-emits the Caddy config) is required to land it.
+#72 (merged to `main` @ `7669bce`)** and was deployed to prod the same day —
+followed by PR #74 (`fix/deploy-csp-origins`), which corrected the CSP after a
+Playwright smoke-test on prod caught it blocking Leaflet/Inter/Razorpay-risk
+scripts.
 
 What merged:
 - **Security:** reset-link default → `https://amphive.app` (was the retired duckdns); Socket.io `connect` now enforces the `token_version` epoch (revoked/logged-out tokens can no longer open a realtime channel — closes the gap vs the HTTP path); `http(s)://8.231.81.12` removed from the CORS + Socket.io allowlists; `amount_inr` bounded at the schema (`Field(gt=0, le=10000, allow_inf_nan=False)` — NaN was slipping past the manual guard); **CSP + `X-Frame-Options: DENY` + `nosniff` + HSTS `includeSubDomains`** added to both Caddy vhosts.
@@ -22,18 +62,17 @@ What merged:
 - **Quality / CI:** the hold-exhausted auto-stop notification is no longer mislabeled "Charging complete" (`session_lifecycle` now matches `"exhausted"`); **408 dead imports swept** (ruff F401) and **CI now gates `ruff check --select F401 backend/`**.
 - **Deps:** `frontend/Dockerfile` → `npm ci`; `uvicorn[standard]`; `tapo<1.0`.
 
-**Deploy caveats:** the CSP is not browser-verified — smoke-test Leaflet map
-tiles + the Razorpay checkout iframe (and `caddy validate`) before trusting it;
-migration `0024` is idempotent and safe to re-run.
+**Deploy caveats:** the browser-smoke-test lesson (a CSP must be verified with
+Playwright, not curl) came from this batch's deploy — see PR #74; migration
+`0024` is idempotent and safe to re-run.
 
-**Not in this batch (audit backlog):** the 2nd audit High — the Razorpay
-signature/webhook credit path has **zero tests** — plus the Mediums/Lows: split
-the `cpo.py` god router + `MQTTManager` god object; the `/api/plugs/available`
-N+1 tariff resolution; `python-jose>=3.4.0` (CVE floor) + a backend deps
-lockfile; replace abandoned passlib; and the **doc drift** where
-[ARCHITECTURE.md](ARCHITECTURE.md), the root README, [AGENTS.md](../AGENTS.md)
-and `.env.template` still describe the retired Headscale/WireGuard overlay +
-duckdns as the live path.
+**Audit backlog as of this batch — since resolved elsewhere:** the 2nd audit
+High (Razorpay signature/webhook credit path had **zero tests**),
+`python-jose>=3.4.0` (CVE floor) and the overlay/duckdns **doc drift** all
+shipped in PR #75 (2026-07-20); the `/api/plugs` N+1 tariff resolution and the
+passlib replacement shipped 2026-07-21 (§0 above). Still open: split the
+`cpo.py` god router + `MQTTManager` god object; a backend deps lockfile;
+frontend code-splitting; CI ruff full-lint / mypy / coverage beyond F401.
 
 ---
 

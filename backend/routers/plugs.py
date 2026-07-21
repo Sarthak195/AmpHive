@@ -23,7 +23,7 @@ from backend.services.rate_limit import public_map_rate_limiter, rate_limit_depe
 from backend.services.auth import (
     get_current_user,
 )
-from backend.services.pricing import resolve_price_display
+from backend.services.pricing import resolve_price_display, resolve_price_display_batch
 from backend.services.session_lifecycle import (
     gateway_is_live, plug_is_powered,
 )
@@ -159,7 +159,7 @@ async def get_available_plugs(
     )
 
     rows = await db.execute(
-        select(Plug, ChargerGroup.name, ChargerGroup.is_public, Gateway, Tenant)
+        select(Plug, ChargerGroup.name, ChargerGroup.is_public, ChargerGroup.tariff_id, Gateway, Tenant)
         .join(Gateway, Gateway.id == Plug.gateway_id)
         .join(Tenant, Tenant.id == Gateway.tenant_id)
         .outerjoin(ChargerGroup, ChargerGroup.id == Plug.group_id)
@@ -187,20 +187,27 @@ async def get_available_plugs(
     # [Reservations] reserved_now / next_reservation etc. for every listed
     # plug in one grouped query — NOT per-plug (this endpoint stays N+1-free).
     reservation_fields = await _reservation_fields_for_plugs(
-        db, [plug.id for plug, _, _, _, _ in all_rows], user.id, now
+        db, [plug.id for plug, *_ in all_rows], user.id, now
+    )
+
+    # Resolved effective rate + [Pricing v2] next TOD price for EVERY listed
+    # plug (chain: plug tariff -> group tariff -> tenant default -> env
+    # fallback) in two fixed IN-queries — the chain inputs (plug/group tariff
+    # ids, tenant) already ride the joined rows, so the old per-plug
+    # resolve_price_display chain (up to 5 queries per plug) is gone. Same
+    # per-plug result; one consistent "now" for the whole list.
+    price_display = await resolve_price_display_batch(
+        db,
+        [(plug, group_tariff_id, tenant)
+         for plug, _, _, group_tariff_id, _, tenant in all_rows],
+        at=now,
     )
 
     responses = []
-    for plug, group_name, group_is_public, gateway, tenant in all_rows:
+    for plug, group_name, group_is_public, _group_tariff_id, gateway, tenant in all_rows:
         gw_online = gateway_is_live(gateway, now)
         powered = plug_is_powered(plug, now)
-        # Resolved effective rate + [Pricing v2] the next TOD price and when it
-        # changes (plug tariff -> group tariff -> tenant default -> env fallback;
-        # services/pricing.py). resolve_price_display loads the tariff+slots ONCE
-        # — same per-plug cost as the old resolve_rate_for_plug, so this adds no
-        # query. Still one lookup per plug (tolerable N+1 for per-site plug
-        # counts; batch this if the cross-tenant list ever grows large).
-        rate, changes_at, next_rate = await resolve_price_display(db, plug)
+        rate, changes_at, next_rate = price_display[plug.id]
         responses.append(
             PlugResponse(
                 id=plug.id,
@@ -253,8 +260,10 @@ async def get_public_plugs(db: AsyncSession = Depends(get_db)):
         .scalar_subquery()
     )
     rows = await db.execute(
-        select(Plug, Gateway)
+        select(Plug, ChargerGroup.tariff_id, Gateway, Tenant)
         .join(Gateway, Gateway.id == Plug.gateway_id)
+        .join(Tenant, Tenant.id == Gateway.tenant_id)
+        .outerjoin(ChargerGroup, ChargerGroup.id == Plug.group_id)
         .where(
             or_(
                 Plug.group_id.is_(None),  # ungrouped/legacy: public to all
@@ -264,15 +273,30 @@ async def get_public_plugs(db: AsyncSession = Depends(get_db)):
     )
 
     now = datetime.now(timezone.utc)
-    out = []
-    for plug, gateway in rows.all():
-        # Effective coords: the plug's own, else its gateway's site (same
-        # fallback the authenticated list uses). No location → not mappable.
+    # Effective coords: the plug's own, else its gateway's site (same
+    # fallback the authenticated list uses). No location → not mappable,
+    # and only mappable plugs get priced.
+    mappable = []
+    for plug, group_tariff_id, gateway, tenant in rows.all():
         lat = plug.latitude if plug.latitude is not None else gateway.latitude
         lon = plug.longitude if plug.longitude is not None else gateway.longitude
         if lat is None or lon is None:
             continue
-        rate, _changes_at, _next_rate = await resolve_price_display(db, plug)
+        mappable.append((plug, group_tariff_id, gateway, tenant, lat, lon))
+
+    # [Audit: N+1] Two fixed IN-queries price the whole map. This endpoint is
+    # UNAUTHENTICATED (rate-limited), so its per-plug query cost matters the
+    # most of all the list endpoints.
+    price_display = await resolve_price_display_batch(
+        db,
+        [(plug, group_tariff_id, tenant)
+         for plug, group_tariff_id, _, tenant, _, _ in mappable],
+        at=now,
+    )
+
+    out = []
+    for plug, _group_tariff_id, gateway, _tenant, lat, lon in mappable:
+        rate, _changes_at, _next_rate = price_display[plug.id]
         out.append(
             PublicPlugResponse(
                 id=plug.id,

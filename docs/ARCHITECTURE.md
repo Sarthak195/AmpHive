@@ -221,8 +221,8 @@ VPN hop.
 
 | Layer | Technology |
 |-------|------------|
-| Frontend | React 19, React Router 6, Vite 8, hand-written CSS (glassmorphism). Razorpay via CDN. |
-| Backend | Python 3.11 (Dockerfile), FastAPI, Uvicorn, SQLAlchemy 2.0 (async), Pydantic, paho-mqtt v2, python-jose, passlib/bcrypt, razorpay, tapo. |
+| Frontend | React 19, React Router 6, Vite 8, hand-written CSS (glassmorphism); Inter (`@fontsource`) + Leaflet CSS self-hosted/bundled — no style/font CDNs. Razorpay via CDN (the one allowed script origin). |
+| Backend | Python 3.11 (Dockerfile), FastAPI, Uvicorn, SQLAlchemy 2.0 (async), Pydantic, paho-mqtt v2, python-jose, bcrypt (pyca, direct — passlib dropped 2026-07-21), razorpay, tapo. |
 | Database | PostgreSQL 15 (Docker container on the GCP VM — Cloud SQL was decommissioned 2026-06-29). **No** TimescaleDB. |
 | Messaging | Eclipse Mosquitto 2.0, TLS on `:8883` (`mqtt.amphive.app`), per-gateway username/password + topic ACLs. Plaintext `:1883` is not host-published. |
 | Firmware | ESP-IDF (targets ESP32-C3), FreeRTOS, direct MQTT client (`AMPHIVE_DIRECT_MQTT`). |
