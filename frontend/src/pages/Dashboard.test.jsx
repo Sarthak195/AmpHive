@@ -267,6 +267,10 @@ describe('Dashboard — sessions banner and rail', () => {
     expect(screen.getByText(/₹12\.00/)).toBeInTheDocument();
     expect(screen.getByText(/2\.3 kW/)).toBeInTheDocument();
 
+    // Screen-reader-only aria-live cost announcement.
+    const region = document.querySelector('[aria-live="polite"].sr-only');
+    expect(region).toHaveTextContent('Current cost 12 rupees, 0.00 kilowatt hours');
+
     await userEvent.click(screen.getByRole('button', { name: 'Open session' }));
     expect(switchSession).toHaveBeenCalled();
     expect(screen.getByText('session page')).toBeInTheDocument();

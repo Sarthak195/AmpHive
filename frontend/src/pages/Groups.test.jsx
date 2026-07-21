@@ -45,9 +45,10 @@ describe('groups list', () => {
     expect(screen.getByText('3 chargers')).toBeInTheDocument();
     expect(screen.getByText('7 chargers')).toBeInTheDocument();
 
+    // Dashboard's ?group= filter matches by group NAME, not id.
     const links = screen.getAllByRole('link', { name: 'View chargers' });
-    expect(links[0]).toHaveAttribute('href', '/?group=1');
-    expect(links[1]).toHaveAttribute('href', '/?group=2');
+    expect(links[0]).toHaveAttribute('href', '/?group=Sunrise%20Society');
+    expect(links[1]).toHaveAttribute('href', '/?group=Open%20Mall%20Lot');
   });
 
   it('shows Leave only for private groups', async () => {

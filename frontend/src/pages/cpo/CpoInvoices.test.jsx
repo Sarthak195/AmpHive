@@ -133,11 +133,13 @@ describe('CpoInvoices', () => {
     expect(toast.ok).toHaveBeenCalled();
   });
 
-  it('opens the printable HTML invoice via a raw token-bearing fetch on View', async () => {
+  it('opens the printable HTML invoice via a raw token-bearing fetch on View, then revokes the blob URL', async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, blob: () => Promise.resolve(new Blob()) });
     vi.stubGlobal('fetch', fetchMock);
-    vi.stubGlobal('URL', { ...URL, createObjectURL: vi.fn().mockReturnValue('blob:mock') });
+    const revokeSpy = vi.fn();
+    vi.stubGlobal('URL', { ...URL, createObjectURL: vi.fn().mockReturnValue('blob:mock'), revokeObjectURL: revokeSpy });
     const openSpy = vi.spyOn(window, 'open').mockImplementation(() => {});
+    const setTimeoutSpy = vi.spyOn(window, 'setTimeout');
     const user = userEvent.setup();
     renderPage();
 
@@ -151,7 +153,15 @@ describe('CpoInvoices', () => {
         expect.objectContaining({ headers: expect.any(Object) })
       );
     });
-    expect(openSpy).toHaveBeenCalled();
+    expect(openSpy).toHaveBeenCalledWith('blob:mock', '_blank');
+
+    // Revocation is deferred (not immediate, unlike the CSV anchor-download
+    // path) so the new tab has time to load the blob first.
+    expect(revokeSpy).not.toHaveBeenCalled();
+    const deferredRevoke = setTimeoutSpy.mock.calls.find(([, delay]) => delay === 60_000);
+    expect(deferredRevoke).toBeTruthy();
+    deferredRevoke[0]();
+    expect(revokeSpy).toHaveBeenCalledWith('blob:mock');
   });
 
   it('surfaces a failed invoice view as a toast', async () => {

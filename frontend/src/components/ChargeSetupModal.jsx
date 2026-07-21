@@ -62,7 +62,7 @@ const COPY = {
 
 export default function ChargeSetupModal({ open, onClose, plug, mode = 'start', onConfirm }) {
   const { coins_per_kwh, coin_inr_rate } = useConfig();
-  const { balance } = useWallet();
+  const { availableBalance } = useWallet();
 
   const [timePreset, setTimePreset] = useState('none');
   const [customTime, setCustomTime] = useState('');
@@ -91,8 +91,10 @@ export default function ChargeSetupModal({ open, onClose, plug, mode = 'start', 
   const copy = COPY[mode] || COPY.start;
 
   // Coverage line: the plug's own price (falling back to the global rate).
+  // Uses availableBalance (not the raw balance) so a hold from a second
+  // concurrent session is respected in the estimate.
   const rate = Number(plug.price_per_kwh) > 0 ? Number(plug.price_per_kwh) : coins_per_kwh || 5;
-  const covers = rate > 0 ? (Number(balance) || 0) / rate : 0;
+  const covers = rate > 0 ? (Number(availableBalance) || 0) / rate : 0;
 
   const customInvalid = timePreset === 'custom' && parseCustomMinutes(customTime) == null;
 

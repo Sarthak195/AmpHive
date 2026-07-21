@@ -91,7 +91,10 @@ function SessionDetailModal({ open, session, rate, onClose, onDispute }) {
       });
       if (!res.ok) throw new Error("Couldn't load the invoice. Please try again.");
       const blob = await res.blob();
-      window.open(URL.createObjectURL(blob), '_blank');
+      const url = URL.createObjectURL(blob);
+      window.open(url, '_blank');
+      // Give the new tab time to load the blob before reclaiming it.
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
     } catch (err) {
       toast.error(err?.message || "Couldn't load the invoice. Please try again.");
     } finally {
@@ -112,7 +115,7 @@ function SessionDetailModal({ open, session, rate, onClose, onDispute }) {
           </button>
           {invoiceable && (
             <button type="button" className="btn btn-quiet" onClick={viewInvoice} disabled={invoiceBusy}>
-              {invoiceBusy ? 'Opening…' : 'Download GST invoice'}
+              {invoiceBusy ? 'Opening…' : 'View GST invoice'}
             </button>
           )}
           {disputable && (

@@ -88,7 +88,9 @@
 
   --ink: hsl(75 12% 13%);
   --ink-2: hsl(75 8% 34%);
-  --ink-3: hsl(75 6% 44%);               /* muted — keeps AA on surface      */
+  --ink-3: hsl(75 6% 38%);               /* muted — verified AA (>=4.5:1) vs
+                                             both --bg (5.51:1) and
+                                             --surface-2 (5.29:1)            */
   --ink-inverse: hsl(46 41% 97%);
 
   /* Brand mark: volt-lime, darkened for light-surface contrast. The bright

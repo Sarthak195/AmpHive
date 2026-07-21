@@ -8,6 +8,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { MemoryRouter } from 'react-router-dom';
 
 import CpoSessions from './CpoSessions';
 import api from '../../api/client';
@@ -74,6 +75,13 @@ const mockRoutes = ({ sessions = SESSIONS_PAGE, plugs = PLUGS } = {}) => {
   });
 };
 
+const renderPage = (initialEntries = ['/cpo/sessions']) =>
+  render(
+    <MemoryRouter initialEntries={initialEntries}>
+      <CpoSessions />
+    </MemoryRouter>
+  );
+
 // The fetched plug name doubles as a <select> option label, so anchoring on
 // row text needs the table cell specifically (not the filter dropdown).
 const findRowCell = (name) => screen.findByRole('cell', { name });
@@ -87,14 +95,14 @@ beforeEach(() => {
 
 describe('CpoSessions — list + filters', () => {
   it('fetches with days/limit/offset and renders rows', async () => {
-    render(<CpoSessions />);
+    renderPage();
     await waitForLoaded();
     expect(api.get).toHaveBeenCalledWith('/api/cpo/analytics/sessions?days=30&limit=20&offset=0');
     expect(await findRowCell('Porch plug')).toBeInTheDocument();
   });
 
   it('renders server-side totals in the KPI strip without a caveat', async () => {
-    render(<CpoSessions />);
+    renderPage();
     await waitForLoaded();
     expect(screen.getByText('45')).toBeInTheDocument();
     expect(screen.queryByText(/Totals computed from/)).not.toBeInTheDocument();
@@ -102,14 +110,14 @@ describe('CpoSessions — list + filters', () => {
 
   it('falls back to client-side totals with a visible caveat for a legacy bare array', async () => {
     mockRoutes({ sessions: SESSIONS_PAGE.items });
-    render(<CpoSessions />);
+    renderPage();
     await waitForLoaded();
     expect(await screen.findByText(/Totals computed from the first 2 sessions shown/)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Next' })).not.toBeInTheDocument();
   });
 
   it('re-queries when the plug filter changes, resetting to offset 0', async () => {
-    render(<CpoSessions />);
+    renderPage();
     await waitForLoaded();
     api.get.mockClear();
     await userEvent.selectOptions(screen.getByLabelText('Charger'), '1');
@@ -119,7 +127,7 @@ describe('CpoSessions — list + filters', () => {
   });
 
   it('paginates using the server total', async () => {
-    render(<CpoSessions />);
+    renderPage();
     await waitForLoaded();
     await userEvent.click(screen.getByRole('button', { name: 'Next' }));
     expect(api.get).toHaveBeenLastCalledWith('/api/cpo/analytics/sessions?days=30&limit=20&offset=20');
@@ -130,7 +138,7 @@ describe('CpoSessions — list + filters', () => {
       if (url.startsWith('/api/cpo/analytics/sessions')) return Promise.reject(new Error('down'));
       return Promise.resolve(PLUGS);
     });
-    render(<CpoSessions />);
+    renderPage();
     expect(await screen.findByText("Couldn't load this")).toBeInTheDocument();
     expect(screen.queryByText('No sessions found')).not.toBeInTheDocument();
 
@@ -141,14 +149,23 @@ describe('CpoSessions — list + filters', () => {
 
   it('shows the empty state only for a true zero-row result', async () => {
     mockRoutes({ sessions: { total: 0, totals: { count: 0, energy_kwh: 0, revenue_coins: 0 }, items: [] } });
-    render(<CpoSessions />);
+    renderPage();
     expect(await screen.findByText('No sessions found')).toBeInTheDocument();
+  });
+
+  it('seeds the status filter from a ?status= deep link (CpoDashboard "Active sessions")', async () => {
+    renderPage(['/cpo/sessions?status=active']);
+    await waitForLoaded();
+    expect(api.get).toHaveBeenCalledWith(
+      '/api/cpo/analytics/sessions?days=30&limit=20&offset=0&status_filter=active'
+    );
+    expect(screen.getByLabelText('Status')).toHaveValue('active');
   });
 });
 
 describe('CpoSessions — CSV export', () => {
   it('downloads the filtered export and shows a success toast', async () => {
-    render(<CpoSessions />);
+    renderPage();
     await waitForLoaded();
 
     const blob = new Blob(['id,plug\n'], { type: 'text/csv' });
@@ -166,7 +183,7 @@ describe('CpoSessions — CSV export', () => {
   });
 
   it('shows an error toast when the export fails', async () => {
-    render(<CpoSessions />);
+    renderPage();
     await waitForLoaded();
     window.fetch.mockResolvedValue({ ok: false, status: 500 });
 
@@ -176,7 +193,7 @@ describe('CpoSessions — CSV export', () => {
 
   it('disables export while there are no sessions', async () => {
     mockRoutes({ sessions: { total: 0, totals: { count: 0, energy_kwh: 0, revenue_coins: 0 }, items: [] } });
-    render(<CpoSessions />);
+    renderPage();
     await screen.findByText('No sessions found');
     expect(screen.getByRole('button', { name: /Export CSV/ })).toBeDisabled();
   });
@@ -184,7 +201,7 @@ describe('CpoSessions — CSV export', () => {
 
 describe('CpoSessions — detail modal', () => {
   it('opens on row click, fetches the receipt shape, and shows the driver from the row', async () => {
-    render(<CpoSessions />);
+    renderPage();
     await userEvent.click(await waitForLoaded());
 
     expect(await screen.findByRole('heading', { name: 'Session detail' })).toBeInTheDocument();
@@ -202,7 +219,7 @@ describe('CpoSessions — detail modal', () => {
       if (url === '/api/sessions/1') return Promise.reject(new Error('Session not found.'));
       return Promise.reject(new Error('unhandled'));
     });
-    render(<CpoSessions />);
+    renderPage();
     await userEvent.click(await waitForLoaded());
 
     await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Details unavailable.'));

@@ -41,10 +41,34 @@ careful work", now done:
   modal opens, zero CSP violations.
 
 Still open from the audit backlog: split the `cpo.py` god router and the
-`MQTTManager` god object; a backend deps lockfile; frontend code-splitting;
-CI ruff full-lint / mypy / coverage beyond F401.
+`MQTTManager` god object; a backend deps lockfile; CI ruff full-lint / mypy /
+coverage beyond F401. (Frontend code-splitting shipped with redesign v3,
+§0.0 below.)
 
 ---
+
+## 0.0 — 2026-07-21 frontend redesign v3 (branch `redesign/ui-v3`, PR pending)
+
+Ground-up rebuild of every UI surface into **three role portals on one
+bundle** — driver app + marketing homepage (`data-theme="day"`, warm light),
+CPO console (`data-theme="volt"`, charcoal/amp-lime), and a **new platform-admin
+portal** (`/admin/*` on the CPO host, violet accent) over the new
+`/api/admin/*` router. Hand-rolled two-theme design system
+(`frontend/src/styles/tokens.css` + primitives; zero CSS/JS CDNs — CSP
+unchanged), shared component kit (`components/ui/`: Modal/ConfirmDialog/
+Toast/Tabs/DataTable/Empty-vs-ErrorState/StatusDot/Money), `lucide-react`
+icons replace emoji, Bricolage Grotesque + JetBrains Mono join Inter
+(all @fontsource self-hosted). Route-level code-splitting via `React.lazy`
+(closes that audit-backlog item), lazy Razorpay (no longer render-blocking in
+`<head>`), PWA manifest, boot splash instead of the blank-screen auth gate,
+API-client timeout + 401 location preservation. New driver IA: `/wallet`
+(replaces `/topup`), `/activity` (replaces `/history`), unified `/map`,
+`/account`, split `/signup`; console IA: `/cpo/chargers|health|pricing`
+(replace plugs/faults/tariffs; old paths redirect). Machine-string → human
+copy centralized in `utils/statusCopy.js`; money is ₹-first via
+`utils/money.js`; plug availability now 5 states (maintenance split from
+offline, unpowered de-colliding from in-use). Old pages/`global.css` deleted.
+Frontend tests rewritten alongside: **512 Vitest tests / 61 files** (was 127).
 
 ## 0.1 — 2026-07-20 audit + quick-wins hardening (PR #72; deployed 2026-07-20, backlog batch PR #75 deployed same day)
 
@@ -70,9 +94,10 @@ Playwright, not curl) came from this batch's deploy — see PR #74; migration
 High (Razorpay signature/webhook credit path had **zero tests**),
 `python-jose>=3.4.0` (CVE floor) and the overlay/duckdns **doc drift** all
 shipped in PR #75 (2026-07-20); the `/api/plugs` N+1 tariff resolution and the
-passlib replacement shipped 2026-07-21 (§0 above). Still open: split the
+passlib replacement shipped 2026-07-21 (§0 above), and frontend
+code-splitting shipped with redesign v3 (§0.0). Still open: split the
 `cpo.py` god router + `MQTTManager` god object; a backend deps lockfile;
-frontend code-splitting; CI ruff full-lint / mypy / coverage beyond F401.
+CI ruff full-lint / mypy / coverage beyond F401.
 
 ---
 
@@ -141,7 +166,7 @@ frontend code-splitting; CI ruff full-lint / mypy / coverage beyond F401.
 | "View History" button (WalletCard) | ✅ | `WalletCard` button → `/history` route → `History.jsx`, now **tabbed**: "Charging Sessions" (`GET /api/sessions/history`) and "Wallet Ledger" (`GET /api/wallet/ledger`) — the latter is the unified money trail (top-up credits **and** session debits, signed amount + running `balance_after`), closing the old "debits-only" gap (2026-07-10). |
 | CPO gateways management + OTA-from-UI | ✅ | New `/cpo/gateways` page (sidebar link) lists each gateway's status, reported firmware, last-seen, and plug count, with an "Update Firmware" action that POSTs `/api/cpo/gateways/{id}/ota` (https image URL; button disabled unless the gateway is online with ≥1 plug). Completes the OTA loop the fw-tracking surfaced (2026-07-10). |
 | TypeScript usage | — | **Decided against 2026-07-07** (TD#14): toolchain removed; all app code is plain `.jsx`/`.js` by policy. ESLint now actually lints `js/jsx` (the old config matched only `ts,tsx` — zero files). |
-| Frontend tests (Vitest + RTL) | ✅ | 127 tests: AuthContext, ProtectedRoute/CpoProtectedRoute (incl. the `state.from` redirect target), Login (returns to the preserved origin, incl. `?plug=`), TopUp payment handler (no client amount on `/verify`), multi-session SessionContext (incl. limit payloads + `focusedLimits` restore), History, Home (QR/deep-link prefill + auth gate + unknown-id notice, private/public sections + collapsed-map behavior, availability/group filters, legend + section counts, charging-limit payloads incl. per-plug coin conversion, notify-when-free bell: shown only on non-startable cards, optimistic POST/DELETE with revert-on-failure, cleared by a live `plug_status→available` flip, reservations: "Reserved until"/"Reserved for you" badge + blocked start click, Reserve modal opening, "Your reservations" strip + cancel), ReserveModal (schedule fetch/render, booking payload ISO strings + duration presets, inline 409, default preset), ChargeLimitControl (presets, coins→kWh conversion + clamping, previews), SessionMonitor limit-progress display, MapComponent (marker color per state, fit-bounds vs country-wide fallback), CpoPlugs QR modal, CpoEarnings (summary, request-payout incl. 409 path, cancel, history). `npm test` runs in CI. |
+| Frontend tests (Vitest + RTL) | ✅ | **512 tests / 61 files after the redesign-v3 rewrite (2026-07-21, §0.0)** — every rebuilt page/component carries a behavioral suite (states render, actions hit the right APIs, errors surface) plus the UI-kit suites (Modal focus trap, Toast timers, DataTable states, statusCopy/money tables). Historical note — the pre-redesign suite was 127 tests: AuthContext, ProtectedRoute/CpoProtectedRoute (incl. the `state.from` redirect target), Login (returns to the preserved origin, incl. `?plug=`), TopUp payment handler (no client amount on `/verify`), multi-session SessionContext (incl. limit payloads + `focusedLimits` restore), History, Home (QR/deep-link prefill + auth gate + unknown-id notice, private/public sections + collapsed-map behavior, availability/group filters, legend + section counts, charging-limit payloads incl. per-plug coin conversion, notify-when-free bell: shown only on non-startable cards, optimistic POST/DELETE with revert-on-failure, cleared by a live `plug_status→available` flip, reservations: "Reserved until"/"Reserved for you" badge + blocked start click, Reserve modal opening, "Your reservations" strip + cancel), ReserveModal (schedule fetch/render, booking payload ISO strings + duration presets, inline 409, default preset), ChargeLimitControl (presets, coins→kWh conversion + clamping, previews), SessionMonitor limit-progress display, MapComponent (marker color per state, fit-bounds vs country-wide fallback), CpoPlugs QR modal, CpoEarnings (summary, request-payout incl. 409 path, cancel, history). `npm test` runs in CI. |
 
 ### Firmware
 | Capability | Status | Notes |

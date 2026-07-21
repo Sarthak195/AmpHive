@@ -60,7 +60,7 @@ const renderMonitor = async () => {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  useWallet.mockReturnValue({ balance: 1000 });
+  useWallet.mockReturnValue({ balance: 1000, availableBalance: 1000 });
   api.get.mockResolvedValue({ base_price_per_kwh: 6, price_now: 6, slots: [] });
 });
 
@@ -77,6 +77,13 @@ describe('SessionMonitor — hero + meters', () => {
     expect(screen.getByText('0.25 kWh')).toBeInTheDocument();
     expect(screen.getByText('1.0 kW')).toBeInTheDocument(); // power now
     expect(screen.getByText('Garage plug')).toBeInTheDocument();
+  });
+
+  it('announces the live cost in an sr-only aria-live region', async () => {
+    useSession.mockReturnValue(baseSession());
+    await renderMonitor();
+    const region = document.querySelector('[aria-live="polite"].sr-only');
+    expect(region).toHaveTextContent('Current cost 1 rupees, 0.25 kilowatt hours');
   });
 
   it('shows the plug rate line from the tariff preview — never the config rate', async () => {
@@ -163,7 +170,7 @@ describe('SessionMonitor — notices', () => {
   });
 
   it('warns on low balance with a Top up link back to this session', async () => {
-    useWallet.mockReturnValue({ balance: 12 }); // cost 10 → ₹2 left, under the floor
+    useWallet.mockReturnValue({ balance: 12, availableBalance: 12 }); // cost 10 → ₹2 left, under the floor
     useSession.mockReturnValue(
       baseSession({ sessionData: { ...baseData, cost_coins: 10, is_stale: false } })
     );
@@ -177,12 +184,23 @@ describe('SessionMonitor — notices', () => {
   });
 
   it('does not warn when the balance comfortably covers the accrued cost', async () => {
-    useWallet.mockReturnValue({ balance: 1000 });
+    useWallet.mockReturnValue({ balance: 1000, availableBalance: 1000 });
     useSession.mockReturnValue(
       baseSession({ sessionData: { ...baseData, cost_coins: 10, is_stale: false } })
     );
     await renderMonitor();
     expect(screen.queryByText(/Low balance/)).not.toBeInTheDocument();
+  });
+
+  it('uses availableBalance (not the raw balance) for the low-balance check, respecting a concurrent hold', async () => {
+    // Raw balance looks comfortable, but a second session's hold leaves only
+    // 12 coins actually available — the low-balance warning should still fire.
+    useWallet.mockReturnValue({ balance: 1000, availableBalance: 12 });
+    useSession.mockReturnValue(
+      baseSession({ sessionData: { ...baseData, cost_coins: 10, is_stale: false } })
+    );
+    await renderMonitor();
+    expect(screen.getByText(/Low balance/)).toBeInTheDocument();
   });
 });
 

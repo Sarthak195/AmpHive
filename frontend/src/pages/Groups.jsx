@@ -140,7 +140,10 @@ export default function Groups() {
                   {group.plug_count} {group.plug_count === 1 ? 'charger' : 'chargers'}
                 </p>
                 <div className="groups-card-actions">
-                  <Link to={`/?group=${group.id}`} className="btn btn-quiet btn-sm">
+                  <Link
+                    to={`/?group=${encodeURIComponent(group.name)}`}
+                    className="btn btn-quiet btn-sm"
+                  >
                     View chargers
                   </Link>
                   {!group.is_public && (

@@ -120,6 +120,8 @@ export default function CpoInvoices() {
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       window.open(url, '_blank');
+      // Give the new tab time to load the blob before reclaiming it.
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
     } catch (err) {
       toast.error(apiErrorCopy(err));
     } finally {

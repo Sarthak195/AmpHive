@@ -122,4 +122,20 @@ describe('Session page — after a stop', () => {
     expect(screen.queryByTestId('monitor')).not.toBeInTheDocument();
     expect(screen.queryByText('No active charge')).not.toBeInTheDocument();
   });
+
+  it('shows the no-active-charge interstitial (not the stale monitor) after the receipt is dismissed', () => {
+    // isActive is false and receipt has been cleared, but sessionData still
+    // holds the finished session's last frame (status: 'completed') — the
+    // interstitial should win, not a frozen/ticking monitor.
+    useSession.mockReturnValue({
+      ...base,
+      isActive: false,
+      receipt: null,
+      sessionData: { plug_id: 2, plug_name: 'Garage plug', cost_coins: 6.17, status: 'completed' },
+    });
+    renderPage();
+    expect(screen.getByText('No active charge')).toBeInTheDocument();
+    expect(screen.queryByTestId('monitor')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('receipt')).not.toBeInTheDocument();
+  });
 });

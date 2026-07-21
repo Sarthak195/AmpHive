@@ -1,11 +1,12 @@
 /**
  * Login redirect tests: after a successful sign-in, the driver returns to
- * wherever ProtectedRoute (or Home's QR/deep-link guard) sent them from —
- * carried as router state.from, taking priority over the `?next=` query
- * param — instead of always bouncing to Home. This is the other half of the
- * QR-deep-link "survives the login redirect" requirement (see Home.test.jsx
- * for the ?plug= prefill half). Register mode has moved to Signup — this
- * page is sign-in only.
+ * wherever they were headed — a safe `?next=` query param (contract C8:
+ * next wins) takes priority over router state.from (ProtectedRoute / Home's
+ * QR/deep-link guard), instead of always bouncing to Home. An unsafe `next`
+ * (open-redirect attempt) is rejected by isSafeInternalPath and falls back to
+ * state.from/Home. This is the other half of the QR-deep-link "survives the
+ * login redirect" requirement (see Home.test.jsx for the ?plug= prefill
+ * half). Register mode has moved to Signup — this page is sign-in only.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen } from '@testing-library/react';
@@ -80,7 +81,7 @@ describe('Login redirect target', () => {
     expect(await screen.findByTestId('location-probe')).toHaveTextContent('/?plug=7');
   });
 
-  it('state.from wins over ?next= when both are present', async () => {
+  it('?next= wins over state.from when both are present (contract C8)', async () => {
     loginSpy.mockResolvedValue({});
     renderLogin({
       pathname: '/login',
@@ -88,7 +89,25 @@ describe('Login redirect target', () => {
       state: { from: { pathname: '/', search: '?plug=9' } },
     });
     await submitLogin();
+    expect(await screen.findByText('topup page')).toBeInTheDocument();
+  });
+
+  it('falls back to state.from when ?next= is an open-redirect attempt', async () => {
+    loginSpy.mockResolvedValue({});
+    renderLogin({
+      pathname: '/login',
+      search: '?next=https%3A%2F%2Fevil.com',
+      state: { from: { pathname: '/', search: '?plug=9' } },
+    });
+    await submitLogin();
     expect(await screen.findByTestId('location-probe')).toHaveTextContent('/?plug=9');
+  });
+
+  it('falls back to Home when ?next= is protocol-relative and there is no state.from', async () => {
+    loginSpy.mockResolvedValue({});
+    renderLogin('/login?next=%2F%2Fevil.com');
+    await submitLogin();
+    expect(await screen.findByText('home page')).toBeInTheDocument();
   });
 
   it('surfaces a login failure inline and stays on the page', async () => {

@@ -10,7 +10,7 @@
  * the shared charcoal-lime console theme with the violet admin accent.
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import {
   LayoutDashboard,
@@ -49,17 +49,47 @@ const currentTitle = (pathname) => {
   return match?.label || 'Admin';
 };
 
+/** Below this width the sidebar becomes an off-canvas drawer (see console.css). */
+const MOBILE_QUERY = '(max-width: 900px)';
+
 const AdminLayout = () => {
   useTheme('volt', 'admin');
   const { user, logout } = useAuth();
   const location = useLocation();
   const navigate = useNavigate();
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [isMobile, setIsMobile] = useState(() => window.matchMedia(MOBILE_QUERY).matches);
+  const sidebarRef = useRef(null);
+  const menuButtonRef = useRef(null);
 
   // Close the drawer on every route change so it never lingers open.
   useEffect(() => {
     setSidebarOpen(false);
   }, [location.pathname]);
+
+  // Open drawer: focus moves in; Esc closes and returns focus to the toggle.
+  useEffect(() => {
+    if (!sidebarOpen) return undefined;
+    sidebarRef.current?.querySelector('a, button')?.focus();
+    const onKey = (e) => {
+      if (e.key === 'Escape') {
+        setSidebarOpen(false);
+        menuButtonRef.current?.focus();
+      }
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [sidebarOpen]);
+
+  // Track the mobile breakpoint so the closed off-canvas sidebar can be
+  // marked inert (removed from tab order) on mobile only — on desktop the
+  // sidebar is always visible and must stay interactive.
+  useEffect(() => {
+    const mql = window.matchMedia(MOBILE_QUERY);
+    const onChange = (e) => setIsMobile(e.matches);
+    mql.addEventListener('change', onChange);
+    return () => mql.removeEventListener('change', onChange);
+  }, []);
 
   const handleSignOut = async () => {
     await logout();
@@ -70,10 +100,12 @@ const AdminLayout = () => {
     <div className="console">
       <div className="console-topbar">
         <button
+          ref={menuButtonRef}
           type="button"
           className="btn btn-quiet btn-icon"
           aria-label={sidebarOpen ? 'Close menu' : 'Open menu'}
           aria-expanded={sidebarOpen}
+          aria-controls="admin-console-sidebar"
           onClick={() => setSidebarOpen((open) => !open)}
         >
           {sidebarOpen ? <X aria-hidden="true" /> : <Menu aria-hidden="true" />}
@@ -90,7 +122,12 @@ const AdminLayout = () => {
         />
       )}
 
-      <aside className={`console-sidebar${sidebarOpen ? ' open' : ''}`}>
+      <aside
+        ref={sidebarRef}
+        id="admin-console-sidebar"
+        className={`console-sidebar${sidebarOpen ? ' open' : ''}`}
+        inert={isMobile && !sidebarOpen}
+      >
         <div className="console-brand">
           <span className="brand-bolt">
             <Zap size={16} aria-hidden="true" />

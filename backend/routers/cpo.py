@@ -438,6 +438,10 @@ async def cpo_list_plugs(
             "current_power_w": plug.current_power_w,
             "group_id": plug.group_id,
             "group_name": group_name,
+            # [Pricing v2] Per-plug tariff override (None = inherit group / tenant
+            # default — see resolve_rate_for_plug()). CpoPricing's assignment
+            # table/dropdown reads this.
+            "tariff_id": plug.tariff_id,
             "latitude": plug.latitude,
             "longitude": plug.longitude,
             # [Caps] The per-plug current cap (None = default hardware cutoff).
@@ -787,6 +791,10 @@ async def cpo_list_groups(
             "max_current_a": group.max_current_a,
             "current_load_a": load_a,
             "pending_capacity_requests": waiting,
+            # [Pricing v2] Group-level tariff override (None = inherit tenant
+            # default — see resolve_rate_for_plug()). CpoPricing's assignment
+            # table/dropdown reads this.
+            "tariff_id": group.tariff_id,
             "created_at": group.created_at.isoformat() if group.created_at else None,
         })
 

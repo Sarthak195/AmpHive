@@ -6,16 +6,21 @@
  * them) while brand, wallet pill and bell remain. On the CPO host only the
  * brand and auth affordances render — driver navigation belongs to the
  * driver origin.
+ *
+ * The user menu is role-aware: drivers get the "Host your chargers"
+ * become-a-CPO link; a cpo/admin who's signed in on this (driver-side)
+ * chrome gets a link back to their console instead — internal on an
+ * unsplit host, external (cpoOrigin()) on a real split driver host.
  */
 
 import { useEffect, useRef, useState } from 'react';
 import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom';
-import { Zap, Wallet as WalletIcon, User, LogOut, PlugZap } from 'lucide-react';
+import { Zap, Wallet as WalletIcon, User, LogOut, PlugZap, Shield } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useWallet } from '../contexts/WalletContext';
 import NotificationBell from './NotificationBell';
 import Money from './ui/Money';
-import { isCpoHost, cpoOrigin } from '../utils/appHost';
+import { isCpoHost, isSplitHost, cpoOrigin } from '../utils/appHost';
 
 const navLinkClass = ({ isActive }) => `appbar-link${isActive ? ' active' : ''}`;
 
@@ -26,21 +31,33 @@ const AppBar = () => {
   const navigate = useNavigate();
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef(null);
+  const menuButtonRef = useRef(null);
   const cpoHost = isCpoHost();
+  const splitHost = isSplitHost();
 
   // Close the user menu on any route change so it never lingers open.
   useEffect(() => {
     setMenuOpen(false);
   }, [location.pathname]);
 
-  // Close on outside click / Escape while open.
+  // Close on outside click / Escape while open — both restore focus to the
+  // trigger button (mirrors CpoLayout's drawer-close pattern).
   useEffect(() => {
     if (!menuOpen) return undefined;
     const onPointerDown = (e) => {
-      if (menuRef.current && !menuRef.current.contains(e.target)) setMenuOpen(false);
+      if (menuRef.current && !menuRef.current.contains(e.target)) {
+        // Prevent the browser's default mousedown "unfocus" behavior so our
+        // own focus restore below actually sticks.
+        e.preventDefault();
+        setMenuOpen(false);
+        menuButtonRef.current?.focus();
+      }
     };
     const onKeyDown = (e) => {
-      if (e.key === 'Escape') setMenuOpen(false);
+      if (e.key === 'Escape') {
+        setMenuOpen(false);
+        menuButtonRef.current?.focus();
+      }
     };
     document.addEventListener('mousedown', onPointerDown);
     document.addEventListener('keydown', onKeyDown);
@@ -92,6 +109,7 @@ const AppBar = () => {
           {user ? (
             <div className="user-menu" ref={menuRef}>
               <button
+                ref={menuButtonRef}
                 type="button"
                 className="btn btn-quiet btn-icon"
                 aria-label="Account menu"
@@ -107,11 +125,37 @@ const AppBar = () => {
                     <User size={16} aria-hidden="true" />
                     Account
                   </Link>
-                  {!cpoHost && (
+                  {!cpoHost && user.role === 'driver' && (
                     <a href={`${cpoOrigin()}/cpo`} className="user-menu-item" role="menuitem">
                       <PlugZap size={16} aria-hidden="true" />
                       Host your chargers
                     </a>
+                  )}
+                  {!cpoHost && user.role === 'cpo' && (
+                    splitHost ? (
+                      <a href={`${cpoOrigin()}/cpo/dashboard`} className="user-menu-item" role="menuitem">
+                        <PlugZap size={16} aria-hidden="true" />
+                        Host console
+                      </a>
+                    ) : (
+                      <Link to="/cpo/dashboard" className="user-menu-item" role="menuitem">
+                        <PlugZap size={16} aria-hidden="true" />
+                        Host console
+                      </Link>
+                    )
+                  )}
+                  {!cpoHost && user.role === 'admin' && (
+                    splitHost ? (
+                      <a href={`${cpoOrigin()}/admin`} className="user-menu-item" role="menuitem">
+                        <Shield size={16} aria-hidden="true" />
+                        Admin console
+                      </a>
+                    ) : (
+                      <Link to="/admin" className="user-menu-item" role="menuitem">
+                        <Shield size={16} aria-hidden="true" />
+                        Admin console
+                      </Link>
+                    )
                   )}
                   <button type="button" className="user-menu-item" role="menuitem" onClick={handleSignOut}>
                     <LogOut size={16} aria-hidden="true" />

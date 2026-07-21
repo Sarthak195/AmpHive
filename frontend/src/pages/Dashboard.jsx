@@ -48,7 +48,7 @@ import ChargeSetupModal from '../components/ChargeSetupModal';
 import ReserveModal from '../components/ReserveModal';
 import { AVAILABILITY_STATES, getPlugAvailability } from '../utils/plugAvailability';
 import { apiErrorCopy, plugStateHint, plugStateLabel } from '../utils/statusCopy';
-import { formatKw, formatKwh } from '../utils/money';
+import { coinsToINR, formatKw, formatKwh } from '../utils/money';
 import { fmtTime, fmtWindow } from '../utils/reservationTime';
 import './Dashboard.css';
 
@@ -444,6 +444,14 @@ const Dashboard = () => {
                         <Money coins={live.cost_coins} rate={coin_inr_rate} /> ·{' '}
                         {formatKw(live.power_w)}
                       </p>
+                    )}
+                    {/* Screen-reader-only live cost announcement — only mutates
+                        (and so only announces) when the whole-rupee value
+                        changes, since telemetry ticks far more often than that. */}
+                    {live && (
+                      <div className="sr-only" aria-live="polite">
+                        {`Current cost ${Math.floor(coinsToINR(live.cost_coins, coin_inr_rate))} rupees, ${(Number(live.energy_kwh) || 0).toFixed(2)} kilowatt hours`}
+                      </div>
                     )}
                   </div>
                 </div>

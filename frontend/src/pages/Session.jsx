@@ -39,7 +39,12 @@ const Session = () => {
     );
   }, [sessionId, focusedCost]);
 
-  const hasSession = isActive || Boolean(sessionData);
+  // Only a genuinely active session earns the live monitor here — a finished
+  // session's stale sessionData (status: 'completed') would otherwise keep
+  // rendering the monitor (elapsed timer still ticking) after the receipt is
+  // dismissed. The receipt has its own branch above, so this only decides
+  // monitor vs. the no-active-charge interstitial.
+  const hasSession = isActive;
 
   return (
     <div className="page session-page">

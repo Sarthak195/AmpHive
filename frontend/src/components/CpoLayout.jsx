@@ -79,6 +79,9 @@ const SETTINGS_ITEM = { to: '/cpo/settings', label: 'Settings', icon: Settings }
 
 const ALL_ITEMS = [...NAV_GROUPS.flatMap((g) => g.items), SETTINGS_ITEM];
 
+/** Below this width the sidebar becomes an off-canvas drawer (see CpoLayout.css). */
+const MOBILE_QUERY = '(max-width: 900px)';
+
 const NavItem = ({ item, counts, pathname }) => {
   const { to, label, icon: Icon, badge } = item;
   const active = pathname.startsWith(to);
@@ -98,6 +101,7 @@ const NavItem = ({ item, counts, pathname }) => {
 
 const CpoLayoutInner = ({ children }) => {
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [isMobile, setIsMobile] = useState(() => window.matchMedia(MOBILE_QUERY).matches);
   const { pathname } = useLocation();
   const { user, logout } = useAuth();
   const { profile, counts } = useTenant();
@@ -117,6 +121,16 @@ const CpoLayoutInner = ({ children }) => {
   useEffect(() => {
     setDrawerOpen(false);
   }, [pathname]);
+
+  // Track the mobile breakpoint so the closed off-canvas sidebar can be
+  // marked inert (removed from tab order) on mobile only — on desktop the
+  // sidebar is always visible and must stay interactive.
+  useEffect(() => {
+    const mql = window.matchMedia(MOBILE_QUERY);
+    const onChange = (e) => setIsMobile(e.matches);
+    mql.addEventListener('change', onChange);
+    return () => mql.removeEventListener('change', onChange);
+  }, []);
 
   // Open drawer: focus moves in; Esc closes and returns focus to the toggle.
   useEffect(() => {
@@ -138,6 +152,7 @@ const CpoLayoutInner = ({ children }) => {
         ref={sidebarRef}
         id="console-sidebar"
         className={`console-sidebar${drawerOpen ? ' open' : ''}`}
+        inert={isMobile && !drawerOpen}
       >
         <div className="console-brand">
           <Zap size={20} aria-hidden="true" />

@@ -18,11 +18,9 @@
  *       GET/POST/DELETE /api/cpo/tariffs/{id}/slots[/{slotId}],
  *       GET /api/cpo/groups, GET /api/cpo/plugs, GET/PUT /api/cpo/profile.
  *
- * NOTE (backend gap): /api/cpo/groups and /api/cpo/plugs don't currently
- * serialize `tariff_id` (only the assign endpoints exist). This page reads it
- * defensively (`?? null` -> "Inherited") and updates its own local state
- * optimistically after a successful assign, so the page stays correct in the
- * same session even before the backend adds the field to those GETs.
+ * /api/cpo/groups and /api/cpo/plugs serialize `tariff_id` (None = inherit).
+ * This page also updates its own local state optimistically after a
+ * successful assign, so the page stays correct without waiting on a refetch.
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react';

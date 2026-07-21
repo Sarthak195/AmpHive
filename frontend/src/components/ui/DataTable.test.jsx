@@ -5,7 +5,7 @@
  * and the pagination footer ("x–y of total", Prev/Next paging + disabling).
  */
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, createEvent } from '@testing-library/react';
 
 import DataTable from './DataTable';
 
@@ -80,17 +80,32 @@ describe('DataTable', () => {
     expect(screen.getByText('1.2 kWh')).toHaveAttribute('data-label', 'Energy');
   });
 
-  it('row click and Enter both fire onRowClick', () => {
+  it('row click, Enter, and Space all fire onRowClick; row is exposed as a button', () => {
     const onRowClick = vi.fn();
     render(<DataTable columns={columns} rows={rows} keyField="id" onRowClick={onRowClick} />);
 
     const row = screen.getByText('Bay A').closest('tr');
     expect(row).toHaveClass('row-link');
+    expect(row).toHaveAttribute('role', 'button');
+    expect(row).toHaveAttribute('tabIndex', '0');
+
     fireEvent.click(row);
     expect(onRowClick).toHaveBeenCalledWith(rows[0]);
 
     fireEvent.keyDown(row, { key: 'Enter' });
     expect(onRowClick).toHaveBeenCalledTimes(2);
+
+    const spaceEvent = createEvent.keyDown(row, { key: ' ' });
+    fireEvent(row, spaceEvent);
+    expect(onRowClick).toHaveBeenCalledTimes(3);
+    expect(spaceEvent.defaultPrevented).toBe(true);
+  });
+
+  it('non-clickable rows have no button role or tabIndex', () => {
+    render(<DataTable columns={columns} rows={rows} keyField="id" />);
+    const row = screen.getByText('Bay A').closest('tr');
+    expect(row).not.toHaveAttribute('role');
+    expect(row).not.toHaveAttribute('tabindex');
   });
 
   it('pagination footer shows "x–y of total" and pages with Prev/Next', () => {

@@ -26,6 +26,7 @@ import { useConfig } from '../contexts/ConfigContext';
 import { loadRazorpay } from '../utils/razorpay';
 import { formatINR } from '../utils/money';
 import { txTypeLabel, apiErrorCopy } from '../utils/statusCopy';
+import { isSafeInternalPath } from '../utils/safePath';
 import './Wallet.css';
 
 const QUICK_AMOUNTS_INR = [100, 200, 500, 1000];
@@ -46,7 +47,10 @@ export default function Wallet() {
   const { coin_inr_rate: rate = 1 } = useConfig();
   const toast = useToast();
   const [searchParams] = useSearchParams();
-  const next = searchParams.get('next');
+  const rawNext = searchParams.get('next');
+  // A malicious/unsafe ?next= just means we hide the "back to your session"
+  // link rather than ever navigating to it — see utils/safePath.js.
+  const next = rawNext && isSafeInternalPath(rawNext) ? rawNext : null;
 
   const [amount, setAmount] = useState(QUICK_AMOUNTS_INR[0]);
   const [customAmount, setCustomAmount] = useState('');

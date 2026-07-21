@@ -159,15 +159,30 @@ describe('NotificationBell', () => {
     expect(await screen.findByText(/Balance running low/)).toBeInTheDocument();
   });
 
-  it('closes on Escape', async () => {
+  it('closes on Escape and restores focus to the bell button', async () => {
     renderBell();
     await screen.findByTestId('unread-badge');
 
-    await userEvent.click(screen.getByRole('button', { name: /Notifications/ }));
+    const trigger = screen.getByRole('button', { name: /Notifications/ });
+    await userEvent.click(trigger);
     expect(screen.getByRole('menu', { name: 'Notifications' })).toBeInTheDocument();
 
     await userEvent.keyboard('{Escape}');
     expect(screen.queryByRole('menu', { name: 'Notifications' })).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+  });
+
+  it('closes on outside click and restores focus to the bell button', async () => {
+    renderBell();
+    await screen.findByTestId('unread-badge');
+
+    const trigger = screen.getByRole('button', { name: /Notifications/ });
+    await userEvent.click(trigger);
+    expect(screen.getByRole('menu', { name: 'Notifications' })).toBeInTheDocument();
+
+    await userEvent.click(document.body);
+    expect(screen.queryByRole('menu', { name: 'Notifications' })).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
   });
 
   it('navigates to the session for a notification with a session_id', async () => {

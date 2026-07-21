@@ -3,9 +3,9 @@
  *
  * Reads the stop response from SessionContext (`receipt`): energy, duration,
  * ₹ charged, balance after, an uncollected-shortfall row with plain-language
- * help, and the auto-stop reason via stopReasonCopy. Actions: download the
- * GST invoice (raw fetch — HTML, needs the Bearer header), report an issue
- * (DisputeModal) and charge again.
+ * help, and the auto-stop reason via stopReasonCopy. Actions: view the GST
+ * invoice (raw fetch — HTML, needs the Bearer header, opens in a new tab —
+ * not a download), report an issue (DisputeModal) and charge again.
  */
 
 import { useState } from 'react';
@@ -68,7 +68,10 @@ const SessionReceipt = () => {
       });
       if (!res.ok) throw new Error("Couldn't load the invoice. Please try again.");
       const blob = await res.blob();
-      window.open(URL.createObjectURL(blob), '_blank');
+      const url = URL.createObjectURL(blob);
+      window.open(url, '_blank');
+      // Give the new tab time to load the blob before reclaiming it.
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
     } catch (err) {
       toast.error(err?.message || "Couldn't load the invoice. Please try again.");
     } finally {
@@ -134,7 +137,7 @@ const SessionReceipt = () => {
             onClick={viewInvoice}
             disabled={invoiceBusy}
           >
-            {invoiceBusy ? 'Opening…' : 'Download GST invoice'}
+            {invoiceBusy ? 'Opening…' : 'View GST invoice'}
           </button>
         )}
         {session_id != null && (

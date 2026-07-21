@@ -125,11 +125,17 @@ export default function DataTable({
             <tr
               key={row[keyField]}
               className={onRowClick ? 'row-link' : undefined}
+              role={onRowClick ? 'button' : undefined}
               onClick={onRowClick ? () => onRowClick(row) : undefined}
               onKeyDown={
                 onRowClick
                   ? (e) => {
-                      if (e.key === 'Enter') onRowClick(row);
+                      if (e.key === 'Enter') {
+                        onRowClick(row);
+                      } else if (e.key === ' ') {
+                        e.preventDefault();
+                        onRowClick(row);
+                      }
                     }
                   : undefined
               }

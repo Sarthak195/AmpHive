@@ -4,6 +4,10 @@
  * user's role from 'driver' to 'cpo'. Shown at /cpo for a user who doesn't
  * have the 'cpo' role yet; already-CPO users are redirected past it.
  *
+ * A signed-in cpo (or an admin who already has a tenant_id) is redirected
+ * straight to the console; a plain admin with no tenant has nothing to set
+ * up here and is sent to /admin instead.
+ *
  * Data: POST /api/cpo/setup { tenant_name }.
  *
  * Console pages live under data-theme="volt", but this page renders before
@@ -37,12 +41,15 @@ const CpoSetup = () => {
   const navigate = useNavigate();
   const { user, refreshUser } = useAuth();
 
-  // If the user is already a CPO, redirect to the dashboard. Use the
-  // declarative <Navigate> element instead of calling navigate() in the render
-  // body — an imperative navigate during render updates the router mid-render,
-  // which React warns about and can loop under StrictMode.
-  if (user?.role === 'cpo') {
+  // If the user already has a console to go to, redirect past this form. Use
+  // the declarative <Navigate> element instead of calling navigate() in the
+  // render body — an imperative navigate during render updates the router
+  // mid-render, which React warns about and can loop under StrictMode.
+  if (user?.role === 'cpo' || (user?.role === 'admin' && user?.tenant_id)) {
     return <Navigate to="/cpo/dashboard" replace />;
+  }
+  if (user?.role === 'admin') {
+    return <Navigate to="/admin" replace />;
   }
 
   const handleSubmit = async (e) => {

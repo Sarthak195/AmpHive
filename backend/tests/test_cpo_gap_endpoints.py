@@ -10,6 +10,8 @@ backend/routers/cpo.py):
 - GET    /api/cpo/reservations         ({total, items})
 - GET    /api/cpo/invoices             ({total, items})
 - GET    /api/cpo/invoices.csv         (CSV export, optional days filter)
+- GET    /api/cpo/plugs                (tariff_id serialized for CpoPricing)
+- GET    /api/cpo/groups               (tariff_id serialized for CpoPricing)
 
 DB-free: the mocked-AsyncSession pattern from test_admin_router.py /
 test_driver_gap_endpoints.py — route functions are called directly with an
@@ -25,12 +27,13 @@ from fastapi import HTTPException
 from fastapi.routing import APIRoute
 
 from backend.database.models import (
-    ReservationStatus, SessionStatus, UserRole,
+    PlugStatus, ReservationStatus, SessionStatus, UserRole,
 )
 from backend.routers.cpo import (
     cpo_analytics_sessions, cpo_export_invoices_csv, cpo_list_events,
-    cpo_list_group_members, cpo_list_invoices, cpo_list_reservations,
-    cpo_remove_group_member, router as cpo_router,
+    cpo_list_group_members, cpo_list_groups, cpo_list_invoices,
+    cpo_list_plugs, cpo_list_reservations, cpo_remove_group_member,
+    router as cpo_router,
 )
 
 
@@ -82,6 +85,96 @@ def _db(*results):
     db.rollback = AsyncMock()
     db.delete = AsyncMock()
     return db
+
+
+# --- GET /api/cpo/plugs & /api/cpo/groups: tariff_id serialization -----------
+
+
+def _plug(plug_id=3, tariff_id=None):
+    p = MagicMock()
+    p.id = plug_id
+    p.name = "Plug A"
+    p.gateway_id = "gw-01"
+    p.local_ip = "192.168.1.50"
+    p.plug_model = "P110"
+    p.status = PlugStatus.AVAILABLE
+    p.current_power_w = 0.0
+    p.group_id = None
+    p.latitude = None
+    p.longitude = None
+    p.max_current_a = None
+    p.queued_charging_enabled = None
+    p.auto_start_delay_min = None
+    p.last_seen_at = None
+    p.created_at = None
+    p.tariff_id = tariff_id
+    return p
+
+
+@pytest.mark.asyncio
+async def test_list_plugs_serializes_tariff_id():
+    db = _db(_all([(_plug(plug_id=3, tariff_id=9), None)]))
+
+    resp = await cpo_list_plugs(_cpo(), db)
+
+    assert resp[0]["id"] == 3
+    assert resp[0]["tariff_id"] == 9
+
+
+@pytest.mark.asyncio
+async def test_list_plugs_tariff_id_none_when_unassigned():
+    db = _db(_all([(_plug(plug_id=3, tariff_id=None), None)]))
+
+    resp = await cpo_list_plugs(_cpo(), db)
+
+    assert resp[0]["tariff_id"] is None
+
+
+def _group(group_id=12, tariff_id=None):
+    g = MagicMock()
+    g.id = group_id
+    g.name = "Society Block A"
+    g.is_public = True
+    g.access_code = None
+    g.max_current_a = None
+    g.created_at = None
+    g.tariff_id = tariff_id
+    return g
+
+
+@pytest.mark.asyncio
+async def test_list_groups_serializes_tariff_id():
+    db = _db(
+        _scalars_all([_group(group_id=12, tariff_id=4)]),
+        _scalar(2),  # plug_count
+        _scalar(0),  # member_count
+        _scalar(0),  # pending capacity requests
+    )
+    with patch(
+        "backend.services.caps.measured_circuit_load_a",
+        new=AsyncMock(return_value=12.5),
+    ):
+        resp = await cpo_list_groups(_cpo(), db)
+
+    assert resp[0]["id"] == 12
+    assert resp[0]["tariff_id"] == 4
+
+
+@pytest.mark.asyncio
+async def test_list_groups_tariff_id_none_when_unassigned():
+    db = _db(
+        _scalars_all([_group(group_id=12, tariff_id=None)]),
+        _scalar(2),
+        _scalar(0),
+        _scalar(0),
+    )
+    with patch(
+        "backend.services.caps.measured_circuit_load_a",
+        new=AsyncMock(return_value=0.0),
+    ):
+        resp = await cpo_list_groups(_cpo(), db)
+
+    assert resp[0]["tariff_id"] is None
 
 
 # --- Route registration -------------------------------------------------------

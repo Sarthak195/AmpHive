@@ -308,6 +308,29 @@ describe('checkout flow', () => {
     expect(link).toHaveAttribute('href', '/session');
   });
 
+  it('hides the "Back to your session" link when ?next= is an open-redirect attempt', async () => {
+    api.post.mockImplementation((url) =>
+      url === '/api/payments/create-order'
+        ? Promise.resolve({ order_id: 'order_123', amount: 10000, currency: 'INR', key_id: 'rzp_test' })
+        : Promise.resolve({ status: 'success', coins_credited: 100, new_balance: 740 })
+    );
+    renderWallet('/wallet?next=https%3A%2F%2Fevil.com');
+    await waitForSettled();
+    await userEvent.click(screen.getByRole('button', { name: /^Pay/ }));
+    await waitFor(() => expect(capturedOptions).toBeDefined());
+
+    await act(async () => {
+      await capturedOptions.handler({
+        razorpay_order_id: 'order_123',
+        razorpay_payment_id: 'pay_456',
+        razorpay_signature: 'sig_789',
+      });
+    });
+
+    await screen.findByText(/new balance ₹740.00/);
+    expect(screen.queryByRole('link', { name: 'Back to your session' })).not.toBeInTheDocument();
+  });
+
   it('surfaces order-creation failures without opening checkout', async () => {
     api.post.mockRejectedValue(new Error('Payment service is not configured.'));
     renderWallet();

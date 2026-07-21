@@ -55,17 +55,20 @@ const renderReceipt = () =>
   );
 
 const originalCreateObjectURL = URL.createObjectURL;
+const originalRevokeObjectURL = URL.revokeObjectURL;
 
 beforeEach(() => {
   vi.clearAllMocks();
   useSession.mockReturnValue({ receipt: RECEIPT, dismissReceipt: dismissSpy });
   localStorage.setItem('amphive_token', 'test-token');
   URL.createObjectURL = vi.fn(() => 'blob:mock');
+  URL.revokeObjectURL = vi.fn();
   window.open = vi.fn();
 });
 
 afterEach(() => {
   URL.createObjectURL = originalCreateObjectURL;
+  URL.revokeObjectURL = originalRevokeObjectURL;
   localStorage.clear();
   vi.unstubAllGlobals();
 });
@@ -114,26 +117,35 @@ describe('SessionReceipt — summary', () => {
 });
 
 describe('SessionReceipt — invoice', () => {
-  it('fetches the GST invoice with the auth header and opens it', async () => {
+  it('fetches the GST invoice with the auth header, opens it, and defers revoking the blob URL', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       blob: async () => new Blob(['<html></html>'], { type: 'text/html' }),
     });
     vi.stubGlobal('fetch', fetchMock);
+    const setTimeoutSpy = vi.spyOn(window, 'setTimeout');
     renderReceipt();
-    await userEvent.click(screen.getByRole('button', { name: 'Download GST invoice' }));
+    await userEvent.click(screen.getByRole('button', { name: 'View GST invoice' }));
 
     expect(fetchMock).toHaveBeenCalledWith(
       expect.stringContaining('/api/sessions/42/invoice?format=html'),
       { headers: { Authorization: 'Bearer test-token' } }
     );
     expect(window.open).toHaveBeenCalledWith('blob:mock', '_blank');
+
+    // Revocation is deferred (not immediate) so the new tab has time to load
+    // the blob first.
+    expect(URL.revokeObjectURL).not.toHaveBeenCalled();
+    const deferredRevoke = setTimeoutSpy.mock.calls.find(([, delay]) => delay === 60_000);
+    expect(deferredRevoke).toBeTruthy();
+    deferredRevoke[0]();
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:mock');
   });
 
   it('surfaces an invoice failure as an error toast (and opens nothing)', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 500 }));
     renderReceipt();
-    await userEvent.click(screen.getByRole('button', { name: 'Download GST invoice' }));
+    await userEvent.click(screen.getByRole('button', { name: 'View GST invoice' }));
 
     expect(window.open).not.toHaveBeenCalled();
     expect(await screen.findByText(/Couldn't load the invoice/)).toBeInTheDocument();
@@ -146,7 +158,7 @@ describe('SessionReceipt — invoice', () => {
     });
     renderReceipt();
     expect(
-      screen.queryByRole('button', { name: 'Download GST invoice' })
+      screen.queryByRole('button', { name: 'View GST invoice' })
     ).not.toBeInTheDocument();
   });
 });

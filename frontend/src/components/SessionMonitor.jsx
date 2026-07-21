@@ -65,7 +65,7 @@ const SessionMonitor = () => {
     lastFrameAt, focusedStartedAt, focusedLimits, alarms,
   } = useSession();
   const { coin_inr_rate } = useConfig();
-  const { balance } = useWallet();
+  const { availableBalance } = useWallet();
   const toast = useToast();
 
   // 1 Hz clock so the elapsed timer and staleness check tick smoothly between
@@ -123,8 +123,10 @@ const SessionMonitor = () => {
   );
 
   // Low balance: the wallet is only debited on stop, so remaining ≈ balance −
-  // accrued cost. The kWh-left estimate uses the plug's price_now when known.
-  const walletBalance = Number(balance) || 0;
+  // accrued cost. Uses availableBalance so a hold from a second concurrent
+  // session is respected. The kWh-left estimate uses the plug's price_now
+  // when known.
+  const walletBalance = Number(availableBalance) || 0;
   const remainingCoins = walletBalance - costCoins;
   const lowBalance = isActive && costCoins > 0 &&
     remainingCoins <= Math.max(10, walletBalance * 0.15);
@@ -209,6 +211,15 @@ const SessionMonitor = () => {
         </span>
         <span className="session-cost-energy num text-2">{formatKwh(energyNum)}</span>
       </ChargeRing>
+
+      {/* Screen-reader-only live cost announcement — only mutates (and so
+          only announces) when the whole-rupee value changes, since telemetry
+          ticks far more often than that. */}
+      {isActive && (
+        <div className="sr-only" aria-live="polite">
+          {`Current cost ${Math.floor(costInr)} rupees, ${energyNum.toFixed(2)} kilowatt hours`}
+        </div>
+      )}
 
       {/* Meter row: kW now · elapsed · plug name (+ the tariff rate line). */}
       <dl className="session-meters">

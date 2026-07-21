@@ -1,7 +1,8 @@
 /**
  * AppBar tests: anonymous vs signed-in rendering on the driver host (nav
- * links, wallet pill, user menu with the external host-your-chargers link)
- * and the CPO-host variant (brand + auth only, no driver navigation).
+ * links, wallet pill, user menu with the role-aware become-a-host / console
+ * link), the CPO-host variant (brand + auth only, no driver navigation), and
+ * the menu's Escape/outside-click focus restore to the trigger button.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen } from '@testing-library/react';
@@ -10,7 +11,7 @@ import { MemoryRouter } from 'react-router-dom';
 
 import AppBar from './AppBar';
 import { useAuth } from '../contexts/AuthContext';
-import { isCpoHost, cpoOrigin } from '../utils/appHost';
+import { isCpoHost, isSplitHost, cpoOrigin } from '../utils/appHost';
 
 vi.mock('../contexts/AuthContext', () => ({ useAuth: vi.fn() }));
 vi.mock('../contexts/WalletContext', () => ({ useWallet: () => ({ balance: 250 }) }));
@@ -20,6 +21,7 @@ vi.mock('./ui/Money', () => ({
 }));
 vi.mock('../utils/appHost', () => ({
   isCpoHost: vi.fn(),
+  isSplitHost: vi.fn(),
   cpoOrigin: vi.fn(),
 }));
 
@@ -33,6 +35,7 @@ const renderAppBar = () =>
 beforeEach(() => {
   vi.clearAllMocks();
   isCpoHost.mockReturnValue(false);
+  isSplitHost.mockReturnValue(true);
   cpoOrigin.mockReturnValue('https://cpo.amphive.app');
 });
 
@@ -84,6 +87,92 @@ describe('AppBar on the driver host — signed in', () => {
 
     await userEvent.click(screen.getByRole('menuitem', { name: /sign out/i }));
     expect(logout).toHaveBeenCalled();
+  });
+
+  it('restores focus to the account-menu button on Escape', async () => {
+    renderAppBar();
+    const trigger = screen.getByRole('button', { name: /account menu/i });
+    await userEvent.click(trigger);
+    expect(screen.getByRole('menu', { name: 'Account' })).toBeInTheDocument();
+
+    await userEvent.keyboard('{Escape}');
+    expect(screen.queryByRole('menu', { name: 'Account' })).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+  });
+
+  it('restores focus to the account-menu button on outside click', async () => {
+    renderAppBar();
+    const trigger = screen.getByRole('button', { name: /account menu/i });
+    await userEvent.click(trigger);
+    expect(screen.getByRole('menu', { name: 'Account' })).toBeInTheDocument();
+
+    await userEvent.click(document.body);
+    expect(screen.queryByRole('menu', { name: 'Account' })).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+  });
+});
+
+describe('AppBar user menu — cpo role', () => {
+  beforeEach(() =>
+    useAuth.mockReturnValue({
+      user: { email: 'op@amphive.test', full_name: 'Olive Operator', role: 'cpo' },
+      logout: vi.fn(),
+    })
+  );
+
+  it('shows an external "Host console" link on a split (driver) host', async () => {
+    isSplitHost.mockReturnValue(true);
+    renderAppBar();
+    await userEvent.click(screen.getByRole('button', { name: /account menu/i }));
+
+    expect(screen.queryByRole('menuitem', { name: /host your chargers/i })).not.toBeInTheDocument();
+    expect(screen.getByRole('menuitem', { name: /host console/i })).toHaveAttribute(
+      'href',
+      'https://cpo.amphive.app/cpo/dashboard'
+    );
+  });
+
+  it('shows an internal "Host console" link on an unsplit host', async () => {
+    isSplitHost.mockReturnValue(false);
+    renderAppBar();
+    await userEvent.click(screen.getByRole('button', { name: /account menu/i }));
+
+    expect(screen.getByRole('menuitem', { name: /host console/i })).toHaveAttribute(
+      'href',
+      '/cpo/dashboard'
+    );
+  });
+});
+
+describe('AppBar user menu — admin role', () => {
+  beforeEach(() =>
+    useAuth.mockReturnValue({
+      user: { email: 'admin@amphive.test', full_name: 'Ada Admin', role: 'admin' },
+      logout: vi.fn(),
+    })
+  );
+
+  it('shows an external "Admin console" link on a split (driver) host', async () => {
+    isSplitHost.mockReturnValue(true);
+    renderAppBar();
+    await userEvent.click(screen.getByRole('button', { name: /account menu/i }));
+
+    expect(screen.queryByRole('menuitem', { name: /host your chargers/i })).not.toBeInTheDocument();
+    expect(screen.getByRole('menuitem', { name: /admin console/i })).toHaveAttribute(
+      'href',
+      'https://cpo.amphive.app/admin'
+    );
+  });
+
+  it('shows an internal "Admin console" link on an unsplit host', async () => {
+    isSplitHost.mockReturnValue(false);
+    renderAppBar();
+    await userEvent.click(screen.getByRole('button', { name: /account menu/i }));
+
+    expect(screen.getByRole('menuitem', { name: /admin console/i })).toHaveAttribute(
+      'href',
+      '/admin'
+    );
   });
 });
 

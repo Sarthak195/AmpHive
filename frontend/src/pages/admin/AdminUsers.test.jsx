@@ -175,7 +175,9 @@ describe('disable / enable', () => {
     await userEvent.click(within(driverRow).getByRole('button', { name: /disable/i }));
 
     expect(
-      screen.getByText("Disable driver@amphive.test? All their sessions and tokens end now.")
+      screen.getByText(
+        "Disable driver@amphive.test? They're signed out everywhere immediately. A charge already in progress keeps running until it finishes or is stopped separately."
+      )
     ).toBeInTheDocument();
 
     api.patch.mockResolvedValue({ status: 'updated', id: 7, role: 'driver', is_disabled: true });

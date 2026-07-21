@@ -4,12 +4,14 @@
  * Register mode has moved to its own page (Signup) — this is sign-in only,
  * with a footer link to "Create an account".
  *
- * On success, returns the driver to wherever they were headed: router
- * state.from (ProtectedRoute / the Home QR/deep-link guard) wins over the
- * `?next=` query param (the api client's 401 handler / Marketing's plug-ID
- * funnel both append it, same-app paths only) — falling back to Home. This
- * keeps the printed-QR path intact: /login?next=/?plug=7 lands back on
- * / with the plug param preserved.
+ * On success, returns the driver to wherever they were headed: the `?next=`
+ * query param (the api client's 401 handler / Marketing's plug-ID funnel
+ * both append it) wins when it's a safe same-app path, else router
+ * state.from (ProtectedRoute / the Home QR/deep-link guard) — falling back
+ * to Home. This keeps the printed-QR path intact: /login?next=/?plug=7 lands
+ * back on / with the plug param preserved. `next` is validated via
+ * isSafeInternalPath() so an attacker-controlled query string can never
+ * bounce the driver off-origin (open-redirect guard).
  */
 
 import { useState } from 'react';
@@ -18,6 +20,7 @@ import { Eye, EyeOff } from 'lucide-react';
 import AuthShell from '../components/AuthShell';
 import { useAuth } from '../contexts/AuthContext';
 import { apiErrorCopy } from '../utils/statusCopy';
+import { isSafeInternalPath } from '../utils/safePath';
 
 const Login = () => {
   const { login } = useAuth();
@@ -37,13 +40,12 @@ const Login = () => {
 
     try {
       await login(email, password);
-      // Return to the original destination: router state.from (ProtectedRoute
-      // / the QR-deep-link guard) wins, else the ?next= param, else Home.
-      const from = location.state?.from;
+      // Return to the original destination: a safe ?next= param wins, else
+      // router state.from (ProtectedRoute / the QR-deep-link guard), else Home.
       const next = new URLSearchParams(location.search).get('next');
-      const target = from
-        ? `${from.pathname}${from.search || ''}${from.hash || ''}`
-        : (next && next.startsWith('/') ? next : '/');
+      const from = location.state?.from;
+      const fromTarget = from ? `${from.pathname}${from.search || ''}${from.hash || ''}` : null;
+      const target = (next && isSafeInternalPath(next) ? next : null) || fromTarget || '/';
       navigate(target, { replace: true });
     } catch (err) {
       setError(apiErrorCopy(err));

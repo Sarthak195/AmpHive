@@ -36,6 +36,7 @@ const NotificationBell = () => {
   const [items, setItems] = useState([]);
   const [unread, setUnread] = useState(0);
   const wrapRef = useRef(null);
+  const bellButtonRef = useRef(null);
 
   const fetchFeed = useCallback(async () => {
     try {
@@ -66,15 +67,26 @@ const NotificationBell = () => {
     return () => socket.off('notification', handleNotification);
   }, [socket]);
 
-  // Refetch every time the drawer opens; close on outside click or Escape.
+  // Refetch every time the drawer opens; close on outside click or Escape —
+  // both restore focus to the bell button (mirrors CpoLayout's drawer-close
+  // pattern).
   useEffect(() => {
     if (!open) return undefined;
     fetchFeed();
     const onPointerDown = (e) => {
-      if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false);
+      if (wrapRef.current && !wrapRef.current.contains(e.target)) {
+        // Prevent the browser's default mousedown "unfocus" behavior so our
+        // own focus restore below actually sticks.
+        e.preventDefault();
+        setOpen(false);
+        bellButtonRef.current?.focus();
+      }
     };
     const onKeyDown = (e) => {
-      if (e.key === 'Escape') setOpen(false);
+      if (e.key === 'Escape') {
+        setOpen(false);
+        bellButtonRef.current?.focus();
+      }
     };
     document.addEventListener('mousedown', onPointerDown);
     document.addEventListener('keydown', onKeyDown);
@@ -117,6 +129,7 @@ const NotificationBell = () => {
   return (
     <div className="notification-bell" ref={wrapRef}>
       <button
+        ref={bellButtonRef}
         type="button"
         className="btn btn-ghost btn-icon"
         aria-label={`Notifications${unread ? ` (${unread} unread)` : ''}`}

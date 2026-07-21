@@ -194,11 +194,39 @@ describe('Activity — session detail modal', () => {
     await userEvent.click(await screen.findByText('Garage plug'));
     await screen.findByRole('heading', { name: 'Session detail' });
 
-    expect(screen.getByRole('button', { name: 'Download GST invoice' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'View GST invoice' })).toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: 'Report an issue' }));
 
     expect(screen.queryByRole('heading', { name: 'Session detail' })).not.toBeInTheDocument();
     expect(await screen.findByTestId('dispute-modal')).toHaveTextContent('dispute for 1');
+  });
+
+  it('opens the GST invoice via a raw token-bearing fetch and defers revoking the blob URL', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, blob: () => Promise.resolve(new Blob()) });
+    vi.stubGlobal('fetch', fetchMock);
+    const revokeSpy = vi.fn();
+    vi.stubGlobal('URL', { ...URL, createObjectURL: vi.fn().mockReturnValue('blob:mock'), revokeObjectURL: revokeSpy });
+    const openSpy = vi.spyOn(window, 'open').mockImplementation(() => {});
+    const setTimeoutSpy = vi.spyOn(window, 'setTimeout');
+
+    render(<Activity />);
+    await userEvent.click(await screen.findByText('Garage plug'));
+    await screen.findByRole('heading', { name: 'Session detail' });
+    await userEvent.click(screen.getByRole('button', { name: 'View GST invoice' }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining('/api/sessions/1/invoice?format=html'),
+        expect.any(Object)
+      );
+    });
+    expect(openSpy).toHaveBeenCalledWith('blob:mock', '_blank');
+
+    expect(revokeSpy).not.toHaveBeenCalled();
+    const deferredRevoke = setTimeoutSpy.mock.calls.find(([, delay]) => delay === 60_000);
+    expect(deferredRevoke).toBeTruthy();
+    deferredRevoke[0]();
+    expect(revokeSpy).toHaveBeenCalledWith('blob:mock');
   });
 
   it('refetches disputes when DisputeModal reports a submission', async () => {

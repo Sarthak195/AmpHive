@@ -91,6 +91,18 @@ describe('Signup', () => {
     expect(await screen.findByTestId('location-probe')).toHaveTextContent('/?plug=7');
   });
 
+  it('rejects an open-redirect ?next= and falls back to Home', async () => {
+    registerSpy.mockResolvedValue({});
+    renderSignup('/signup?next=https%3A%2F%2Fevil.com');
+
+    await userEvent.type(screen.getByLabelText('Full name'), 'New Driver');
+    await userEvent.type(screen.getByLabelText('Email address'), 'new@amphive.test');
+    await userEvent.type(screen.getByLabelText('Password'), 'password123');
+    await userEvent.click(screen.getByRole('button', { name: 'Create account' }));
+
+    expect(await screen.findByText('home page')).toBeInTheDocument();
+  });
+
   it('surfaces an API failure (e.g. email already registered) inline', async () => {
     registerSpy.mockRejectedValue(new Error('An account with that email already exists.'));
     renderSignup();

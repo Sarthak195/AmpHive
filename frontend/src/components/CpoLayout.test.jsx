@@ -25,6 +25,17 @@ vi.mock('../utils/appHost', () => ({ driverOrigin: () => 'https://amphive.app' }
 
 const logout = vi.fn();
 
+/** jsdom has no matchMedia implementation — stub it so CpoLayout's mobile
+ *  breakpoint check (which drives `inert` on the closed drawer) can run. */
+const mockMatchMedia = (matches) => {
+  window.matchMedia = vi.fn().mockImplementation((query) => ({
+    matches,
+    media: query,
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+  }));
+};
+
 const NAV_LINKS = [
   ['Dashboard', '/cpo/dashboard'],
   ['Chargers', '/cpo/chargers'],
@@ -51,6 +62,7 @@ const renderLayout = (path = '/cpo/dashboard') =>
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockMatchMedia(false); // desktop by default
   useAuth.mockReturnValue({
     user: { email: 'op@amphive.test', full_name: 'Olive Operator', role: 'cpo' },
     logout,
@@ -150,5 +162,21 @@ describe('CpoLayout', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Open menu' }));
     await userEvent.click(screen.getByRole('button', { name: 'Close menu' }));
     expect(document.querySelector('.console-sidebar')).not.toHaveClass('open');
+  });
+
+  it('marks the closed sidebar inert on mobile, but never on desktop', async () => {
+    mockMatchMedia(true); // mobile
+    renderLayout();
+    const sidebar = document.querySelector('.console-sidebar');
+    expect(sidebar).toHaveAttribute('inert');
+
+    await userEvent.click(screen.getByRole('button', { name: 'Open menu' }));
+    expect(sidebar).not.toHaveAttribute('inert');
+  });
+
+  it('never marks the sidebar inert on desktop, even while the drawer is closed', () => {
+    mockMatchMedia(false); // desktop
+    renderLayout();
+    expect(document.querySelector('.console-sidebar')).not.toHaveAttribute('inert');
   });
 });

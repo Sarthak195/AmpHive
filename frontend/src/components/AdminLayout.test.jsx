@@ -19,6 +19,17 @@ vi.mock('react-router-dom', async () => {
   return { ...actual, useNavigate: () => navigateMock };
 });
 
+/** jsdom has no matchMedia implementation — stub it so AdminLayout's mobile
+ *  breakpoint check (which drives `inert` on the closed drawer) can run. */
+const mockMatchMedia = (matches) => {
+  window.matchMedia = vi.fn().mockImplementation((query) => ({
+    matches,
+    media: query,
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+  }));
+};
+
 const renderLayout = (path = '/admin/tenants') =>
   render(
     <MemoryRouter initialEntries={[path]}>
@@ -34,6 +45,7 @@ const renderLayout = (path = '/admin/tenants') =>
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockMatchMedia(false); // desktop by default
   useAuth.mockReturnValue({
     user: { email: 'root@amphive.test', role: 'admin' },
     logout: vi.fn().mockResolvedValue(),
@@ -87,6 +99,37 @@ describe('AdminLayout', () => {
     const scrim = closeButtons.find((b) => b.className === 'console-scrim');
     await userEvent.click(scrim);
     expect(sidebar()).not.toHaveClass('open');
+  });
+
+  it('moves focus into the drawer on open; Escape closes it and restores focus to the toggle', async () => {
+    renderLayout();
+    const toggle = screen.getByRole('button', { name: 'Open menu' });
+
+    await userEvent.click(toggle);
+    expect(screen.getByRole('link', { name: 'Overview' })).toHaveFocus();
+
+    await userEvent.keyboard('{Escape}');
+    const sidebar = screen.getByRole('link', { name: 'Overview' }).closest('aside');
+    expect(sidebar).not.toHaveClass('open');
+    expect(screen.getByRole('button', { name: 'Open menu' })).toHaveFocus();
+  });
+
+  it('marks the closed sidebar inert on mobile, but never on desktop', async () => {
+    mockMatchMedia(true); // mobile
+    renderLayout();
+    const sidebar = () => screen.getByRole('link', { name: 'Overview' }).closest('aside');
+    expect(sidebar()).toHaveAttribute('inert');
+
+    await userEvent.click(screen.getByRole('button', { name: 'Open menu' }));
+    expect(sidebar()).not.toHaveAttribute('inert');
+  });
+
+  it('never marks the sidebar inert on desktop, even while the drawer is closed', () => {
+    mockMatchMedia(false); // desktop
+    renderLayout();
+    expect(screen.getByRole('link', { name: 'Overview' }).closest('aside')).not.toHaveAttribute(
+      'inert'
+    );
   });
 
   it('omits the Operator console link when the admin has no tenant_id', () => {

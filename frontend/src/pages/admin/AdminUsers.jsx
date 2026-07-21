@@ -365,7 +365,7 @@ export default function AdminUsers() {
         body={
           disableTarget?.is_disabled
             ? `${disableTarget.email} will be able to sign in again.`
-            : `Disable ${disableTarget?.email}? All their sessions and tokens end now.`
+            : `Disable ${disableTarget?.email}? They're signed out everywhere immediately. A charge already in progress keeps running until it finishes or is stopped separately.`
         }
       />
 

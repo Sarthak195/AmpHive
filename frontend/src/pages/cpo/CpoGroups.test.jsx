@@ -34,6 +34,15 @@ Object.defineProperty(navigator, 'clipboard', {
   configurable: true,
 });
 
+/** jsdom has no matchMedia implementation — stub it so CpoLayout's mobile
+ *  breakpoint check (this suite renders the real layout) can run. */
+window.matchMedia = vi.fn().mockImplementation((query) => ({
+  matches: false,
+  media: query,
+  addEventListener: vi.fn(),
+  removeEventListener: vi.fn(),
+}));
+
 const GROUPS = [
   {
     id: 1, name: 'Sunrise Society', is_public: false, access_code: 'SUNRISE24',

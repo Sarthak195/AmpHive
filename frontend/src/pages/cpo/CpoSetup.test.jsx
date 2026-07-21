@@ -1,9 +1,11 @@
 /**
- * CpoSetup tests: an already-CPO user is redirected straight to the
- * dashboard; a driver sees the org-name form + what-happens-next checklist,
- * blank submission is blocked client-side, a successful POST /api/cpo/setup
- * refreshes the user, toasts, and redirects to the dashboard, and a rejected
- * setup surfaces inline (not as a toast).
+ * CpoSetup tests: an already-CPO user (or an admin who already has a
+ * tenant_id) is redirected straight to the dashboard; a plain admin with no
+ * tenant has nothing to set up here and is sent to /admin instead; a driver
+ * sees the org-name form + what-happens-next checklist, blank submission is
+ * blocked client-side, a successful POST /api/cpo/setup refreshes the user,
+ * toasts, and redirects to the dashboard, and a rejected setup surfaces
+ * inline (not as a toast).
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen } from '@testing-library/react';
@@ -31,6 +33,7 @@ const renderSetup = () =>
       <Routes>
         <Route path="/cpo" element={<CpoSetup />} />
         <Route path="/cpo/dashboard" element={<div>cpo dashboard</div>} />
+        <Route path="/admin" element={<div>admin overview</div>} />
       </Routes>
     </MemoryRouter>
   );
@@ -45,6 +48,18 @@ describe('CpoSetup', () => {
     useAuth.mockReturnValue({ user: { role: 'cpo' }, refreshUser: refreshUserSpy });
     renderSetup();
     expect(screen.getByText('cpo dashboard')).toBeInTheDocument();
+  });
+
+  it('redirects an admin who already has a tenant_id straight to the dashboard', () => {
+    useAuth.mockReturnValue({ user: { role: 'admin', tenant_id: 3 }, refreshUser: refreshUserSpy });
+    renderSetup();
+    expect(screen.getByText('cpo dashboard')).toBeInTheDocument();
+  });
+
+  it('sends a tenant-less admin to /admin instead of showing the become-a-host form', () => {
+    useAuth.mockReturnValue({ user: { role: 'admin', tenant_id: null }, refreshUser: refreshUserSpy });
+    renderSetup();
+    expect(screen.getByText('admin overview')).toBeInTheDocument();
   });
 
   it('renders the organization form and the what-happens-next checklist', () => {

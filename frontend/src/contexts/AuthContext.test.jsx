@@ -109,6 +109,30 @@ describe('login / logout', () => {
     expect(JSON.parse(localStorage.getItem('amphive_user')).email).toBe('driver@amphive.test');
   });
 
+  it('login refreshes from /api/auth/me so fields missing from the AuthResponse land', async () => {
+    api.post.mockResolvedValue({
+      token: 'fresh-jwt',
+      user: { email: 'driver@amphive.test', role: 'driver' },
+    });
+    api.get.mockResolvedValue({
+      email: 'driver@amphive.test',
+      role: 'driver',
+      available_balance: 42,
+      created_at: '2026-01-01T00:00:00Z',
+      is_disabled: false,
+    });
+    renderProbe();
+    await screen.findByTestId('user');
+
+    await userEvent.click(screen.getByText('login'));
+
+    // The optimistic set happens first, then the /me refresh lands the full shape.
+    await waitFor(() => expect(api.get).toHaveBeenCalledWith('/api/auth/me'));
+    await waitFor(() =>
+      expect(JSON.parse(localStorage.getItem('amphive_user')).available_balance).toBe(42)
+    );
+  });
+
   it('logout revokes server-side then clears state and localStorage', async () => {
     api.post.mockImplementation((url) =>
       url === '/api/auth/login'

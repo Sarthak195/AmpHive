@@ -17,6 +17,7 @@ import AuthShell from '../components/AuthShell';
 import { useToast } from '../components/ui';
 import { useAuth } from '../contexts/AuthContext';
 import { apiErrorCopy } from '../utils/statusCopy';
+import { isSafeInternalPath } from '../utils/safePath';
 
 const MIN_LEN = 8;
 const MAX_LEN = 72;
@@ -58,7 +59,7 @@ const Signup = () => {
       const next = new URLSearchParams(location.search).get('next');
       const target = from
         ? `${from.pathname}${from.search || ''}${from.hash || ''}`
-        : (next && next.startsWith('/') ? next : '/');
+        : (next && isSafeInternalPath(next) ? next : '/');
       navigate(target, { replace: true });
     } catch (err) {
       setError(apiErrorCopy(err));

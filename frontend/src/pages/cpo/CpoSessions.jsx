@@ -14,9 +14,15 @@
  * the existing /api/cpo/analytics/sessions.csv endpoint — that's a file
  * download, so it goes through a raw authenticated fetch, not the JSON api
  * client.
+ *
+ * Seeds the status filter from a `?status=` deep link (e.g. CpoDashboard's
+ * "Active sessions" KPI links to /cpo/sessions?status=active) — the query
+ * param's value already matches the backend's `status_filter` values
+ * one-to-one, so it's read once on mount as the initial filter state.
  */
 
 import { useCallback, useEffect, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { BatteryCharging, Download } from 'lucide-react';
 
 import CpoLayout from '../../components/CpoLayout';
@@ -63,10 +69,11 @@ function Row({ label, children }) {
 export default function CpoSessions() {
   const { coin_inr_rate: rate = 1 } = useConfig();
   const toast = useToast();
+  const [searchParams] = useSearchParams();
 
   const [days, setDays] = useState(30);
   const [plugId, setPlugId] = useState('');
-  const [statusFilter, setStatusFilter] = useState('');
+  const [statusFilter, setStatusFilter] = useState(() => searchParams.get('status') || '');
   const [plugs, setPlugs] = useState([]);
 
   const [sessions, setSessions] = useState([]);

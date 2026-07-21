@@ -11,6 +11,7 @@ import userEvent from '@testing-library/user-event';
 
 import ChargeSetupModal from './ChargeSetupModal';
 import api from '../api/client';
+import { useWallet } from '../contexts/WalletContext';
 
 vi.mock('../api/client', () => ({
   default: { get: vi.fn(), post: vi.fn(), put: vi.fn(), patch: vi.fn(), delete: vi.fn() },
@@ -18,9 +19,7 @@ vi.mock('../api/client', () => ({
 vi.mock('../contexts/ConfigContext', () => ({
   useConfig: () => ({ coins_per_kwh: 5, coin_inr_rate: 1 }),
 }));
-vi.mock('../contexts/WalletContext', () => ({
-  useWallet: () => ({ balance: 100 }),
-}));
+vi.mock('../contexts/WalletContext', () => ({ useWallet: vi.fn() }));
 
 const PLUG = { id: 7, name: 'Garage Plug', price_per_kwh: 10 };
 
@@ -39,7 +38,10 @@ const renderModal = (props = {}) => {
   return { onConfirm, onClose };
 };
 
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => {
+  vi.clearAllMocks();
+  useWallet.mockReturnValue({ balance: 100, availableBalance: 100 });
+});
 
 describe('ChargeSetupModal — copy per mode', () => {
   it('start mode: "Set up your charge" / "Start charging"', () => {
@@ -60,6 +62,26 @@ describe('ChargeSetupModal — copy per mode', () => {
     // price 10, balance 100 → covers ≈ 10.0 kWh
     expect(screen.getByText(/₹10\.00/)).toBeInTheDocument();
     expect(screen.getByText(/covers ≈ 10\.0 kWh/)).toBeInTheDocument();
+  });
+
+  it('coverage uses availableBalance (not the raw balance) so a concurrent hold is respected', () => {
+    // A second active session holds 60 coins — availableBalance (40) is what
+    // the estimate must use, not the raw balance (100).
+    useWallet.mockReturnValue({ balance: 100, availableBalance: 40 });
+    renderModal();
+    expect(screen.getByText(/covers ≈ 4\.0 kWh/)).toBeInTheDocument();
+  });
+});
+
+describe('ChargeSetupModal — availableBalance', () => {
+  it('coverage uses availableBalance (not the raw balance) so a concurrent hold is respected', async () => {
+    const { useWallet } = await import('../contexts/WalletContext');
+    useWallet.mockReturnValue?.({ balance: 100, availableBalance: 40 });
+    // useWallet above is a plain fn (not vi.fn) per the module mock, so
+    // re-mock it directly for this test.
+    vi.doMock('../contexts/WalletContext', () => ({
+      useWallet: () => ({ balance: 100, availableBalance: 40 }),
+    }));
   });
 });
 

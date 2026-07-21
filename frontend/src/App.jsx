@@ -14,7 +14,9 @@
  * admin) ships as its own chunk; BootSplash is both the auth-restore gate
  * and the Suspense fallback. Driver chrome (AppBar + MobileTabBar) renders
  * inside the driver route trees via DriverShell — console routes bring
- * their own layout chrome.
+ * their own layout chrome, and the auth pages (Login/Signup/ForgotPassword/
+ * ResetPassword) render standalone outside any shell (their own AuthShell
+ * frame is the only chrome they get).
  */
 
 import { lazy, Suspense } from 'react';
@@ -104,36 +106,47 @@ const passwordResetRoutes = (
   </>
 );
 
+/** Auth pages render standalone — no AppBar/MobileTabBar chrome. They bring
+    their own AuthShell frame, so mounting them inside DriverShell would show
+    double chrome (this app bar AND the auth card's own header). */
+const authRoutes = (
+  <>
+    <Route path="/login" element={<Login />} />
+    <Route path="/signup" element={<Signup />} />
+    {passwordResetRoutes}
+  </>
+);
+
 /** Driver experience — shared verbatim by the driver host and the unsplit
     fallback tree. Legacy paths redirect: /topup → /wallet, /history →
     /activity. */
 const driverRoutes = (
-  <Route element={<DriverShell />}>
-    <Route path="/" element={<HomeGate />} />
-    <Route path="/login" element={<Login />} />
-    <Route path="/signup" element={<Signup />} />
-    {passwordResetRoutes}
-    {/* Public charger-discovery map — no account needed. */}
-    <Route path="/map" element={<MapPage />} />
-    <Route path="/session" element={
-      <ProtectedRoute><Session /></ProtectedRoute>
-    } />
-    <Route path="/wallet" element={
-      <ProtectedRoute><Wallet /></ProtectedRoute>
-    } />
-    <Route path="/activity" element={
-      <ProtectedRoute><Activity /></ProtectedRoute>
-    } />
-    <Route path="/groups" element={
-      <ProtectedRoute><Groups /></ProtectedRoute>
-    } />
-    <Route path="/account" element={
-      <ProtectedRoute><Account /></ProtectedRoute>
-    } />
-    {/* Renamed pages keep their old URLs working. */}
-    <Route path="/topup" element={<Navigate to="/wallet" replace />} />
-    <Route path="/history" element={<Navigate to="/activity" replace />} />
-  </Route>
+  <>
+    {authRoutes}
+    <Route element={<DriverShell />}>
+      <Route path="/" element={<HomeGate />} />
+      {/* Public charger-discovery map — no account needed. */}
+      <Route path="/map" element={<MapPage />} />
+      <Route path="/session" element={
+        <ProtectedRoute><Session /></ProtectedRoute>
+      } />
+      <Route path="/wallet" element={
+        <ProtectedRoute><Wallet /></ProtectedRoute>
+      } />
+      <Route path="/activity" element={
+        <ProtectedRoute><Activity /></ProtectedRoute>
+      } />
+      <Route path="/groups" element={
+        <ProtectedRoute><Groups /></ProtectedRoute>
+      } />
+      <Route path="/account" element={
+        <ProtectedRoute><Account /></ProtectedRoute>
+      } />
+      {/* Renamed pages keep their old URLs working. */}
+      <Route path="/topup" element={<Navigate to="/wallet" replace />} />
+      <Route path="/history" element={<Navigate to="/activity" replace />} />
+    </Route>
+  </>
 );
 
 /** CPO console route table — shared by the CPO host and unsplit trees.
