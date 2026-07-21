@@ -539,4 +539,76 @@ async def request_capacity(
     return {"status": "requested", "plug_id": plug_id}
 
 
+# ===========================================================================
+# Tariff preview — the plug's full effective price schedule
+# (redesign/ui-v3 — plans/redesign-v3-contract.md §4 "Driver gaps")
+# ===========================================================================
+
+@router.get("/api/plugs/{plug_id}/tariff-preview")
+async def get_plug_tariff_preview(
+    plug_id: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    The plug's EFFECTIVE tariff, previewed for the driver before they start:
+    ``{base_price_per_kwh, price_now, slots: [{days, start_minute,
+    end_minute, price_per_kwh}]}``.
+
+    Any authenticated role; visibility follows GET /api/plugs/{id} exactly
+    (ensure_plug_group_access — 403 for a private-group plug the caller
+    hasn't joined). The tariff resolves through the SAME chain
+    services/pricing.py resolve_rate_for_plug uses (plug -> group -> tenant
+    default -> global env fallback) — this endpoint reuses that module's
+    resolution + slot helpers rather than re-implementing them, so preview
+    and billing can never disagree. ``days`` expands the slot's days_mask
+    into weekday indices (0=Mon .. 6=Sun, the mask's own bit order).
+    ``price_now`` re-resolves at "now" in the tenant's local zone: the
+    covering slot's price, else the flat base. No tariff anywhere in the
+    chain -> the env default rate with no slots.
+    """
+    from backend.database.models import TariffSlot
+    from backend.services.money import to_money
+    from backend.services.pricing import (
+        _resolve_tariff_and_tz, _slot_rate_and_bound, _to_local, _zone,
+        default_rate,
+    )
+
+    result = await db.execute(select(Plug).where(Plug.id == plug_id))
+    plug = result.scalar_one_or_none()
+    if not plug:
+        raise HTTPException(status_code=404, detail=f"Plug with ID {plug_id} not found.")
+
+    await ensure_plug_group_access(db, plug, user)
+
+    tariff, tz_name = await _resolve_tariff_and_tz(db, plug)
+    if tariff is None:
+        # Legacy env fallback — flat rate, no time-of-day structure.
+        rate = float(default_rate())
+        return {"base_price_per_kwh": rate, "price_now": rate, "slots": []}
+
+    slots = (
+        await db.execute(select(TariffSlot).where(TariffSlot.tariff_id == tariff.id))
+    ).scalars().all()
+
+    base = to_money(tariff.price_per_kwh)
+    at_local = _to_local(datetime.now(timezone.utc), _zone(tz_name))
+    slot_rate, _boundary = _slot_rate_and_bound(slots, at_local)
+    price_now = slot_rate if slot_rate is not None else base
+
+    return {
+        "base_price_per_kwh": float(base),
+        "price_now": float(price_now),
+        "slots": [
+            {
+                "days": [d for d in range(7) if (int(s.days_mask) >> d) & 1],
+                "start_minute": int(s.start_min),
+                "end_minute": int(s.end_min),
+                "price_per_kwh": float(to_money(s.price_per_kwh)),
+            }
+            for s in sorted(slots, key=lambda s: (int(s.start_min), int(s.end_min)))
+        ],
+    }
+
+
 

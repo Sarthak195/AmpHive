@@ -154,6 +154,13 @@ class User(Base):
     # revoke) invalidates all previously issued tokens for this user without a
     # blacklist table. Added in migration 0003.
     token_version: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"), nullable=False)
+    # [Admin] Platform-admin kill switch for an account: login refuses a
+    # disabled user (403 "account_disabled") and get_current_user rejects
+    # them the same way, so existing tokens die immediately (the admin PATCH
+    # that sets this also bumps token_version as a belt-and-braces revoke).
+    # Soft lock, not a delete — balance/ledger/session history stay intact.
+    # Alembic revision 0025_user_disable.
+    is_disabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
 
     # Relationships
@@ -554,9 +561,15 @@ class AuditLog(Base):
     - action / target_type are plain Strings, not PG enums: the action
       taxonomy (e.g. "gateway.create", "plug.status_change",
       "access_code.regen") is expected to grow without a schema migration.
-    - tenant_id is NOT NULL + CASCADE, matching Gateway/ChargingSession/
-      ChargerGroup/GatewayEvent — deleting a tenant deletes its audit trail
-      along with everything else it owns.
+    - tenant_id is nullable + CASCADE (revision 0025_user_disable relaxed the
+      original NOT NULL): tenant-scoped CPO actions carry their tenant as
+      before (deleting a tenant deletes its audit trail along with everything
+      else it owns), while PLATFORM-level admin actions — e.g. an admin
+      disabling a tenant-less driver or adjusting their balance, where neither
+      the actor (platform admins have tenant_id NULL by design) nor the target
+      has a tenant — audit with tenant_id NULL instead of being unrecordable.
+      NULL rows never surface in the tenant-scoped GET /api/cpo/audit (an
+      equality filter skips them); they are read via GET /api/admin/audit.
     - actor_user_id is nullable + SET NULL: the acting user's account must
       stay deletable without erasing the audit trail (same rationale as
       LedgerTransaction.session_id's nullable-on-delete).
@@ -572,7 +585,7 @@ class AuditLog(Base):
     __tablename__ = "audit_logs"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    tenant_id: Mapped[int] = mapped_column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    tenant_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=True)
     actor_user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     # e.g. "gateway.create", "gateway.delete", "plug.create", "plug.delete",
     # "plug.status_change", "plug.maintenance_enter"/"..._clear",

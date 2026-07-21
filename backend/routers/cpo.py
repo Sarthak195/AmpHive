@@ -964,6 +964,97 @@ async def cpo_delete_group(
     return {"status": "deleted", "group_id": group_id, "group_name": group_name}
 
 
+@router.get("/api/cpo/groups/{group_id}/members")
+async def cpo_list_group_members(
+    group_id: int,
+    user: User = Depends(require_role("cpo", "admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    [redesign/ui-v3 contract §4] Members of one of the CPO's private groups —
+    the drivers who joined via its access code. Tenant-scoped like the other
+    group routes (404 for another tenant's group, indistinguishable from
+    "doesn't exist"). Returns a bare list per the contract shape:
+    [{user_id, email, full_name, joined_at}], oldest joiner first.
+    """
+    group_result = await db.execute(
+        select(ChargerGroup).where(
+            and_(ChargerGroup.id == group_id, ChargerGroup.tenant_id == user.tenant_id)
+        )
+    )
+    if not group_result.scalar_one_or_none():
+        raise HTTPException(status_code=404, detail="Group not found or access denied.")
+
+    result = await db.execute(
+        select(GroupMembership, User.email, User.full_name)
+        .join(User, User.id == GroupMembership.user_id)
+        .where(GroupMembership.group_id == group_id)
+        .order_by(GroupMembership.joined_at.asc(), GroupMembership.id.asc())
+    )
+    return [
+        {
+            "user_id": m.user_id,
+            "email": email,
+            "full_name": full_name,
+            "joined_at": m.joined_at.isoformat() if m.joined_at else None,
+        }
+        for m, email, full_name in result.all()
+    ]
+
+
+@router.delete("/api/cpo/groups/{group_id}/members/{user_id}")
+async def cpo_remove_group_member(
+    group_id: int,
+    user_id: int,
+    user: User = Depends(require_role("cpo", "admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    [redesign/ui-v3 contract §4] Remove a member from one of the CPO's private
+    groups (revokes their access without rotating the code for everyone else).
+    Tenant-scoped on the group; 404 if the user isn't a member. Audited
+    (group.member_remove) — membership changes gate who may charge on private
+    plugs, same taxonomy as access_code.regen.
+    """
+    group_result = await db.execute(
+        select(ChargerGroup).where(
+            and_(ChargerGroup.id == group_id, ChargerGroup.tenant_id == user.tenant_id)
+        )
+    )
+    group = group_result.scalar_one_or_none()
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found or access denied.")
+
+    membership_result = await db.execute(
+        select(GroupMembership).where(
+            and_(GroupMembership.group_id == group_id, GroupMembership.user_id == user_id)
+        )
+    )
+    membership = membership_result.scalar_one_or_none()
+    if not membership:
+        raise HTTPException(status_code=404, detail="That user is not a member of this group.")
+
+    await db.delete(membership)
+    await db.commit()
+
+    logger.info(
+        f"CPO group member removed: user={user_id} from group={group_id} "
+        f"('{group.name}') by {user.email}"
+    )
+
+    await try_record_audit(
+        db,
+        tenant_id=user.tenant_id,
+        actor_user_id=user.id,
+        action="group.member_remove",
+        target_type="group",
+        target_id=group_id,
+        detail=f"user_id={user_id}, group={group.name}",
+    )
+
+    return {"status": "removed", "group_id": group_id, "user_id": user_id}
+
+
 # --- CPO Analytics ---
 
 @router.get("/api/cpo/analytics/overview")
@@ -1070,45 +1161,68 @@ async def cpo_analytics_sessions(
     status_filter: Optional[str] = None,
     days: int = 30,
     limit: int = 50,
+    offset: int = 0,
 ):
     """
     Session history across all of the CPO's plugs.
     Supports optional filters: plug_id, status, and date range (days).
-    Returns sessions ordered by most recent first.
-    """
-    # Base query: sessions belonging to this CPO's tenant, with plug name and
-    # driver email joined in (previously two extra queries per session row).
-    # Outer joins preserve the old fallback behavior for orphaned references.
-    query = (
-        select(ChargingSession, Plug.name, User.email)
-        .outerjoin(Plug, Plug.id == ChargingSession.plug_id)
-        .outerjoin(User, User.id == ChargingSession.user_id)
-        .where(ChargingSession.tenant_id == user.tenant_id)
-    )
+    Sessions are ordered most recent first.
 
-    # Apply optional filters
+    [redesign/ui-v3 contract §4] Paginated: house limit/offset params (limit
+    capped at 200) and `total` + `totals` {count, energy_kwh, revenue_coins}
+    computed SERVER-SIDE over the full filtered set — the page slice never
+    truncates the aggregates (the old client summed the ≤100 rows it got).
+    Returns {total, totals, items, sessions} — `sessions` aliases `items` for
+    callers written against the pre-contract bare-list shape.
+    """
+    limit, offset = max(1, min(limit, 200)), max(0, offset)
+
+    # Shared filter set — applied identically to the aggregate and page
+    # queries so the totals always describe exactly what's being paged.
+    conditions = [ChargingSession.tenant_id == user.tenant_id]
     if plug_id:
-        query = query.where(ChargingSession.plug_id == plug_id)
+        conditions.append(ChargingSession.plug_id == plug_id)
     if status_filter:
         try:
-            status_enum = SessionStatus(status_filter)
-            query = query.where(ChargingSession.status == status_enum)
+            conditions.append(ChargingSession.status == SessionStatus(status_filter))
         except ValueError:
             raise HTTPException(
                 status_code=400,
                 detail=f"Invalid status filter '{status_filter}'. Valid: {[s.value for s in SessionStatus]}",
             )
-
-    # Date range filter
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-    query = query.where(ChargingSession.started_at >= cutoff)
+    conditions.append(ChargingSession.started_at >= cutoff)
 
-    # Order and limit
-    query = query.order_by(ChargingSession.started_at.desc()).limit(limit)
+    totals_row = (
+        await db.execute(
+            select(
+                func.count(ChargingSession.id),
+                func.coalesce(func.sum(ChargingSession.energy_kwh), 0),
+                func.coalesce(func.sum(ChargingSession.coins_spent), 0),
+            ).where(and_(*conditions))
+        )
+    ).first()
+    total = int(totals_row[0]) if totals_row else 0
+    totals = {
+        "count": total,
+        "energy_kwh": round(float(totals_row[1]), 3) if totals_row else 0.0,
+        "revenue_coins": round(float(totals_row[2]), 2) if totals_row else 0.0,
+    }
 
-    result = await db.execute(query)
+    # Page query: sessions belonging to this CPO's tenant, with plug name and
+    # driver email joined in (previously two extra queries per session row).
+    # Outer joins preserve the old fallback behavior for orphaned references.
+    result = await db.execute(
+        select(ChargingSession, Plug.name, User.email)
+        .outerjoin(Plug, Plug.id == ChargingSession.plug_id)
+        .outerjoin(User, User.id == ChargingSession.user_id)
+        .where(and_(*conditions))
+        .order_by(ChargingSession.started_at.desc(), ChargingSession.id.desc())
+        .limit(limit)
+        .offset(offset)
+    )
 
-    response = []
+    items = []
     for s, plug_name, user_email in result.all():
         plug_name = plug_name if plug_name is not None else f"Plug #{s.plug_id}"
         user_email = user_email if user_email is not None else "unknown"
@@ -1118,7 +1232,7 @@ async def cpo_analytics_sessions(
         if s.ended_at and s.started_at:
             duration_minutes = round((s.ended_at - s.started_at).total_seconds() / 60, 1)
 
-        response.append({
+        items.append({
             "id": s.id,
             "plug_id": s.plug_id,
             "plug_name": plug_name,
@@ -1132,7 +1246,7 @@ async def cpo_analytics_sessions(
             "status": s.status.value,
         })
 
-    return response
+    return {"total": total, "totals": totals, "items": items, "sessions": items}
 
 
 @router.get("/api/cpo/analytics/sessions.csv")
@@ -1354,11 +1468,12 @@ async def cpo_analytics_telemetry(
 
 # --- CPO Gateway Events / Alerts ---
 
-@router.get("/api/cpo/events", response_model=List[GatewayEventResponse])
+@router.get("/api/cpo/events")
 async def cpo_list_events(
     user: User = Depends(require_role("cpo", "admin")),
     db: AsyncSession = Depends(get_db),
     limit: int = 50,
+    offset: int = 0,
     unacknowledged_only: bool = False,
     severity: Optional[str] = None,
 ):
@@ -1367,35 +1482,49 @@ async def cpo_list_events(
     unauthorized-on alarms, OTA lifecycle notices — newest first. Powers the
     operator alert feed. `unacknowledged_only` narrows to the active alert set;
     `severity` filters (e.g. "critical").
+
+    [redesign/ui-v3 contract §4] Paginated: {total, items} with the house
+    limit/offset params (limit capped at 200); `total` counts the full
+    filtered set, not the page.
     """
-    limit = max(1, min(limit, 200))
+    limit, offset = max(1, min(limit, 200)), max(0, offset)
     conditions = [GatewayEvent.tenant_id == user.tenant_id]
     if unacknowledged_only:
         conditions.append(GatewayEvent.acknowledged == False)  # noqa: E712
     if severity:
         conditions.append(GatewayEvent.severity == severity)
 
+    total = (
+        await db.execute(
+            select(func.count(GatewayEvent.id)).where(and_(*conditions))
+        )
+    ).scalar() or 0
+
     result = await db.execute(
         select(GatewayEvent)
         .where(and_(*conditions))
         .order_by(GatewayEvent.created_at.desc(), GatewayEvent.id.desc())
         .limit(limit)
+        .offset(offset)
     )
     events = list(result.scalars().all())
 
-    return [
-        GatewayEventResponse(
-            id=ev.id,
-            gateway_id=ev.gateway_id,
-            plug_id=ev.plug_id,
-            event_type=ev.event_type,
-            severity=ev.severity,
-            detail=ev.detail,
-            acknowledged=ev.acknowledged,
-            created_at=ev.created_at.isoformat() if ev.created_at else None,
-        )
-        for ev in events
-    ]
+    return {
+        "total": int(total),
+        "items": [
+            GatewayEventResponse(
+                id=ev.id,
+                gateway_id=ev.gateway_id,
+                plug_id=ev.plug_id,
+                event_type=ev.event_type,
+                severity=ev.severity,
+                detail=ev.detail,
+                acknowledged=ev.acknowledged,
+                created_at=ev.created_at.isoformat() if ev.created_at else None,
+            )
+            for ev in events
+        ],
+    }
 
 
 @router.post("/api/cpo/events/{event_id}/ack")
@@ -2352,11 +2481,19 @@ async def cpo_list_invoices(
     limit: int = 50,
     offset: int = 0,
 ):
-    """List the tenant's issued GST invoices, newest first. Tenant-scoped,
-    same pagination shape as GET /api/cpo/audit."""
+    """List the tenant's issued GST invoices, newest first. Tenant-scoped.
+
+    [redesign/ui-v3 contract §4] Paginated: {total, items} with the house
+    limit/offset params (limit capped at 200)."""
     tenant_id = _require_tenant_id(user)
     limit = max(1, min(limit, 200))
     offset = max(0, offset)
+
+    total = (
+        await db.execute(
+            select(func.count(Invoice.id)).where(Invoice.tenant_id == tenant_id)
+        )
+    ).scalar() or 0
 
     result = await db.execute(
         select(Invoice)
@@ -2365,7 +2502,67 @@ async def cpo_list_invoices(
         .limit(limit)
         .offset(offset)
     )
-    return [invoice_to_dict(inv) for inv in result.scalars().all()]
+    return {
+        "total": int(total),
+        "items": [invoice_to_dict(inv) for inv in result.scalars().all()],
+    }
+
+
+@router.get("/api/cpo/invoices.csv")
+async def cpo_export_invoices_csv(
+    user: User = Depends(require_role("cpo", "admin")),
+    db: AsyncSession = Depends(get_db),
+    days: Optional[int] = None,
+):
+    """
+    Export the tenant's issued GST invoices as CSV (accounting / spreadsheet
+    import) — mirrors GET /api/cpo/analytics/sessions.csv: same auth, a
+    downloadable `text/csv` attachment, capped at 10k rows to bound memory.
+    `days` is optional (unlike sessions.csv): invoices are a legal ledger, so
+    the default export is the full history; pass days=N to window it to
+    invoices issued in the last N days.
+    """
+    tenant_id = _require_tenant_id(user)
+
+    query = select(Invoice).where(Invoice.tenant_id == tenant_id)
+    if days is not None:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        query = query.where(Invoice.issued_at >= cutoff)
+    query = query.order_by(Invoice.issued_at.desc(), Invoice.id.desc()).limit(10000)
+
+    result = await db.execute(query)
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow([
+        "invoice_number", "issued_at", "session_id", "driver_user_id",
+        "energy_kwh", "rate_coins_per_kwh", "amount_coins",
+        "taxable_value_inr", "gst_rate_pct", "gst_amount_inr", "total_inr",
+        "seller_legal_name", "seller_gstin",
+    ])
+    for inv in result.scalars().all():
+        writer.writerow([
+            inv.invoice_number,
+            inv.issued_at.isoformat() if inv.issued_at else "",
+            inv.session_id,
+            inv.driver_user_id,
+            round(inv.energy_kwh, 3),
+            round(float(inv.rate_coins_per_kwh), 2),
+            round(float(inv.amount_coins), 2),
+            round(float(inv.taxable_value_inr), 2),
+            round(float(inv.gst_rate_pct), 2),
+            round(float(inv.gst_amount_inr), 2),
+            round(float(inv.total_inr), 2),
+            inv.seller_legal_name or "",
+            inv.seller_gstin or "",
+        ])
+
+    filename = f"amphive-invoices-{datetime.now(timezone.utc).strftime('%Y%m%d')}.csv"
+    return Response(
+        content=buf.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 # ===========================================================================
@@ -2393,11 +2590,15 @@ async def cpo_list_reservations(
     offset: int = 0,
 ):
     """List the tenant's plug reservations, newest window first. Tenant-
-    scoped, same pagination shape as GET /api/cpo/audit; optional `status`
-    filter (booked/cancelled/fulfilled/expired — 400 otherwise, matching the
-    CpoPlugUpdateRequest.status validation convention) and `upcoming_only`
-    (BOOKED with end_at in the future). Lazily expires lapsed holds first so
-    the operator never sees a no-show still shown as BOOKED."""
+    scoped; optional `status` filter (booked/cancelled/fulfilled/expired —
+    400 otherwise, matching the CpoPlugUpdateRequest.status validation
+    convention) and `upcoming_only` (BOOKED with end_at in the future).
+    Lazily expires lapsed holds first so the operator never sees a no-show
+    still shown as BOOKED.
+
+    [redesign/ui-v3 contract §4] Paginated: {total, items} with the house
+    limit/offset params (limit capped at 200); `total` counts the full
+    filtered set, not the page."""
     tenant_id = _require_tenant_id(user)
     limit = max(1, min(limit, 200))
     offset = max(0, offset)
@@ -2421,6 +2622,12 @@ async def cpo_list_reservations(
         conditions.append(Reservation.status == ReservationStatus.BOOKED)
         conditions.append(Reservation.end_at > now)
 
+    total = (
+        await db.execute(
+            select(func.count(Reservation.id)).where(and_(*conditions))
+        )
+    ).scalar() or 0
+
     rows = await db.execute(
         select(Reservation, Plug.name, User.email, User.full_name)
         .join(Plug, Plug.id == Reservation.plug_id)
@@ -2430,22 +2637,25 @@ async def cpo_list_reservations(
         .limit(limit)
         .offset(offset)
     )
-    return [
-        {
-            "id": r.id,
-            "plug_id": r.plug_id,
-            "plug_name": plug_name,
-            "user_id": r.user_id,
-            "user_email": user_email,
-            "user_name": user_name,
-            "start_at": r.start_at.isoformat(),
-            "end_at": r.end_at.isoformat(),
-            "status": r.status.value,
-            "session_id": r.session_id,
-            "created_at": r.created_at.isoformat() if r.created_at else None,
-        }
-        for r, plug_name, user_email, user_name in rows.all()
-    ]
+    return {
+        "total": int(total),
+        "items": [
+            {
+                "id": r.id,
+                "plug_id": r.plug_id,
+                "plug_name": plug_name,
+                "user_id": r.user_id,
+                "user_email": user_email,
+                "user_name": user_name,
+                "start_at": r.start_at.isoformat(),
+                "end_at": r.end_at.isoformat(),
+                "status": r.status.value,
+                "session_id": r.session_id,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            }
+            for r, plug_name, user_email, user_name in rows.all()
+        ],
+    }
 
 
 # Wrap FastAPI app with Socket.io ASGI wrapper so they run on the same port

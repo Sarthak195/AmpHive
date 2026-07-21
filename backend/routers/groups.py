@@ -107,3 +107,37 @@ async def get_my_groups(
     ]
 
 
+@router.delete("/api/groups/{group_id}/leave")
+async def leave_group(
+    group_id: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Leave a group the caller previously joined — deletes their
+    GroupMembership row (the join_group inverse; redesign/ui-v3 contract §4
+    "Driver gaps"). 404 when the caller isn't a member: that covers a group
+    that doesn't exist too, and public groups have no memberships to leave.
+    Membership removal only — CPO-side group CRUD lives in routers/cpo.py.
+    """
+    result = await db.execute(
+        select(GroupMembership).where(
+            and_(
+                GroupMembership.user_id == user.id,
+                GroupMembership.group_id == group_id,
+            )
+        )
+    )
+    membership = result.scalar_one_or_none()
+    if membership is None:
+        raise HTTPException(
+            status_code=404, detail="You are not a member of this group."
+        )
+
+    await db.delete(membership)
+    await db.commit()
+    logger.info(f"User {user.email} left group id={group_id}")
+
+    return {"status": "left", "group_id": group_id}
+
+

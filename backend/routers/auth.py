@@ -110,6 +110,13 @@ async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
     if not user or not verify_password(req.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Invalid email or password.")
 
+    # [Admin] Disabled accounts can't sign in. Checked AFTER the password so
+    # this response is only ever shown to the account's real owner (no
+    # disabled-account oracle for someone guessing passwords). The machine
+    # detail is deliberate — the frontend maps it to friendly copy.
+    if user.is_disabled:
+        raise HTTPException(status_code=403, detail="account_disabled")
+
     token = create_access_token(user.id, user.role.value, user.email, user.token_version)
     logger.info(
         "User logged in",

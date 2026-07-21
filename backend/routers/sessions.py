@@ -543,28 +543,52 @@ async def get_active_session(
 async def get_session_history(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    limit: int = 50,
+    offset: int = 0,
 ):
-    """Return past charging sessions for the current user, most recent first."""
-    result = await db.execute(
-        select(ChargingSession)
-        .where(ChargingSession.user_id == user.id)
-        .order_by(ChargingSession.started_at.desc())
-        .limit(50)
-    )
-    sessions = list(result.scalars().all())
+    """
+    Past charging sessions for the current user, most recent first.
 
-    return [
-        {
-            "id": s.id,
-            "plug_id": s.plug_id,
-            "started_at": s.started_at.isoformat() if s.started_at else None,
-            "ended_at": s.ended_at.isoformat() if s.ended_at else None,
-            "energy_kwh": round(s.energy_kwh, 3),
-            "coins_spent": round(s.coins_spent, 2),
-            "status": s.status.value,
-        }
-        for s in sessions
-    ]
+    [redesign/ui-v3 contract §4] Paginated: returns ``{"total": int,
+    "items": [...]}`` with the house limit/offset params (limit capped at
+    200, default 50), and each row now carries ``plug_name`` (single join —
+    this list stays N+1-free like /api/sessions/active).
+    """
+    limit, offset = max(1, min(limit, 200)), max(0, offset)
+
+    total = (
+        await db.execute(
+            select(func.count(ChargingSession.id)).where(
+                ChargingSession.user_id == user.id
+            )
+        )
+    ).scalar() or 0
+
+    result = await db.execute(
+        select(ChargingSession, Plug.name)
+        .join(Plug, Plug.id == ChargingSession.plug_id)
+        .where(ChargingSession.user_id == user.id)
+        .order_by(ChargingSession.started_at.desc(), ChargingSession.id.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+
+    return {
+        "total": int(total),
+        "items": [
+            {
+                "id": s.id,
+                "plug_id": s.plug_id,
+                "plug_name": plug_name,
+                "started_at": s.started_at.isoformat() if s.started_at else None,
+                "ended_at": s.ended_at.isoformat() if s.ended_at else None,
+                "energy_kwh": round(s.energy_kwh, 3),
+                "coins_spent": round(float(s.coins_spent), 2),
+                "status": s.status.value,
+            }
+            for s, plug_name in result.all()
+        ],
+    }
 
 
 # ===========================================================================
@@ -1018,5 +1042,219 @@ async def get_session_invoice(
         return HTMLResponse(content=await render_invoice_html(db, invoice))
 
     return invoice_to_dict(invoice)
+
+
+# ===========================================================================
+# Driver-side gap endpoints (redesign/ui-v3 — plans/redesign-v3-contract.md
+# §4 "Driver gaps"). Appended with local imports, same merge-hot-spot
+# rationale as the GST section above.
+#
+# ROUTE ORDER MATTERS: GET /api/sessions/{session_id} below is a catch-all
+# for the /api/sessions/* GET namespace — a non-integer segment 422s rather
+# than falling through — so every STATIC sibling (/active, /history,
+# /queued above; /disputes/my and /me/stats here) must be registered
+# BEFORE it. Keep it the LAST GET route in this file.
+# ===========================================================================
+import re  # noqa: E402
+
+from backend.database.models import LedgerTransaction, TransactionType  # noqa: E402
+from backend.services.billing import session_cost  # noqa: E402
+from backend.services.pricing import default_rate  # noqa: E402
+
+
+@router.get("/api/me/stats")
+async def get_my_stats(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Current-calendar-month + lifetime charging aggregates for the caller,
+    for the driver dashboard/account page:
+    ``{month: {energy_kwh, spend_coins, sessions}, lifetime: {...}}``.
+
+    Only FINISHED sessions count (status != ACTIVE — completed/paid/
+    cancelled): ``coins_spent`` is only written at finalize, so an ACTIVE
+    session has no billed spend yet and would skew energy-vs-spend. Same
+    stored-column semantics /api/sessions/history rows expose. "Month" is
+    the current UTC calendar month (started_at >= the 1st, 00:00 UTC).
+    """
+    now = datetime.now(timezone.utc)
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    finished = and_(
+        ChargingSession.user_id == user.id,
+        ChargingSession.status != SessionStatus.ACTIVE,
+    )
+
+    async def _bucket(*extra_conditions):
+        row = (
+            await db.execute(
+                select(
+                    func.count(ChargingSession.id),
+                    func.coalesce(func.sum(ChargingSession.energy_kwh), 0),
+                    func.coalesce(func.sum(ChargingSession.coins_spent), 0),
+                ).where(finished, *extra_conditions)
+            )
+        ).first()
+        count, energy, coins = row if row else (0, 0, 0)
+        return {
+            "energy_kwh": round(float(energy or 0), 3),
+            "spend_coins": round(float(coins or 0), 2),
+            "sessions": int(count or 0),
+        }
+
+    return {
+        "month": await _bucket(ChargingSession.started_at >= month_start),
+        "lifetime": await _bucket(),
+    }
+
+
+@router.get("/api/sessions/disputes/my")
+async def get_my_disputes(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """The caller's disputes, newest first — the driver-side mirror of the
+    CPO's GET /api/cpo/disputes (which owns resolution)."""
+    result = await db.execute(
+        select(SessionDispute)
+        .where(SessionDispute.driver_user_id == user.id)
+        .order_by(SessionDispute.created_at.desc(), SessionDispute.id.desc())
+    )
+    return [
+        {
+            "id": d.id,
+            "session_id": d.session_id,
+            "status": d.status.value,
+            "reason": d.reason,
+            "resolution_note": d.resolution_note,
+            "refund_coins": float(d.refund_coins) if d.refund_coins is not None else None,
+            "created_at": d.created_at.isoformat() if d.created_at else None,
+            "resolved_at": d.resolved_at.isoformat() if d.resolved_at else None,
+        }
+        for d in result.scalars().all()
+    ]
+
+
+@router.get("/api/sessions/{session_id}")
+async def get_session_detail(
+    session_id: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Full receipt/detail for ONE session — the same field shape
+    finalize_charging_session's stop response returns (so the frontend's
+    receipt component renders either interchangeably), with ``status``
+    carrying the session's real status (a live session is viewable too) and
+    ``plug_name`` joined in.
+
+    Access mirrors GET /api/sessions/{id}/invoice: the driver who owns the
+    session, or a cpo/admin of the owning tenant — anyone else gets 404, not
+    403, so existence isn't leaked.
+
+    Derivation notes for a STORED session (vs. the live stop path):
+    - ``coins_spent`` is the finalized debit; ``shortfall_coins`` is
+      re-derived as billed-cost-minus-collected via services/billing
+      session_cost (0 while ACTIVE — nothing billed yet).
+    - ``balance_before``/``balance_remaining`` come from the session's
+      SESSION_DEBIT ledger row (None while ACTIVE / for a pre-ledger row).
+    - ``reason`` is recovered from that ledger row's "[reason]" suffix
+      (finalize embeds it in the description); None when there wasn't one.
+    """
+    row = (
+        await db.execute(
+            select(ChargingSession, Plug.name)
+            .outerjoin(Plug, Plug.id == ChargingSession.plug_id)
+            .where(ChargingSession.id == session_id)
+        )
+    ).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Session not found.")
+    session, plug_name = row
+
+    if user.role == UserRole.DRIVER:
+        if session.user_id != user.id:
+            raise HTTPException(status_code=404, detail="Session not found.")
+    elif user.role == UserRole.CPO:
+        if session.tenant_id != user.tenant_id:
+            raise HTTPException(status_code=404, detail="Session not found.")
+    elif user.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Access denied.")
+
+    energy = session.energy_kwh or 0.0
+    rate = (
+        session.rate_coins_per_kwh
+        if session.rate_coins_per_kwh is not None
+        else default_rate()
+    )
+    coins_spent = float(session.coins_spent or 0)
+
+    is_active = session.status == SessionStatus.ACTIVE
+    shortfall = 0.0
+    if not is_active:
+        # Billed cost re-derived exactly as finalize computed it (segment-aware).
+        shortfall = max(float(session_cost(session, energy)) - coins_spent, 0.0)
+
+    # The finalize-time SESSION_DEBIT ledger row carries the wallet balances
+    # (admin adjustments use session_id NULL, refunds use REFUND — no clash).
+    ledger = (
+        await db.execute(
+            select(LedgerTransaction)
+            .where(
+                and_(
+                    LedgerTransaction.session_id == session.id,
+                    LedgerTransaction.transaction_type == TransactionType.SESSION_DEBIT,
+                )
+            )
+            .order_by(LedgerTransaction.id.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    balance_before = balance_remaining = None
+    reason = None
+    if ledger is not None:
+        if ledger.balance_after is not None:
+            balance_remaining = round(float(ledger.balance_after), 2)
+            # amount is the signed delta (negative debit): before = after - amount.
+            balance_before = round(float(ledger.balance_after - ledger.amount), 2)
+        if ledger.description:
+            m = re.search(r"\[([^\]]+)\]", ledger.description)
+            if m:
+                reason = m.group(1)
+
+    duration_sec = None
+    if session.started_at and session.ended_at:
+        started = session.started_at
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=timezone.utc)
+        ended = session.ended_at
+        if ended.tzinfo is None:
+            ended = ended.replace(tzinfo=timezone.utc)
+        duration_sec = int((ended - started).total_seconds())
+
+    return {
+        "status": session.status.value,
+        "session_id": session.id,
+        "plug_id": session.plug_id,
+        "plug_name": plug_name if plug_name is not None else f"Plug #{session.plug_id}",
+        "energy_kwh": round(energy, 3),
+        "peak_power_w": round(session.peak_power_w or 0.0, 1),
+        "price_per_kwh": float(rate),
+        "settled_cost_coins": (
+            float(session.settled_cost_coins)
+            if session.settled_cost_coins is not None else None
+        ),
+        "coins_spent": round(coins_spent, 2),
+        "shortfall_coins": round(shortfall, 2),
+        "balance_before": balance_before,
+        "balance_remaining": balance_remaining,
+        "duration_sec": duration_sec,
+        "started_at": session.started_at.isoformat() if session.started_at else None,
+        "ended_at": session.ended_at.isoformat() if session.ended_at else None,
+        "max_kwh": session.max_kwh,
+        "max_duration_seconds": session.max_duration_seconds,
+        "reason": reason,
+    }
 
 

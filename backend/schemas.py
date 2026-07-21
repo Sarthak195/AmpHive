@@ -550,3 +550,28 @@ class MyReservationsResponse(BaseModel):
     recent history (everything else, newest first, capped)."""
     upcoming: list[ReservationResponse]
     history: list[ReservationResponse]
+
+
+# --- Admin console (redesign/ui-v3 — backend/routers/admin.py) -------------
+# Appended at the end of the file, same rationale as the reservation/dispute
+# sections: avoids touching shared blocks that parallel branches also edit.
+
+
+class AdminUserUpdateRequest(BaseModel):
+    """Body for PATCH /api/admin/users/{id}. Both optional; omitted fields
+    are left unchanged. `role` is validated in the router (matching the
+    CpoPlugUpdateRequest.status convention) so an invalid value gets a clean
+    400 instead of a generic 422."""
+    role: Optional[str] = None
+    is_disabled: Optional[bool] = None
+
+
+class AdminAdjustBalanceRequest(BaseModel):
+    """Body for POST /api/admin/users/{id}/adjust-balance. `amount_coins` is
+    SIGNED: positive credits the wallet, negative debits it (the router
+    floors the resulting balance at 0 — the DB CHECK constraint
+    ck_users_coin_balance_non_negative forbids negative balances). `reason`
+    is mandatory: an admin moving money must say why (it lands in the ledger
+    description and the audit row)."""
+    amount_coins: float
+    reason: str = Field(min_length=3, max_length=200)
