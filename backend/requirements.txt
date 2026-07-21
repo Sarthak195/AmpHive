@@ -11,9 +11,9 @@ email-validator>=2.0.0
 # --- Phase 2 additions ---
 # JWT token generation and validation (HS256 symmetric signing)
 python-jose[cryptography]>=3.4.0
-# Password hashing (bcrypt) — industry standard for user credential storage
-passlib[bcrypt]>=1.7.4
-bcrypt==4.0.1
+# Password hashing — pyca/bcrypt used directly (passlib was dropped: abandoned
+# upstream and incompatible with bcrypt>=4.1, which had pinned us to 4.0.1)
+bcrypt>=4.1.0
 # Load .env files for local development (DATABASE_URL, JWT_SECRET_KEY, etc.)
 python-dotenv>=1.0.0
 # Razorpay payment gateway SDK for India (UPI, cards, wallets, net banking)

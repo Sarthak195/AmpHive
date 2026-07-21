@@ -25,7 +25,7 @@ main.py  (app assembly only since 2026-07-07: lifespan, CORS, health, router inc
 ├── database/reset_db.py   destructive dev-only reset (drop_all + create_all; confirmation-gated)
 ├── migrations/            Alembic env.py + versions/ (0001_baseline = frozen full schema)
 │
-├── services/auth.py       JWT (python-jose, HS256, 7-day) + bcrypt (passlib) + get_current_user
+├── services/auth.py       JWT (python-jose, HS256, 7-day) + bcrypt (pyca, direct) + get_current_user
 ├── services/rbac.py       require_role(...) dependency factory → guards all /api/cpo/* routes
 ├── services/mqtt_manager.py  paho-mqtt bridge: publishes ON/OFF; ingests telemetry
 │                             (updates TelemetryStore + persists energy/peak_power) & status
@@ -46,7 +46,7 @@ main.py  (app assembly only since 2026-07-07: lifespan, CORS, health, router inc
 | `pydantic` | Request/response validation |
 | `paho-mqtt>=2.1` | MQTT client (backend ↔ gateway) |
 | `python-jose[cryptography]` | JWT encode/decode |
-| `passlib[bcrypt]`, `bcrypt==4.0.1` | Password hashing |
+| `bcrypt>=4.1` | Password hashing — pyca/bcrypt called directly (passlib dropped 2026-07-21: abandoned upstream, was pinning bcrypt to 4.0.1) |
 | `python-dotenv` | `.env` loading |
 | `razorpay` | Payment gateway SDK |
 | `python-socketio`, `python-engineio` | Socket.io server and engine for real-time WebSockets |
@@ -87,7 +87,8 @@ main.jsx  (ReactDOM.createRoot, StrictMode)
 |---------|------|
 | `react` / `react-dom` ^19 | UI framework |
 | `react-router-dom` ^6 | Client-side routing |
-| `leaflet` / `react-leaflet` | OpenStreetMap map on Home (`MapComponent`), color-coded markers via `utils/plugAvailability.js` |
+| `leaflet` / `react-leaflet` | OpenStreetMap map on Home (`MapComponent`), color-coded markers via `utils/plugAvailability.js`; Leaflet CSS bundled from node_modules (was an unpkg `<link>`) |
+| `@fontsource/inter` | Self-hosted Inter (300–700) — replaced the Google Fonts `@import` so the CSP carries no font/style CDN origins |
 | `qrcode.react` | Per-plug QR code (`CpoPlugs` → deep-links to `/?plug=<id>`, 2026-07-12) |
 | `recharts` | CPO analytics charts |
 | `vite` ^8, `@vitejs/plugin-react` | Build tool / dev server |

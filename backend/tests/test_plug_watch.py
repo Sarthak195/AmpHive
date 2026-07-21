@@ -558,9 +558,11 @@ async def test_available_plugs_carry_watching_via_one_extra_query():
     tenant = MagicMock(queued_charging_enabled=False)
 
     rows_result = MagicMock()
+    # Row shape: (plug, group name, group is_public, group tariff_id, gateway,
+    # tenant) — the group columns are None for ungrouped plugs (outer join).
     rows_result.all.return_value = [
-        (plug_a, None, None, gateway, tenant),
-        (plug_b, None, None, gateway, tenant),
+        (plug_a, None, None, None, gateway, tenant),
+        (plug_b, None, None, None, gateway, tenant),
     ]
     watched_result = MagicMock()
     watched_result.scalars.return_value.all.return_value = [2]  # watching plug B
@@ -576,8 +578,9 @@ async def test_available_plugs_carry_watching_via_one_extra_query():
     db = _db(rows_result, watched_result, expire_result, reservations_result)
 
     with patch("backend.routers.plugs.gateway_is_live", return_value=True), \
-         patch("backend.routers.plugs.resolve_price_display",
-               AsyncMock(return_value=(Decimal("5.00"), None, None))):
+         patch("backend.routers.plugs.resolve_price_display_batch",
+               AsyncMock(return_value={1: (Decimal("5.00"), None, None),
+                                       2: (Decimal("5.00"), None, None)})):
         responses = await get_available_plugs(user, db)
 
     # plugs+joins, the watches, then the reservation expiry+grouped pair —

@@ -335,6 +335,9 @@ async def resolve_price_display(db: AsyncSession, plug: Plug, at: datetime = Non
     caller renders a "next price" hint only on a real, imminent change.
     ``boundary`` is tz-aware in the tenant's local zone (``isoformat`` carries
     the offset). Read-only — snapshots nothing.
+
+    LIST endpoints must use :func:`resolve_price_display_batch` instead —
+    fixed two-query cost for the whole list rather than per-plug chain lookups.
     """
     tariff, tz_name = await _resolve_tariff_and_tz(db, plug)
     if tariff is None:
@@ -346,12 +349,21 @@ async def resolve_price_display(db: AsyncSession, plug: Plug, at: datetime = Non
     slots = (
         await db.execute(select(TariffSlot).where(TariffSlot.tariff_id == tariff.id))
     ).scalars().all()
-    flat = to_money(tariff.price_per_kwh)
+    return _price_display_from_slots(slots, at_local, to_money(tariff.price_per_kwh))
 
+
+def _price_display_from_slots(slots, at_local: datetime, flat: Decimal):
+    """
+    PURE, DB-FREE display core shared by :func:`resolve_price_display` and
+    :func:`resolve_price_display_batch`: given a tariff's slots, a tz-aware
+    LOCAL instant and the tariff's flat price, return ``(rate, boundary,
+    next_rate)`` with exactly the semantics documented on
+    :func:`resolve_price_display`.
+    """
     slot_rate, boundary = _slot_rate_and_bound(slots, at_local)
     rate = slot_rate if slot_rate is not None else flat
     # Only preview a change happening LATER THE SAME LOCAL DAY. _slot_rate_and_bound
-    # can now return a cross-day boundary (the next applicable weekday) for the
+    # can return a cross-day boundary (the next applicable weekday) for the
     # repricing path, but a bare "@ HH:MM" driver ribbon can't convey a future
     # date, so a tomorrow/next-week boundary must not surface as a "next price".
     if boundary is None or boundary.date() != at_local.date():
@@ -365,6 +377,95 @@ async def resolve_price_display(db: AsyncSession, plug: Plug, at: datetime = Non
     if next_rate == rate:
         return rate, None, None
     return rate, boundary, next_rate
+
+
+def _pick_tariff(candidate_ids, tariffs_by_id):
+    """
+    PURE: the batched equivalent of :func:`_resolve_tariff_and_tz`'s chain —
+    the first candidate id (chain order: plug -> group -> tenant default) that
+    resolves to a LIVE row wins; a non-None id whose row is gone (dangling FK)
+    falls through to the next link, exactly like the per-plug lookups. ``None``
+    when the whole chain is empty or fully dangling (callers then fall back to
+    the env default rate).
+    """
+    for tid in candidate_ids:
+        if tid is not None and tid in tariffs_by_id:
+            return tariffs_by_id[tid]
+    return None
+
+
+async def resolve_price_display_batch(db: AsyncSession, items, at: datetime = None):
+    """
+    [Audit: plug-list N+1] :func:`resolve_price_display` for a whole plug LIST
+    at a fixed query cost: ONE ``Tariff`` IN-query over every chain candidate +
+    ONE ``TariffSlot`` IN-query over the winning tariffs, instead of up to five
+    chain queries per plug.
+
+    ``items``: iterable of ``(plug, group_tariff_id, tenant)`` —
+    ``group_tariff_id`` is the plug's charger group's ``tariff_id`` (``None``
+    when ungrouped or the group has no tariff) and ``tenant`` the plug's owning
+    tenant via its gateway (``None`` tolerated: the chain then skips the
+    tenant-default link and the zone falls back to ``DEFAULT_TZ``). The list
+    endpoints' joins already carry all three, so batching adds no per-plug
+    loads.
+
+    Returns ``{plug.id: (rate, boundary, next_rate)}`` covering every item,
+    each triple identical to what :func:`resolve_price_display` returns for
+    that plug — same chain fallthrough (including dangling tariff ids), same
+    tenant-zone projection, same same-local-day preview rule. All plugs are
+    priced at the SAME instant ``at`` (default now): one consistent snapshot
+    for the whole list. Read-only — snapshots nothing.
+    """
+    items = list(items)
+    if at is None:
+        at = datetime.now(timezone.utc)
+
+    # Per-plug candidate chain, in fallback order (plug -> group -> tenant).
+    chains = {
+        plug.id: (
+            plug.tariff_id,
+            group_tariff_id,
+            tenant.default_tariff_id if tenant is not None else None,
+        )
+        for plug, group_tariff_id, tenant in items
+    }
+    candidate_ids = {tid for chain in chains.values() for tid in chain if tid is not None}
+
+    tariffs_by_id = {}
+    if candidate_ids:
+        tariffs_by_id = {
+            t.id: t
+            for t in (
+                await db.execute(select(Tariff).where(Tariff.id.in_(candidate_ids)))
+            ).scalars()
+        }
+
+    # Slots only for tariffs that actually WON a chain (dangling ids fell
+    # through above; chain losers are never priced) — keeps the IN-list minimal.
+    winner_ids = {
+        t.id
+        for chain in chains.values()
+        if (t := _pick_tariff(chain, tariffs_by_id)) is not None
+    }
+    slots_by_tariff = {}
+    if winner_ids:
+        for s in (
+            await db.execute(select(TariffSlot).where(TariffSlot.tariff_id.in_(winner_ids)))
+        ).scalars():
+            slots_by_tariff.setdefault(s.tariff_id, []).append(s)
+
+    out = {}
+    for plug, group_tariff_id, tenant in items:
+        tariff = _pick_tariff(chains[plug.id], tariffs_by_id)
+        if tariff is None:
+            out[plug.id] = (default_rate(), None, None)
+            continue
+        tz_name = tenant.timezone if (tenant is not None and tenant.timezone) else DEFAULT_TZ
+        at_local = _to_local(at, _zone(tz_name))
+        out[plug.id] = _price_display_from_slots(
+            slots_by_tariff.get(tariff.id, []), at_local, to_money(tariff.price_per_kwh)
+        )
+    return out
 
 
 async def reprice_session_if_due(db: AsyncSession, session, plug: Plug, at: datetime = None):

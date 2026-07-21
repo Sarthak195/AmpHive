@@ -2,9 +2,10 @@
 Tests for the unauthenticated public discovery endpoint (GET /api/plugs/public,
 backend/routers/plugs.py get_public_plugs).
 
-DB-free: db.execute is mocked to return (plug, gateway) rows, and
-resolve_price_display / gateway_is_live are patched. This covers the response
-PROJECTION and the coords-skip / gateway-coord-fallback logic.
+DB-free: db.execute is mocked to return (plug, group_tariff_id, gateway,
+tenant) rows, and resolve_price_display_batch / gateway_is_live are patched.
+This covers the response PROJECTION and the coords-skip /
+gateway-coord-fallback logic.
 
 The PRIVACY guarantee itself — that only public/ungrouped plugs are returned,
 never private-group (society/office) plugs — is enforced by the SQL WHERE clause
@@ -38,12 +39,17 @@ async def test_get_public_plugs_projects_skips_no_coords_and_falls_back_to_gatew
     p3, g3 = _plug(3, "No Loc", PlugStatus.AVAILABLE), MagicMock(latitude=None, longitude=None)
 
     result = MagicMock()
-    result.all.return_value = [(p1, g1), (p2, g2), (p3, g3)]
+    result.all.return_value = [
+        (p1, None, g1, MagicMock()), (p2, None, g2, MagicMock()), (p3, None, g3, MagicMock()),
+    ]
     db = AsyncMock()
     db.execute = AsyncMock(return_value=result)
 
-    with patch("backend.routers.plugs.resolve_price_display",
-               AsyncMock(return_value=(Decimal("5.00"), None, None))), \
+    # The batch pricing map deliberately has NO entry for p3 — pricing an
+    # unmappable plug would KeyError, proving only mappable plugs are priced.
+    with patch("backend.routers.plugs.resolve_price_display_batch",
+               AsyncMock(return_value={1: (Decimal("5.00"), None, None),
+                                       2: (Decimal("5.00"), None, None)})), \
          patch("backend.routers.plugs.gateway_is_live", return_value=True):
         out = await get_public_plugs(db=db)
 
@@ -64,12 +70,12 @@ async def test_get_public_plugs_marks_dead_gateway_offline():
 
     p, g = _plug(1, "Pub A", PlugStatus.AVAILABLE, 12.9, 77.6), MagicMock()
     result = MagicMock()
-    result.all.return_value = [(p, g)]
+    result.all.return_value = [(p, None, g, MagicMock())]
     db = AsyncMock()
     db.execute = AsyncMock(return_value=result)
 
-    with patch("backend.routers.plugs.resolve_price_display",
-               AsyncMock(return_value=(Decimal("5.00"), None, None))), \
+    with patch("backend.routers.plugs.resolve_price_display_batch",
+               AsyncMock(return_value={1: (Decimal("5.00"), None, None)})), \
          patch("backend.routers.plugs.gateway_is_live", return_value=False):
         out = await get_public_plugs(db=db)
 

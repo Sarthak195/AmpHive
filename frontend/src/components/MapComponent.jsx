@@ -1,5 +1,9 @@
 import { MapContainer, TileLayer, Marker, Popup } from 'react-leaflet';
 import L from 'leaflet';
+// Bundled from node_modules (was an unpkg.com <link> in index.html) so the
+// CSP style-src needs no CDN origin. Safe to bundle: markers are divIcon
+// (below), so Leaflet's default-icon PNG path detection is never exercised.
+import 'leaflet/dist/leaflet.css';
 import { AVAILABILITY_CSS_VAR, getPlugAvailability } from '../utils/plugAvailability';
 
 // Colored dot markers (Available / In use / Offline) instead of Leaflet's

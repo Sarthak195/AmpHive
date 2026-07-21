@@ -1,5 +1,5 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
-
+/* Inter is self-hosted via @fontsource (imported in src/main.jsx) — no
+   Google Fonts origins needed by the CSP. */
 :root {
   /* High-Voltage Hive — warm-biased charcoal + amp-lime.
      Amp = current; Hive = a colony of shared chargers, some of them charged
