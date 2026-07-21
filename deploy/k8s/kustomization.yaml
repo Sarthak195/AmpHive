@@ -1,0 +1,15 @@
+# kubectl apply -k deploy/k8s/
+#
+# Secrets are NOT listed here — create them out-of-band first (see README /
+# secret.example.yaml). This bundle only carries the non-secret manifests.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: amphive
+
+resources:
+  - namespace.yaml
+  - postgres.yaml
+  - mosquitto.yaml
+  - backend.yaml
+  - frontend.yaml

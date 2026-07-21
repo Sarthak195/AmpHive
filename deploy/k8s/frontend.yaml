@@ -1,3 +1,24 @@
+# =============================================================================
+# Frontend — Deployment + Services (compose `frontend` service)
+#
+# Image built FROM SOURCE (frontend/Dockerfile — nginx serving the SPA and
+# proxying /api + /socket.io to `backend:8000`). Build + import into k3s first:
+#   docker build -t amphive-frontend:local ./frontend
+#   docker save amphive-frontend:local | sudo k3s ctr images import -
+#
+# Two Services:
+#   - frontend        : ClusterIP :80  (the name Caddy would reverse_proxy to,
+#                       matching the compose `frontend:80` front-door target)
+#   - frontend-nodeport: NodePort 30080 -> 80, so the stack is reachable for
+#                       verification WITHOUT an ingress controller (we run k3s
+#                       with traefik DISABLED — do not assume it exists).
+#
+# INGRESS / CUTOVER NOTE: there is intentionally no Ingress object here (no
+# ingress controller on this node). At cutover the existing Caddy compose front
+# door (or a future ingress) terminates TLS and points at this frontend — e.g.
+# `reverse_proxy <node-ip>:30080` in the Caddyfile — instead of the compose
+# `frontend:80`. A ready-to-edit Ingress is left commented out at the bottom.
+# =============================================================================
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -17,18 +38,28 @@ spec:
     spec:
       containers:
         - name: frontend
-          image: sarthak195/amphive-frontend:latest
+          image: amphive-frontend:local
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 80
               name: http
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: frontend-service
+  name: frontend
   namespace: amphive
+  labels:
+    app: frontend
 spec:
+  type: ClusterIP
   ports:
     - port: 80
       targetPort: 80
@@ -36,21 +67,41 @@ spec:
   selector:
     app: frontend
 ---
-apiVersion: networking.k8s.io/v1
-kind: Ingress
+# Reachable without an ingress controller: http://<node-ip>:30080
+apiVersion: v1
+kind: Service
 metadata:
-  name: frontend-ingress
+  name: frontend-nodeport
   namespace: amphive
-  annotations:
-    ingress.kubernetes.io/ssl-redirect: "false"
+  labels:
+    app: frontend
 spec:
-  rules:
-    - http:
-        paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: frontend-service
-                port:
-                  number: 80
+  type: NodePort
+  ports:
+    - port: 80
+      targetPort: 80
+      nodePort: 30080
+      name: http
+  selector:
+    app: frontend
+---
+# CUTOVER (commented out): enable only once an ingress controller exists on the
+# cluster (traefik is disabled on this node). Until then the frontend-nodeport
+# Service above is the entrypoint, and Caddy fronts it.
+#
+# apiVersion: networking.k8s.io/v1
+# kind: Ingress
+# metadata:
+#   name: frontend-ingress
+#   namespace: amphive
+# spec:
+#   rules:
+#     - http:
+#         paths:
+#           - path: /
+#             pathType: Prefix
+#             backend:
+#               service:
+#                 name: frontend
+#                 port:
+#                   number: 80
