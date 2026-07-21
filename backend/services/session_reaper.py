@@ -323,7 +323,11 @@ class SessionReaperService:
         regardless. One reservation's failure never aborts the sweep. Returns
         the number of reservations activated this sweep."""
         from backend.database.models import (
-            ChargingSession, Plug, Reservation, ReservationStatus, SessionStatus,
+            ChargingSession,
+            Plug,
+            Reservation,
+            ReservationStatus,
+            SessionStatus,
         )
         from backend.services.notifications import notify
 
@@ -464,13 +468,19 @@ class SessionReaperService:
         from fastapi import HTTPException
 
         from backend.database.models import (
-            Gateway, Plug, PlugStatus, QueuedCharge, QueuedChargeStatus, Tenant,
+            Gateway,
+            Plug,
+            PlugStatus,
+            QueuedCharge,
+            QueuedChargeStatus,
+            Tenant,
             User,
         )
         from backend.services.notifications import notify
         from backend.services.session_lifecycle import plug_is_powered
         from backend.services.session_start import (
-            auto_start_delay, begin_active_session,
+            auto_start_delay,
+            begin_active_session,
         )
 
         now = datetime.now(timezone.utc)

@@ -27,12 +27,23 @@ from fastapi import HTTPException
 from fastapi.routing import APIRoute
 
 from backend.database.models import (
-    PlugStatus, ReservationStatus, SessionStatus, UserRole,
+    PlugStatus,
+    ReservationStatus,
+    SessionStatus,
+    UserRole,
 )
 from backend.routers.cpo import (
-    cpo_analytics_sessions, cpo_export_invoices_csv, cpo_list_events,
-    cpo_list_group_members, cpo_list_groups, cpo_list_invoices,
-    cpo_list_plugs, cpo_list_reservations, cpo_remove_group_member,
+    cpo_analytics_sessions,
+    cpo_export_invoices_csv,
+    cpo_list_events,
+    cpo_list_group_members,
+    cpo_list_groups,
+    cpo_list_invoices,
+    cpo_list_plugs,
+    cpo_list_reservations,
+    cpo_remove_group_member,
+)
+from backend.routers.cpo import (
     router as cpo_router,
 )
 
@@ -247,7 +258,7 @@ async def test_remove_group_member_deletes_and_audits():
     membership = _membership(user_id=7)
     db = _db(_scalar_one_or_none(group), _scalar_one_or_none(membership))
 
-    with patch("backend.routers.cpo.try_record_audit", new=AsyncMock()) as audit:
+    with patch("backend.routers.cpo._groups.try_record_audit", new=AsyncMock()) as audit:
         resp = await cpo_remove_group_member(12, 7, _cpo(), db)
 
     db.delete.assert_awaited_once_with(membership)
@@ -400,7 +411,7 @@ async def test_list_reservations_paginated_shape():
     db = _db(_scalar(12), _all([(r, "Plug A", "driver@amphive.test", "Dee River")]))
 
     with patch(
-        "backend.routers.cpo.expire_lapsed_reservations",
+        "backend.routers.cpo._reservations.expire_lapsed_reservations",
         new=AsyncMock(return_value=0),
     ):
         resp = await cpo_list_reservations(_cpo(), db)
@@ -427,7 +438,7 @@ async def test_list_reservations_paginated_shape():
 async def test_list_reservations_invalid_status_400():
     db = _db()
     with patch(
-        "backend.routers.cpo.expire_lapsed_reservations",
+        "backend.routers.cpo._reservations.expire_lapsed_reservations",
         new=AsyncMock(return_value=0),
     ):
         with pytest.raises(HTTPException) as exc:

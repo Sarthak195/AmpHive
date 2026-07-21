@@ -9,7 +9,9 @@ import pytest
 from fastapi import HTTPException
 
 from backend.services.rate_limit import (
-    SlidingWindowRateLimiter, client_ip, rate_limit_dependency,
+    SlidingWindowRateLimiter,
+    client_ip,
+    rate_limit_dependency,
 )
 
 

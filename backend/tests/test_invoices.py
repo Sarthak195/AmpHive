@@ -110,6 +110,7 @@ def test_cpo_profile_update_accepts_gst_seller_fields():
 
 def test_cpo_profile_update_enforces_gst_length_caps():
     from pydantic import ValidationError
+
     from backend.schemas import CpoProfileUpdateRequest
     with pytest.raises(ValidationError):
         CpoProfileUpdateRequest(gstin="x" * 16)            # GSTIN max 15
@@ -197,7 +198,11 @@ async def factory():
     """Engine + fresh schema per test; yields a session factory. Mirrors
     test_payouts.py's fixture exactly."""
     from sqlalchemy import text
-    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+    from sqlalchemy.ext.asyncio import (
+        AsyncSession,
+        async_sessionmaker,
+        create_async_engine,
+    )
     from sqlalchemy.pool import NullPool
 
     from backend.database.models import Base
@@ -242,7 +247,14 @@ async def _seed_session(
     _seed_session, extended with energy_kwh/rate (needed for the invoice
     line snapshot) and returning driver_user_id (needed for ownership
     checks)."""
-    from backend.database.models import ChargingSession, Gateway, GatewayStatus, Plug, PlugStatus, User
+    from backend.database.models import (
+        ChargingSession,
+        Gateway,
+        GatewayStatus,
+        Plug,
+        PlugStatus,
+        User,
+    )
 
     n = next(_seed_counter)
     if ended_at is None and status != SessionStatus.ACTIVE:

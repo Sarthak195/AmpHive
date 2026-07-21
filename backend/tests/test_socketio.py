@@ -1,10 +1,12 @@
 import asyncio
 import sys
 import types
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+
 from backend.services.socketio_manager import connect, subscribe_session
+
 
 def _configure_user_db(mock_db_factory, user):
     """Wire a patched async_session_factory so `async with` yields a session
@@ -69,14 +71,14 @@ async def test_connect_rejects_revoked_or_unknown_user():
 @pytest.mark.asyncio
 async def test_connect_invalid_or_missing_token():
     with patch("backend.services.socketio_manager.decode_access_token") as mock_decode, \
-         patch("backend.services.socketio_manager.sio") as mock_sio:
-        
+         patch("backend.services.socketio_manager.sio"):
+
         mock_decode.return_value = None
-        
+
         # No token at all
         res = await connect("sid-123", {}, None)
         assert res is False
-        
+
         # Invalid token
         res = await connect("sid-123", {}, {"token": "invalid-jwt"})
         assert res is False
@@ -85,10 +87,10 @@ async def test_connect_invalid_or_missing_token():
 async def test_subscribe_session_unauthorized():
     with patch("backend.services.socketio_manager.sio") as mock_sio, \
          patch("backend.services.socketio_manager.async_session_factory") as mock_db_factory:
-        
+
         mock_sio.get_session = AsyncMock(return_value={"user_id": 42})
         mock_sio.emit = AsyncMock()
-        
+
         # Setup mock db session returning None (no session found or unauthorized)
         mock_db = AsyncMock()
         mock_db.execute = AsyncMock()
@@ -96,9 +98,9 @@ async def test_subscribe_session_unauthorized():
         mock_result.scalar_one_or_none.return_value = None
         mock_db.execute.return_value = mock_result
         mock_db_factory.return_value.__aenter__.return_value = mock_db
-        
+
         await subscribe_session("sid-123", {"session_id": 100})
-        
+
         mock_sio.emit.assert_awaited_once_with(
             "subscription_error", {"detail": "Session not found or unauthorized"}, to="sid-123"
         )
@@ -107,26 +109,26 @@ async def test_subscribe_session_unauthorized():
 async def test_subscribe_session_success():
     with patch("backend.services.socketio_manager.sio") as mock_sio, \
          patch("backend.services.socketio_manager.async_session_factory") as mock_db_factory, \
-         patch("backend.services.socketio_manager.stream_telemetry_task") as mock_task, \
+         patch("backend.services.socketio_manager.stream_telemetry_task"), \
          patch("backend.services.socketio_manager.active_streams", {}) as mock_active_streams:
-        
+
         mock_sio.get_session = AsyncMock(return_value={"user_id": 42})
         mock_sio.emit = AsyncMock()
         mock_sio.enter_room = AsyncMock()
-        
+
         # Setup mock db session returning a valid session
         mock_session = MagicMock()
         mock_session.plug_id = 9
-        
+
         mock_db = AsyncMock()
         mock_db.execute = AsyncMock()
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = mock_session
         mock_db.execute.return_value = mock_result
         mock_db_factory.return_value.__aenter__.return_value = mock_db
-        
+
         await subscribe_session("sid-123", {"session_id": 100})
-        
+
         mock_sio.enter_room.assert_awaited_once_with("sid-123", "session_100")
         mock_sio.emit.assert_awaited_once_with("subscription_success", {"session_id": 100}, to="sid-123")
         assert 100 in mock_active_streams

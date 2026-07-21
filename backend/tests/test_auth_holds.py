@@ -48,7 +48,11 @@ ENUM_TYPES = ["gateway_status", "plug_status", "session_status", "tx_type", "use
 async def factory():
     """Engine + fresh schema per test; yields a session factory."""
     from sqlalchemy import text
-    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+    from sqlalchemy.ext.asyncio import (
+        AsyncSession,
+        async_sessionmaker,
+        create_async_engine,
+    )
     from sqlalchemy.pool import NullPool
 
     from backend.database.models import Base
@@ -310,9 +314,9 @@ async def test_available_balance_unknown_user_returns_zero(factory):
 async def test_hold_sized_to_max_kwh_cost_when_available_balance_is_larger(factory, monkeypatch):
     """hold = min(available, max_kwh * rate) — bounded by the session's own
     worst-case energy cost when the wallet has plenty to spare."""
-    import backend.services.pricing as pricing_mod
     from sqlalchemy import select
 
+    import backend.services.pricing as pricing_mod
     from backend.database.models import ChargingSession
 
     monkeypatch.setattr(pricing_mod, "COINS_PER_KWH", 5.0)
@@ -337,9 +341,9 @@ async def test_hold_sized_to_max_kwh_cost_when_available_balance_is_larger(facto
 async def test_hold_sized_to_available_balance_when_smaller_than_max_kwh_cost(factory, monkeypatch):
     """hold = min(available, max_kwh * rate) — bounded by the AVAILABLE
     balance when it's the tighter constraint."""
-    import backend.services.pricing as pricing_mod
     from sqlalchemy import select
 
+    import backend.services.pricing as pricing_mod
     from backend.database.models import ChargingSession
 
     monkeypatch.setattr(pricing_mod, "COINS_PER_KWH", 5.0)
@@ -366,9 +370,9 @@ async def test_second_concurrent_session_gets_remaining_available_balance(factor
     the same coins: the second start only gets what's left of the AVAILABLE
     balance after the first session's hold, not a fresh read of the raw
     wallet balance."""
-    import backend.services.pricing as pricing_mod
     from sqlalchemy import select
 
+    import backend.services.pricing as pricing_mod
     from backend.database.models import ChargingSession
 
     monkeypatch.setattr(pricing_mod, "COINS_PER_KWH", 5.0)
@@ -406,9 +410,9 @@ async def test_small_session_starts_with_hold_below_floor(factory, monkeypatch):
     gates the AVAILABLE balance, never the hold itself. Regression for the
     2026-07-12 prod find where a fully-funded wallet was 402'd because its
     5 kWh session only reserved 25 coins (< the 50 floor)."""
-    import backend.services.pricing as pricing_mod
     from sqlalchemy import select
 
+    import backend.services.pricing as pricing_mod
     from backend.database.models import ChargingSession
 
     monkeypatch.setattr(pricing_mod, "COINS_PER_KWH", 5.0)
@@ -436,8 +440,9 @@ async def test_start_rejected_when_available_balance_below_floor_despite_raw_bal
     must still get the 402 once another active session already holds enough
     of it to push the AVAILABLE balance below the floor — proving the check
     gates on available_balance, not user.coin_balance."""
-    import backend.services.pricing as pricing_mod
     from fastapi import HTTPException
+
+    import backend.services.pricing as pricing_mod
 
     monkeypatch.setattr(pricing_mod, "COINS_PER_KWH", 5.0)
 
@@ -583,7 +588,9 @@ async def test_legacy_null_hold_session_finalizes_with_pre_hold_behavior(factory
     import backend.services.session_lifecycle as sl_mod
     from backend import state as state_module
     from backend.database.models import (
-        LedgerTransaction, SessionStatus, User,
+        LedgerTransaction,
+        SessionStatus,
+        User,
     )
 
     tenant_id = await _seed_tenant(factory)

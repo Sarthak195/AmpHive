@@ -15,8 +15,12 @@ from jose import jwt
 from backend.routers.auth import login
 from backend.schemas import LoginRequest
 from backend.services.auth import (
-    JWT_ALGORITHM, JWT_SECRET_KEY, decode_access_token, get_current_user,
-    hash_password, verify_password,
+    JWT_ALGORITHM,
+    JWT_SECRET_KEY,
+    decode_access_token,
+    get_current_user,
+    hash_password,
+    verify_password,
 )
 
 

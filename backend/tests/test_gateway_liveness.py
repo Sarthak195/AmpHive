@@ -18,9 +18,13 @@ from unittest.mock import MagicMock
 import pytest
 
 from backend.database.models import GatewayStatus
-from backend.services.session_lifecycle import GATEWAY_LIVENESS_WINDOW_SEC, gateway_is_live
 from backend.services import mqtt_manager as mqtt_module
+from backend.services.mqtt import telemetry as mqtt_telemetry_module
 from backend.services.mqtt_manager import MQTTManager
+from backend.services.session_lifecycle import (
+    GATEWAY_LIVENESS_WINDOW_SEC,
+    gateway_is_live,
+)
 
 NOW = datetime(2026, 7, 6, 12, 0, 0, tzinfo=timezone.utc)
 
@@ -74,7 +78,9 @@ def test_bump_throttle_allows_first_then_blocks_within_window(monkeypatch):
     mgr = MQTTManager()
 
     t = [1000.0]
-    monkeypatch.setattr(mqtt_module.time, "monotonic", lambda: t[0])
+    # _should_bump_gateway_seen's time.monotonic() call now lives in
+    # services/mqtt/telemetry.py (post mixin-split); patch it there.
+    monkeypatch.setattr(mqtt_telemetry_module.time, "monotonic", lambda: t[0])
 
     assert mgr._should_bump_gateway_seen("gw-1") is True
     assert mgr._should_bump_gateway_seen("gw-1") is False       # same instant

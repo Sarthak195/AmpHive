@@ -32,7 +32,13 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.database.models import ChargingSession, Invoice, SessionStatus, Tenant, User
+from backend.database.models import (
+    ChargingSession,
+    Invoice,
+    SessionStatus,
+    Tenant,
+    User,
+)
 from backend.services.money import ZERO_MONEY, to_money
 from backend.services.pricing import default_rate
 

@@ -34,16 +34,26 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database.db import get_db
 from backend.database.models import (
-    Gateway, Plug, PlugStatus, Reservation, ReservationStatus, User, UserRole,
+    Gateway,
+    Plug,
+    PlugStatus,
+    Reservation,
+    ReservationStatus,
+    User,
+    UserRole,
 )
 from backend.schemas import (
-    MyReservationsResponse, ReservationCreateRequest, ReservationResponse,
+    MyReservationsResponse,
+    ReservationCreateRequest,
+    ReservationResponse,
 )
 from backend.services import reservations as reservation_policy
 from backend.services.auth import get_current_user
 from backend.services.notifications import notify
 from backend.services.reservations import (
-    expire_lapsed_reservations, format_window, user_can_access_plug,
+    expire_lapsed_reservations,
+    format_window,
+    user_can_access_plug,
 )
 
 logger = logging.getLogger("amphive.api")

@@ -17,8 +17,9 @@ import os
 import sys
 
 from sqlalchemy.ext.asyncio import create_async_engine
-from backend.database.models import Base
+
 from backend.database.db import DATABASE_URL
+from backend.database.models import Base
 
 
 async def main():

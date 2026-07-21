@@ -14,12 +14,25 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend import state
 from backend.database.db import get_db
 from backend.database.models import (
-    ChargerGroup, ChargingSession, DisputeStatus, Gateway, GroupMembership, Plug, PlugStatus, SessionDispute,
-    SessionStatus, Tenant, User, UserRole,
+    ChargerGroup,
+    ChargingSession,
+    DisputeStatus,
+    Gateway,
+    GroupMembership,
+    Plug,
+    PlugStatus,
+    SessionDispute,
+    SessionStatus,
+    Tenant,
+    User,
+    UserRole,
 )
 from backend.schemas import (
-    DisputeCreateRequest, DisputeResponse,
-    QueueChargeRequest, SessionLimitsUpdateRequest, SessionStartRequest,
+    DisputeCreateRequest,
+    DisputeResponse,
+    QueueChargeRequest,
+    SessionLimitsUpdateRequest,
+    SessionStartRequest,
     SessionStopRequest,
 )
 from backend.services.auth import (
@@ -29,11 +42,13 @@ from backend.services.money import energy_cost, to_money
 from backend.services.pricing import max_rate_over_window
 from backend.services.session_lifecycle import (
     finalize_charging_session,
-    gateway_is_live, plug_is_powered,
+    gateway_is_live,
+    plug_is_powered,
     # Not called here, but tests patch it on this module (the start flow's
     # telemetry-interval stub); keep it importable as that patch surface.
     set_plug_telemetry_interval,  # noqa: F401
 )
+
 # [Session start refactor] The ACTIVE-session start body (caps -> rate -> hold
 # -> create -> claim -> publish -> rollback) lives in one shared helper so the
 # reaper's queued-charge auto-start bills identically to a walk-up start
@@ -41,7 +56,8 @@ from backend.services.session_lifecycle import (
 # re-exported here — it moved to session_start so the queue endpoint and the
 # auto-start share one floor — so main.py's GET /api/config import still works.
 from backend.services.session_start import (
-    MIN_START_BALANCE_COINS, begin_active_session,
+    MIN_START_BALANCE_COINS,
+    begin_active_session,
 )
 from backend.services.wallet import available_balance
 
@@ -993,7 +1009,9 @@ async def dispute_session(
 from fastapi.responses import HTMLResponse  # noqa: E402
 
 from backend.services.invoices import (  # noqa: E402
-    SessionNotInvoiceableError, invoice_to_dict, issue_invoice_for_session,
+    SessionNotInvoiceableError,
+    invoice_to_dict,
+    issue_invoice_for_session,
     render_invoice_html,
 )
 

@@ -12,21 +12,30 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database.db import get_db
 from backend.database.models import (
-    CapacityRequest, ChargerGroup, Gateway, GroupMembership, Plug, PlugStatus, PlugWatch,
-    Tenant, User,
+    CapacityRequest,
+    ChargerGroup,
+    Gateway,
+    GroupMembership,
+    Plug,
+    PlugStatus,
+    PlugWatch,
+    Tenant,
+    User,
 )
 from backend.schemas import (
     PlugResponse,
     PublicPlugResponse,
 )
-from backend.services.rate_limit import public_map_rate_limiter, rate_limit_dependency
 from backend.services.auth import (
     get_current_user,
 )
 from backend.services.pricing import resolve_price_display, resolve_price_display_batch
+from backend.services.rate_limit import public_map_rate_limiter, rate_limit_dependency
 from backend.services.session_lifecycle import (
-    gateway_is_live, plug_is_powered,
+    gateway_is_live,
+    plug_is_powered,
 )
+
 # [Queued charge] queue_available on PlugResponse = gateway online + plug
 # unpowered + the CPO's queued-charging resolver says yes (Plug override ->
 # Tenant default).
@@ -154,7 +163,7 @@ async def get_available_plugs(
     )
     public_group_ids = (
         select(ChargerGroup.id)
-        .where(ChargerGroup.is_public == True)
+        .where(ChargerGroup.is_public == True)  # noqa: E712 (SQL boolean, not Python)
         .scalar_subquery()
     )
 
@@ -570,7 +579,10 @@ async def get_plug_tariff_preview(
     from backend.database.models import TariffSlot
     from backend.services.money import to_money
     from backend.services.pricing import (
-        _resolve_tariff_and_tz, _slot_rate_and_bound, _to_local, _zone,
+        _resolve_tariff_and_tz,
+        _slot_rate_and_bound,
+        _to_local,
+        _zone,
         default_rate,
     )
 

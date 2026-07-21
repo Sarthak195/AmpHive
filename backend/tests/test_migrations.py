@@ -46,6 +46,7 @@ def _make_config(url: str):
 async def _wipe(engine):
     """Drop everything the baseline (or create_all) may have left behind."""
     from sqlalchemy import text
+
     from backend.database.models import Base
 
     async with engine.begin() as conn:

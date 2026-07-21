@@ -7,9 +7,10 @@ injected finalize callable are mocked; what's under test is the sweep logic —
 every stale id gets a finalize attempt, races (finalize -> None) aren't
 counted as reaped, and one failing session doesn't abort the sweep.
 """
-import pytest
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 from backend.services.session_reaper import REAP_REASON, SessionReaperService
 

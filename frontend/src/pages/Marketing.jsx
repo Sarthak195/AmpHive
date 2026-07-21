@@ -117,7 +117,7 @@ const NetworkProof = () => {
     <p className="mkt-proof" aria-live="polite" data-testid="network-proof">
       <StatusDot state="available" live />
       <span>
-        <span className="num">{plugs.length}</span> chargers on the network ·{' '}
+        <span className="num">{plugs.length}</span> charger{plugs.length === 1 ? '' : 's'} on the network ·{' '}
         <span className="num">{available}</span> available right now
       </span>
     </p>

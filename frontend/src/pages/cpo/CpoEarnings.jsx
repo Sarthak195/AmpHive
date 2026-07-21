@@ -6,19 +6,24 @@
  * (bank/UPI) and the platform operator's admin console marks it paid once
  * that transfer has happened — this page never shows a "Mark paid" action.
  *
- * Data: GET /api/cpo/earnings (lifetime + unsettled legs), GET
- * /api/cpo/payouts (bare array, newest request first).
+ * Data: GET /api/cpo/earnings (lifetime + unsettled legs, plus the offline
+ * top-up pool figure), GET /api/cpo/payouts (bare array, newest request
+ * first), GET /api/cpo/topups (paginated {total,items}).
  * Mutations: POST /api/cpo/payouts (request), POST
- * /api/cpo/payouts/{id}/cancel (owner or admin; only while REQUESTED).
+ * /api/cpo/payouts/{id}/cancel (owner or admin; only while REQUESTED),
+ * POST /api/cpo/topups (credit a driver's wallet from cash collected
+ * offline — capped at the tenant's available top-up pool, a two-step
+ * Modal-then-ConfirmDialog flow stating the money math plainly).
  */
 
 import { useCallback, useEffect, useState } from 'react';
-import { Wallet } from 'lucide-react';
+import { HandCoins, Wallet } from 'lucide-react';
 import CpoLayout from '../../components/CpoLayout';
+import Modal from '../../components/ui/Modal';
 import { PageHeader, DataTable, ConfirmDialog, Money, ErrorState, useToast } from '../../components/ui';
 import api from '../../api/client';
 import { useConfig } from '../../contexts/ConfigContext';
-import { formatINR } from '../../utils/money';
+import { coinsToINR, formatINR } from '../../utils/money';
 import { apiErrorCopy, payoutStatusLabel } from '../../utils/statusCopy';
 import './CpoEarnings.css';
 
@@ -100,6 +105,93 @@ export default function CpoEarnings() {
   useEffect(() => {
     fetchData();
   }, [fetchData]);
+
+  // ---- Offline (cash) top-ups ---------------------------------------------
+  const [topups, setTopups] = useState([]);
+  const [topupsTotal, setTopupsTotal] = useState(0);
+  const [topupsOffset, setTopupsOffset] = useState(0);
+  const [topupsLoading, setTopupsLoading] = useState(true);
+  const [topupsError, setTopupsError] = useState(null);
+  const TOPUPS_PAGE_SIZE = 20;
+
+  const fetchTopups = useCallback(async (offset = 0) => {
+    setTopupsLoading(true);
+    setTopupsError(null);
+    try {
+      const data = await api.get(`/api/cpo/topups?limit=${TOPUPS_PAGE_SIZE}&offset=${offset}`);
+      setTopups(data?.items || []);
+      setTopupsTotal(data?.total || 0);
+      setTopupsOffset(offset);
+    } catch (err) {
+      setTopupsError(err);
+    } finally {
+      setTopupsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchTopups(0);
+  }, [fetchTopups]);
+
+  const pool = earnings?.topup_pool;
+  const availablePool = Number(pool?.available_coins || 0);
+
+  const [creditOpen, setCreditOpen] = useState(false);
+  const [creditForm, setCreditForm] = useState({ driver_email: '', amount_coins: '', note: '' });
+  const [creditFormError, setCreditFormError] = useState('');
+  const [creditConfirmOpen, setCreditConfirmOpen] = useState(false);
+  const [creditBusy, setCreditBusy] = useState(false);
+  const [creditError, setCreditError] = useState('');
+
+  const openCredit = () => {
+    setCreditForm({ driver_email: '', amount_coins: '', note: '' });
+    setCreditFormError('');
+    setCreditOpen(true);
+  };
+
+  const submitCreditForm = (e) => {
+    e.preventDefault();
+    const email = creditForm.driver_email.trim();
+    const amount = Number(creditForm.amount_coins);
+    if (!email) {
+      setCreditFormError('Enter the driver’s email.');
+      return;
+    }
+    if (!amount || amount <= 0) {
+      setCreditFormError('Enter an amount greater than 0.');
+      return;
+    }
+    if (amount > availablePool) {
+      setCreditFormError(
+        `That's more than your available pool (${formatINR(coinsToINR(availablePool, rate))}). Reduce the amount.`
+      );
+      return;
+    }
+    setCreditFormError('');
+    setCreditOpen(false);
+    setCreditError('');
+    setCreditConfirmOpen(true);
+  };
+
+  const confirmCredit = async () => {
+    setCreditBusy(true);
+    setCreditError('');
+    try {
+      await api.post('/api/cpo/topups', {
+        driver_email: creditForm.driver_email.trim(),
+        amount_coins: Number(creditForm.amount_coins),
+        note: creditForm.note.trim() || undefined,
+      });
+      setCreditConfirmOpen(false);
+      toast.ok('Driver credited.');
+      await fetchData();
+      await fetchTopups(0);
+    } catch (err) {
+      setCreditError(apiErrorCopy(err));
+    } finally {
+      setCreditBusy(false);
+    }
+  };
 
   const unsettled = earnings?.unsettled;
   const hasUnsettled = Number(unsettled?.net_coins || 0) > 0;
@@ -199,6 +291,18 @@ export default function CpoEarnings() {
     },
   ];
 
+  const topupColumns = [
+    {
+      key: 'driver',
+      label: 'Driver',
+      render: (t) => t.driver_email || `#${t.driver_user_id ?? '—'}`,
+    },
+    { key: 'amount_coins', label: 'Amount', num: true, render: (t) => <Money coins={t.amount_coins} rate={rate} showCoins /> },
+    { key: 'note', label: 'Note', render: (t) => t.note || <span className="text-3">—</span> },
+    { key: 'actor', label: 'Credited by', render: (t) => t.actor_email || '—' },
+    { key: 'created_at', label: 'Date', render: (t) => formatDateTime(t.created_at) },
+  ];
+
   return (
     <CpoLayout>
       <PageHeader
@@ -266,6 +370,68 @@ export default function CpoEarnings() {
             Coins are AmpHive's internal ledger unit — 1 coin = {formatINR(rate)}.
           </p>
 
+          <div className="card earnings-topup-card">
+            <div className="earnings-topup-header">
+              <div>
+                <h2 className="earnings-card-title">Offline top-ups</h2>
+                <p className="text-3 text-sm">
+                  Credit collected in cash — it comes out of your unsettled earnings, it's
+                  never created from nothing.
+                </p>
+              </div>
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={openCredit}
+                disabled={loading || availablePool <= 0}
+              >
+                <HandCoins size={16} aria-hidden="true" />
+                Credit a driver
+              </button>
+            </div>
+            <div className="earnings-stat-row">
+              <div className="earnings-stat">
+                <span className="earnings-stat-label">Available to top up</span>
+                <span className="earnings-stat-value earnings-stat-value--net">
+                  <Money coins={availablePool} rate={rate} showCoins />
+                </span>
+              </div>
+              {Number(pool?.already_issued_coins || 0) > 0 && (
+                <div className="earnings-stat">
+                  <span className="earnings-stat-label">Already credited this window</span>
+                  <span className="earnings-stat-value">
+                    <Money coins={pool.already_issued_coins} rate={rate} showCoins />
+                  </span>
+                </div>
+              )}
+            </div>
+            {availablePool <= 0 && (
+              <p className="text-3 text-sm">
+                There's nothing unsettled to top up with right now.
+              </p>
+            )}
+          </div>
+
+          <h2 className="earnings-section-title">Top-up history</h2>
+
+          <DataTable
+            columns={topupColumns}
+            rows={topups}
+            loading={topupsLoading}
+            error={topupsError}
+            onRetry={() => fetchTopups(topupsOffset)}
+            emptyIcon={HandCoins}
+            emptyTitle="No offline top-ups yet"
+            emptyBody="Credit a driver's wallet for a cash payment collected at the charger — it draws from your own unsettled earnings."
+            pagination={{
+              total: topupsTotal,
+              offset: topupsOffset,
+              limit: TOPUPS_PAGE_SIZE,
+              onPage: fetchTopups,
+            }}
+            collapse
+          />
+
           <h2 className="earnings-section-title">Payout history</h2>
 
           <DataTable
@@ -328,6 +494,95 @@ export default function CpoEarnings() {
               request.
             </p>
             {cancelError && <p className="field-error">{cancelError}</p>}
+          </div>
+        }
+      />
+
+      <Modal open={creditOpen} onClose={() => setCreditOpen(false)} title="Credit a driver">
+        <form className="stack" onSubmit={submitCreditForm}>
+          <div className="field">
+            <label className="field-label" htmlFor="topup-driver-email">
+              Driver's email
+            </label>
+            <input
+              id="topup-driver-email"
+              type="email"
+              className="input"
+              value={creditForm.driver_email}
+              onChange={(e) => setCreditForm((f) => ({ ...f, driver_email: e.target.value }))}
+              placeholder="driver@example.com"
+              autoFocus
+              required
+            />
+          </div>
+          <div className="field">
+            <label className="field-label" htmlFor="topup-amount">
+              Amount (coins)
+            </label>
+            <input
+              id="topup-amount"
+              type="number"
+              min="0"
+              step="0.01"
+              className="input"
+              value={creditForm.amount_coins}
+              onChange={(e) => setCreditForm((f) => ({ ...f, amount_coins: e.target.value }))}
+              placeholder="0.00"
+              required
+            />
+            <p className="field-help">
+              Up to <Money coins={availablePool} rate={rate} showCoins /> available right now.
+            </p>
+          </div>
+          <div className="field">
+            <label className="field-label" htmlFor="topup-note">
+              Note (optional)
+            </label>
+            <input
+              id="topup-note"
+              className="input"
+              value={creditForm.note}
+              onChange={(e) => setCreditForm((f) => ({ ...f, note: e.target.value }))}
+              placeholder="e.g. cash, pump 3"
+              maxLength={500}
+            />
+          </div>
+          {creditFormError && <p className="field-error">{creditFormError}</p>}
+          <div className="modal-actions">
+            <button type="button" className="btn btn-quiet" onClick={() => setCreditOpen(false)}>
+              Cancel
+            </button>
+            <button type="submit" className="btn btn-primary">
+              Continue
+            </button>
+          </div>
+        </form>
+      </Modal>
+
+      <ConfirmDialog
+        open={creditConfirmOpen}
+        onClose={() => !creditBusy && setCreditConfirmOpen(false)}
+        onConfirm={confirmCredit}
+        title="Credit this driver?"
+        confirmLabel="Credit driver"
+        tone="primary"
+        busy={creditBusy}
+        busyLabel="Crediting…"
+        body={
+          <div className="stack-sm">
+            <p className="text-2">
+              Credit <strong>{creditForm.driver_email}</strong> with{' '}
+              <strong>
+                <Money coins={Number(creditForm.amount_coins) || 0} rate={rate} showCoins />
+              </strong>
+              . Their wallet balance rises immediately, and this comes straight out of your
+              unsettled earnings pool — it will reduce any bank payout you request later for
+              this same window.
+            </p>
+            {creditForm.note && (
+              <p className="text-3 text-sm">Note: {creditForm.note}</p>
+            )}
+            {creditError && <p className="field-error">{creditError}</p>}
           </div>
         }
       />

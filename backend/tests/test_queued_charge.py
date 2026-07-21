@@ -16,17 +16,22 @@ import pytest
 from fastapi import HTTPException
 
 from backend.database.models import (
-    GatewayStatus, PlugStatus, QueuedChargeStatus,
+    GatewayStatus,
+    PlugStatus,
+    QueuedChargeStatus,
 )
 from backend.routers.sessions import (
-    cancel_queued_charge, get_queued_charges, queue_charge,
+    cancel_queued_charge,
+    get_queued_charges,
+    queue_charge,
 )
 from backend.schemas import QueueChargeRequest
 from backend.services.session_reaper import SessionReaperService
 from backend.services.session_start import (
-    auto_start_delay, queue_ttl, queued_charging_enabled,
+    auto_start_delay,
+    queue_ttl,
+    queued_charging_enabled,
 )
-
 
 # --------------------------------------------------------------------------
 # Config resolvers (Plug override -> Tenant default)

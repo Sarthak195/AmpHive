@@ -1,13 +1,14 @@
-import logging
 import asyncio
-from typing import Dict, Any
-import socketio
+import logging
+from typing import Any, Dict
 
-from backend.services.auth import decode_access_token
-from backend.services.telemetry import TelemetryStore
+import socketio
+from sqlalchemy import and_, select
+
 from backend.database.db import async_session_factory
 from backend.database.models import ChargingSession, User
-from sqlalchemy import select, and_
+from backend.services.auth import decode_access_token
+from backend.services.telemetry import TelemetryStore
 
 logger = logging.getLogger("amphive.socketio")
 
@@ -101,13 +102,13 @@ async def connect(sid, environ, auth=None):
     if not token:
         logger.warning(f"Socket connection rejected: No token provided (sid: {sid})")
         return False  # Refuses connection
-        
+
     try:
         payload = decode_access_token(token)
         if not payload or not payload.get("sub"):
             logger.warning(f"Socket connection rejected: Invalid token (sid: {sid})")
             return False
-            
+
         user_id = int(payload.get("sub"))
 
         # Reject tokens issued before the user's current token epoch (logout /
@@ -145,13 +146,13 @@ async def subscribe_session(sid, data):
     if not isinstance(data, dict) or "session_id" not in data:
         await sio.emit("subscription_error", {"detail": "Invalid parameters"}, to=sid)
         return
-        
+
     try:
         session_id = int(data["session_id"])
     except (ValueError, TypeError):
         await sio.emit("subscription_error", {"detail": "Invalid session_id"}, to=sid)
         return
-        
+
     # Retrieve user_id from session
     socket_session = await sio.get_session(sid)
     user_id = socket_session.get("user_id")
@@ -173,14 +174,14 @@ async def subscribe_session(sid, data):
         if not charging_session:
             await sio.emit("subscription_error", {"detail": "Session not found or unauthorized"}, to=sid)
             return
-            
+
         plug_id = charging_session.plug_id
 
     # Enter room for this session
     room_name = f"session_{session_id}"
     await sio.enter_room(sid, room_name)
     logger.info(f"Client {sid} (user {user_id}) joined room {room_name}")
-    
+
     await sio.emit("subscription_success", {"session_id": session_id}, to=sid)
 
     # Start telemetry stream task if not already running for this session
@@ -200,7 +201,7 @@ async def unsubscribe_session(sid, data):
         session_id = int(data["session_id"])
     except (ValueError, TypeError):
         return
-        
+
     room_name = f"session_{session_id}"
     await sio.leave_room(sid, room_name)
     logger.info(f"Client {sid} left room {room_name}")
@@ -214,9 +215,9 @@ async def stream_telemetry_task(session_id: int, plug_id: int):
     from backend.services.session_lifecycle import set_plug_telemetry_interval
     room_name = f"session_{session_id}"
     logger.info(f"Starting telemetry stream task for session {session_id} (plug {plug_id})")
-    
+
     listeners_incremented = False
-    
+
     try:
         # Increment active listeners in telemetry store
         async with async_session_factory() as db:
@@ -236,10 +237,10 @@ async def stream_telemetry_task(session_id: int, plug_id: int):
             if not has_listeners:
                 logger.info(f"No participants left in room {room_name}. Terminating telemetry stream task.")
                 break
-                
+
             # Emit telemetry to the room
             await sio.emit("telemetry", snapshot, room=room_name)
-            
+
             if snapshot.get("status") == "completed":
                 logger.info(f"Session {session_id} completed. Terminating telemetry stream task.")
                 break
@@ -251,6 +252,6 @@ async def stream_telemetry_task(session_id: int, plug_id: int):
                 listeners = telemetry_store.decrement_listeners(plug_id)
                 if listeners == 0:
                     await set_plug_telemetry_interval(db, plug_id, 10000)
-        
+
         active_streams.pop(session_id, None)
         logger.info(f"Telemetry stream task for session {session_id} ended.")

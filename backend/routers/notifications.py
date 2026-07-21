@@ -16,11 +16,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.database.db import get_db
 from backend.database.models import Notification, PushSubscription, User
 from backend.schemas import (
-    NotificationListResponse, NotificationResponse, PushSubscribeRequest,
+    NotificationListResponse,
+    NotificationResponse,
+    PushSubscribeRequest,
     PushUnsubscribeRequest,
 )
-from backend.services.auth import get_current_user
 from backend.services import notifications as notification_service
+from backend.services.auth import get_current_user
 
 logger = logging.getLogger("amphive.api")
 router = APIRouter()

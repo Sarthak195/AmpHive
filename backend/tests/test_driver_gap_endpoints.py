@@ -22,12 +22,19 @@ from fastapi import HTTPException
 from fastapi.routing import APIRoute
 
 from backend.database.models import (
-    DisputeStatus, SessionStatus, UserRole,
+    DisputeStatus,
+    SessionStatus,
+    UserRole,
 )
 from backend.routers.groups import leave_group
 from backend.routers.plugs import get_plug_tariff_preview
 from backend.routers.sessions import (
-    get_my_disputes, get_my_stats, get_session_detail, get_session_history,
+    get_my_disputes,
+    get_my_stats,
+    get_session_detail,
+    get_session_history,
+)
+from backend.routers.sessions import (
     router as sessions_router,
 )
 
@@ -139,11 +146,11 @@ def _session(
 
 def _ledger(amount=Decimal("-12.00"), balance_after=Decimal("88.00"),
             description="Charging session on Plug A: 1.500 kWh"):
-    l = MagicMock()
-    l.amount = amount
-    l.balance_after = balance_after
-    l.description = description
-    return l
+    ledger = MagicMock()
+    ledger.amount = amount
+    ledger.balance_after = balance_after
+    ledger.description = description
+    return ledger
 
 
 @pytest.mark.asyncio

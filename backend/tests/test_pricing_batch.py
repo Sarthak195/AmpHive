@@ -26,7 +26,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from backend.services.pricing import (
-    _pick_tariff, _price_display_from_slots, default_rate,
+    _pick_tariff,
+    _price_display_from_slots,
+    default_rate,
     resolve_price_display_batch,
 )
 

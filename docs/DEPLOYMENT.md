@@ -79,6 +79,27 @@ broker endpoint (§2). DuckDNS is **retired** — no dynamic-DNS updater cron
 runs on the VM anymore, and `scripts/setup_duckdns.sh` is unused/retired
 (kept only as reference; see [SECURITY.md](SECURITY.md)).
 
+### Backend dependency lockfile — `backend/requirements.lock.txt`
+
+`backend/Dockerfile` installs `backend/requirements.lock.txt`, a fully-pinned
+`pip freeze` snapshot — not `backend/requirements.txt` directly — so every
+`--build` above resolves the exact same package versions instead of
+re-resolving `>=` ranges at build time. `requirements.txt` stays the
+human-edited source (loose pins + rationale comments); the lockfile is
+regenerated, never hand-edited:
+
+1. Update `backend/requirements.txt` as usual.
+2. `.venv/Scripts/python -m pip install -r backend/requirements.txt`
+3. `.venv/Scripts/python -m pip freeze` and copy the result into
+   `backend/requirements.lock.txt`, dropping anything that isn't part of
+   `requirements.txt`'s dependency closure — dev/test tooling (already
+   pinned/declared separately in `backend/requirements-dev.txt`) and any
+   stray local-only packages (browser automation, linters, etc.) that the
+   backend doesn't import at runtime.
+
+No version upgrades happen as a side effect of this regeneration — it only
+mirrors what's already resolved from `requirements.txt`.
+
 ### One-time VM bootstrap — `deploy/scripts/startup.sh`
 
 `apt-get install docker.io docker-compose`, enable+start Docker. Nothing else

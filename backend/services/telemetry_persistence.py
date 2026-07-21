@@ -128,7 +128,11 @@ class TelemetryPersistenceService:
 
         # Imported here to avoid a circular import at module load.
         from backend.database.models import (
-            ChargingSession, Gateway, Plug, SessionStatus, TelemetryReading,
+            ChargingSession,
+            Gateway,
+            Plug,
+            SessionStatus,
+            TelemetryReading,
         )
 
         try:

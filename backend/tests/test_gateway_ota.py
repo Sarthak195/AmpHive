@@ -50,7 +50,7 @@ def _db(*results):
 @pytest.mark.asyncio
 async def test_ota_published_for_online_gateway():
     db = _db(_result(_online_gateway()), _result(1))  # gateway, then plug_id=1
-    with patch("backend.routers.cpo.state") as state:
+    with patch("backend.routers.cpo._gateways.state") as state:
         state.mqtt_manager.send_gateway_ota.return_value = True
         res = await cpo_gateway_ota("gw-1", CpoGatewayOtaRequest(firmware_url=URL), _user(), db)
 
@@ -89,7 +89,7 @@ async def test_ota_409_when_gateway_has_no_plugs():
 @pytest.mark.asyncio
 async def test_ota_502_when_publish_fails():
     db = _db(_result(_online_gateway()), _result(1))
-    with patch("backend.routers.cpo.state") as state:
+    with patch("backend.routers.cpo._gateways.state") as state:
         state.mqtt_manager.send_gateway_ota.return_value = False
         with pytest.raises(HTTPException) as exc:
             await cpo_gateway_ota("gw-1", CpoGatewayOtaRequest(firmware_url=URL), _user(), db)

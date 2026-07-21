@@ -36,7 +36,11 @@ import pytest_asyncio
 from fastapi import HTTPException
 
 from backend.database.models import PayoutStatus, SessionStatus, UserRole
-from backend.routers.cpo import cpo_cancel_payout, cpo_mark_payout_paid, cpo_request_payout
+from backend.routers.cpo import (
+    cpo_cancel_payout,
+    cpo_mark_payout_paid,
+    cpo_request_payout,
+)
 from backend.services import payouts as payout_service
 from backend.services.rbac import require_role
 
@@ -275,7 +279,11 @@ async def factory():
     test_wallet.py's fixture exactly (including the belt-and-braces enum
     drop loop, extended here with payout_status)."""
     from sqlalchemy import text
-    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+    from sqlalchemy.ext.asyncio import (
+        AsyncSession,
+        async_sessionmaker,
+        create_async_engine,
+    )
     from sqlalchemy.pool import NullPool
 
     from backend.database.models import Base
@@ -316,7 +324,14 @@ async def _seed_session(factory, tenant_id, coins_spent, status, ended_at=None):
     are throwaway, just to satisfy FK constraints -- the earnings query only
     reads ChargingSession.tenant_id/status/ended_at/coins_spent (see
     services/payouts.py's module docstring for why no join is needed)."""
-    from backend.database.models import ChargingSession, Gateway, GatewayStatus, Plug, PlugStatus, User
+    from backend.database.models import (
+        ChargingSession,
+        Gateway,
+        GatewayStatus,
+        Plug,
+        PlugStatus,
+        User,
+    )
 
     n = next(_seed_counter)
     async with factory() as db:

@@ -28,6 +28,7 @@ Design decisions:
 """
 
 from fastapi import Depends, HTTPException, status
+
 from backend.database.models import User
 from backend.services.auth import get_current_user
 

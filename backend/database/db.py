@@ -13,8 +13,9 @@ Design decisions:
 """
 
 import os
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from typing import AsyncGenerator
+
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 # Read the database URL from environment. Expected format:
 # postgresql+asyncpg://user:password@host:port/dbname
@@ -71,6 +72,7 @@ def alembic_config():
     and inside the Docker image (/app/backend/...).
     """
     from pathlib import Path
+
     from alembic.config import Config
 
     cfg = Config()

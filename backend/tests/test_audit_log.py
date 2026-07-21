@@ -14,12 +14,20 @@ import pytest
 
 from backend.database.models import PlugStatus
 from backend.routers.cpo import (
-    cpo_create_gateway, cpo_create_group, cpo_create_plug, cpo_delete_group,
-    cpo_list_audit_log, cpo_update_group, cpo_update_plug,
+    cpo_create_gateway,
+    cpo_create_group,
+    cpo_create_plug,
+    cpo_delete_group,
+    cpo_list_audit_log,
+    cpo_update_group,
+    cpo_update_plug,
 )
 from backend.schemas import (
-    CpoGatewayCreateRequest, CpoGroupCreateRequest, CpoGroupUpdateRequest,
-    CpoPlugCreateRequest, CpoPlugUpdateRequest,
+    CpoGatewayCreateRequest,
+    CpoGroupCreateRequest,
+    CpoGroupUpdateRequest,
+    CpoPlugCreateRequest,
+    CpoPlugUpdateRequest,
 )
 from backend.services.audit import record_audit, try_record_audit
 

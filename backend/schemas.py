@@ -10,7 +10,6 @@ from typing import Optional
 
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
-
 # --- Auth Schemas ---
 
 class RegisterRequest(BaseModel):
@@ -502,6 +501,33 @@ class DisputeResponse(BaseModel):
     created_at: Optional[str] = None
     resolved_at: Optional[str] = None
     resolved_by_user_id: Optional[int] = None
+
+
+# --- CPO Offline (cash) Top-ups ---
+
+class CpoTopupCreateRequest(BaseModel):
+    """Body for POST /api/cpo/topups. `amount_coins` is bounded server-side
+    against the tenant's available top-up pool (services/payouts.py's
+    available_pool_coins), not just > 0 here — the router 409s with the
+    actual figure when it's exceeded. `note` is optional, short free text
+    ("cash, pump 3")."""
+    driver_email: EmailStr
+    amount_coins: float = Field(gt=0)
+    note: Optional[str] = Field(default=None, max_length=500)
+
+
+class CpoTopupResponse(BaseModel):
+    """A CPO offline (cash) top-up — the CPO-side accounting record; the
+    driver's own wallet ledger shows the matching CPO_TOPUP credit."""
+    id: int
+    tenant_id: int
+    actor_user_id: Optional[int] = None
+    actor_email: Optional[str] = None
+    driver_user_id: Optional[int] = None
+    driver_email: Optional[str] = None
+    amount_coins: float
+    note: Optional[str] = None
+    created_at: Optional[str] = None
 
 
 # --- Plug Reservation Schemas (feat/reservations) ---

@@ -53,7 +53,11 @@ ENUM_TYPES = [
 async def factory():
     """Engine + fresh schema per test; yields a session factory."""
     from sqlalchemy import text
-    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+    from sqlalchemy.ext.asyncio import (
+        AsyncSession,
+        async_sessionmaker,
+        create_async_engine,
+    )
     from sqlalchemy.pool import NullPool
 
     from backend.database.models import Base
@@ -87,7 +91,13 @@ async def _seed_world(
     """One tenant with a CPO + driver + a charging session, ready to dispute.
     Returns the ids tests need. `session_status` defaults to COMPLETED."""
     from backend.database.models import (
-        ChargingSession, Gateway, Plug, SessionStatus, Tenant, User, UserRole,
+        ChargingSession,
+        Gateway,
+        Plug,
+        SessionStatus,
+        Tenant,
+        User,
+        UserRole,
     )
 
     session_status = session_status or SessionStatus.COMPLETED

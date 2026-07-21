@@ -9,10 +9,10 @@ winner's committed session), and /api/sessions/active returns every ACTIVE
 session — previously only the newest was surfaced, which left any older
 active session unreachable/un-stoppable from the UI.
 """
-import pytest
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from fastapi import HTTPException
 
 from backend.routers import sessions as sessions_module

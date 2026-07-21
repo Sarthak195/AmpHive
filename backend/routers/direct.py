@@ -24,7 +24,8 @@ router = APIRouter()
 
 # [Direct Mode] env config (dotenv is loaded before routers are imported,
 # but load again defensively — it is idempotent).
-from dotenv import load_dotenv
+from dotenv import load_dotenv  # noqa: E402
+
 load_dotenv()
 DIRECT_MODE = os.getenv("DIRECT_MODE", "false").lower() == "true"
 TAPO_PLUG_IP = os.getenv("TAPO_PLUG_IP", "")
