@@ -298,10 +298,9 @@ async def finalize_charging_session(
     # requested in that gap wouldn't see this row yet, but WOULD advance its
     # watermark to its own (later) "now" -- permanently excluding this
     # session's earnings from every future payout too, since the watermark
-    # never runs backwards. Minimizing the gap here narrows that race; the
-    # real backstop is the settlement-lag on the payout side (see
-    # PAYOUT_SETTLEMENT_LAG_SEC in services/payouts.py), which tolerates
-    # whatever gap remains between this line and the commit actually landing.
+    # never runs backwards. Stamping ended_at right before the commit shrinks
+    # that window to the commit itself (see the "Watermark race" note in
+    # services/payouts.py for the residual and why a lag was not the fix).
     session.ended_at = datetime.now(timezone.utc)
     await db.commit()
 
