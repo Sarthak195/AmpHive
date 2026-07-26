@@ -24,6 +24,31 @@ a plug is ever reassigned to a different gateway/tenant, a historical
 session must still be credited to whoever operated the plug when the
 session actually ran.
 
+Refunds (session disputes) net out of this same gross:
+`sum_completed_session_coins` also subtracts the SUM(refund_coins) of every
+APPROVED SessionDispute for this tenant whose resolved_at falls in the same
+[window_start, window_end) (see `sum_approved_refund_coins`). The refund is
+windowed by the dispute's own *resolved_at* — deliberately NOT by the
+session's ended_at — because a dispute can be approved long after its
+session was already settled into a REQUESTED/PAID payout. Keying the refund
+to when it was resolved lands it in the CURRENT unsettled window, so it
+claws back off the CPO's next payout/pool. Keying it to the session's
+ended_at (the obvious mirror of the gross scoping) reopens the drain: once
+the session's ended_at is behind the watermark — which happens the moment
+any payout covering it is requested — a later refund would fall before every
+future window and never be subtracted, letting a CPO get paid in full and
+then approve the refund for free. `cpo_resolve_dispute`
+(routers/cpo/_disputes.py) credits the driver's wallet and stamps
+SessionDispute.refund_coins/resolved_at/status but deliberately never
+touches ChargingSession.coins_spent (that column stays the driver's original
+receipt/invoice) — so without this subtraction here, a refunded session
+would silently keep paying the CPO out on coins it no longer collected. A
+refund resolved in a window with too little fresh gross to absorb it clamps
+the window to zero (below) and, because no payout is created when the payable
+is non-positive (routers/cpo/_payouts.py), the watermark does not advance —
+so the un-absorbed refund keeps suppressing payouts until later earnings
+cover it (carry-forward, never over-paid).
+
 Platform fee = PLATFORM_FEE_PCT percent of gross (env, default 10.0),
 money-rounded via to_money; net = gross - fee (not gross * (1 - pct/100)),
 so fee + net always foot back to gross exactly.
@@ -62,9 +87,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database.models import (
     ChargingSession,
+    DisputeStatus,
     OfflineTopup,
     Payout,
     PayoutStatus,
+    SessionDispute,
     SessionStatus,
 )
 from backend.services.money import ZERO_MONEY, to_money
@@ -99,6 +126,40 @@ def compute_fee_and_net(gross: Decimal) -> Tuple[Decimal, Decimal]:
     return fee, net
 
 
+async def sum_approved_refund_coins(
+    db: AsyncSession,
+    tenant_id: int,
+    window_start: Optional[datetime] = None,
+    window_end: Optional[datetime] = None,
+) -> Decimal:
+    """SUM(refund_coins) of APPROVED SessionDisputes for this tenant whose
+    resolved_at is in the half-open window [window_start, window_end). The
+    window is keyed off the dispute's OWN resolved_at — not the session's
+    ended_at — so a refund approved after its session was already settled
+    still claws back off the current unsettled window instead of vanishing
+    before the watermark (see the module docstring's "Refunds" paragraph for
+    the full rationale and the pay-then-refund drain it closes). Joins
+    ChargingSession only to scope by tenant/COMPLETED, since refund_coins and
+    resolved_at both live on SessionDispute."""
+    conditions = [
+        ChargingSession.tenant_id == tenant_id,
+        ChargingSession.status == SessionStatus.COMPLETED,
+        SessionDispute.status == DisputeStatus.APPROVED,
+    ]
+    if window_start is not None:
+        conditions.append(SessionDispute.resolved_at >= window_start)
+    if window_end is not None:
+        conditions.append(SessionDispute.resolved_at < window_end)
+
+    result = await db.execute(
+        select(func.coalesce(func.sum(SessionDispute.refund_coins), 0))
+        .select_from(SessionDispute)
+        .join(ChargingSession, ChargingSession.id == SessionDispute.session_id)
+        .where(and_(*conditions))
+    )
+    return to_money(result.scalar() or 0)
+
+
 async def sum_completed_session_coins(
     db: AsyncSession,
     tenant_id: int,
@@ -106,9 +167,16 @@ async def sum_completed_session_coins(
     window_end: Optional[datetime] = None,
 ) -> Decimal:
     """SUM(coins_spent) for this tenant's COMPLETED sessions with ended_at in
-    the half-open window [window_start, window_end). Either bound omitted
-    means unbounded on that side (omit both for lifetime earnings). Single
-    aggregate query — see the module docstring for why no join is needed."""
+    the half-open window [window_start, window_end), minus the SUM of any
+    APPROVED SessionDispute.refund_coins against those same sessions (see
+    `sum_approved_refund_coins` and the module docstring's "Refunds"
+    paragraph) — clamped at zero so a data inconsistency can't produce a
+    negative gross. Either bound omitted means unbounded on that side (omit
+    both for lifetime earnings). This is the single shared aggregate both
+    the earnings dashboard (gross/fee/net) and the offline top-up pool read,
+    so a dispute refund is reflected everywhere coins_spent is, without
+    mutating coins_spent itself (that stays the driver's original
+    receipt/invoice)."""
     conditions = [
         ChargingSession.tenant_id == tenant_id,
         ChargingSession.status == SessionStatus.COMPLETED,
@@ -123,7 +191,10 @@ async def sum_completed_session_coins(
             and_(*conditions)
         )
     )
-    return to_money(result.scalar() or 0)
+    gross = to_money(result.scalar() or 0)
+
+    refunds = await sum_approved_refund_coins(db, tenant_id, window_start, window_end)
+    return to_money(max(gross - refunds, ZERO_MONEY))
 
 
 async def sum_offline_topups(

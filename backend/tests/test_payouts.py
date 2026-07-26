@@ -444,6 +444,137 @@ async def test_gross_earnings_sums_only_completed_sessions_in_window(factory):
     assert gross == Decimal("17.50")
 
 
+async def _seed_driver(factory, tag):
+    """A standalone driver User row (no tenant), for FKs that need a real
+    driver id -- e.g. SessionDispute.driver_user_id below. Mirrors
+    _seed_admin's shape."""
+    from backend.database.models import User
+
+    n = next(_seed_counter)
+    async with factory() as db:
+        driver = User(
+            email=f"{tag}-{n}@example.com",
+            hashed_password="x",
+            full_name="Disputing Driver",
+            role=UserRole.DRIVER,
+        )
+        db.add(driver)
+        await db.commit()
+        return driver.id
+
+
+@requires_db
+@pytest.mark.asyncio
+async def test_approved_dispute_refund_nets_out_of_gross_in_its_sessions_window(factory):
+    """sum_completed_session_coins on its own: an APPROVED refund against a
+    COMPLETED session must reduce the gross for the window that session's
+    ended_at falls in, and a REJECTED dispute (no money moved) must not."""
+    from backend.database.models import DisputeStatus, SessionDispute
+
+    tenant_id, _ = await _seed_tenant(factory, "RefundGrossCo")
+    driver_id = await _seed_driver(factory, "driver")
+    now = datetime.now(timezone.utc)
+    ended_at = now - timedelta(hours=1)
+
+    approved_session_id = await _seed_session(
+        factory, tenant_id, "20.00", SessionStatus.COMPLETED, ended_at=ended_at
+    )
+    rejected_session_id = await _seed_session(
+        factory, tenant_id, "10.00", SessionStatus.COMPLETED, ended_at=ended_at
+    )
+
+    async with factory() as db:
+        db.add(SessionDispute(
+            session_id=approved_session_id,
+            tenant_id=tenant_id,
+            driver_user_id=driver_id,
+            reason="Charger stopped early",
+            status=DisputeStatus.APPROVED,
+            refund_coins=Decimal("5.00"),
+            resolved_at=now,
+        ))
+        db.add(SessionDispute(
+            session_id=rejected_session_id,
+            tenant_id=tenant_id,
+            driver_user_id=driver_id,
+            reason="Did not like the price",
+            status=DisputeStatus.REJECTED,
+            resolved_at=now,
+        ))
+        await db.commit()
+
+    async with factory() as db:
+        gross = await payout_service.sum_completed_session_coins(
+            db, tenant_id,
+            window_start=now - timedelta(days=1),
+            window_end=now + timedelta(minutes=1),
+        )
+
+    # (20.00 - 5.00 approved refund) + 10.00 untouched by the rejected one.
+    assert gross == Decimal("25.00")
+
+
+@requires_db
+@pytest.mark.asyncio
+async def test_approved_dispute_refund_reduces_available_pool_and_payable_net(factory):
+    """End-to-end through tenant_earnings_summary: a session billed N=20.00
+    coins with an APPROVED dispute refund R=5.00 must reduce both the
+    payable net and the offline-topup available pool by R net of the
+    platform's cut on R (fee is linear -- fee(A) - fee(A-R) == fee(R) at
+    whole-rupee amounts) -- not by the raw R, and not at all until the
+    dispute is actually approved. cpo_resolve_dispute never mutates
+    ChargingSession.coins_spent (see routers/cpo/_disputes.py), so this
+    netting-out has to happen in the earnings aggregate itself."""
+    from backend.database.models import DisputeStatus, SessionDispute
+
+    tenant_id, _ = await _seed_tenant(factory, "DisputePoolCo")
+    driver_id = await _seed_driver(factory, "disputer")
+    now = datetime.now(timezone.utc)
+    ended_at = now - timedelta(hours=1)
+
+    session_id = await _seed_session(
+        factory, tenant_id, "20.00", SessionStatus.COMPLETED, ended_at=ended_at
+    )
+
+    # Baseline: no dispute yet -- the full 20.00 gross settles at the
+    # default 10% platform fee (same default the sibling payout-lifecycle
+    # tests above rely on).
+    async with factory() as db:
+        baseline = await payout_service.tenant_earnings_summary(db, tenant_id)
+    assert baseline["unsettled_gross_coins"] == Decimal("20.00")
+    assert baseline["unsettled_net_coins"] == Decimal("18.00")
+    assert baseline["available_pool_coins"] == Decimal("18.00")
+
+    async with factory() as db:
+        db.add(SessionDispute(
+            session_id=session_id,
+            tenant_id=tenant_id,
+            driver_user_id=driver_id,
+            reason="Session cut off early",
+            status=DisputeStatus.APPROVED,
+            refund_coins=Decimal("5.00"),
+            resolved_at=now,
+        ))
+        await db.commit()
+
+    async with factory() as db:
+        after_refund = await payout_service.tenant_earnings_summary(db, tenant_id)
+
+    # Gross nets out the refund before the fee split: 20.00 - 5.00 = 15.00.
+    assert after_refund["unsettled_gross_coins"] == Decimal("15.00")
+    assert after_refund["unsettled_net_coins"] == Decimal("13.50")
+    assert after_refund["available_pool_coins"] == Decimal("13.50")
+    # Lifetime figures are the same underlying aggregate -- they move too.
+    assert after_refund["lifetime_gross_coins"] == Decimal("15.00")
+    assert after_refund["lifetime_net_coins"] == Decimal("13.50")
+
+    # The payable net/pool dropped by exactly the refund's own after-fee
+    # value -- i.e. by R net of the platform's cut on R, not by raw R.
+    _, refund_net = payout_service.compute_fee_and_net(Decimal("5.00"))
+    assert baseline["unsettled_net_coins"] - after_refund["unsettled_net_coins"] == refund_net
+    assert baseline["available_pool_coins"] - after_refund["available_pool_coins"] == refund_net
+
+
 @requires_db
 @pytest.mark.asyncio
 async def test_watermark_advances_after_payout_and_cancel_frees_window(factory):
@@ -523,6 +654,73 @@ async def test_second_payout_request_conflicts_while_first_pending(factory):
     assert rows[0].actor_user_id == user_id
     assert "gross=20.00" in rows[0].detail
     assert "net=18.00" in rows[0].detail
+
+
+@requires_db
+@pytest.mark.asyncio
+async def test_refund_approved_after_payout_still_claws_back_next_window(factory):
+    """Regression for the pay-then-refund drain: a dispute approved AFTER its
+    session was already settled into a PAID payout must still reduce the
+    tenant's NEXT unsettled window, because the refund is windowed by the
+    dispute's resolved_at, not the session's ended_at. Under the old ended_at
+    windowing the refund fell behind the watermark and vanished, letting a CPO
+    be paid in full and then approve the refund for free."""
+    from backend.database.models import DisputeStatus, Payout, SessionDispute
+
+    tenant_id, user_id = await _seed_tenant(factory, "PayThenRefundCo")
+    driver_id = await _seed_driver(factory, "latedisputer")
+    now = datetime.now(timezone.utc)
+
+    # S1 ended 2h ago and was fully settled into a PAID payout whose period_end
+    # (90m ago) becomes the tenant's watermark -> S1 now sits behind it.
+    old_session_id = await _seed_session(
+        factory, tenant_id, "20.00", SessionStatus.COMPLETED,
+        ended_at=now - timedelta(hours=2),
+    )
+    settled_at = now - timedelta(minutes=90)
+    async with factory() as db:
+        db.add(Payout(
+            tenant_id=tenant_id,
+            period_start=payout_service.EPOCH,
+            period_end=settled_at,
+            gross_coins=Decimal("20.00"),
+            platform_fee_coins=Decimal("2.00"),
+            net_coins=Decimal("18.00"),
+            status=PayoutStatus.PAID,
+            requested_by_user_id=user_id,
+        ))
+        await db.commit()
+
+    # Fresh earnings in the current unsettled window for the clawback to bite.
+    await _seed_session(
+        factory, tenant_id, "20.00", SessionStatus.COMPLETED,
+        ended_at=now - timedelta(minutes=30),
+    )
+
+    # Only NOW is the dispute against the already-paid S1 approved.
+    async with factory() as db:
+        db.add(SessionDispute(
+            session_id=old_session_id,
+            tenant_id=tenant_id,
+            driver_user_id=driver_id,
+            reason="Approved long after the session was paid out",
+            status=DisputeStatus.APPROVED,
+            refund_coins=Decimal("5.00"),
+            resolved_at=now,
+        ))
+        await db.commit()
+
+    async with factory() as db:
+        summary = await payout_service.tenant_earnings_summary(db, tenant_id)
+
+    # Watermark sits at the PAID payout's period_end; the fresh 20.00 session is
+    # the only in-window gross, but the late refund (resolved now) claws back
+    # against it: 20.00 - 5.00 = 15.00 gross -> 13.50 net/pool. Old ended_at
+    # windowing would have left gross=20.00 / net=18.00 (refund dropped).
+    assert summary["watermark"] == settled_at
+    assert summary["unsettled_gross_coins"] == Decimal("15.00")
+    assert summary["unsettled_net_coins"] == Decimal("13.50")
+    assert summary["available_pool_coins"] == Decimal("13.50")
 
 
 @requires_db
