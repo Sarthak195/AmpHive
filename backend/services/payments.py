@@ -15,6 +15,11 @@ Design decisions:
   5. Frontend calls POST /api/payments/verify → backend verifies signature,
      credits coins to the user's wallet
 - Webhook endpoint is a backup verification path (Razorpay server-to-server).
+- The webhook also handles refund events (refund.created / refund.processed /
+  payment.refunded) so a driver who tops up and then gets refunded outside
+  AmpHive (e.g. a chargeback or a refund issued directly on the card/UPI
+  rail) has the equivalent coins clawed back from their wallet — see
+  extract_refund_from_webhook() and routers/payments.py `_debit_refund`.
 """
 
 import hashlib
@@ -265,6 +270,73 @@ def extract_payment_from_webhook(event: dict) -> Optional[dict]:
     return {
         "payment_id": payment_id,
         "user_id": user_id,
+        "amount_inr": amount_inr,
+        "coins": coins,
+    }
+
+
+# Razorpay fires slightly different event names depending on the refund's
+# lifecycle stage / how it was initiated, but all three carry the same refund
+# entity shape under payload["refund"]["entity"] (payment.refunded additionally
+# includes a payload["payment"]["entity"], which we don't need — the refund
+# entity alone has everything required to reverse the credit).
+REFUND_EVENT_NAMES = {"refund.processed", "refund.created", "payment.refunded"}
+
+
+def extract_refund_from_webhook(event: dict) -> Optional[dict]:
+    """
+    Extract the debit-relevant fields from a Razorpay refund webhook event
+    payload.
+
+    Razorpay wraps the refund entity inside the webhook body like so:
+        {
+          "event": "refund.processed",
+          "payload": { "refund": { "entity": { ...refund fields... } } }
+        }
+
+    Unlike payment.captured, the refund entity does not reliably carry the
+    `notes` (user_id/coins) we attached at order-creation time — Razorpay only
+    copies notes onto a refund if they were explicitly passed when the refund
+    was created, which is out of our control since refunds are typically
+    issued by the driver's card issuer or by an operator directly in the
+    Razorpay dashboard, not through AmpHive. So this function deliberately
+    does NOT resolve a user_id — the caller must look up the user via the
+    refund's `payment_id`, matching it against the original TOPUP ledger row
+    (see routers/payments.py `_topup_user_for_payment`).
+
+    Args:
+        event: The parsed JSON webhook body.
+
+    Returns:
+        A dict {refund_id, payment_id, amount_inr, coins} when the event is a
+        refund we can extract, or None otherwise (e.g. non-refund events, or a
+        refund entity missing its id/payment_id).
+    """
+    if event.get("event") not in REFUND_EVENT_NAMES:
+        return None
+
+    entity = (
+        event.get("payload", {})
+        .get("refund", {})
+        .get("entity", {})
+    )
+    if not entity:
+        return None
+
+    refund_id = entity.get("id")
+    payment_id = entity.get("payment_id")
+    if not refund_id or not payment_id:
+        return None
+
+    # Amount is authoritative from Razorpay, in paise. Convert to rupees. This
+    # is the amount of THIS refund (partial refunds carry only their own
+    # slice), mirroring how amount is read off the payment entity above.
+    amount_inr = float(entity.get("amount", 0)) / 100.0
+    coins = calculate_coins(amount_inr)
+
+    return {
+        "refund_id": refund_id,
+        "payment_id": payment_id,
         "amount_inr": amount_inr,
         "coins": coins,
     }
