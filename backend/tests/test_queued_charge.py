@@ -329,6 +329,18 @@ def _row_db(*results):
     return db
 
 
+def _upd():
+    """Stub result for an UPDATE statement (expire_lapsed_reservations) —
+    the reaper never reads its return value."""
+    return MagicMock()
+
+
+def _reservation(user_id):
+    r = MagicMock()
+    r.user_id = user_id
+    return r
+
+
 def _qc(status=QueuedChargeStatus.WAITING, expires_in_min=60, plug_id=1, user_id=5):
     qc = MagicMock()
     qc.id = 1
@@ -363,7 +375,7 @@ async def test_sweep_leaves_waiting_mid_debounce():
     plug = _plug(powered=True)
     plug.powered_since = datetime.now(timezone.utc)   # just resumed
     tenant = _tenant(delay=5)                          # 5-min debounce
-    row_db = _row_db(_s1n(qc), _s1n(plug), _s1(tenant))
+    row_db = _row_db(_s1n(qc), _s1n(_user()), _s1(0), _s1n(plug), _s1(tenant))
     svc = SessionReaperService(_factory(_scan_db([1]), row_db), AsyncMock())
 
     with patch("backend.services.session_start.begin_active_session",
@@ -384,7 +396,10 @@ async def test_sweep_starts_debounced_row():
     tenant = _tenant(delay=2)
     user = _user()
     gateway = _gateway()
-    row_db = _row_db(_s1n(qc), _s1n(plug), _s1(tenant), _s1n(user), _s1(gateway))
+    row_db = _row_db(
+        _s1n(qc), _s1n(user), _s1(0), _s1n(plug), _s1(tenant),
+        _upd(), _s1n(None), _s1(gateway),
+    )
     svc = SessionReaperService(_factory(_scan_db([1]), row_db), AsyncMock())
 
     session = MagicMock()
@@ -409,7 +424,10 @@ async def test_sweep_expires_on_balance_failure():
     plug = _plug(powered=True)
     plug.powered_since = datetime.now(timezone.utc) - timedelta(minutes=10)
     tenant = _tenant(delay=2)
-    row_db = _row_db(_s1n(qc), _s1n(plug), _s1(tenant), _s1n(_user()), _s1(_gateway()))
+    row_db = _row_db(
+        _s1n(qc), _s1n(_user()), _s1(0), _s1n(plug), _s1(tenant),
+        _upd(), _s1n(None), _s1(_gateway()),
+    )
     svc = SessionReaperService(_factory(_scan_db([1]), row_db), AsyncMock())
 
     with patch("backend.services.session_start.begin_active_session",
@@ -429,7 +447,10 @@ async def test_sweep_fails_on_caps_failure():
     plug = _plug(powered=True)
     plug.powered_since = datetime.now(timezone.utc) - timedelta(minutes=10)
     tenant = _tenant(delay=2)
-    row_db = _row_db(_s1n(qc), _s1n(plug), _s1(tenant), _s1n(_user()), _s1(_gateway()))
+    row_db = _row_db(
+        _s1n(qc), _s1n(_user()), _s1(0), _s1n(plug), _s1(tenant),
+        _upd(), _s1n(None), _s1(_gateway()),
+    )
     svc = SessionReaperService(_factory(_scan_db([1]), row_db), AsyncMock())
 
     with patch("backend.services.session_start.begin_active_session",
@@ -440,6 +461,96 @@ async def test_sweep_fails_on_caps_failure():
     assert started == 0
     assert qc.status == QueuedChargeStatus.FAILED
     assert notify.await_args.args[1] == "queued_charge_failed"
+
+
+@pytest.mark.asyncio
+async def test_sweep_defers_when_another_users_reservation_covers_plug():
+    """[Reservation gate] A BOOKED reservation held by a DIFFERENT user that
+    covers right now must not be auto-started into — that would steal a
+    bookable slot the walk-up start route itself would 409 on
+    (routers/sessions.py start_charging_session). The queued charge stays
+    WAITING (retried next tick) and begin_active_session is never called.
+
+    The mock DB is loaded with a result for every db.execute() the
+    fall-through path would reach if this gate were deleted or inverted —
+    including the gateway lookup that only happens AFTER the gate — up to
+    and including a real begin_active_session award. That matters: with only
+    as many results as the correct defer path consumes, a broken gate would
+    make one extra, unmocked db.execute() that raises StopAsyncIteration,
+    which the sweep's blanket per-row `except Exception` swallows silently —
+    leaving qc.status untouched at WAITING and begin_active_session unawaited
+    for the WRONG reason, so the assertions below would pass even with the
+    gate gone. With the full mock chain present, a removed/inverted gate
+    instead runs all the way through to a genuine STARTED and an actual
+    begin_active_session await, which the assertions below will catch."""
+    qc = _qc(user_id=5)
+    plug = _plug(powered=True)
+    plug.powered_since = datetime.now(timezone.utc) - timedelta(minutes=10)
+    tenant = _tenant(delay=2)
+    someone_elses_reservation = _reservation(user_id=99)
+    gateway = _gateway()
+    session = MagicMock()
+    session.id = 99
+    row_db = _row_db(
+        _s1n(qc), _s1n(_user(user_id=5)), _s1(0), _s1n(plug), _s1(tenant),
+        _upd(), _s1n(someone_elses_reservation),
+        _s1(gateway),  # only reached if the reservation gate fails to defer
+    )
+    svc = SessionReaperService(_factory(_scan_db([1]), row_db), AsyncMock())
+
+    with patch("backend.services.session_start.begin_active_session",
+               AsyncMock(return_value=session)) as begin, \
+         patch("backend.services.notifications.notify", AsyncMock()):
+        started = await svc.reap_queued_starts_once()
+
+    assert started == 0
+    assert qc.status == QueuedChargeStatus.WAITING
+    begin.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sweep_defers_when_user_at_active_session_cap():
+    """[Cap gate] A user already running MAX_ACTIVE_SESSIONS_PER_USER (2)
+    ACTIVE sessions must not be auto-started past the cap the walk-up start
+    route enforces (routers/sessions.py start_charging_session). The queued
+    charge stays WAITING (retried next tick) and begin_active_session is
+    never called.
+
+    The mock DB is loaded with a result for every db.execute() the rest of
+    the sweep would reach if this cap check were deleted or inverted — plug,
+    tenant, the reservation-expiry UPDATE, the covering-reservation lookup,
+    and the gateway lookup — all the way through to a genuine
+    begin_active_session award. That matters: with only as many results as
+    the correct defer path consumes (just the count query), a broken gate
+    would make one extra, unmocked db.execute() (the plug lookup) that raises
+    StopAsyncIteration, which the sweep's blanket per-row `except Exception`
+    swallows silently — leaving qc.status untouched at WAITING and
+    begin_active_session unawaited for the WRONG reason, so the assertions
+    below would pass even with the gate gone. With the full mock chain
+    present, a removed/inverted cap check instead runs all the way through to
+    a genuine STARTED and an actual begin_active_session await, which the
+    assertions below will catch."""
+    qc = _qc(user_id=5)
+    plug = _plug(powered=True)
+    plug.powered_since = datetime.now(timezone.utc) - timedelta(minutes=10)
+    tenant = _tenant(delay=2)
+    gateway = _gateway()
+    session = MagicMock()
+    session.id = 99
+    row_db = _row_db(
+        _s1n(qc), _s1n(_user(user_id=5)), _s1(2),   # already at the cap
+        _s1n(plug), _s1(tenant), _upd(), _s1n(None), _s1(gateway),
+    )
+    svc = SessionReaperService(_factory(_scan_db([1]), row_db), AsyncMock())
+
+    with patch("backend.services.session_start.begin_active_session",
+               AsyncMock(return_value=session)) as begin, \
+         patch("backend.services.notifications.notify", AsyncMock()):
+        started = await svc.reap_queued_starts_once()
+
+    assert started == 0
+    assert qc.status == QueuedChargeStatus.WAITING
+    begin.assert_not_awaited()
 
 
 # --------------------------------------------------------------------------
