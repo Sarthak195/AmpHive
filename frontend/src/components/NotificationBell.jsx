@@ -121,7 +121,7 @@ const NotificationBell = () => {
     setOpen(false);
     if (n.plug_id) navigate(`/?plug=${n.plug_id}`);
     else if (n.session_id) navigate('/session');
-    else if (n.type && n.type.includes('topup')) navigate('/wallet');
+    else if (n.type && n.type.includes('topup')) navigate('/credit');
   };
 
   if (!user) return null;
@@ -158,7 +158,7 @@ const NotificationBell = () => {
 
           {items.length === 0 ? (
             <p className="text-3 text-sm notification-panel-empty">
-              Nothing yet — session updates, low-balance warnings and top-up confirmations will
+              Nothing yet — session updates, low-balance warnings and credit confirmations will
               show up here.
             </p>
           ) : (

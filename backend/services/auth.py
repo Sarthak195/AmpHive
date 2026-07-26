@@ -93,6 +93,31 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
         return False
 
 
+# A bcrypt hash of a fixed, arbitrary string — never a real password. /login
+# runs verify_password against this when the requested email matches no
+# account, so that path pays the same bcrypt cost as a real "wrong password"
+# check instead of short-circuiting — closing a timing side-channel that
+# would otherwise let a caller distinguish "no such user" from "wrong
+# password" by response latency. Computed once at import time.
+_DUMMY_PASSWORD_HASH = hash_password("amphive-timing-defense-dummy-password")
+
+
+# --- Email normalization ---
+
+def normalize_email(email: str) -> str:
+    """Canonicalize an email for lookup/storage: trim surrounding whitespace
+    and lowercase. Applied at register/login/forgot-password so `Driver@x.com`
+    and `driver@x.com` resolve to the same account.
+
+    Note: `users.email`'s unique index is still byte-exact (no migration
+    here) — this is a code-level guarantee. It stops *new* case-variant
+    duplicates from being created and lets a user who types a different case
+    than they registered with still log in / recover; it does not merge or
+    dedupe any case-variant accounts that may already exist in the DB.
+    """
+    return email.strip().lower()
+
+
 # --- JWT Token Management ---
 
 def create_access_token(user_id: int, role: str, email: str, token_version: int = 0) -> str:

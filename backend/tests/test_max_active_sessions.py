@@ -10,6 +10,7 @@ session — previously only the newest was surfaced, which left any older
 active session unreachable/un-stoppable from the UI.
 """
 from datetime import datetime, timezone
+from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -18,6 +19,7 @@ from fastapi import HTTPException
 from backend.routers import sessions as sessions_module
 from backend.routers.sessions import get_active_session, start_charging_session
 from backend.schemas import SessionStartRequest
+from backend.services.billing import session_cost
 
 
 def _user(user_id=1):
@@ -100,11 +102,22 @@ async def test_cap_is_configurable(monkeypatch):
 
 # --- /api/sessions/active multi-session shape -------------------------------
 
-def _session_row(session_id, plug_id, started_at):
+def _session_row(
+    session_id, plug_id, started_at,
+    energy_kwh=0.0, hold_coins=None, rate_coins_per_kwh=None,
+):
     s = MagicMock()
     s.id = session_id
     s.plug_id = plug_id
     s.started_at = started_at
+    s.max_kwh = None
+    s.max_duration_seconds = None
+    s.energy_kwh = energy_kwh
+    s.hold_coins = hold_coins
+    s.rate_coins_per_kwh = rate_coins_per_kwh
+    # Legacy single-rate session_cost() branch (no active segment pricing).
+    s.rate_segment_start_kwh = None
+    s.settled_cost_coins = None
     return s
 
 
@@ -126,6 +139,37 @@ async def test_active_returns_all_sessions_newest_first():
     assert res["session_id"] == 2
     assert res["plug_id"] == 20
     assert res["plug_name"] == "Plug B"
+
+
+@pytest.mark.asyncio
+async def test_active_session_includes_energy_cost_and_hold_fields():
+    """[Restore/switch preview] GET /api/sessions/active must enrich each
+    item (and the top-level mirror) with energy_kwh, cost_coins, hold_coins,
+    and rate_coins_per_kwh so a client restoring/switching sessions doesn't
+    fabricate 0 energy/cost, and can compute a low-balance warning off
+    hold_coins."""
+    session = _session_row(
+        3, 30, datetime(2026, 7, 7, 13, 0, tzinfo=timezone.utc),
+        energy_kwh=2.5, hold_coins=Decimal("50.00"), rate_coins_per_kwh=Decimal("8.00"),
+    )
+    result = MagicMock()
+    result.all.return_value = [(session, "Plug C")]
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=result)
+
+    res = await get_active_session(_user(), db)
+
+    item = res["sessions"][0]
+    expected_cost = float(session_cost(session, session.energy_kwh))
+    assert item["energy_kwh"] == 2.5
+    assert item["cost_coins"] == expected_cost
+    assert item["hold_coins"] == 50.0
+    assert item["rate_coins_per_kwh"] == 8.0
+    # Top-level single-session mirror carries the same enrichment.
+    assert res["energy_kwh"] == 2.5
+    assert res["cost_coins"] == expected_cost
+    assert res["hold_coins"] == 50.0
+    assert res["rate_coins_per_kwh"] == 8.0
 
 
 @pytest.mark.asyncio

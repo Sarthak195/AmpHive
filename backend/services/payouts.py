@@ -13,8 +13,16 @@ disagree.
 Earnings math
 -------------
 A tenant's gross earnings over a window = SUM(coins_spent) of that tenant's
-COMPLETED charging sessions with ended_at in the window. ChargingSession.
-tenant_id is already denormalized (set at session-start from the plug's
+FINISHED charging sessions (ChargingSession.status COMPLETED or PAID — the
+same two-status definition of "finished revenue" already used by
+routers/admin.py's _REVENUE_STATUSES, routers/cpo/_analytics.py, and
+services/invoices.py's _INVOICEABLE_STATUSES; this module used to filter on
+COMPLETED alone, which would have silently under-counted gross the moment
+anything transitions a session to PAID) with ended_at in the window. Note
+this SessionStatus.PAID is unrelated to Payout.status PAID a few paragraphs
+below — one says "this charging session's invoice is settled", the other
+says "this CPO's payout batch was wired". ChargingSession.tenant_id is
+already denormalized (set at session-start from the plug's
 gateway's tenant at that time), so this is a single aggregate query — no
 join and no per-plug looping (the N+1 shape this repo avoids elsewhere; see
 cpo_analytics_overview/revenue/energy in routers/cpo.py, which use the same
@@ -23,6 +31,34 @@ correct* scoping than joining through the plug's CURRENT gateway/tenant: if
 a plug is ever reassigned to a different gateway/tenant, a historical
 session must still be credited to whoever operated the plug when the
 session actually ran.
+
+Refunds (session disputes) net out of this same gross:
+`sum_completed_session_coins` also subtracts the SUM(refund_coins) of every
+APPROVED SessionDispute for this tenant whose resolved_at falls in the same
+[window_start, window_end) (see `sum_approved_refund_coins`, which joins on
+the same COMPLETED-or-PAID status set as the gross query above, so a
+session's refund still nets out no matter which of the two finished
+statuses it currently carries). The refund is
+windowed by the dispute's own *resolved_at* — deliberately NOT by the
+session's ended_at — because a dispute can be approved long after its
+session was already settled into a REQUESTED/PAID payout. Keying the refund
+to when it was resolved lands it in the CURRENT unsettled window, so it
+claws back off the CPO's next payout/pool. Keying it to the session's
+ended_at (the obvious mirror of the gross scoping) reopens the drain: once
+the session's ended_at is behind the watermark — which happens the moment
+any payout covering it is requested — a later refund would fall before every
+future window and never be subtracted, letting a CPO get paid in full and
+then approve the refund for free. `cpo_resolve_dispute`
+(routers/cpo/_disputes.py) credits the driver's wallet and stamps
+SessionDispute.refund_coins/resolved_at/status but deliberately never
+touches ChargingSession.coins_spent (that column stays the driver's original
+receipt/invoice) — so without this subtraction here, a refunded session
+would silently keep paying the CPO out on coins it no longer collected. A
+refund resolved in a window with too little fresh gross to absorb it clamps
+the window to zero (below) and, because no payout is created when the payable
+is non-positive (routers/cpo/_payouts.py), the watermark does not advance —
+so the un-absorbed refund keeps suppressing payouts until later earnings
+cover it (carry-forward, never over-paid).
 
 Platform fee = PLATFORM_FEE_PCT percent of gross (env, default 10.0),
 money-rounded via to_money; net = gross - fee (not gross * (1 - pct/100)),
@@ -38,6 +74,24 @@ request can't re-snapshot a window that's still pending admin settlement;
 CANCELLED payouts are excluded, which frees their window for a future
 request. See routers/cpo.py for how the request endpoint makes the
 watermark-read + insert atomic per tenant.
+
+Watermark race (known limitation)
+---------------------------------
+`finalize_charging_session` (services/session_lifecycle.py) stamps
+``ChargingSession.ended_at`` immediately before it commits. A payout
+snapshot landing in the tiny window between that commit starting and
+becoming visible could miss the session yet still advance its watermark
+past the session's ended_at, dropping those earnings from future payouts.
+Stamping ended_at right before the commit shrinks that window to the commit
+itself. A fully race-free fix needs a monotonic "settled_at" marker
+independent of ended_at (a schema change) and is deferred: the residual is
+a sub-second edge under a concurrent finalize + payout, so at most one
+session's earnings could slip a single settlement — a KNOWN LIMITATION, not
+a standing drain. (An earlier attempt floored the window at ``now - lag``
+for gross, top-ups AND refunds; it was reverted because a single shared
+watermark cannot lag the gross window without also delaying — or
+double-counting — top-ups/refunds, which must settle immediately for the
+top-up pool guard in routers/cpo/_topups.py to stay correct.)
 
 Offline top-up pool
 --------------------
@@ -62,9 +116,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database.models import (
     ChargingSession,
+    DisputeStatus,
     OfflineTopup,
     Payout,
     PayoutStatus,
+    SessionDispute,
     SessionStatus,
 )
 from backend.services.money import ZERO_MONEY, to_money
@@ -72,6 +128,12 @@ from backend.services.money import ZERO_MONEY, to_money
 # A tenant with no payout history yet has watermark = EPOCH, so "unsettled"
 # runs from the beginning of time to now (i.e. all of its lifetime earnings).
 EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+# ChargingSession statuses that count as "finished revenue" for the payout
+# ledger — kept in lockstep with routers/admin.py's _REVENUE_STATUSES,
+# routers/cpo/_analytics.py, and services/invoices.py's
+# _INVOICEABLE_STATUSES (see the module docstring's "Earnings math" section).
+FINISHED_SESSION_STATUSES = (SessionStatus.COMPLETED, SessionStatus.PAID)
 
 _DEFAULT_PLATFORM_FEE_PCT = Decimal("10.0")
 
@@ -99,19 +161,65 @@ def compute_fee_and_net(gross: Decimal) -> Tuple[Decimal, Decimal]:
     return fee, net
 
 
+async def sum_approved_refund_coins(
+    db: AsyncSession,
+    tenant_id: int,
+    window_start: Optional[datetime] = None,
+    window_end: Optional[datetime] = None,
+) -> Decimal:
+    """SUM(refund_coins) of APPROVED SessionDisputes for this tenant whose
+    resolved_at is in the half-open window [window_start, window_end). The
+    window is keyed off the dispute's OWN resolved_at — not the session's
+    ended_at — so a refund approved after its session was already settled
+    still claws back off the current unsettled window instead of vanishing
+    before the watermark (see the module docstring's "Refunds" paragraph for
+    the full rationale and the pay-then-refund drain it closes). Joins
+    ChargingSession only to scope by tenant/status (COMPLETED or PAID — see
+    FINISHED_SESSION_STATUSES), since refund_coins and resolved_at both live
+    on SessionDispute."""
+    conditions = [
+        ChargingSession.tenant_id == tenant_id,
+        ChargingSession.status.in_(FINISHED_SESSION_STATUSES),
+        SessionDispute.status == DisputeStatus.APPROVED,
+    ]
+    if window_start is not None:
+        conditions.append(SessionDispute.resolved_at >= window_start)
+    if window_end is not None:
+        conditions.append(SessionDispute.resolved_at < window_end)
+
+    result = await db.execute(
+        select(func.coalesce(func.sum(SessionDispute.refund_coins), 0))
+        .select_from(SessionDispute)
+        .join(ChargingSession, ChargingSession.id == SessionDispute.session_id)
+        .where(and_(*conditions))
+    )
+    return to_money(result.scalar() or 0)
+
+
 async def sum_completed_session_coins(
     db: AsyncSession,
     tenant_id: int,
     window_start: Optional[datetime] = None,
     window_end: Optional[datetime] = None,
 ) -> Decimal:
-    """SUM(coins_spent) for this tenant's COMPLETED sessions with ended_at in
-    the half-open window [window_start, window_end). Either bound omitted
-    means unbounded on that side (omit both for lifetime earnings). Single
-    aggregate query — see the module docstring for why no join is needed."""
+    """SUM(coins_spent) for this tenant's FINISHED sessions (status COMPLETED
+    or PAID — see FINISHED_SESSION_STATUSES and the module docstring's
+    "Earnings math" section) with ended_at in the half-open window
+    [window_start, window_end), minus the SUM of any APPROVED
+    SessionDispute.refund_coins against those same sessions (see
+    `sum_approved_refund_coins` and the module docstring's "Refunds"
+    paragraph) — clamped at zero so a data inconsistency can't produce a
+    negative gross. Either bound omitted means unbounded on that side (omit
+    both for lifetime earnings). This is the single shared aggregate both
+    the earnings dashboard (gross/fee/net) and the offline top-up pool read,
+    so a dispute refund is reflected everywhere coins_spent is, without
+    mutating coins_spent itself (that stays the driver's original
+    receipt/invoice). The name predates PAID being included here — kept
+    as-is since it's the shared public entry point every payout/earnings
+    caller already imports."""
     conditions = [
         ChargingSession.tenant_id == tenant_id,
-        ChargingSession.status == SessionStatus.COMPLETED,
+        ChargingSession.status.in_(FINISHED_SESSION_STATUSES),
     ]
     if window_start is not None:
         conditions.append(ChargingSession.ended_at >= window_start)
@@ -123,7 +231,10 @@ async def sum_completed_session_coins(
             and_(*conditions)
         )
     )
-    return to_money(result.scalar() or 0)
+    gross = to_money(result.scalar() or 0)
+
+    refunds = await sum_approved_refund_coins(db, tenant_id, window_start, window_end)
+    return to_money(max(gross - refunds, ZERO_MONEY))
 
 
 async def sum_offline_topups(

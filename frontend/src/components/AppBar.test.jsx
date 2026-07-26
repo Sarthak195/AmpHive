@@ -49,7 +49,7 @@ describe('AppBar on the driver host — anonymous', () => {
       expect(screen.getByRole('link', { name: label })).toBeInTheDocument();
     }
     expect(screen.getByRole('link', { name: /sign in/i })).toHaveAttribute('href', '/login');
-    expect(screen.queryByLabelText(/wallet balance/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/charging credit balance/i)).not.toBeInTheDocument();
     expect(screen.queryByTestId('bell')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /account menu/i })).not.toBeInTheDocument();
   });
@@ -65,10 +65,10 @@ describe('AppBar on the driver host — signed in', () => {
     })
   );
 
-  it('shows the wallet pill (linking to /wallet), notification bell and avatar initial', () => {
+  it('shows the credit pill (linking to /credit), notification bell and avatar initial', () => {
     renderAppBar();
-    const pill = screen.getByLabelText(/wallet balance/i);
-    expect(pill).toHaveAttribute('href', '/wallet');
+    const pill = screen.getByLabelText(/charging credit balance/i);
+    expect(pill).toHaveAttribute('href', '/credit');
     expect(screen.getByTestId('money')).toHaveTextContent('₹250');
     expect(screen.getByTestId('bell')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /account menu/i })).toHaveTextContent('D');
@@ -190,7 +190,7 @@ describe('AppBar on the CPO host', () => {
     for (const label of ['Home', 'Map', 'Activity', 'Groups']) {
       expect(screen.queryByRole('link', { name: label })).not.toBeInTheDocument();
     }
-    expect(screen.queryByLabelText(/wallet balance/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/charging credit balance/i)).not.toBeInTheDocument();
 
     await userEvent.click(screen.getByRole('button', { name: /account menu/i }));
     expect(screen.getByRole('menuitem', { name: /account/i })).toBeInTheDocument();

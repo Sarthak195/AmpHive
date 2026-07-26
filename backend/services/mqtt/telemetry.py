@@ -23,12 +23,25 @@ import asyncio
 import functools
 import logging
 import math
+import os
 import time
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger("amphive.mqtt")
+
+# Hard ceiling on inbound kwh magnitude. math.isfinite() below only rejects
+# NaN/Infinity — a garbage or malicious frame reporting a huge but perfectly
+# *finite* kwh (e.g. 1e30) would otherwise sail through, get pinned onto
+# active_session.energy_kwh via the monotonic `max()` in _persist_telemetry,
+# and then wedge session_cost()/to_money()'s Decimal.quantize() into a raw
+# decimal.InvalidOperation on EVERY finalize path (the default Decimal
+# context can't round a ~30-digit number to 2dp) — the session could never
+# finalize and the plug would stay OCCUPIED forever. No real session gets
+# remotely close to this (a home/commercial charger tops out at a few dozen
+# kWh per session); env-overridable for exotic fleets or tests.
+MAX_PLAUSIBLE_KWH = float(os.getenv("MAX_PLAUSIBLE_KWH", "1000.0"))
 
 
 class MQTTTelemetryMixin:
@@ -95,6 +108,21 @@ class MQTTTelemetryMixin:
             logger.warning(
                 "Telemetry has non-finite values, ignoring",
                 extra={"gateway_id": gateway_id, "plug_id": plug_id, "payload": payload},
+            )
+            return
+
+        # Implausible kwh magnitude (or negative): drop the whole frame rather
+        # than clamp it. Clamping would still let a garbage value inflate a
+        # bill up to the clamp ceiling; dropping means it can never advance
+        # billed energy or trigger relay actuation at all. See MAX_PLAUSIBLE_KWH
+        # above for why this exists.
+        if kwh < 0 or kwh > MAX_PLAUSIBLE_KWH:
+            logger.warning(
+                "Telemetry kwh outside plausible bounds, dropping frame",
+                extra={
+                    "gateway_id": gateway_id, "plug_id": plug_id,
+                    "kwh": kwh, "max_plausible_kwh": MAX_PLAUSIBLE_KWH,
+                },
             )
             return
 
@@ -277,6 +305,13 @@ class MQTTTelemetryMixin:
         updated_max_kwh: Optional[float] = None
         updated_max_duration: Optional[int] = None
         updated_started_at: Optional[datetime] = None
+        # The session's MONOTONIC total (active_session.energy_kwh, post-max —
+        # see the REC-01 clamp below), NOT the raw per-frame `kwh`. A mid-session
+        # gateway reboot resets the device counter to ~0, so a raw frame value
+        # can be far below the already-billed total; feeding that raw value to
+        # the auto-stop mirrors would let a reset silently defeat both the
+        # wallet-exhaustion and session-limit auto-stops.
+        updated_energy_kwh: Optional[float] = None
         # [Pricing v2] Segment accrual state, captured AFTER an in-frame reprice
         # so the exhaustion check and the live-cost mirror both see the new
         # rate. `reprice` is (new_rate, boundary) when a TOD boundary closed a
@@ -311,11 +346,16 @@ class MQTTTelemetryMixin:
                 # longer than PLUG_POWER_STALE_SEC (a mains/relay power-cycle);
                 # last_telemetry_at is the freshness signal plug_is_powered()
                 # reads. Distinct from the never-written plugs.last_seen_at.
-                now = datetime.now(timezone.utc)
-                prev = plug.last_telemetry_at
-                if prev is None or (now - prev).total_seconds() > PLUG_POWER_STALE_SEC:
-                    plug.powered_since = now
-                plug.last_telemetry_at = now
+                # Skipped for offline-resync frames (TD#24): those are buffered
+                # HISTORICAL readings, not proof the plug is live right now — a
+                # backlog of replayed frames must not make a de-powered plug
+                # look freshly powered to plug_is_powered().
+                if not is_offline:
+                    now = datetime.now(timezone.utc)
+                    prev = plug.last_telemetry_at
+                    if prev is None or (now - prev).total_seconds() > PLUG_POWER_STALE_SEC:
+                        plug.powered_since = now
+                    plug.last_telemetry_at = now
 
                 # Update plug's current power reading
                 plug.current_power_w = watts
@@ -356,6 +396,16 @@ class MQTTTelemetryMixin:
                     # [REC-01] Energy is monotonic: never bill down. A reading
                     # below the stored total (meter reset) re-baselines to the
                     # max, matching the guard already on the peak-power write.
+                    # KNOWN GAP (deferred, needs a schema column to fix
+                    # correctly): this clamp tracks no reset offset. Once the
+                    # post-reset raw counter climbs back PAST the pre-reset
+                    # total, max() starts tracking the raw value directly again
+                    # and the energy billed before the reset is silently lost
+                    # from the bill. A correct fix needs to persist the raw
+                    # counter's last value + an accumulated reset offset (so it
+                    # survives a backend restart, not just an in-process dict) —
+                    # that's a migration, so it's tracked separately rather than
+                    # guessed here.
                     active_session.energy_kwh = max(active_session.energy_kwh or 0.0, kwh)
                     # Track peak power — only update if this reading is higher
                     if watts > active_session.peak_power_w:
@@ -372,6 +422,7 @@ class MQTTTelemetryMixin:
                     reprice = await reprice_session_if_due(session, active_session, plug)
                     updated_session_id = active_session.id
                     updated_user_id = active_session.user_id
+                    updated_energy_kwh = active_session.energy_kwh
                     updated_rate = active_session.rate_coins_per_kwh
                     updated_settled = active_session.settled_cost_coins
                     updated_segment_start = active_session.rate_segment_start_kwh
@@ -391,13 +442,31 @@ class MQTTTelemetryMixin:
                 # readings, not the plug's live relay state — an id-scoped lookup
                 # that misses a since-finalized session must not actuate the relay.
                 elif active_session is None and relay_on and not is_offline:
-                    self.send_plug_command(
-                        gateway_id, plug_id, "OFF", local_ip=plug.local_ip, wait=False
+                    # [REC-02 race guard] The lookup above can miss even though
+                    # a DIFFERENT session now legitimately owns this plug: a
+                    # frame carrying a STALE claimed session_id (that session
+                    # already finalized) arrives after a new session started on
+                    # the same plug, so the id-scoped where_clause finds
+                    # nothing even though the plug IS validly ACTIVE under the
+                    # new session. Re-check plug-scoped (no id filter) before
+                    # actuating OFF so we never cut power out from under a
+                    # session that's really running.
+                    other_active_result = await session.execute(
+                        select(ChargingSession).where(
+                            and_(
+                                ChargingSession.plug_id == plug_id,
+                                ChargingSession.status == SessionStatus.ACTIVE,
+                            )
+                        )
                     )
-                    logger.info(
-                        "Republished OFF for relay-on plug with no ACTIVE session",
-                        extra={"gateway_id": gateway_id, "plug_id": plug_id},
-                    )
+                    if other_active_result.scalar_one_or_none() is None:
+                        self.send_plug_command(
+                            gateway_id, plug_id, "OFF", local_ip=plug.local_ip, wait=False
+                        )
+                        logger.info(
+                            "Republished OFF for relay-on plug with no ACTIVE session",
+                            extra={"gateway_id": gateway_id, "plug_id": plug_id},
+                        )
 
                 await session.commit()
         except Exception as e:
@@ -439,7 +508,7 @@ class MQTTTelemetryMixin:
                     plug_id=plug_id, session_id=updated_session_id,
                 )
             await self._maybe_auto_stop_on_exhaustion(
-                updated_session_id, updated_user_id, kwh, updated_rate,
+                updated_session_id, updated_user_id, updated_energy_kwh, updated_rate,
                 updated_hold_coins, updated_settled, updated_segment_start,
             )
             # [Session limits] User-set stop conditions, mirrored backend-side
@@ -451,7 +520,7 @@ class MQTTTelemetryMixin:
             # covered no-op (at most a low-balance warning) — either way the
             # session settles exactly once via the shared finalize row lock.
             await self._maybe_auto_stop_on_limits(
-                updated_session_id, updated_user_id, kwh,
+                updated_session_id, updated_user_id, updated_energy_kwh,
                 updated_max_kwh, updated_max_duration, updated_started_at,
             )
 

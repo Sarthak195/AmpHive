@@ -18,10 +18,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import razorpay
 from fastapi import HTTPException
+from pydantic import ValidationError
 
 import backend.routers.payments as payments_router
 import backend.services.payments as payments
-from backend.schemas import VerifyPaymentRequest
+from backend.schemas import CreateOrderRequest, VerifyPaymentRequest
 
 
 def _client_returning(payment: dict) -> MagicMock:
@@ -74,6 +75,28 @@ def test_missing_notes_normalized_to_empty_dict():
 
     assert out["notes"] == {}
     assert out["status"] == "authorized"  # caller decides captured-only policy
+
+
+# ===========================================================================
+# CreateOrderRequest.amount_inr — must be exactly paise-quantizable (<=2dp)
+#
+# create_order() charges int(round(amount_inr * 100)) paise but computes
+# notes.coins from the raw, un-quantized amount_inr. If amount_inr carried
+# more than 2 decimal places, those two numbers could disagree by a fraction
+# of a coin. Rejecting sub-paise precision up front makes that divergence
+# impossible instead of relying on downstream rounding to paper over it.
+# ===========================================================================
+
+@pytest.mark.parametrize("amount", [10, 10.0, 10.5, 99.99, 123.45, 10000.0])
+def test_create_order_request_accepts_2dp_amounts(amount):
+    req = CreateOrderRequest(amount_inr=amount)
+    assert req.amount_inr == amount
+
+
+@pytest.mark.parametrize("amount", [123.455, 10.001, 99.999])
+def test_create_order_request_rejects_sub_paise_precision(amount):
+    with pytest.raises(ValidationError):
+        CreateOrderRequest(amount_inr=amount)
 
 
 # ===========================================================================
@@ -161,18 +184,102 @@ def test_extract_returns_none_when_notes_missing_user_id():
     assert payments.extract_payment_from_webhook(event) is None
 
 
-def test_extract_prefers_notes_coins_over_derived_amount():
-    """notes.coins (pre-computed at order time) wins over deriving from the
-    settled amount, even when they'd disagree."""
+def test_extract_ignores_notes_coins_and_derives_from_captured_amount():
+    """notes.coins is pre-computed at order-creation time from the raw,
+    un-paise-quantized amount_inr (services/payments.py create_order()) and
+    can diverge from what Razorpay actually charged — so it must NEVER be
+    trusted for the credited amount. The webhook always derives coins from
+    the authoritative captured amount instead, even when notes.coins
+    disagrees with it."""
     event = _captured_event(notes={"user_id": "42", "coins": "999"}, amount_paise=1000)
     out = payments.extract_payment_from_webhook(event)
-    assert out == {"payment_id": "pay_1", "user_id": 42, "amount_inr": 10.0, "coins": 999.0}
+    assert out == {"payment_id": "pay_1", "user_id": 42, "amount_inr": 10.0, "coins": 10.0}
 
 
-def test_extract_falls_back_to_amount_derived_coins_when_notes_coins_absent():
+def test_extract_derives_coins_from_amount_when_notes_coins_absent():
     event = _captured_event(notes={"user_id": "42"}, amount_paise=1500)
     out = payments.extract_payment_from_webhook(event)
     assert out == {"payment_id": "pay_1", "user_id": 42, "amount_inr": 15.0, "coins": 15.0}
+
+
+def test_extract_credits_captured_paise_times_rate_for_fractional_amount():
+    """Coins always equal captured_paise/100 * COINS_PER_RUPEE — proven here
+    with a fractional-rupee capture and a non-1:1 rate, matching how
+    /api/payments/verify computes coins off the Razorpay-fetched amount."""
+    event = _captured_event(notes={"user_id": "42"}, amount_paise=1050)  # ₹10.50 captured
+    with patch.object(payments, "COINS_PER_RUPEE", 2.0):
+        out = payments.extract_payment_from_webhook(event)
+    assert out == {"payment_id": "pay_1", "user_id": 42, "amount_inr": 10.5, "coins": 21.0}
+
+
+# ===========================================================================
+# extract_refund_from_webhook — attributing a webhook payload to a wallet
+# clawback. Unlike captures, the refund entity carries no notes/user_id — the
+# caller resolves the user via payment_id against our own ledger — so this
+# only needs to prove refund_id/payment_id/amount extraction is correct.
+# ===========================================================================
+
+def _refund_event(
+    event_name: str = "refund.processed",
+    refund_id: str = "rfnd_1",
+    payment_id: str = "pay_1",
+    amount_paise: int = 1000,
+) -> dict:
+    return {
+        "event": event_name,
+        "payload": {
+            "refund": {
+                "entity": {
+                    "id": refund_id,
+                    "payment_id": payment_id,
+                    "amount": amount_paise,
+                }
+            }
+        },
+    }
+
+
+def test_extract_refund_ignores_non_refund_event():
+    event = _captured_event()
+    assert payments.extract_refund_from_webhook(event) is None
+
+
+@pytest.mark.parametrize("event_name", ["refund.processed", "refund.created", "payment.refunded"])
+def test_extract_refund_handles_every_refund_event_name(event_name):
+    """All three Razorpay refund event names carry the same refund entity
+    shape and must extract identically."""
+    event = _refund_event(event_name=event_name, amount_paise=500)
+    out = payments.extract_refund_from_webhook(event)
+    assert out == {"refund_id": "rfnd_1", "payment_id": "pay_1", "amount_inr": 5.0, "coins": 5.0}
+
+
+def test_extract_refund_returns_none_when_entity_missing():
+    event = {"event": "refund.processed", "payload": {}}
+    assert payments.extract_refund_from_webhook(event) is None
+
+
+def test_extract_refund_returns_none_when_payment_id_missing():
+    event = {
+        "event": "refund.processed",
+        "payload": {"refund": {"entity": {"id": "rfnd_1", "amount": 500}}},
+    }
+    assert payments.extract_refund_from_webhook(event) is None
+
+
+def test_extract_refund_returns_none_when_id_missing():
+    event = {
+        "event": "refund.processed",
+        "payload": {"refund": {"entity": {"payment_id": "pay_1", "amount": 500}}},
+    }
+    assert payments.extract_refund_from_webhook(event) is None
+
+
+def test_extract_refund_partial_amount_derives_coins():
+    """A partial refund's amount is this refund's own slice, not the full
+    payment — coins derive from that slice via the same conversion as topups."""
+    event = _refund_event(amount_paise=250)
+    out = payments.extract_refund_from_webhook(event)
+    assert out == {"refund_id": "rfnd_1", "payment_id": "pay_1", "amount_inr": 2.5, "coins": 2.5}
 
 
 # ===========================================================================
@@ -262,3 +369,97 @@ async def test_webhook_endpoint_empty_secret_hard_fails():
         with pytest.raises(HTTPException) as exc:
             await payments_router.razorpay_webhook(request, AsyncMock())
     assert exc.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_webhook_endpoint_rejects_bad_hmac_for_refund_event():
+    """The signature gate is checked before the event is even parsed, so it
+    applies uniformly to refund events too — a forged refund webhook can't
+    trigger a debit any more than a forged capture can trigger a credit."""
+    request = _FakeRequest(b'{"event": "refund.processed"}', {"X-Razorpay-Signature": "bad_sig"})
+    with patch.object(payments_router.payment_service, "verify_webhook_signature", return_value=False):
+        with pytest.raises(HTTPException) as exc:
+            await payments_router.razorpay_webhook(request, AsyncMock())
+    assert exc.value.status_code == 400
+
+
+# ===========================================================================
+# routers/payments.py razorpay_webhook — refund handling (claws back coins)
+#
+# These isolate the router's orchestration logic by mocking the DB-touching
+# helpers (_already_credited / _topup_user_for_payment / _debit_refund)
+# directly, the same way the tests above isolate it from Razorpay's SDK by
+# mocking payment_service — no real database involved.
+# ===========================================================================
+
+def _refund_dict(refund_id="rfnd_1", payment_id="pay_1", amount_inr=9.0, coins=9.0) -> dict:
+    return {"refund_id": refund_id, "payment_id": payment_id, "amount_inr": amount_inr, "coins": coins}
+
+
+@pytest.mark.asyncio
+async def test_webhook_refund_debits_correct_coins():
+    """A verified refund event resolves the topup's user, debits exactly the
+    coin-equivalent of the refunded amount, and reports it back."""
+    request = _FakeRequest(b"{}", {"X-Razorpay-Signature": "sig"})
+    refund = _refund_dict(amount_inr=9.0, coins=9.0)
+
+    with patch.object(payments_router.payment_service, "verify_webhook_signature", return_value=True), \
+         patch.object(payments_router.payment_service, "extract_refund_from_webhook", return_value=refund), \
+         patch.object(payments_router, "_already_credited", AsyncMock(return_value=False)), \
+         patch.object(payments_router, "_topup_user_for_payment", AsyncMock(return_value=42)), \
+         patch.object(payments_router, "_debit_refund", AsyncMock(return_value=91.0)) as debit_mock:
+        out = await payments_router.razorpay_webhook(request, AsyncMock())
+
+    assert out == {
+        "status": "refunded",
+        "refund_id": "rfnd_1",
+        "payment_id": "pay_1",
+        "coins_debited": 9.0,
+        "new_balance": 91.0,
+    }
+    debit_mock.assert_awaited_once()
+    _, kwargs = debit_mock.call_args
+    assert kwargs["user_id"] == 42
+    assert kwargs["coins"] == 9.0
+    assert kwargs["refund_id"] == "rfnd_1"
+    assert kwargs["payment_id"] == "pay_1"
+
+
+@pytest.mark.asyncio
+async def test_webhook_refund_duplicate_is_noop():
+    """A redelivered refund webhook (same refund_id, per Razorpay's
+    at-least-once retry policy) must not debit twice or even look up the
+    user again — it's short-circuited by the idempotency guard."""
+    request = _FakeRequest(b"{}", {"X-Razorpay-Signature": "sig"})
+    refund = _refund_dict()
+
+    with patch.object(payments_router.payment_service, "verify_webhook_signature", return_value=True), \
+         patch.object(payments_router.payment_service, "extract_refund_from_webhook", return_value=refund), \
+         patch.object(payments_router, "_already_credited", AsyncMock(return_value=True)), \
+         patch.object(payments_router, "_topup_user_for_payment", AsyncMock()) as user_lookup_mock, \
+         patch.object(payments_router, "_debit_refund", AsyncMock()) as debit_mock:
+        out = await payments_router.razorpay_webhook(request, AsyncMock())
+
+    assert out == {"status": "already_refunded", "refund_id": "rfnd_1"}
+    user_lookup_mock.assert_not_awaited()
+    debit_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_webhook_refund_unknown_payment_handled_gracefully():
+    """A refund whose payment_id has no matching TOPUP row in our ledger
+    (e.g. a payment made before this feature shipped) is acknowledged, not
+    errored — there is nothing here to claw back, and erroring would just
+    make Razorpay retry the webhook forever."""
+    request = _FakeRequest(b"{}", {"X-Razorpay-Signature": "sig"})
+    refund = _refund_dict(payment_id="pay_ghost")
+
+    with patch.object(payments_router.payment_service, "verify_webhook_signature", return_value=True), \
+         patch.object(payments_router.payment_service, "extract_refund_from_webhook", return_value=refund), \
+         patch.object(payments_router, "_already_credited", AsyncMock(return_value=False)), \
+         patch.object(payments_router, "_topup_user_for_payment", AsyncMock(return_value=None)), \
+         patch.object(payments_router, "_debit_refund", AsyncMock()) as debit_mock:
+        out = await payments_router.razorpay_webhook(request, AsyncMock())
+
+    assert out == {"status": "payment_not_found", "refund_id": "rfnd_1", "payment_id": "pay_ghost"}
+    debit_mock.assert_not_awaited()

@@ -9,7 +9,7 @@
  *                      rate line from /api/plugs/{id}/tariff-preview (hidden
  *                      on fetch failure — never the global config rate).
  *   - notices        — .banner rows: stale telemetry, gateway alarms
- *                      (eventTypeCopy), low balance (with a Top up link).
+ *                      (eventTypeCopy), low balance (with an Add credit link).
  *   - limit target   — progress toward the auto-stop target + inline editor
  *                      (PATCH limits via SessionContext.updateLimits).
  *   - stop           — ConfirmDialog stating the kWh/₹ consequence.
@@ -62,7 +62,7 @@ const StatusPill = ({ isActive, isStale }) => {
 const SessionMonitor = () => {
   const {
     sessionData, sessionId, isActive, stopSession, updateLimits,
-    lastFrameAt, focusedStartedAt, focusedLimits, alarms,
+    lastFrameAt, focusedStartedAt, focusedLimits, focusedHoldCoins, alarms,
   } = useSession();
   const { coin_inr_rate } = useConfig();
   const { availableBalance } = useWallet();
@@ -122,14 +122,23 @@ const SessionMonitor = () => {
     (noFrameFor !== null && noFrameFor > STALE_AFTER_MS)
   );
 
-  // Low balance: the wallet is only debited on stop, so remaining ≈ balance −
-  // accrued cost. Uses availableBalance so a hold from a second concurrent
-  // session is respected. The kWh-left estimate uses the plug's price_now
-  // when known.
+  // Low balance: the wallet is only debited on stop, so remaining is
+  // estimated from what's left before the backend auto-stops THIS session.
+  // The backend's own threshold (services/mqtt/telemetry.py
+  // _maybe_auto_stop_on_exhaustion) is the session's own authorization hold
+  // (focusedHoldCoins) when it has one — NOT the driver's whole wallet
+  // balance, which a second concurrent session's hold would otherwise skew
+  // (its own remaining balance already nets that hold out, but the fraction
+  // of it left is a different number than the fraction of THIS session's
+  // hold left). Legacy/unheld sessions (hold_coins null) fall back to
+  // availableBalance, matching the backend's own fallback. The kWh-left
+  // estimate uses the plug's price_now when known.
   const walletBalance = Number(availableBalance) || 0;
-  const remainingCoins = walletBalance - costCoins;
+  const hasHold = focusedHoldCoins != null;
+  const headroomBase = hasHold ? Number(focusedHoldCoins) : walletBalance;
+  const remainingCoins = headroomBase - costCoins;
   const lowBalance = isActive && costCoins > 0 &&
-    remainingCoins <= Math.max(10, walletBalance * 0.15);
+    remainingCoins <= Math.max(10, headroomBase * 0.15);
   const priceNow = tariff?.price_now != null ? Number(tariff.price_now) : null;
   const kwhLeft = priceNow > 0 ? Math.max(0, remainingCoins) / priceNow : null;
 
@@ -169,6 +178,23 @@ const SessionMonitor = () => {
     if (!Number.isNaN(hours) && hours > 0) limits.max_duration_seconds = Math.round(hours * 3600);
     if (limits.max_kwh == null && limits.max_duration_seconds == null) {
       setLimitError('Enter an energy (kWh) or time (hours) limit.');
+      return;
+    }
+    // Guard against a target already behind what's been consumed. The
+    // backend rejects a too-low max_kwh outright (409 "target is below
+    // energy already delivered"), but a too-low max_duration_seconds isn't
+    // checked server-side — it would otherwise silently auto-stop the
+    // session on the very next telemetry frame instead of saving cleanly.
+    if (limits.max_kwh != null && limits.max_kwh < energyNum) {
+      setLimitError(
+        `Energy limit can't be below what's already used (${energyNum.toFixed(2)} kWh).`
+      );
+      return;
+    }
+    if (limits.max_duration_seconds != null && limits.max_duration_seconds < elapsedSec) {
+      setLimitError(
+        `Time limit can't be below the elapsed time (${formatDuration(elapsedSec)}).`
+      );
       return;
     }
     setSavingLimit(true);
@@ -267,8 +293,8 @@ const SessionMonitor = () => {
                 <strong>Low balance</strong> — about{' '}
                 <span className="num">{formatINR(coinsToINR(Math.max(0, remainingCoins), coin_inr_rate))}</span>
                 {kwhLeft != null && <> (≈ {formatKwh(kwhLeft)})</>} left before charging
-                stops automatically. <Link to="/wallet?next=/session">Top up</Link> —
-                charging continues while you top up.
+                stops automatically. <Link to="/credit?next=/session">Add credit</Link> —
+                charging continues while you add credit.
               </p>
             </div>
           )}

@@ -238,6 +238,70 @@ async def issue_invoice_for_session(db: AsyncSession, session_id: int) -> Invoic
     return invoice
 
 
+async def adjust_invoice_for_session_refund(
+    db: AsyncSession,
+    session_id: int,
+    session_coins_spent: Decimal,
+    cumulative_refund_coins: Decimal,
+) -> Optional[Invoice]:
+    """
+    Re-derive an ALREADY-ISSUED session invoice's monetary totals down to
+    reflect an approved dispute refund, so tenant-facing invoice views (GET
+    /api/cpo/invoices) and the CSV export (/api/cpo/invoices.csv) stop
+    reporting revenue that was actually credited back to the driver.
+
+    Called by routers/cpo/_disputes.py's cpo_resolve_dispute from *inside*
+    the same DB transaction as the wallet credit + ledger write + dispute
+    status update -- this function only mutates the ORM object and does NOT
+    commit; the caller's own db.commit() persists everything (or a later
+    exception rolls all of it back) atomically together.
+
+    Migration-free credit-note approximation: rather than a separate
+    credit-note document (which would need a new table/column -- see this
+    module's docstring for the one-invoice-per-session design), the
+    already-issued Invoice row's own money columns (amount_coins,
+    taxable_value_inr, gst_amount_inr, total_inr) are recomputed IN PLACE,
+    always derived fresh from (session_coins_spent - cumulative_refund_coins)
+    rather than adjusted incrementally off whatever the columns currently
+    hold -- so calling this once per approved dispute on a session (the
+    caller passes the *cumulative* APPROVED refund total across every
+    APPROVED dispute on the session, not just this one's own increment) is
+    idempotent and correct no matter how many disputes have already been
+    approved against it. The GST split uses the rate the invoice was
+    ORIGINALLY issued at (`invoice.gst_rate_pct`), not whatever
+    GST_RATE_PCT is configured now, so a later env change can't
+    retroactively reshape an old invoice's tax split.
+
+    invoice_number, the seller snapshot, and the billed energy/rate line are
+    left untouched -- only the money actually retained changes, never what
+    was delivered or who sold it.
+
+    No-op (returns None) if the session has no invoice yet: there is nothing
+    "already issued" to adjust in that case. `session_coins_spent` -- the
+    driver-facing debited amount and the wallet ledger's source of truth --
+    is a read-only input here and is never itself mutated by this function;
+    if an invoice is issued LATER for a session that already had a dispute
+    approved against it, pricing that first issuance off the refund is out
+    of scope here (see this module's docstring: coins_spent is deliberately
+    never rewritten by a refund).
+    """
+    invoice = await _get_invoice_by_session(db, session_id)
+    if invoice is None:
+        return None
+
+    new_total = to_money(
+        max(to_money(session_coins_spent) - to_money(cumulative_refund_coins), ZERO_MONEY)
+    )
+    taxable_value, gst_amount = split_gst_inclusive(new_total, invoice.gst_rate_pct)
+
+    invoice.amount_coins = new_total
+    invoice.taxable_value_inr = taxable_value
+    invoice.gst_amount_inr = gst_amount
+    invoice.total_inr = new_total
+    db.add(invoice)
+    return invoice
+
+
 def invoice_to_dict(invoice: Invoice) -> dict:
     """JSON-serializable shape for GET /api/sessions/{id}/invoice and
     GET /api/cpo/invoices."""

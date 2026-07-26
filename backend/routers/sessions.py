@@ -38,6 +38,7 @@ from backend.schemas import (
 from backend.services.auth import (
     get_current_user,
 )
+from backend.services.billing import session_cost
 from backend.services.money import energy_cost, to_money
 from backend.services.pricing import max_rate_over_window
 from backend.services.session_lifecycle import (
@@ -393,6 +394,14 @@ async def update_session_limits(
     Recomputed under the user-row lock (taken first; user -> session order here
     has no cycle with finalize's session -> user). Legacy NULL-hold sessions
     keep a NULL hold.
+
+    [Security] The resized hold is FLOORED at this session's already-accrued
+    cost (billing.session_cost at the session's current energy_kwh — the same
+    segment-aware function finalize bills with), and a max_kwh below energy
+    already delivered is rejected outright (409). Without both: finalize caps
+    the debit at min(final_cost, hold_coins), so lowering max_kwh below energy
+    already consumed could shrink the hold under what's owed and forgive the
+    difference (e.g. charge 29 kWh, PATCH max_kwh to 0.1, pay ~0.1 kWh worth).
     """
     updates = {}
     if req.max_kwh is not None:
@@ -432,6 +441,17 @@ async def update_session_limits(
             detail="This session is not active — its limits can no longer change.",
         )
 
+    # [Security] Reject a target below energy already delivered — checked
+    # against the persisted energy_kwh BEFORE any mutation below. Without
+    # this, a 200 here would be followed within ~1 s by the telemetry-path
+    # auto-stop mirror finalizing the session (energy >= max_kwh) — a target
+    # a driver could never actually charge down to, only exploit.
+    if "max_kwh" in updates and updates["max_kwh"] < (session.energy_kwh or 0.0):
+        raise HTTPException(
+            status_code=409,
+            detail="target is below energy already delivered",
+        )
+
     # Load the plug once — needed for the TOD hold re-sizing below and to push
     # the updated watchdogs to the firmware after the commit.
     plug = (
@@ -463,9 +483,15 @@ async def update_session_limits(
             session.max_duration_seconds or 24 * 3600,
         )
         headroom = await available_balance(db, user.id) + session.hold_coins
-        session.hold_coins = to_money(
-            min(headroom, energy_cost(session.max_kwh, max_rate))
-        )
+        # [Security] Floor the resize at what this session has ALREADY
+        # accrued — the same segment-aware session_cost finalize bills with —
+        # so a lowered max_kwh can never shrink the hold below cost already
+        # owed. finalize caps the debit at min(final_cost, hold_coins), so an
+        # under-floored hold here would silently forgive the difference (the
+        # "charge 29 kWh, PATCH max_kwh to 0.1" exploit).
+        accrued_floor = to_money(session_cost(session, session.energy_kwh or 0.0))
+        resized = to_money(min(headroom, energy_cost(session.max_kwh, max_rate)))
+        session.hold_coins = to_money(max(accrued_floor, resized))
 
     await db.commit()
     await db.refresh(session)
@@ -546,6 +572,21 @@ async def get_active_session(
             # progress toward them ("0.42 / 1.00 kWh · stops automatically").
             "max_kwh": session.max_kwh,
             "max_duration_seconds": session.max_duration_seconds,
+            # [Restore/switch preview] Without these, a client restoring or
+            # switching between active sessions has no energy/cost to show and
+            # fabricates 0 — understating the stop-confirmation preview and
+            # breaking the low-balance warning (which needs hold_coins). Same
+            # segment-aware session_cost the stop/detail paths bill with, at
+            # this session's current energy_kwh (read-only — no billing here).
+            "energy_kwh": session.energy_kwh or 0.0,
+            "cost_coins": float(session_cost(session, session.energy_kwh or 0.0)),
+            "hold_coins": (
+                float(session.hold_coins) if session.hold_coins is not None else None
+            ),
+            "rate_coins_per_kwh": (
+                float(session.rate_coins_per_kwh)
+                if session.rate_coins_per_kwh is not None else None
+            ),
         }
         for session, plug_name in result.all()
     ]
@@ -1076,7 +1117,6 @@ async def get_session_invoice(
 import re  # noqa: E402
 
 from backend.database.models import LedgerTransaction, TransactionType  # noqa: E402
-from backend.services.billing import session_cost  # noqa: E402
 from backend.services.pricing import default_rate  # noqa: E402
 
 

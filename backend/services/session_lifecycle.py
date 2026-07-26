@@ -207,8 +207,9 @@ async def finalize_charging_session(
     final_cost = session_cost(session, final_energy)  # Decimal, 2 dp
 
     # 3. Finalize session
+    #    ended_at is deliberately NOT stamped here -- see the assignment right
+    #    before the commit below (payout watermark race).
     session.status = SessionStatus.COMPLETED
-    session.ended_at = datetime.now(timezone.utc)
     session.energy_kwh = final_energy
 
     # 4. Deduct coins from user wallet and create ledger entry (Atomic).
@@ -286,6 +287,21 @@ async def finalize_charging_session(
 
     # 5. Update plug status back to available
     plug.status = PlugStatus.AVAILABLE
+
+    # [Payout watermark race] Stamp ended_at as late as possible -- right
+    # before the commit that makes this session visible to a concurrent
+    # cpo_request_payout/tenant_earnings_summary snapshot (services/
+    # payouts.py). Everything above this line (the wallet debit in particular
+    # — debit_wallet_clamped does its own locked DB round trip) takes real
+    # wall-clock time, so setting ended_at up front (as this used to) could
+    # bake in a timestamp well before the row actually commits; a payout
+    # requested in that gap wouldn't see this row yet, but WOULD advance its
+    # watermark to its own (later) "now" -- permanently excluding this
+    # session's earnings from every future payout too, since the watermark
+    # never runs backwards. Stamping ended_at right before the commit shrinks
+    # that window to the commit itself (see the "Watermark race" note in
+    # services/payouts.py for the residual and why a lag was not the fix).
+    session.ended_at = datetime.now(timezone.utc)
     await db.commit()
 
     # Broadcast so other clients' plug lists flip back to AVAILABLE live.

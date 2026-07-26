@@ -871,6 +871,153 @@ async def test_malformed_telemetry_dropped_without_crashing(payload):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("bad_kwh", [
+    1e30,   # DoS: finite, so it sails past isfinite() — the monotonic max()
+            # in _persist_telemetry would pin it onto active_session.energy_kwh,
+            # then session_cost -> to_money's Decimal.quantize would raise a
+            # raw decimal.InvalidOperation on every finalize path (a ~30-digit
+            # number can't be rounded to 2dp in the default Decimal context),
+            # wedging the session ACTIVE and the plug OCCUPIED forever.
+    -5.0,   # negative energy is never plausible either.
+])
+async def test_implausible_kwh_dropped_before_persistence(bad_kwh):
+    """
+    A kwh far outside MAX_PLAUSIBLE_KWH (or negative) must be dropped by the
+    handler itself, same as the non-finite/malformed cases above — it must
+    never reach the TelemetryStore or get scheduled onto _persist_telemetry,
+    so it can never be pinned onto a session's stored energy.
+    """
+    MQTTManager._instance = None
+    loop = asyncio.get_running_loop()
+    store = MagicMock()
+    mgr = MQTTManager(telemetry_store=store, db_session_factory=lambda: None,
+                      event_loop=loop)
+
+    persists = []
+
+    async def fake_persist(*a, **k):
+        persists.append(a)
+
+    mgr._persist_telemetry = fake_persist
+
+    mgr._handle_gateway_telemetry("gw-1", {
+        "plug_id": 1, "watts": 100.0, "kwh": bad_kwh,
+        "voltage": 230.0, "current": 1.0, "status": "occupied",
+    })
+    await asyncio.sleep(0.05)
+
+    store.update.assert_not_called()
+    assert persists == []
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_kwh_at_the_plausible_ceiling_is_not_dropped():
+    """The ceiling is inclusive: a reading exactly at MAX_PLAUSIBLE_KWH is a
+    real (if extreme) value, not garbage, and must still be processed."""
+    from backend.services.mqtt.telemetry import MAX_PLAUSIBLE_KWH
+
+    MQTTManager._instance = None
+    loop = asyncio.get_running_loop()
+    store = MagicMock()
+    mgr = MQTTManager(telemetry_store=store, db_session_factory=lambda: None,
+                      event_loop=loop)
+
+    persists = []
+
+    async def fake_persist(gateway_id, plug_id, watts, kwh, session_id=None,
+                           sample=None, relay_on=False, is_offline=False):
+        persists.append(kwh)
+
+    mgr._persist_telemetry = fake_persist
+
+    mgr._handle_gateway_telemetry("gw-1", {
+        "plug_id": 1, "watts": 100.0, "kwh": MAX_PLAUSIBLE_KWH,
+        "voltage": 230.0, "current": 1.0, "status": "occupied",
+    })
+    await asyncio.sleep(0.05)
+
+    assert persists == [MAX_PLAUSIBLE_KWH]
+    store.update.assert_called_once()
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_implausible_kwh_frame_does_not_block_a_following_normal_frame():
+    """
+    A dropped 1e30 kwh frame must not wedge the handler for the next reading —
+    e.g. the normal-sized frame that reports a session's actual stop must
+    still be processed exactly as if the bad frame had never arrived.
+    """
+    MQTTManager._instance = None
+    loop = asyncio.get_running_loop()
+    store = MagicMock()
+    mgr = MQTTManager(telemetry_store=store, db_session_factory=lambda: None,
+                      event_loop=loop)
+
+    persists = []
+
+    async def fake_persist(gateway_id, plug_id, watts, kwh, session_id=None,
+                           sample=None, relay_on=False, is_offline=False):
+        persists.append(kwh)
+
+    mgr._persist_telemetry = fake_persist
+
+    mgr._handle_gateway_telemetry("gw-1", {
+        "plug_id": 1, "watts": 100.0, "kwh": 1e30,
+        "voltage": 230.0, "current": 1.0, "status": "occupied",
+    })
+    mgr._handle_gateway_telemetry("gw-1", {
+        "plug_id": 1, "watts": 0.0, "kwh": 0.75,
+        "voltage": 230.0, "current": 0.0, "status": "available",
+    })
+    await asyncio.sleep(0.05)
+
+    # Only the normal (stop) frame made it through.
+    assert persists == [0.75]
+    store.update.assert_called_once()
+    assert store.update.call_args.args[3] == 0.75  # energy_kwh positional arg
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_implausible_kwh_never_reaches_the_db_or_pins_session_energy():
+    """
+    End-to-end proof (handler -> scheduled persist, not just the isolated
+    _persist_telemetry unit): a 1e30 kwh frame must never reach the DB layer
+    at all, so it can never be pinned onto active_session.energy_kwh via the
+    monotonic max() in _persist_telemetry. Plug/session wiring mirrors
+    test_persist_telemetry_drops_foreign_plug below.
+    """
+    MQTTManager._instance = None
+    loop = asyncio.get_running_loop()
+
+    plug = MagicMock()
+    plug.gateway_id = "gw-1"
+    sess_row = MagicMock()
+    sess_row.energy_kwh = 0.5  # the real, pre-frame stored energy
+
+    session = _FakeSession([
+        _FakeResult(scalar=plug),
+        _FakeResult(scalar=sess_row),
+    ])
+    mgr = MQTTManager(db_session_factory=lambda: session, event_loop=loop)
+
+    mgr._handle_gateway_telemetry("gw-1", {
+        "plug_id": 5, "watts": 100.0, "kwh": 1e30,
+        "voltage": 230.0, "current": 1.0, "status": "occupied",
+        "session_id": "42",
+    })
+    await asyncio.sleep(0.05)
+
+    # The frame never reached the DB layer: no query, no commit, and the
+    # session's stored energy is untouched.
+    assert session.committed is False
+    assert sess_row.energy_kwh == 0.5
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
 async def test_string_plug_id_coerced_to_int():
     """A numeric-string plug_id ("3") is coerced to int so downstream DB
     comparisons and store keys stay type-consistent."""
@@ -1108,7 +1255,8 @@ async def test_persist_telemetry_relay_on_no_session_republishes_off():
     MQTTManager._instance = None
     session = _FakeSession([
         _FakeResult(scalar=_owned_plug()),
-        _FakeResult(scalar=None),   # no ACTIVE session
+        _FakeResult(scalar=None),   # no ACTIVE session (id-scoped/plug-scoped lookup)
+        _FakeResult(scalar=None),   # [REC-02 race guard] plug-scoped recheck: still none
     ])
     mgr = MQTTManager(db_session_factory=lambda: session)
     mgr.send_plug_command = MagicMock()
@@ -1119,6 +1267,30 @@ async def test_persist_telemetry_relay_on_no_session_republishes_off():
     mgr.send_plug_command.assert_called_once_with(
         "gw-1", 7, "OFF", local_ip="10.0.0.5", wait=False
     )
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_persist_telemetry_stale_session_id_does_not_off_a_different_active_session():
+    """[REC-02 race guard] A frame carries a STALE claimed session_id (that
+    session already finalized), so the id-scoped lookup misses — but a
+    DIFFERENT session now legitimately owns the plug (a new one started on it
+    since). The reconciliation OFF must not fire and cut power out from under
+    the session that's really running."""
+    MQTTManager._instance = None
+    other_active = MagicMock()  # the NEW session that now legitimately owns the plug
+    session = _FakeSession([
+        _FakeResult(scalar=_owned_plug()),      # plug ownership
+        _FakeResult(scalar=None),               # id-scoped lookup misses (stale id)
+        _FakeResult(scalar=other_active),        # plug-scoped recheck: a DIFFERENT session IS active
+    ])
+    mgr = MQTTManager(db_session_factory=lambda: session)
+    mgr.send_plug_command = MagicMock()
+
+    await mgr._persist_telemetry("gw-1", 7, 50.0, 0.0,
+                                 session_id=999, sample=None, relay_on=True)
+
+    mgr.send_plug_command.assert_not_called()
     MQTTManager._instance = None
 
 
@@ -1202,6 +1374,56 @@ async def test_persist_telemetry_rebaselines_powered_since_after_gap():
 
     assert plug.powered_since > old              # power resumed after a gap
     assert plug.last_telemetry_at > old
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_persist_telemetry_offline_frame_does_not_bump_freshness_clock():
+    """[Plug power / TD#24] An offline-replay frame (buffered historical
+    reading drained on resync) must NOT stamp last_telemetry_at/powered_since —
+    those drive plug_is_powered()'s freshness check, and a buffered frame is
+    not proof the plug is live right now. Without this, a backlog of replayed
+    frames after a real power-cycle would make a de-powered plug look freshly
+    powered."""
+    MQTTManager._instance = None
+    plug = _owned_plug()
+    old = datetime.now(timezone.utc) - timedelta(seconds=600)  # older than PLUG_POWER_STALE_SEC
+    plug.last_telemetry_at = old
+    plug.powered_since = old
+    session = _FakeSession([
+        _FakeResult(scalar=plug),
+        _FakeResult(scalar=None),   # no ACTIVE session
+    ])
+    mgr = MQTTManager(db_session_factory=lambda: session)
+
+    await mgr._persist_telemetry("gw-1", 5, 100.0, 1.0, None, None,
+                                 relay_on=False, is_offline=True)
+
+    assert plug.last_telemetry_at == old   # untouched by the historical frame
+    assert plug.powered_since == old
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_persist_telemetry_offline_first_frame_does_not_set_power_clock():
+    """[Plug power / TD#24] Even as the very first frame ever seen for a plug
+    (last_telemetry_at NULL), an offline-replay frame must not seed
+    powered_since/last_telemetry_at — a historical reading proves nothing
+    about the plug's live state now."""
+    MQTTManager._instance = None
+    plug = _owned_plug()  # last_telemetry_at = None
+    plug.powered_since = None
+    session = _FakeSession([
+        _FakeResult(scalar=plug),
+        _FakeResult(scalar=None),   # no ACTIVE session
+    ])
+    mgr = MQTTManager(db_session_factory=lambda: session)
+
+    await mgr._persist_telemetry("gw-1", 5, 100.0, 1.0, None, None,
+                                 relay_on=False, is_offline=True)
+
+    assert plug.last_telemetry_at is None
+    assert plug.powered_since is None
     MQTTManager._instance = None
 
 

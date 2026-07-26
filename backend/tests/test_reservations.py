@@ -684,6 +684,36 @@ async def test_cancel_cross_tenant_cpo_denied_404(factory, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_cancel_by_global_admin_bypasses_tenant(factory, monkeypatch):
+    """A platform ADMIN (tenant_id=None) can cancel a reservation from any
+    tenant — matching the ADMIN-bypasses-tenant convention used elsewhere
+    (e.g. routers/cpo/_payouts.py payout cancel)."""
+    from backend.database.models import ReservationStatus, UserRole
+
+    tenant_id = await _seed_tenant(factory)
+    gw = await _seed_gateway(factory, tenant_id)
+    plug_id = await _seed_plug(factory, gw)
+    driver = await _seed_user(factory, tenant_id=tenant_id)
+    admin = await _seed_user(factory, tenant_id=None, role=UserRole.ADMIN)
+
+    now = _now()
+    resv_id = await _seed_reservation(
+        factory, plug_id=plug_id, user_id=driver, tenant_id=tenant_id,
+        start_at=now + timedelta(hours=1), end_at=now + timedelta(hours=2),
+    )
+
+    result, notify_mock = await _cancel(
+        factory, monkeypatch, reservation_id=resv_id,
+        user=_fake_user(admin, role=UserRole.ADMIN, tenant_id=None),
+    )
+    assert result.status == "cancelled"
+    row = await _get_reservation(factory, resv_id)
+    assert row.status == ReservationStatus.CANCELLED
+    # ADMIN cancel notifies the driver (same as CPO cancel).
+    assert notify_mock.await_count == 1
+
+
+@pytest.mark.asyncio
 async def test_cancel_terminal_states_409(factory, monkeypatch):
     from fastapi import HTTPException
 

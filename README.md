@@ -6,6 +6,14 @@ app, the backend authorizes and bills against a prepaid coin wallet, and the
 command reaches the plug through an ESP32 gateway that dials outbound over
 direct TLS MQTT — no VPN or overlay network involved.
 
+---
+
+## Safety & Disclaimer
+
+**⚠️ WARNING: This software controls high-voltage electrical hardware and is NOT certified for production use.** It is provided for reference and educational purposes only and contains known safety-relevant defects. **DO NOT deploy this code to control real charging equipment.** Improper use can cause fire, electric shock, equipment damage, injury or death. The billing/payment code is unaudited with known money-handling bugs and must not process real payments. **See [`SAFETY.md`](SAFETY.md) and [`LICENSE`](LICENSE) before use.**
+
+---
+
 ```
 ┌──────────────┐        ┌───────────────────┐        ┌────────────────────┐
 │  Driver App  │◄──────►│  FastAPI Backend  │◄──────►│  PostgreSQL 15     │

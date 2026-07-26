@@ -62,6 +62,15 @@ FORCE_STOP_WALKUP_ON_RESERVATION = os.getenv(
     "RESERVATION_FORCE_STOP_WALKUP", "true"
 ).lower() in ("1", "true", "yes")
 
+# [Queued charge] Same concurrent-session cap the walk-up start route enforces
+# (routers/sessions.py MAX_ACTIVE_SESSIONS_PER_USER) — read independently here
+# (same name, same default) rather than importing the router module, keeping
+# this module import-light and the dependency direction services-do-not-
+# import-routers intact (same rationale as AUTO_STOP_ON_LIMITS above). Used by
+# reap_queued_starts_once so an auto-start can't push a user past the cap the
+# walk-up route would have blocked.
+MAX_ACTIVE_SESSIONS_PER_USER = int(os.getenv("MAX_ACTIVE_SESSIONS_PER_USER", "2"))
+
 
 class SessionReaperService:
     """Owns a background task (started/stopped by the app lifespan) that
@@ -449,17 +458,47 @@ class SessionReaperService:
         SELECT the WAITING ids read-only, then ONE txn per row — lock the row
         (with_for_update) + re-check WAITING (race-safe against a driver cancel).
 
+        An auto-start never passed through the session-start route's gates (it
+        wasn't triggered by a request), so before calling begin_active_session
+        this replays the walk-up route's admission checks (routers/sessions.py
+        start_charging_session), in the SAME lock order (user -> plug) that
+        route uses — so this sweep can never deadlock against a concurrent
+        walk-up start on the same plug/user (AB-BA if this locked plug-then-
+        user while a request locked user-then-plug):
+          - [Cap] The user row is locked FIRST (with_for_update, same as the
+            walk-up route) and its ACTIVE session count checked against
+            MAX_ACTIVE_SESSIONS_PER_USER before the plug is even touched — a
+            user already at the cap is left WAITING to retry, never auto-started
+            past it.
+          - [Reservation] Once the plug is confirmed AVAILABLE, the same
+            covering-reservation check the walk-up gate uses (BOOKED,
+            start_at <= now < end_at) is replayed: a window held by a DIFFERENT
+            user leaves the row WAITING rather than stealing their bookable
+            slot. The queued charge's OWN user holding the window is not a
+            conflict — the start proceeds (the reservation itself is left for
+            the reservation sweep to reconcile).
+          - [Hold sizing] The user row locked for the cap check above is the
+            SAME row passed into begin_active_session, so its
+            available_balance() call reads a row this transaction already
+            holds FOR UPDATE — the precondition available_balance() documents —
+            instead of racing an unlocked read against a concurrent hold.
+
         Per row:
           - now >= expires_at            -> EXPIRED + notify.
+          - user missing                 -> FAILED (no one to notify).
+          - user at MAX_ACTIVE_SESSIONS_PER_USER -> leave WAITING (retry next
+            tick).
           - plug missing / out of service -> FAILED + notify.
           - not powered yet, or powered for < auto_start_delay, or the plug is
             momentarily OCCUPIED by someone else -> leave WAITING (retry next
             tick); a blip that reset powered_since simply restarts the debounce.
-          - powered AND debounced AND plug AVAILABLE -> begin_active_session
-            (the SAME helper the walk-up start uses, so hold/caps/billing can't
-            diverge): success -> STARTED + link started_session_id + notify; a
-            402 balance floor -> EXPIRED + notify; caps/out-of-service/publish
-            failure -> FAILED + notify.
+          - plug covered by another user's active reservation window -> leave
+            WAITING (retry next tick).
+          - powered AND debounced AND plug AVAILABLE AND unreserved-by-others ->
+            begin_active_session (the SAME helper the walk-up start uses, so
+            hold/caps/billing can't diverge): success -> STARTED + link
+            started_session_id + notify; a 402 balance floor -> EXPIRED +
+            notify; caps/out-of-service/publish failure -> FAILED + notify.
 
         Funds are never locked (the locked decision), so the balance is
         re-checked here inside begin_active_session and can legitimately fail an
@@ -468,15 +507,20 @@ class SessionReaperService:
         from fastapi import HTTPException
 
         from backend.database.models import (
+            ChargingSession,
             Gateway,
             Plug,
             PlugStatus,
             QueuedCharge,
             QueuedChargeStatus,
+            Reservation,
+            ReservationStatus,
+            SessionStatus,
             Tenant,
             User,
         )
         from backend.services.notifications import notify
+        from backend.services.reservations import expire_lapsed_reservations
         from backend.services.session_lifecycle import plug_is_powered
         from backend.services.session_start import (
             auto_start_delay,
@@ -528,7 +572,44 @@ class SessionReaperService:
                         )
                         continue
 
-                    # 2. Load the plug (locked, so a concurrent manual start on
+                    # 2. [Cap] Lock the user row BEFORE the plug row — the same
+                    #    order the walk-up route takes (routers/sessions.py) —
+                    #    so a concurrent manual start by this same user on this
+                    #    same plug can never deadlock against this sweep (this
+                    #    used to lock only the plug; adding a plug-then-user
+                    #    lock here would invert the walk-up route's user-then-
+                    #    plug order and risk an AB-BA deadlock). Cheap to do
+                    #    unconditionally: it's exactly what the walk-up route
+                    #    does on every request regardless of plug state.
+                    locked_user = await db.execute(
+                        select(User).where(User.id == qc.user_id).with_for_update()
+                    )
+                    user = locked_user.scalar_one_or_none()
+                    if user is None:
+                        qc.status = QueuedChargeStatus.FAILED
+                        await db.commit()
+                        continue
+
+                    count_result = await db.execute(
+                        select(func.count())
+                        .select_from(ChargingSession)
+                        .where(
+                            and_(
+                                ChargingSession.user_id == user.id,
+                                ChargingSession.status == SessionStatus.ACTIVE,
+                            )
+                        )
+                    )
+                    active_count = count_result.scalar_one()
+                    if active_count >= MAX_ACTIVE_SESSIONS_PER_USER:
+                        # Leave WAITING — the user is already at their
+                        # concurrent-session cap; a session they stop (or
+                        # another queued charge that fails/expires) frees a
+                        # slot for a later tick. Not terminal, so no notify.
+                        await db.commit()
+                        continue
+
+                    # 3. Load the plug (locked, so a concurrent manual start on
                     #    it serializes with us) + its tenant for the resolver.
                     plug = (await db.execute(
                         select(Plug).where(Plug.id == qc.plug_id).with_for_update()
@@ -545,7 +626,7 @@ class SessionReaperService:
                         )
                         continue
 
-                    # 3. Powered continuously for the debounce? A gap reset
+                    # 4. Powered continuously for the debounce? A gap reset
                     #    powered_since (mqtt_manager._persist_telemetry), so a
                     #    blip restarts the clock and never trips this early.
                     powered_since = plug.powered_since
@@ -562,7 +643,7 @@ class SessionReaperService:
                         await db.commit()  # mid-debounce — leave WAITING
                         continue
 
-                    # 4. Plug must actually be startable. OCCUPIED = someone
+                    # 5. Plug must actually be startable. OCCUPIED = someone
                     #    else is on it right now (or a crashed prior auto-start
                     #    left it claimed) — retry next tick, never double-start.
                     #    OFFLINE/MAINTENANCE = the operator took it out of
@@ -583,19 +664,46 @@ class SessionReaperService:
                         )
                         continue
 
-                    user = (await db.execute(
-                        select(User).where(User.id == qc.user_id)
+                    # 6. [Reservation] Same covering-reservation gate the
+                    #    walk-up route enforces (routers/sessions.py): lazy
+                    #    no-show expiry first, then look for a still-BOOKED
+                    #    window over right now. Someone ELSE'S window means this
+                    #    auto-start would steal their bookable slot — leave
+                    #    WAITING instead. (There is no walk-up session here to
+                    #    force-stop — just a start to withhold — so this doesn't
+                    #    need the reservation-start sweep's overrun handling.)
+                    #    The queue's OWN user holding the window is not a
+                    #    conflict; the reservation itself is left BOOKED for the
+                    #    reservation sweep to reconcile.
+                    await expire_lapsed_reservations(db, plug_id=plug.id, now=now)
+                    covering = (await db.execute(
+                        select(Reservation)
+                        .where(
+                            and_(
+                                Reservation.plug_id == plug.id,
+                                Reservation.status == ReservationStatus.BOOKED,
+                                Reservation.start_at <= now,
+                                Reservation.end_at > now,
+                            )
+                        )
+                        .order_by(Reservation.start_at)
+                        .limit(1)
                     )).scalar_one_or_none()
+                    if covering is not None and covering.user_id != qc.user_id:
+                        await db.commit()  # reserved by someone else — leave WAITING
+                        continue
+
                     gateway = (await db.execute(
                         select(Gateway).where(Gateway.id == plug.gateway_id)
                     )).scalar_one()
-                    if user is None:
-                        qc.status = QueuedChargeStatus.FAILED
-                        await db.commit()
-                        continue
 
-                    # 5. Start via the shared helper (commits the session + plug
-                    #    claim itself). Then mark the queue STARTED + link it.
+                    # 7. Start via the shared helper (commits the session + plug
+                    #    claim itself), passing the user row this transaction
+                    #    already holds FOR UPDATE (step 2) — begin_active_session's
+                    #    available_balance() call requires that lock to be
+                    #    race-safe against a concurrent hold, exactly as the
+                    #    walk-up route provides it. Then mark the queue STARTED +
+                    #    link it.
                     try:
                         session = await begin_active_session(
                             db, user, plug, gateway,

@@ -12,14 +12,17 @@ from fastapi import HTTPException
 from fastapi.security import HTTPAuthorizationCredentials
 from jose import jwt
 
+import backend.routers.auth as auth_router
 from backend.routers.auth import login
 from backend.schemas import LoginRequest
 from backend.services.auth import (
+    _DUMMY_PASSWORD_HASH,
     JWT_ALGORITHM,
     JWT_SECRET_KEY,
     decode_access_token,
     get_current_user,
     hash_password,
+    normalize_email,
     verify_password,
 )
 
@@ -69,6 +72,61 @@ async def test_login_unknown_email_rejected():
         await login(LoginRequest(email="nobody@amphive.test", password="whatever"), db)
 
     assert exc.value.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_login_both_branches_run_the_password_hash_check(monkeypatch):
+    """Timing side-channel defense: a nonexistent email must pay the same
+    bcrypt cost as a wrong-password attempt against a real account, so
+    response latency can't be used to tell the two apart. verify_password
+    must be invoked on both the known-user and unknown-user paths — the
+    unknown-user path against the fixed dummy hash, never short-circuited."""
+    real_verify = auth_router.verify_password
+    calls = []
+
+    def spy(password, hashed):
+        calls.append(hashed)
+        return real_verify(password, hashed)
+
+    monkeypatch.setattr(auth_router, "verify_password", spy)
+
+    user = _user(password="correct-horse")
+    db_known = _db_returning(user)
+    with pytest.raises(HTTPException) as exc_known:
+        await login(LoginRequest(email=user.email, password="wrong-password"), db_known)
+    assert exc_known.value.status_code == 401
+
+    db_unknown = _db_returning(None)
+    with pytest.raises(HTTPException) as exc_unknown:
+        await login(LoginRequest(email="nobody@amphive.test", password="whatever"), db_unknown)
+    assert exc_unknown.value.status_code == 401
+
+    assert len(calls) == 2, "verify_password must run on both branches"
+    assert calls[0] == user.hashed_password
+    assert calls[1] == _DUMMY_PASSWORD_HASH  # fixed dummy, never a real hash
+
+
+@pytest.mark.asyncio
+async def test_login_matches_account_regardless_of_email_case():
+    """A user registered as `driver@amphive.test` must still be able to log
+    in typing `Driver@AmpHive.Test` — the lookup is normalized before the
+    SELECT is issued."""
+    user = _user(email="driver@amphive.test", password="correct-horse")
+    db = _db_returning(user)
+
+    with patch(
+        "backend.routers.auth.check_and_speed_up_active_session",
+        new=AsyncMock(),
+    ):
+        resp = await login(
+            LoginRequest(email="  Driver@AmpHive.Test  ", password="correct-horse"), db
+        )
+
+    assert resp.user["email"] == "driver@amphive.test"
+    lookup_stmt = db.execute.await_args_list[0].args[0]
+    assert normalize_email("  Driver@AmpHive.Test  ") in str(
+        lookup_stmt.compile(compile_kwargs={"literal_binds": True})
+    )
 
 
 @pytest.mark.asyncio

@@ -49,8 +49,8 @@ const FEED = {
       id: 1,
       type: 'topup_credited',
       severity: 'info',
-      title: 'Wallet topped up',
-      body: '100.00 coins credited — balance is now 100.00.',
+      title: 'Charging credit added',
+      body: '₹100.00 added — your charging credit is now ₹100.00.',
       plug_id: null,
       session_id: null,
       read: true,
@@ -200,9 +200,9 @@ describe('NotificationBell', () => {
     await screen.findByTestId('unread-badge');
     await userEvent.click(screen.getByRole('button', { name: /Notifications/ }));
 
-    await userEvent.click(await screen.findByText(/Wallet topped up/));
+    await userEvent.click(await screen.findByText(/Charging credit added/));
 
-    expect(mockNavigate).toHaveBeenCalledWith('/wallet');
+    expect(mockNavigate).toHaveBeenCalledWith('/credit');
   });
 
   it('navigates to the deep-link for a notification with a plug_id', async () => {

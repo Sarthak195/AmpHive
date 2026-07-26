@@ -4,6 +4,7 @@ Payments routes — moved verbatim from main.py (2026-07-07, TD#7 split).
 import asyncio
 import json
 import logging
+from decimal import Decimal
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -28,7 +29,7 @@ from backend.services.auth import (
     get_current_user,
 )
 from backend.services.money import to_money
-from backend.services.wallet import available_balance, credit_wallet
+from backend.services.wallet import available_balance, credit_wallet, debit_wallet_clamped
 
 logger = logging.getLogger("amphive.api")
 router = APIRouter()
@@ -37,11 +38,21 @@ router = APIRouter()
 # Payment Endpoints (Razorpay)
 # ===========================================================================
 
-async def _already_credited(db: AsyncSession, payment_id: str) -> bool:
-    """True if a TOPUP ledger row already exists for this razorpay_payment_id."""
+async def _already_credited(db: AsyncSession, razorpay_id: str) -> bool:
+    """True if a ledger row already exists carrying this Razorpay id in the
+    (unique) razorpay_payment_id column.
+
+    Despite the column's name, this same slot doubles as the idempotency key
+    for refund debits: TOPUP rows key it on the payment id ("pay_..."), REFUND
+    rows created by `_debit_refund` key it on the refund id ("rfnd_..."). The
+    two id spaces never collide (disjoint prefixes, and Razorpay ids are
+    globally unique), so one column + one UNIQUE constraint safely dedupes
+    both a redelivered payment.captured webhook and a redelivered refund
+    webhook without a schema change.
+    """
     existing = await db.execute(
         select(LedgerTransaction.id).where(
-            LedgerTransaction.razorpay_payment_id == payment_id
+            LedgerTransaction.razorpay_payment_id == razorpay_id
         )
     )
     return existing.first() is not None
@@ -98,8 +109,82 @@ async def _credit_topup(
     await notify(
         user_id,
         "topup_credited",
-        "Wallet topped up",
-        f"{credit:.2f} coins credited — balance is now {new_balance:.2f}.",
+        "Charging credit added",
+        f"₹{credit:.2f} added — your charging credit is now ₹{new_balance:.2f}.",
+    )
+    return new_balance
+
+
+async def _topup_user_for_payment(db: AsyncSession, payment_id: str) -> Optional[int]:
+    """The user_id credited by the original TOPUP ledger row for this
+    razorpay payment_id, or None if we have no such row (e.g. a payment made
+    before this feature existed, or one whose webhook we never attributed to
+    a user — see extract_payment_from_webhook). A refund can only be clawed
+    back from a wallet we actually credited."""
+    result = await db.execute(
+        select(LedgerTransaction.user_id).where(
+            LedgerTransaction.razorpay_payment_id == payment_id
+        )
+    )
+    return result.scalars().first()
+
+
+async def _debit_refund(
+    db: AsyncSession,
+    *,
+    user_id: int,
+    coins: float,
+    refund_id: str,
+    payment_id: str,
+    description: str,
+) -> Optional[Decimal]:
+    """
+    Atomically debit `coins` from a user for a Razorpay refund and write a
+    negative-amount REFUND ledger row keyed by `refund_id`.
+
+    Idempotency mirrors `_credit_topup`: the UNIQUE constraint on
+    razorpay_payment_id (reused here for the refund id — see `_already_credited`)
+    makes a redelivered refund webhook a no-op — the loser's INSERT raises
+    IntegrityError, we roll back (undoing the balance debit), and return None
+    so the caller reports an idempotent no-op.
+
+    Uses debit_wallet_clamped so a refund that arrives after the driver has
+    already spent the topped-up coins can't push the balance negative; the
+    ledger row records what was ACTUALLY clawed back, which may be less than
+    the refunded amount if the balance couldn't cover it (logged as a
+    warning — that shortfall is effectively forgiven, not tracked as debt).
+    """
+    debit = to_money(coins)  # normalise the float from the payment service
+    actual_debit, new_balance = await debit_wallet_clamped(db, user_id, debit)
+    if actual_debit < debit:
+        logger.warning(
+            f"Refund {refund_id} (payment {payment_id}): wallet balance could only "
+            f"cover {actual_debit:.2f} of the {debit:.2f} coins owed back; "
+            "shortfall forgiven."
+        )
+
+    db.add(LedgerTransaction(
+        user_id=user_id,
+        amount=-actual_debit,  # Negative = debit
+        transaction_type=TransactionType.REFUND,
+        description=description,
+        razorpay_payment_id=refund_id,
+        balance_after=new_balance,
+    ))
+    try:
+        await db.commit()
+    except IntegrityError:
+        # Another request (a redelivered refund webhook) already inserted
+        # this refund_id.
+        await db.rollback()
+        return None
+
+    from backend.services.notifications import notify
+    await notify(
+        user_id,
+        "topup_refunded",
+        "Charging credit reversed",
+        f"₹{actual_debit:.2f} was deducted after a refund — your charging credit is now ₹{new_balance:.2f}.",
     )
     return new_balance
 
@@ -265,7 +350,7 @@ async def verify_payment(
         user_id=user.id,
         coins=coins,
         payment_id=req.razorpay_payment_id,
-        description=f"Wallet top-up: ₹{amount_inr:.2f} → {coins:.2f} coins (Razorpay: {req.razorpay_payment_id})",
+        description=f"Charging credit added: ₹{amount_inr:.2f} → {coins:.2f} credit (Razorpay: {req.razorpay_payment_id})",
     )
     if credited is None:
         # Lost the race to the webhook (or a duplicate submit). Not an error.
@@ -278,6 +363,69 @@ async def verify_payment(
         "status": "success",
         "coins_credited": coins,
         "new_balance": round(credited, 2),
+    }
+
+
+async def _handle_refund_webhook(db: AsyncSession, refund: dict) -> dict:
+    """
+    Handle a verified Razorpay refund event (see `razorpay_webhook`'s
+    docstring, step 3b): debit the driver by the refunded coin-equivalent so
+    they can't keep coins for money that's been returned outside AmpHive.
+
+    `refund` is the dict returned by `extract_payment_from_webhook`'s sibling
+    `extract_refund_from_webhook`: {refund_id, payment_id, amount_inr, coins}.
+
+    Idempotent on refund_id (see `_debit_refund`). Gracefully acks — rather
+    than erroring — a refund whose payment_id has no matching TOPUP row in
+    our ledger (e.g. a payment predating this feature, or one we could never
+    attribute to a user): there's nothing here to claw back, and erroring
+    would just make Razorpay retry forever.
+    """
+    refund_id = refund["refund_id"]
+    payment_id = refund["payment_id"]
+
+    # --- Idempotency (fast path) -------------------------------------------
+    # A prior ledger row keyed on this refund_id means it was already
+    # processed (by an earlier webhook retry). The authoritative guard for
+    # the concurrent case is the UNIQUE constraint, handled by _debit_refund.
+    if await _already_credited(db, refund_id):
+        logger.info(f"Webhook refund {refund_id} already processed — skipping (idempotent).")
+        return {"status": "already_refunded", "refund_id": refund_id}
+
+    user_id = await _topup_user_for_payment(db, payment_id)
+    if user_id is None:
+        logger.warning(
+            f"Webhook refund {refund_id} references payment {payment_id}, which has "
+            "no matching topup in our ledger; nothing to claw back."
+        )
+        return {"status": "payment_not_found", "refund_id": refund_id, "payment_id": payment_id}
+
+    coins = refund["coins"]
+    new_balance = await _debit_refund(
+        db,
+        user_id=user_id,
+        coins=coins,
+        refund_id=refund_id,
+        payment_id=payment_id,
+        description=f"Charging credit reversed (refund): ₹{refund['amount_inr']:.2f} → -{coins:.2f} credit (Razorpay refund: {refund_id})",
+    )
+    if new_balance is None:
+        # Lost the race to a redelivered webhook.
+        if await _already_credited(db, refund_id):
+            return {"status": "already_refunded", "refund_id": refund_id}
+        logger.warning(f"Webhook refund {refund_id} could not be applied to user {user_id}.")
+        return {"status": "user_not_found", "refund_id": refund_id}
+
+    logger.info(
+        f"Webhook refund debited user={user_id}: ₹{refund['amount_inr']:.2f} → {coins:.2f} coins clawed back "
+        f"(refund={refund_id}, payment={payment_id})"
+    )
+    return {
+        "status": "refunded",
+        "refund_id": refund_id,
+        "payment_id": payment_id,
+        "coins_debited": coins,
+        "new_balance": round(new_balance, 2),
     }
 
 
@@ -294,11 +442,23 @@ async def razorpay_webhook(request: Request, db: AsyncSession = Depends(get_db))
 
     Flow:
       1. Verify the HMAC signature (X-Razorpay-Signature) against the raw body.
-      2. Parse the event and extract the settled payment (payment.captured).
-      3. Idempotency guard: if a ledger TOPUP row already references this
-         razorpay_payment_id (created here OR by /verify), do nothing. This
-         prevents double-crediting when both paths fire for the same payment.
-      4. Atomically credit coins (row-locked user) and write a ledger entry.
+         This applies uniformly to every event type below, refunds included —
+         an attacker can't forge a wallet debit any more than a credit.
+      2. Parse the event and extract either a settled payment (payment.captured)
+         or a refund (refund.created / refund.processed / payment.refunded).
+      3a. Payment path — idempotency guard: if a ledger TOPUP row already
+          references this razorpay_payment_id (created here OR by /verify),
+          do nothing. This prevents double-crediting when both paths fire for
+          the same payment. Then atomically credit coins and write a ledger
+          entry.
+      3b. Refund path — a driver can top up, then get the charge refunded
+          externally (chargeback, or a refund issued directly by the card
+          issuer / in the Razorpay dashboard) while keeping the credited
+          coins; this claws them back. Idempotency guard mirrors the payment
+          path but keyed on the refund_id. The debited user is looked up via
+          the refund's payment_id against our own TOPUP ledger row (refund
+          entities don't reliably carry the notes we attach at order-creation
+          time). Debits are clamped so the balance never goes negative.
     """
     body = await request.body()
     signature = request.headers.get("X-Razorpay-Signature", "")
@@ -315,8 +475,16 @@ async def razorpay_webhook(request: Request, db: AsyncSession = Depends(get_db))
     event_type = event.get("event", "")
     logger.info(f"Razorpay webhook received: {event_type}")
 
+    # --- Refund path: claw back coins for money returned outside AmpHive ---
+    # Checked before the capture path since the event names are disjoint
+    # (payment.refunded is the only overlap risk, and extract_payment_from_webhook
+    # only matches "payment.captured", so there's no double-handling).
+    refund = payment_service.extract_refund_from_webhook(event)
+    if refund is not None:
+        return await _handle_refund_webhook(db, refund)
+
     # Extract the creditable payment. Returns None for non-payment events
-    # (e.g. order.paid, refund.*) or captures we can't attribute to a user.
+    # (e.g. order.paid) or captures we can't attribute to a user.
     payment = payment_service.extract_payment_from_webhook(event)
     if payment is None:
         # Not a creditable event — acknowledge so Razorpay stops retrying.
@@ -339,7 +507,7 @@ async def razorpay_webhook(request: Request, db: AsyncSession = Depends(get_db))
         user_id=payment["user_id"],
         coins=coins,
         payment_id=payment_id,
-        description=f"Wallet top-up (webhook): ₹{payment['amount_inr']:.2f} → {coins:.2f} coins (Razorpay: {payment_id})",
+        description=f"Charging credit added (webhook): ₹{payment['amount_inr']:.2f} → {coins:.2f} credit (Razorpay: {payment_id})",
     )
     if new_balance is None:
         # Either the user doesn't exist, or /verify won the race. Distinguish

@@ -91,12 +91,23 @@ export default function ChargeSetupModal({ open, onClose, plug, mode = 'start', 
   const copy = COPY[mode] || COPY.start;
 
   // Coverage line: the plug's own price (falling back to the global rate).
-  // Uses availableBalance (not the raw balance) so a hold from a second
-  // concurrent session is respected in the estimate.
-  const rate = Number(plug.price_per_kwh) > 0 ? Number(plug.price_per_kwh) : coins_per_kwh || 5;
+  // A real 0 (free charging) is a valid rate — only null/undefined/non-numeric
+  // fall back to the global rate. Uses availableBalance (not the raw balance)
+  // so a hold from a second concurrent session is respected in the estimate.
+  const plugRate = Number(plug.price_per_kwh);
+  const rate =
+    plug.price_per_kwh != null && Number.isFinite(plugRate) ? plugRate : (coins_per_kwh ?? 5);
   const covers = rate > 0 ? (Number(availableBalance) || 0) / rate : 0;
 
-  const customInvalid = timePreset === 'custom' && parseCustomMinutes(customTime) == null;
+  // Validate custom time: must be valid format and within [0, 1440] minutes (24h max).
+  const customMinutes = timePreset === 'custom' ? parseCustomMinutes(customTime) : null;
+  const customOutOfRange = timePreset === 'custom' && customTime !== '' && customMinutes !== null && customMinutes > 1440;
+  const customInvalid = timePreset === 'custom' && (parseCustomMinutes(customTime) == null || customOutOfRange);
+
+  // Validate kWh: must be within (0, 100].
+  const kwhNum = kwh !== '' ? parseFloat(kwh) : null;
+  const kwhOutOfRange = kwhNum !== null && (kwhNum <= 0 || kwhNum > 100);
+  const kwhInvalid = kwhNum !== null && kwhNum <= 0;
 
   const handleConfirm = async () => {
     const limits = {};
@@ -149,7 +160,7 @@ export default function ChargeSetupModal({ open, onClose, plug, mode = 'start', 
             type="button"
             className="btn btn-primary"
             onClick={handleConfirm}
-            disabled={busy || customInvalid}
+            disabled={busy || customInvalid || kwhOutOfRange}
           >
             {busy ? copy.busy : copy.confirm}
           </button>
@@ -184,6 +195,11 @@ export default function ChargeSetupModal({ open, onClose, plug, mode = 'start', 
               </button>
             ))}
           </div>
+          {timePreset === 'none' && (
+            <p className="field-hint text-sm">
+              Defaults to 30 kWh / 4 h if no limit set
+            </p>
+          )}
           {timePreset === 'custom' && (
             <>
               <input
@@ -196,7 +212,9 @@ export default function ChargeSetupModal({ open, onClose, plug, mode = 'start', 
                 inputMode="numeric"
               />
               {customTime !== '' && customInvalid && (
-                <p className="field-error">Enter a time as hours:minutes, like 1:30.</p>
+                <p className="field-error">
+                  {customOutOfRange ? 'Maximum 24 hours (24:00).' : 'Enter a time as hours:minutes, like 1:30.'}
+                </p>
               )}
             </>
           )}
@@ -211,11 +229,23 @@ export default function ChargeSetupModal({ open, onClose, plug, mode = 'start', 
             className="input"
             type="number"
             min="0"
+            max="100"
             step="0.1"
             value={kwh}
             onChange={(e) => setKwh(e.target.value)}
             placeholder="No limit"
+            aria-invalid={kwh !== '' && kwhOutOfRange}
           />
+          {kwh !== '' && kwhOutOfRange && (
+            <p className="field-error">
+              {kwhInvalid ? 'Energy limit must be greater than 0.' : 'Maximum 100 kWh.'}
+            </p>
+          )}
+          {kwh === '' && (
+            <p className="field-hint text-sm">
+              Defaults to 30 kWh if no limit set
+            </p>
+          )}
         </div>
 
         {error && (

@@ -19,7 +19,7 @@
  * monitor (telemetry subscription follows the focused session).
  */
 
-import { createContext, useState, useContext, useEffect, useCallback } from 'react';
+import { createContext, useState, useContext, useEffect, useCallback, useRef } from 'react';
 import { io } from 'socket.io-client';
 import api from '../api/client';
 import { useAuth } from './AuthContext';
@@ -27,6 +27,14 @@ import { useAuth } from './AuthContext';
 const SessionContext = createContext();
 
 const API_BASE = import.meta.env.VITE_API_URL || '';
+
+// Telemetry statuses the backend reports once a session is no longer live
+// (services/telemetry.py TelemetryStore.end_session sets "completed" when a
+// session is finalized — by the driver's own Stop, a limit/wallet/hold
+// exhaustion auto-stop, or the stale-session reaper). Only "completed"
+// exists today; matched via a helper so a future terminal value is a
+// one-line change.
+const isTerminalStatus = (status) => status === 'completed';
 
 export const SessionProvider = ({ children }) => {
   const { user, refreshUser } = useAuth();
@@ -51,6 +59,13 @@ export const SessionProvider = ({ children }) => {
   // progress toward them ("0.42 / 1.00 kWh · stops automatically"). Comes
   // from the start response or from /api/sessions/active on restore/switch.
   const [focusedLimits, setFocusedLimits] = useState(null);
+  // The focused session's own authorization hold (coins reserved for it at
+  // start, resized on limit edits) — nullable for legacy pre-hold sessions.
+  // This — not the driver's whole wallet balance — is the exhaustion
+  // threshold the backend auto-stops against (services/mqtt/telemetry.py
+  // _maybe_auto_stop_on_exhaustion), so the low-balance banner needs it to
+  // warn/clear at the same point the backend actually stops charging.
+  const [focusedHoldCoins, setFocusedHoldCoins] = useState(null);
   // Recent gateway alarms (safety cutoff / unauthorized-on / OTA), newest first.
   const [alarms, setAlarms] = useState([]);
   // The final billing summary from the most recent stop, shown as a receipt.
@@ -106,6 +121,16 @@ export const SessionProvider = ({ children }) => {
     const handleTelemetry = (data) => {
       setSessionData(data);
       setLastFrameAt(Date.now());
+      // The backend can end THIS session out from under the driver — a
+      // limit/wallet/hold-exhaustion auto-stop, or the stale-session reaper
+      // — with no client-initiated stop call. Without this, the UI never
+      // learns: it keeps showing a live "Stop charging" button that 400s
+      // ("This session is not active") when clicked. Mark it ended so the
+      // page falls back to the no-active-session view instead.
+      if (isTerminalStatus(data?.status)) {
+        setIsActive(false);
+        setActiveSessions((prev) => prev.filter((s) => s.session_id !== sessionId));
+      }
     };
 
     socket.on('telemetry', handleTelemetry);
@@ -119,9 +144,36 @@ export const SessionProvider = ({ children }) => {
     };
   }, [socket, sessionId, isActive]);
 
-  const refreshActiveSessions = useCallback(async () => {
+  // Tracks the *focused* session id without making refreshActiveSessions
+  // depend on `sessionId` (which would change its identity on every
+  // start/switch and re-trigger the mount-restore effect below).
+  const sessionIdRef = useRef(null);
+  useEffect(() => {
+    sessionIdRef.current = sessionId;
+  }, [sessionId]);
+
+  const refreshActiveSessions = useCallback(async (focusSessionId = null) => {
     const res = await api.get('/api/sessions/active');
-    setActiveSessions(res.sessions || []);
+    const sessions = res.sessions || [];
+    setActiveSessions(sessions);
+    // Backfill the *focused* session's enriched fields (hold_coins, limits)
+    // from the canonical GET — a caller like startSession may not have them
+    // in its own response, and without this the low-balance warning (which
+    // reads focusedHoldCoins) stays dead until a full reload.
+    // Prefer an explicitly-passed id: right after startSession's
+    // setSessionId the sessionIdRef sync effect hasn't committed yet, and a
+    // stale ref could match (and mis-backfill from) a DIFFERENT session that
+    // is still in the list.
+    const targetId = focusSessionId ?? sessionIdRef.current;
+    const focused = sessions.find((s) => s.session_id === targetId);
+    if (focused) {
+      setFocusedHoldCoins(focused.hold_coins ?? null);
+      setFocusedLimits(
+        focused.max_kwh != null || focused.max_duration_seconds != null
+          ? { max_kwh: focused.max_kwh ?? null, max_duration_seconds: focused.max_duration_seconds ?? null }
+          : null
+      );
+    }
     return res;
   }, []);
 
@@ -140,6 +192,7 @@ export const SessionProvider = ({ children }) => {
           }
         : null
     );
+    setFocusedHoldCoins(session.hold_coins ?? null);
     setLastFrameAt(null);
     setSessionData({
       plug_id: session.plug_id,
@@ -190,39 +243,78 @@ export const SessionProvider = ({ children }) => {
           ? effectiveLimits
           : null
       );
+      // Echoed only by newer backends; older ones leave this null until the
+      // refresh below (or a switchSession) fills it in.
+      setFocusedHoldCoins(result.hold_coins ?? null);
       setLastFrameAt(null);
       setSessionData(null);
+      // The start response may omit hold_coins/cost_coins entirely — pull
+      // the enriched /api/sessions/active so the low-balance warning has a
+      // real threshold for THIS session without waiting for a full reload.
+      refreshActiveSessions(result.session_id).catch(() => {});
       return result;
     } catch (err) {
       setError(err.message);
       throw err;
     }
-  }, []);
+  }, [refreshActiveSessions]);
 
   const stopSession = useCallback(async () => {
     setError(null);
     try {
       if (sessionId) {
         const result = await api.post('/api/sessions/stop', { session_id: sessionId });
-        setActiveSessions(prev => prev.filter(s => s.session_id !== sessionId));
-        // Keep last sessionData for receipt view, but mark as completed
-        setSessionData(prev => prev ? { ...prev, status: 'completed' } : null);
-        setIsActive(false);
-        // Show the final billing summary as a receipt and refresh the wallet
-        // so the balance updates immediately after the debit.
-        setReceipt(result);
+        const remaining = activeSessions.filter(s => s.session_id !== sessionId);
+        setActiveSessions(remaining);
+        if (remaining.length > 0) {
+          // Another concurrent session (a user can hold up to
+          // MAX_ACTIVE_SESSIONS_PER_USER) is still charging — refocus the
+          // live monitor on it instead of stranding it behind this session's
+          // now-inactive state.
+          switchSession(remaining[0]);
+        } else {
+          // Keep last sessionData for receipt view, but mark as completed
+          setSessionData(prev => prev ? { ...prev, status: 'completed' } : null);
+          setIsActive(false);
+          // Show the final billing summary as a receipt (only meaningful
+          // when nothing else is still live to show instead).
+          setReceipt(result);
+        }
+        // Refresh the wallet so the balance updates immediately after the debit.
         refreshUser().catch(() => {});
         return result;
       }
     } catch (err) {
       setError(err.message);
-      setIsActive(false);
       // The stop may have failed because the session was already finalized
-      // server-side (reaper/other tab) — re-sync the list from the backend.
-      refreshActiveSessions().catch(() => {});
+      // server-side (reaper/other tab), or transiently (network blip) while
+      // it's still very much ACTIVE. Blanket setIsActive(false) here would
+      // strand a still-charging sibling (or even this same session, if the
+      // stop didn't actually take) behind a dead "no active session" view —
+      // re-sync from the backend and only clear focus once nothing remains.
+      try {
+        const res = await refreshActiveSessions();
+        const remaining = res.sessions || [];
+        const stillFocused = remaining.some((s) => s.session_id === sessionId);
+        if (stillFocused) {
+          // The stop didn't actually take — it's still active server-side.
+          // Leave it focused rather than disturbing its live telemetry.
+          setIsActive(true);
+        } else if (remaining.length > 0) {
+          // This session is gone, but a concurrent sibling is still
+          // charging — refocus onto it instead of stranding it.
+          switchSession(remaining[0]);
+        } else {
+          setIsActive(false);
+        }
+      } catch {
+        // Couldn't even re-sync — fall back to the old behavior rather than
+        // leaving a possibly-stale isActive=true with nothing to verify it.
+        setIsActive(false);
+      }
       throw err;
     }
-  }, [sessionId, refreshActiveSessions, refreshUser]);
+  }, [sessionId, activeSessions, switchSession, refreshActiveSessions, refreshUser]);
 
   // Update a RUNNING session's stop conditions ("start now, set the target
   // later"). PATCHes the backend, then reflects the returned limits into the
@@ -248,8 +340,13 @@ export const SessionProvider = ({ children }) => {
     setActiveSessions((prev) =>
       prev.map((s) => (s.session_id === id ? { ...s, ...next } : s))
     );
+    // A max_kwh/max_duration_seconds change can grow or shrink this
+    // session's auth hold (routers/sessions.py update_session_limits) —
+    // refresh the wallet so available_balance reflects it immediately,
+    // matching stopSession's post-debit refresh.
+    refreshUser().catch(() => {});
     return result;
-  }, [sessionId]);
+  }, [sessionId, refreshUser]);
 
   const dismissReceipt = useCallback(() => setReceipt(null), []);
 
@@ -259,6 +356,7 @@ export const SessionProvider = ({ children }) => {
     setIsActive(false);
     setFocusedStartedAt(null);
     setFocusedLimits(null);
+    setFocusedHoldCoins(null);
     setLastFrameAt(null);
     setReceipt(null);
     setError(null);
@@ -292,7 +390,7 @@ export const SessionProvider = ({ children }) => {
     <SessionContext.Provider value={{
       socket,
       activeSessions, sessionData, sessionId, isActive, error,
-      lastFrameAt, focusedStartedAt, focusedLimits, alarms, receipt,
+      lastFrameAt, focusedStartedAt, focusedLimits, focusedHoldCoins, alarms, receipt,
       startSession, stopSession, updateLimits, clearSession, switchSession, dismissReceipt,
     }}>
       {children}

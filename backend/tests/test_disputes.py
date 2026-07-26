@@ -645,6 +645,157 @@ async def test_cpo_list_disputes_rejects_invalid_status_filter(factory):
     assert exc.value.status_code == 400
 
 
+# --- Invoice credit-note adjustment on approval -----------------------------
+
+@pytest.mark.asyncio
+async def test_approve_adjusts_already_issued_invoice_and_flows_into_csv_export(factory):
+    """The bug this closes: approving a refund used to leave any
+    already-issued GST invoice (and its CSV export) reporting the pre-refund
+    gross total forever. Proves the fix end to end -- through the actual
+    CSV endpoint, not just the raw Invoice row -- for a PARTIAL refund."""
+    from sqlalchemy import select
+
+    from backend.database.models import Invoice
+    from backend.routers.cpo import cpo_resolve_dispute
+    from backend.routers.cpo._invoices import cpo_export_invoices_csv
+    from backend.schemas import CpoDisputeResolveRequest
+    from backend.services import invoices as invoices_service
+
+    world = await _seed_world(factory, coins_spent="118.00", driver_balance="0.00")
+
+    async with factory() as db:
+        issued = await invoices_service.issue_invoice_for_session(db, world["session_id"])
+    assert issued.total_inr == Decimal("118.00")
+
+    dispute_id = await _seed_open_dispute(factory, world)
+    cpo = _user_obj(world["cpo_id"], "cpo@amphive.test", tenant_id=world["tenant_id"])
+
+    async with factory() as db:
+        await cpo_resolve_dispute(
+            dispute_id, CpoDisputeResolveRequest(action="approve", refund_coins=59.00), cpo, db,
+        )
+
+    async with factory() as db:
+        invoice = (
+            await db.execute(select(Invoice).where(Invoice.session_id == world["session_id"]))
+        ).scalar_one()
+    # Half the session was refunded -> the invoice's totals are re-derived
+    # from the remaining 59.00 at the SAME 18% rate it was issued at, not
+    # merely decremented -- taxable/GST still foot to the new total exactly.
+    assert invoice.amount_coins == Decimal("59.00")
+    assert invoice.total_inr == Decimal("59.00")
+    assert invoice.taxable_value_inr == Decimal("50.00")
+    assert invoice.gst_amount_inr == Decimal("9.00")
+    # Untouched: invoice identity/number and the billed line.
+    assert invoice.invoice_number == issued.invoice_number
+
+    async with factory() as db:
+        response = await cpo_export_invoices_csv(user=cpo, db=db, days=None)
+    body = response.body.decode()
+    # The CSV formats money as round(float(Decimal(...)), 2), so 59.00 -> "59.0".
+    assert "59.0" in body
+    assert "118.0" not in body
+
+
+@pytest.mark.asyncio
+async def test_approve_full_refund_zeroes_out_the_invoice(factory):
+    from sqlalchemy import select
+
+    from backend.database.models import Invoice
+    from backend.routers.cpo import cpo_resolve_dispute
+    from backend.schemas import CpoDisputeResolveRequest
+    from backend.services import invoices as invoices_service
+
+    world = await _seed_world(factory, coins_spent="20.00", driver_balance="0.00")
+
+    async with factory() as db:
+        await invoices_service.issue_invoice_for_session(db, world["session_id"])
+
+    dispute_id = await _seed_open_dispute(factory, world)
+    cpo = _user_obj(world["cpo_id"], "cpo@amphive.test", tenant_id=world["tenant_id"])
+
+    async with factory() as db:
+        await cpo_resolve_dispute(dispute_id, CpoDisputeResolveRequest(action="approve"), cpo, db)
+
+    async with factory() as db:
+        invoice = (
+            await db.execute(select(Invoice).where(Invoice.session_id == world["session_id"]))
+        ).scalar_one()
+    assert invoice.total_inr == Decimal("0.00")
+    assert invoice.taxable_value_inr == Decimal("0.00")
+    assert invoice.gst_amount_inr == Decimal("0.00")
+
+
+@pytest.mark.asyncio
+async def test_approve_adjustment_is_cumulative_across_two_disputes(factory):
+    """Two separate APPROVED disputes on the same session must each re-derive
+    the invoice off the running cumulative refund, not double-subtract or
+    only account for the latest one."""
+    from sqlalchemy import select
+
+    from backend.database.models import Invoice
+    from backend.routers.cpo import cpo_resolve_dispute
+    from backend.schemas import CpoDisputeResolveRequest
+    from backend.services import invoices as invoices_service
+
+    world = await _seed_world(factory, coins_spent="20.00", driver_balance="0.00")
+
+    async with factory() as db:
+        await invoices_service.issue_invoice_for_session(db, world["session_id"])
+
+    cpo = _user_obj(world["cpo_id"], "cpo@amphive.test", tenant_id=world["tenant_id"])
+
+    dispute1 = await _seed_open_dispute(factory, world, reason="First partial-refund dispute on this session.")
+    async with factory() as db:
+        await cpo_resolve_dispute(
+            dispute1, CpoDisputeResolveRequest(action="approve", refund_coins=6.00), cpo, db,
+        )
+
+    async with factory() as db:
+        invoice = (
+            await db.execute(select(Invoice).where(Invoice.session_id == world["session_id"]))
+        ).scalar_one()
+    assert invoice.total_inr == Decimal("14.00")
+
+    dispute2 = await _seed_open_dispute(factory, world, reason="Second, separate dispute on the same session.")
+    async with factory() as db:
+        await cpo_resolve_dispute(
+            dispute2, CpoDisputeResolveRequest(action="approve", refund_coins=4.00), cpo, db,
+        )
+
+    async with factory() as db:
+        invoice = (
+            await db.execute(select(Invoice).where(Invoice.session_id == world["session_id"]))
+        ).scalar_one()
+    assert invoice.total_inr == Decimal("10.00")
+
+
+@pytest.mark.asyncio
+async def test_approve_is_a_noop_when_session_was_never_invoiced(factory):
+    """No invoice has ever been issued for the session (the driver never
+    fetched one) -- approving a refund must not create one or blow up; it's
+    simply nothing to adjust yet."""
+    from sqlalchemy import func, select
+
+    from backend.database.models import Invoice
+    from backend.routers.cpo import cpo_resolve_dispute
+    from backend.schemas import CpoDisputeResolveRequest
+
+    world = await _seed_world(factory, coins_spent="20.00", driver_balance="0.00")
+    dispute_id = await _seed_open_dispute(factory, world)
+    cpo = _user_obj(world["cpo_id"], "cpo@amphive.test", tenant_id=world["tenant_id"])
+
+    async with factory() as db:
+        res = await cpo_resolve_dispute(dispute_id, CpoDisputeResolveRequest(action="approve"), cpo, db)
+    assert res.status == "approved"
+
+    async with factory() as db:
+        count = (
+            await db.execute(select(func.count(Invoice.id)).where(Invoice.session_id == world["session_id"]))
+        ).scalar()
+    assert count == 0
+
+
 @pytest.mark.asyncio
 async def test_cpo_cannot_resolve_another_tenants_dispute(factory):
     from backend.database.models import DisputeStatus

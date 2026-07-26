@@ -340,8 +340,8 @@ async def cancel_reservation(
 
     is_owner = reservation.user_id == user.id
     is_tenant_operator = (
-        user.role in (UserRole.CPO, UserRole.ADMIN)
-        and user.tenant_id == reservation.tenant_id
+        user.role == UserRole.ADMIN
+        or (user.role == UserRole.CPO and user.tenant_id == reservation.tenant_id)
     )
     if not (is_owner or is_tenant_operator):
         raise HTTPException(status_code=404, detail="Reservation not found.")

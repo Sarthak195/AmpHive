@@ -9,7 +9,7 @@
  * stats that hide when /api/me/stats errors.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { render, screen, waitFor, within, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 
@@ -208,6 +208,49 @@ describe('Dashboard — charge now lookup', () => {
     await userEvent.click(within(screen.getByRole('status')).getByRole('button', { name: 'Reserve' }));
     expect(screen.getByTestId('reserve-modal')).toHaveTextContent('2');
   });
+
+  it('a stale lookup cannot fire openCharge for the previous plug once the query has moved on', async () => {
+    setRoute('/api/plugs/7', () =>
+      Promise.resolve({ id: 7, name: 'Visitor Plug', status: 'available', gateway_online: true, plug_powered: true, price_per_kwh: 9 })
+    );
+    // 'unpowered' is a derived UI state (status 'available' + plug_powered
+    // false), not a raw API status — send the real shape or getPlugAvailability
+    // classifies it 'offline' and the Queue button never renders.
+    setRoute('/api/plugs/8', () =>
+      Promise.resolve({ id: 8, name: 'Other Plug', status: 'available', gateway_online: true, plug_powered: false, queue_available: true, price_per_kwh: 9 })
+    );
+    renderDash();
+    await screen.findByText('Lobby Plug');
+
+    const input = screen.getByLabelText('Charger ID');
+
+    // Type "7" and let the lookup settle — hang on to the live "Start
+    // charging" button so we can try firing it again once it's gone stale.
+    await userEvent.type(input, '7');
+    expect(await screen.findByText('Visitor Plug')).toBeInTheDocument();
+    const staleStartBtn = screen.getByRole('button', { name: 'Start charging' });
+    expect(staleStartBtn).toBeEnabled();
+
+    // Move on to "8" — the previous lookup's preview (and its button) must
+    // be gone entirely, not merely relabelled or disabled in place.
+    await userEvent.clear(input);
+    await userEvent.type(input, '8');
+    expect(await screen.findByText('Other Plug')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Start charging' })).not.toBeInTheDocument();
+
+    // Firing the now-stale "7" button (simulating a click that lands after
+    // the UI has already moved on to a different lookup) must NOT open the
+    // setup modal for the old plug.
+    fireEvent.click(staleStartBtn);
+    expect(screen.queryByTestId('setup-modal')).not.toBeInTheDocument();
+
+    // Only the current lookup's action (Queue charge, for plug 8) can fire —
+    // and it opens the modal for the right plug.
+    const queueBtn = screen.getByRole('button', { name: 'Queue charge' });
+    expect(queueBtn).toBeEnabled();
+    await userEvent.click(queueBtn);
+    expect(screen.getByTestId('setup-modal')).toHaveTextContent('queue:8');
+  });
 });
 
 describe('Dashboard — up next strip', () => {
@@ -291,8 +334,8 @@ describe('Dashboard — sessions banner and rail', () => {
     renderDash();
     await screen.findByText('Lobby Plug');
     expect(screen.queryByText('Energy this month')).not.toBeInTheDocument();
-    // The wallet card itself still renders.
-    expect(screen.getByText('Wallet balance')).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'Top up' })).toHaveAttribute('href', '/wallet');
+    // The charging-credit card itself still renders.
+    expect(screen.getByText('Charging credit')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Add credit' })).toHaveAttribute('href', '/credit');
   });
 });

@@ -82,7 +82,7 @@ class FakeRazorpay {
   }
 }
 
-const renderWallet = (route = '/wallet') =>
+const renderWallet = (route = '/credit') =>
   render(
     <MemoryRouter initialEntries={[route]}>
       <Wallet />
@@ -92,7 +92,7 @@ const renderWallet = (route = '/wallet') =>
 // Ledger fetch is the only async work on mount — waiting for a row is the
 // stable "the page has settled" signal (the balance figure renders
 // synchronously from the mocked user, so it never needs a wait itself).
-const waitForSettled = () => screen.findByText('Top-up');
+const waitForSettled = () => screen.findByText('Credit added');
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -145,7 +145,7 @@ describe('ledger', () => {
     const table = screen.getByRole('table');
     const rows = within(table).getAllByRole('row');
 
-    expect(screen.getByText('Top-up')).toBeInTheDocument();
+    expect(screen.getByText('Credit added')).toBeInTheDocument();
     expect(screen.getByText('Charging')).toBeInTheDocument();
     expect(screen.getByText('Session #42')).toBeInTheDocument();
     expect(within(rows[1]).getByText('₹140.00')).toBeInTheDocument();
@@ -157,17 +157,17 @@ describe('ledger', () => {
     renderWallet();
 
     expect(await screen.findByText("Couldn't load this")).toBeInTheDocument();
-    expect(screen.queryByText('No wallet activity yet')).not.toBeInTheDocument();
+    expect(screen.queryByText('No credit activity yet')).not.toBeInTheDocument();
 
     api.get.mockResolvedValue(LEDGER);
     await userEvent.click(screen.getByRole('button', { name: 'Retry' }));
-    expect(await screen.findByText('Top-up')).toBeInTheDocument();
+    expect(await screen.findByText('Credit added')).toBeInTheDocument();
   });
 
   it('shows the empty state only for a true zero-row ledger', async () => {
     api.get.mockResolvedValue([]);
     renderWallet();
-    expect(await screen.findByText('No wallet activity yet')).toBeInTheDocument();
+    expect(await screen.findByText('No credit activity yet')).toBeInTheDocument();
   });
 });
 
@@ -186,7 +186,7 @@ describe('top-up amount picking', () => {
     await userEvent.type(screen.getByLabelText(/custom amount/i), '10');
     await userEvent.click(screen.getByRole('button', { name: /^Pay/ }));
 
-    expect(await screen.findByText(/Minimum top-up is ₹50.00/)).toBeInTheDocument();
+    expect(await screen.findByText(/Minimum credit is ₹50.00/)).toBeInTheDocument();
     expect(api.post).not.toHaveBeenCalled();
   });
 
@@ -196,7 +196,7 @@ describe('top-up amount picking', () => {
     await userEvent.type(screen.getByLabelText(/custom amount/i), '20000');
     await userEvent.click(screen.getByRole('button', { name: /^Pay/ }));
 
-    expect(await screen.findByText(/Maximum top-up is ₹10,000.00/)).toBeInTheDocument();
+    expect(await screen.findByText(/Maximum credit is ₹10,000.00/)).toBeInTheDocument();
     expect(api.post).not.toHaveBeenCalled();
   });
 });
@@ -291,7 +291,7 @@ describe('checkout flow', () => {
         ? Promise.resolve({ order_id: 'order_123', amount: 10000, currency: 'INR', key_id: 'rzp_test' })
         : Promise.resolve({ status: 'success', coins_credited: 100, new_balance: 740 })
     );
-    renderWallet('/wallet?next=%2Fsession');
+    renderWallet('/credit?next=%2Fsession');
     await waitForSettled();
     await userEvent.click(screen.getByRole('button', { name: /^Pay/ }));
     await waitFor(() => expect(capturedOptions).toBeDefined());
@@ -314,7 +314,7 @@ describe('checkout flow', () => {
         ? Promise.resolve({ order_id: 'order_123', amount: 10000, currency: 'INR', key_id: 'rzp_test' })
         : Promise.resolve({ status: 'success', coins_credited: 100, new_balance: 740 })
     );
-    renderWallet('/wallet?next=https%3A%2F%2Fevil.com');
+    renderWallet('/credit?next=https%3A%2F%2Fevil.com');
     await waitForSettled();
     await userEvent.click(screen.getByRole('button', { name: /^Pay/ }));
     await waitFor(() => expect(capturedOptions).toBeDefined());

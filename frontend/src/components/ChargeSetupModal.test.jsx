@@ -71,6 +71,29 @@ describe('ChargeSetupModal — copy per mode', () => {
     renderModal();
     expect(screen.getByText(/covers ≈ 4\.0 kWh/)).toBeInTheDocument();
   });
+
+  it('shows default limits helper when "No limit" chip is selected', () => {
+    renderModal();
+    expect(screen.getByText(/Defaults to 30 kWh \/ 4 h if no limit set/i)).toBeInTheDocument();
+  });
+
+  it('a zero tariff (free charging) is used as-is, not coerced to the global fallback', () => {
+    const zeroTariffPlug = { id: 7, name: 'Free Plug', price_per_kwh: 0 };
+    render(
+      <ChargeSetupModal
+        open
+        onClose={() => {}}
+        plug={zeroTariffPlug}
+        mode="start"
+        onConfirm={vi.fn()}
+      />
+    );
+    // price_per_kwh: 0 is a real, valid rate (free charging) — it must NOT
+    // fall back to coins_per_kwh (5, from the ConfigContext mock).
+    expect(screen.getByText(/₹0\.00/)).toBeInTheDocument();
+    expect(screen.getByText(/covers ≈ 0\.0 kWh/)).toBeInTheDocument();
+    expect(screen.queryByText(/₹5\.00/)).not.toBeInTheDocument();
+  });
 });
 
 describe('ChargeSetupModal — availableBalance', () => {
@@ -114,6 +137,57 @@ describe('ChargeSetupModal — limits payload', () => {
     await userEvent.type(custom, '1:30');
     await userEvent.click(screen.getByRole('button', { name: 'Start charging' }));
     expect(onConfirm).toHaveBeenCalledWith(7, { max_duration_seconds: 5400 });
+  });
+
+  it('custom time cannot exceed 24 hours (1440 minutes)', async () => {
+    renderModal();
+    await userEvent.click(screen.getByRole('button', { name: 'Custom' }));
+    const custom = screen.getByLabelText(/custom time limit/i);
+
+    // 25:00 should be out of range
+    await userEvent.type(custom, '25:00');
+    expect(screen.getByText(/Maximum 24 hours/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Start charging' })).toBeDisabled();
+
+    // 24:00 should be valid
+    await userEvent.clear(custom);
+    await userEvent.type(custom, '24:00');
+    expect(screen.queryByText(/Maximum 24 hours/)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Start charging' })).not.toBeDisabled();
+  });
+
+  it('energy limit cannot exceed 100 kWh and must be > 0', async () => {
+    renderModal();
+    const kwh = screen.getByLabelText('Energy limit (kWh)');
+
+    // 101 kWh should be out of range
+    await userEvent.type(kwh, '101');
+    expect(screen.getByText(/Maximum 100 kWh/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Start charging' })).toBeDisabled();
+
+    // 0 kWh should be invalid
+    await userEvent.clear(kwh);
+    await userEvent.type(kwh, '0');
+    expect(screen.getByText(/must be greater than 0/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Start charging' })).toBeDisabled();
+
+    // 50 kWh should be valid
+    await userEvent.clear(kwh);
+    await userEvent.type(kwh, '50');
+    expect(screen.queryByText(/Maximum 100 kWh/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/must be greater than 0/)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Start charging' })).not.toBeDisabled();
+  });
+
+  it('shows default kWh helper when energy limit is blank', async () => {
+    renderModal();
+    const kwh = screen.getByLabelText('Energy limit (kWh)');
+    expect(screen.getByText(/Defaults to 30 kWh if no limit set/i)).toBeInTheDocument();
+
+    // When user types something, the hint should remain
+    await userEvent.type(kwh, '50');
+    // The hint only shows when kwh === '', so it should disappear when typing
+    // (This is the expected behavior based on the code)
   });
 });
 

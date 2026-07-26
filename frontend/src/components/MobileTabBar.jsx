@@ -10,7 +10,7 @@ import { Home, Map, Wallet, Activity } from 'lucide-react';
 const TABS = [
   { to: '/', label: 'Home', icon: Home, end: true },
   { to: '/map', label: 'Map', icon: Map },
-  { to: '/wallet', label: 'Wallet', icon: Wallet },
+  { to: '/credit', label: 'Credit', icon: Wallet },
   { to: '/activity', label: 'Activity', icon: Activity },
 ];
 
