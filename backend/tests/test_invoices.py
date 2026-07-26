@@ -402,6 +402,100 @@ async def test_second_call_is_idempotent_same_invoice_number(factory):
     assert count == 1
 
 
+# --- 2b. Dispute-refund adjustment (adjust_invoice_for_session_refund) -----------
+
+@requires_db
+@pytest.mark.asyncio
+async def test_adjust_invoice_for_refund_re_derives_totals_at_the_original_rate(factory, monkeypatch):
+    """The core credit-note-approximation behavior: an already-issued
+    invoice's totals are re-derived from (coins_spent - cumulative_refund)
+    at the RATE THE INVOICE WAS ISSUED AT, even if GST_RATE_PCT has since
+    changed in the environment -- an old invoice's tax split must never
+    silently reshape itself."""
+    monkeypatch.delenv("GST_RATE_PCT", raising=False)  # 18% at issue time
+    tenant_id, _ = await _seed_tenant(factory, "AdjCo")
+    session_id, _ = await _seed_session(factory, tenant_id, "118.00")
+
+    async with factory() as db:
+        await invoices_service.issue_invoice_for_session(db, session_id)
+
+    monkeypatch.setenv("GST_RATE_PCT", "28")  # rate changes AFTER issuance
+
+    async with factory() as db:
+        adjusted = await invoices_service.adjust_invoice_for_session_refund(
+            db, session_id, Decimal("118.00"), Decimal("59.00"),
+        )
+        await db.commit()
+
+    assert adjusted is not None
+    assert adjusted.amount_coins == Decimal("59.00")
+    assert adjusted.total_inr == Decimal("59.00")
+    # Still split at the original 18%, not the now-configured 28%.
+    assert adjusted.gst_rate_pct == Decimal("18.00")
+    assert adjusted.taxable_value_inr == Decimal("50.00")
+    assert adjusted.gst_amount_inr == Decimal("9.00")
+
+
+@requires_db
+@pytest.mark.asyncio
+async def test_adjust_invoice_for_refund_floors_at_zero_on_full_refund(factory):
+    tenant_id, _ = await _seed_tenant(factory, "FullRefundCo")
+    session_id, _ = await _seed_session(factory, tenant_id, "20.00")
+
+    async with factory() as db:
+        await invoices_service.issue_invoice_for_session(db, session_id)
+
+    async with factory() as db:
+        adjusted = await invoices_service.adjust_invoice_for_session_refund(
+            db, session_id, Decimal("20.00"), Decimal("20.00"),
+        )
+        await db.commit()
+
+    assert adjusted.total_inr == Decimal("0.00")
+    assert adjusted.taxable_value_inr == Decimal("0.00")
+    assert adjusted.gst_amount_inr == Decimal("0.00")
+
+
+@requires_db
+@pytest.mark.asyncio
+async def test_adjust_invoice_for_refund_is_idempotent_not_cumulative(factory):
+    """Calling this twice with the SAME cumulative-refund figure (as would
+    happen if the caller's transaction retried) must land on the same
+    totals, not subtract the refund twice."""
+    tenant_id, _ = await _seed_tenant(factory, "IdemAdjCo")
+    session_id, _ = await _seed_session(factory, tenant_id, "118.00")
+
+    async with factory() as db:
+        await invoices_service.issue_invoice_for_session(db, session_id)
+
+    async with factory() as db:
+        await invoices_service.adjust_invoice_for_session_refund(
+            db, session_id, Decimal("118.00"), Decimal("59.00"),
+        )
+        await db.commit()
+
+    async with factory() as db:
+        second = await invoices_service.adjust_invoice_for_session_refund(
+            db, session_id, Decimal("118.00"), Decimal("59.00"),
+        )
+        await db.commit()
+
+    assert second.total_inr == Decimal("59.00")
+
+
+@requires_db
+@pytest.mark.asyncio
+async def test_adjust_invoice_for_refund_noop_when_session_has_no_invoice(factory):
+    tenant_id, _ = await _seed_tenant(factory, "NoInvoiceCo")
+    session_id, _ = await _seed_session(factory, tenant_id, "20.00")
+
+    async with factory() as db:
+        result = await invoices_service.adjust_invoice_for_session_refund(
+            db, session_id, Decimal("20.00"), Decimal("5.00"),
+        )
+    assert result is None
+
+
 # --- 3. Sequential numbering under the tenant lock --------------------------------
 
 @requires_db

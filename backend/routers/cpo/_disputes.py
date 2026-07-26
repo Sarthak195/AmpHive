@@ -22,6 +22,7 @@ from backend.database.models import (
     User,
 )
 from backend.schemas import CpoDisputeResolveRequest, DisputeResponse
+from backend.services.invoices import adjust_invoice_for_session_refund
 from backend.services.money import ZERO_MONEY, to_money
 from backend.services.rbac import require_role
 from backend.services.wallet import credit_wallet
@@ -81,7 +82,13 @@ async def cpo_resolve_dispute(
     and writes a REFUND LedgerTransaction referencing the session — coins
     only, there is no Razorpay money-out path. `refund_coins` defaults to
     the session's `coins_spent`; the cumulative APPROVED refund_coins for a
-    session may never exceed that session's `coins_spent`.
+    session may never exceed that session's `coins_spent`. If the session
+    already has an issued GST invoice, its totals are brought down in the
+    same transaction to reflect the refund (services/invoices.py
+    adjust_invoice_for_session_refund) — otherwise the tenant's invoice
+    list/CSV export would keep reporting the pre-refund gross total forever.
+    The driver-facing `session.coins_spent` itself is never touched by this
+    — only the invoice's own money columns.
 
     Reject: status + resolution_note only, no money movement.
 
@@ -192,6 +199,13 @@ async def cpo_resolve_dispute(
         description=f"Dispute #{dispute.id} approved: refund for session {dispute.session_id}",
         balance_after=new_balance,
     ))
+
+    # No-op if the session hasn't been invoiced yet — nothing "already
+    # issued" to adjust. session_cost (session.coins_spent) is passed
+    # read-only and is never itself mutated by this call.
+    await adjust_invoice_for_session_refund(
+        db, dispute.session_id, session_cost, already_refunded + refund_amount,
+    )
 
     dispute.status = DisputeStatus.APPROVED
     dispute.refund_coins = refund_amount
