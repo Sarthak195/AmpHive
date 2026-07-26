@@ -9,7 +9,7 @@ import secrets
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,9 +29,11 @@ from backend.schemas import (
 )
 from backend.services import email as email_service
 from backend.services.auth import (
+    _DUMMY_PASSWORD_HASH,
     create_access_token,
     get_current_user,
     hash_password,
+    normalize_email,
     verify_password,
 )
 from backend.services.rate_limit import (
@@ -66,16 +68,21 @@ async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
     Rate-limited per client IP (REGISTER_RATE_LIMIT) against bulk
     account creation / email enumeration.
     """
+    # Canonicalize (trim + lowercase) so `Driver@x.com` and `driver@x.com`
+    # are the same account — both for the duplicate check below and for what
+    # gets stored.
+    email = normalize_email(req.email)
+
     # Check if email already exists (fast path for a clean error message; the
     # unique index is the real guard — a concurrent duplicate slips past this
     # SELECT and must be caught at commit).
-    result = await db.execute(select(User).where(User.email == req.email))
+    result = await db.execute(select(User).where(func.lower(User.email) == email))
     if result.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="An account with this email already exists.")
 
     # Create the user with hashed password
     user = User(
-        email=req.email,
+        email=email,
         hashed_password=hash_password(req.password),
         full_name=req.full_name,
         role=UserRole.DRIVER,
@@ -115,11 +122,25 @@ async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
     Returns a JWT token on success.
     Rate-limited per client IP (LOGIN_RATE_LIMIT) against brute force;
     attempts count regardless of outcome.
+    Email lookup is case-insensitive (canonicalized to lowercase — see
+    normalize_email) so an account registered as `Driver@x.com` still
+    matches a login attempt for `driver@x.com`.
     """
-    result = await db.execute(select(User).where(User.email == req.email))
+    email = normalize_email(req.email)
+    result = await db.execute(select(User).where(func.lower(User.email) == email))
     user = result.scalar_one_or_none()
 
-    if not user or not verify_password(req.password, user.hashed_password):
+    if user is not None:
+        password_ok = verify_password(req.password, user.hashed_password)
+    else:
+        # Timing side-channel defense: a nonexistent email must not return
+        # faster than a wrong-password attempt against a real one. Run the
+        # same bcrypt-cost verification against a fixed dummy hash so this
+        # branch pays the same cost as the branch above.
+        verify_password(req.password, _DUMMY_PASSWORD_HASH)
+        password_ok = False
+
+    if not user or not password_ok:
         raise HTTPException(status_code=401, detail="Invalid email or password.")
 
     # [Admin] Disabled accounts can't sign in. Checked AFTER the password so
@@ -237,8 +258,13 @@ async def forgot_password(req: ForgotPasswordRequest, db: AsyncSession = Depends
     live link exists per account. Delivery goes through services/email.py:
     SMTP when SMTP_HOST is configured, otherwise the link is logged at
     WARNING (console fallback).
+
+    Email lookup is case-insensitive (see normalize_email), matching
+    register/login, so a user who types a different case than they
+    registered with still finds their account.
     """
-    result = await db.execute(select(User).where(User.email == req.email))
+    email = normalize_email(req.email)
+    result = await db.execute(select(User).where(func.lower(User.email) == email))
     user = result.scalar_one_or_none()
     if user is None:
         return _FORGOT_RESPONSE
