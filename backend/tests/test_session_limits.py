@@ -526,6 +526,157 @@ async def test_patch_shrinks_hold_when_max_kwh_lowered(factory):
 
 @db_gated
 @pytest.mark.asyncio
+async def test_patch_409_when_max_kwh_below_energy_already_delivered(factory):
+    """[Security] The driver-exploitable hold-forgiveness bug (backend/routers/
+    sessions.py update_session_limits): charge most of the way to the target,
+    then PATCH max_kwh down to a sliver so the naive resize (and the
+    telemetry-path auto-stop mirror) would let finalize collect almost
+    nothing for energy already consumed. The PATCH itself must be rejected —
+    not merely re-sized — so a 200 here can never be followed within ~1 s by
+    an auto-stop at a target the driver never actually charged down to."""
+    from fastapi import HTTPException
+    from sqlalchemy import select
+
+    from backend.database.models import ChargingSession
+
+    tenant_id = await _seed_tenant(factory)
+    gw = await _seed_gateway(factory, tenant_id, "gw-patch-exploit")
+    plug_id = await _seed_plug(factory, gw)
+    uid = await _seed_user(factory, "500.00", tenant_id)
+    # 29 kWh already delivered against a 30 kWh target; hold sized for the
+    # original target (30 kWh * 5.00 = 150.00) — mirrors the reported exploit
+    # ("charge 29 kWh, PATCH max_kwh to 0.1, pay ~0.1 kWh").
+    sid = await _seed_active_session(
+        factory, tenant_id=tenant_id, user_id=uid, plug_id=plug_id,
+        max_kwh=30.0, max_duration=14400, hold="150.00", rate="5.00",
+        energy=29.0,
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await _patch_limits(factory, session_id=sid, user_id=uid, max_kwh=0.1)
+    assert exc.value.status_code == 409
+    assert "already delivered" in exc.value.detail
+
+    # Rejected outright — neither max_kwh nor the hold moved.
+    async with factory() as db:
+        session = (await db.execute(
+            select(ChargingSession).where(ChargingSession.id == sid)
+        )).scalar_one()
+    assert session.max_kwh == 30.0
+    assert session.hold_coins == Decimal("150.00")
+
+
+@db_gated
+@pytest.mark.asyncio
+async def test_patch_hold_floored_at_accrued_cost_even_when_kwh_target_allowed(factory):
+    """[Security] Even a max_kwh PATCH that CLEARS the 409 guard (new target
+    still >= energy already delivered) must not let the hold resize dip below
+    what's already owed. A segmented (TOD) session can carry settled cost from
+    an earlier, HIGHER rate than the plug's current/future rate, so naively
+    re-deriving the hold as energy_cost(new_max_kwh, max_rate) can undershoot
+    the real accrued cost even though new_max_kwh > energy delivered. The
+    floor — billing.session_cost at the session's own energy_kwh, the same
+    function finalize bills with — must win."""
+    from sqlalchemy import select
+
+    from backend.database.models import ChargingSession
+
+    tenant_id = await _seed_tenant(factory)
+    gw = await _seed_gateway(factory, tenant_id, "gw-patch-floor")
+    plug_id = await _seed_plug(factory, gw)
+    uid = await _seed_user(factory, "500.00", tenant_id)
+    sid = await _seed_active_session(
+        factory, tenant_id=tenant_id, user_id=uid, plug_id=plug_id,
+        max_kwh=30.0, max_duration=14400, hold="150.00", rate="5.00",
+        energy=5.0,
+    )
+    # Fabricate a closed high-rate segment: 5 kWh already settled at a rate
+    # that nets 100.00 coins, with the open segment starting fresh at the
+    # current energy (nothing accrued in it yet). No tariff on the plug, so
+    # max_rate_over_window resolves to the 5.00 env default for the future
+    # window — well under the 100.00 already locked into settled_cost_coins.
+    async with factory() as db:
+        session = (await db.execute(
+            select(ChargingSession).where(ChargingSession.id == sid)
+        )).scalar_one()
+        session.settled_cost_coins = Decimal("100.00")
+        session.rate_segment_start_kwh = 5.0
+        await db.commit()
+
+    # New target (6 kWh) is above the 5 kWh already delivered — clears the 409
+    # guard — but energy_cost(6.0, 5.00) = 30.00, far under the 100.00 already
+    # owed for the closed segment. session_cost(session, 5.0) = 100.00 exactly
+    # (settled 100.00 + 0 open-segment energy), so the floor must hold at 100.
+    await _patch_limits(factory, session_id=sid, user_id=uid, max_kwh=6.0)
+
+    async with factory() as db:
+        session = (await db.execute(
+            select(ChargingSession).where(ChargingSession.id == sid)
+        )).scalar_one()
+    assert session.max_kwh == 6.0
+    assert session.hold_coins == Decimal("100.00")   # floored, not shrunk to 30.00
+
+
+@db_gated
+@pytest.mark.asyncio
+async def test_finalize_bills_full_accrued_cost_with_no_forgiven_overage_after_blocked_patch(
+    factory, monkeypatch,
+):
+    """End-to-end version of the exploit report: a rejected max_kwh PATCH must
+    leave the hold intact, so finalize goes on to collect the FULL accrued
+    cost for energy already delivered — none of it forgiven."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from fastapi import HTTPException
+    from sqlalchemy import select
+
+    import backend.services.session_lifecycle as sl_mod
+    from backend import state as state_module
+    from backend.database.models import ChargingSession, User
+
+    tenant_id = await _seed_tenant(factory)
+    gw = await _seed_gateway(factory, tenant_id, "gw-patch-finalize")
+    plug_id = await _seed_plug(factory, gw)
+    uid = await _seed_user(factory, "500.00", tenant_id)
+    sid = await _seed_active_session(
+        factory, tenant_id=tenant_id, user_id=uid, plug_id=plug_id,
+        max_kwh=30.0, max_duration=14400, hold="150.00", rate="5.00",
+        energy=29.0,
+    )
+
+    # The exploit attempt: rejected, not merely re-sized.
+    with pytest.raises(HTTPException) as exc:
+        await _patch_limits(factory, session_id=sid, user_id=uid, max_kwh=0.1)
+    assert exc.value.status_code == 409
+
+    monkeypatch.setattr(
+        state_module, "mqtt_manager",
+        MagicMock(send_plug_command=MagicMock(return_value=True)),
+    )
+    monkeypatch.setattr(sl_mod, "set_plug_telemetry_interval", AsyncMock())
+    state_module.telemetry_store.start_session(plug_id)
+
+    async with factory() as db:
+        outcome = await sl_mod.finalize_charging_session(db, sid)
+
+    assert outcome is not None
+    # 29 kWh * 5.00 coins/kWh = 145.00 — the FULL accrued cost, none forgiven
+    # (the pre-fix bug would have left the hold at ~0.10-kWh's worth after
+    # the malicious PATCH, capping this at pennies instead).
+    assert outcome["coins_spent"] == 145.0
+    assert outcome["shortfall_coins"] == 0.0
+
+    async with factory() as db:
+        session = (await db.execute(
+            select(ChargingSession).where(ChargingSession.id == sid)
+        )).scalar_one()
+        user = (await db.execute(select(User).where(User.id == uid))).scalar_one()
+    assert session.coins_spent == Decimal("145.00")
+    assert user.coin_balance == Decimal("355.00")   # 500.00 - 145.00, no shortfall
+
+
+@db_gated
+@pytest.mark.asyncio
 async def test_patch_resizes_hold_when_only_max_duration_raised_into_higher_rate(factory):
     """REC-07: a PATCH raising ONLY max_duration into a window that crosses a
     higher-rate TOD slot must re-size the hold — max_rate_over_window rises with
