@@ -239,6 +239,20 @@ class LedgerEntryResponse(BaseModel):
 class CreateOrderRequest(BaseModel):
     amount_inr: float = Field(gt=0, le=10000, allow_inf_nan=False)  # Amount in Rupees (e.g. 100 for ₹100)
 
+    @field_validator("amount_inr")
+    @classmethod
+    def _reject_sub_paise_precision(cls, v: float) -> float:
+        # Razorpay only bills whole paise: services/payments.py create_order()
+        # charges int(round(amount_inr * 100)) paise, while the order's
+        # notes.coins is computed from this raw, un-quantized amount_inr. A
+        # request with more than 2 decimal places (e.g. 123.455) would make
+        # those two numbers diverge by a fraction of a coin. Reject rather
+        # than silently round, so the client sees an explicit 422 instead of
+        # AmpHive quietly crediting a different amount than it displayed.
+        if round(v, 2) != v:
+            raise ValueError("amount_inr must have at most 2 decimal places")
+        return v
+
 class CreateOrderResponse(BaseModel):
     order_id: str
     amount: int       # Amount in paise

@@ -18,10 +18,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import razorpay
 from fastapi import HTTPException
+from pydantic import ValidationError
 
 import backend.routers.payments as payments_router
 import backend.services.payments as payments
-from backend.schemas import VerifyPaymentRequest
+from backend.schemas import CreateOrderRequest, VerifyPaymentRequest
 
 
 def _client_returning(payment: dict) -> MagicMock:
@@ -74,6 +75,28 @@ def test_missing_notes_normalized_to_empty_dict():
 
     assert out["notes"] == {}
     assert out["status"] == "authorized"  # caller decides captured-only policy
+
+
+# ===========================================================================
+# CreateOrderRequest.amount_inr — must be exactly paise-quantizable (<=2dp)
+#
+# create_order() charges int(round(amount_inr * 100)) paise but computes
+# notes.coins from the raw, un-quantized amount_inr. If amount_inr carried
+# more than 2 decimal places, those two numbers could disagree by a fraction
+# of a coin. Rejecting sub-paise precision up front makes that divergence
+# impossible instead of relying on downstream rounding to paper over it.
+# ===========================================================================
+
+@pytest.mark.parametrize("amount", [10, 10.0, 10.5, 99.99, 123.45, 10000.0])
+def test_create_order_request_accepts_2dp_amounts(amount):
+    req = CreateOrderRequest(amount_inr=amount)
+    assert req.amount_inr == amount
+
+
+@pytest.mark.parametrize("amount", [123.455, 10.001, 99.999])
+def test_create_order_request_rejects_sub_paise_precision(amount):
+    with pytest.raises(ValidationError):
+        CreateOrderRequest(amount_inr=amount)
 
 
 # ===========================================================================
@@ -161,18 +184,32 @@ def test_extract_returns_none_when_notes_missing_user_id():
     assert payments.extract_payment_from_webhook(event) is None
 
 
-def test_extract_prefers_notes_coins_over_derived_amount():
-    """notes.coins (pre-computed at order time) wins over deriving from the
-    settled amount, even when they'd disagree."""
+def test_extract_ignores_notes_coins_and_derives_from_captured_amount():
+    """notes.coins is pre-computed at order-creation time from the raw,
+    un-paise-quantized amount_inr (services/payments.py create_order()) and
+    can diverge from what Razorpay actually charged — so it must NEVER be
+    trusted for the credited amount. The webhook always derives coins from
+    the authoritative captured amount instead, even when notes.coins
+    disagrees with it."""
     event = _captured_event(notes={"user_id": "42", "coins": "999"}, amount_paise=1000)
     out = payments.extract_payment_from_webhook(event)
-    assert out == {"payment_id": "pay_1", "user_id": 42, "amount_inr": 10.0, "coins": 999.0}
+    assert out == {"payment_id": "pay_1", "user_id": 42, "amount_inr": 10.0, "coins": 10.0}
 
 
-def test_extract_falls_back_to_amount_derived_coins_when_notes_coins_absent():
+def test_extract_derives_coins_from_amount_when_notes_coins_absent():
     event = _captured_event(notes={"user_id": "42"}, amount_paise=1500)
     out = payments.extract_payment_from_webhook(event)
     assert out == {"payment_id": "pay_1", "user_id": 42, "amount_inr": 15.0, "coins": 15.0}
+
+
+def test_extract_credits_captured_paise_times_rate_for_fractional_amount():
+    """Coins always equal captured_paise/100 * COINS_PER_RUPEE — proven here
+    with a fractional-rupee capture and a non-1:1 rate, matching how
+    /api/payments/verify computes coins off the Razorpay-fetched amount."""
+    event = _captured_event(notes={"user_id": "42"}, amount_paise=1050)  # ₹10.50 captured
+    with patch.object(payments, "COINS_PER_RUPEE", 2.0):
+        out = payments.extract_payment_from_webhook(event)
+    assert out == {"payment_id": "pay_1", "user_id": 42, "amount_inr": 10.5, "coins": 21.0}
 
 
 # ===========================================================================

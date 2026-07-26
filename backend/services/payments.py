@@ -211,9 +211,15 @@ def extract_payment_from_webhook(event: dict) -> Optional[dict]:
 
     The payment entity carries the `notes` dict we attached at order-creation
     time in create_order() (user_id + coins), plus the authoritative `amount`
-    (in paise) and a unique `id` (the razorpay_payment_id). We prefer the
-    `notes` values but fall back to deriving coins from `amount` so a webhook
-    can still credit correctly even if the notes were stripped.
+    (in paise) and a unique `id` (the razorpay_payment_id). `user_id` is read
+    from `notes` — nothing else identifies whose wallet to credit — but
+    `coins` is always DERIVED from the authoritative captured `amount`, never
+    taken from `notes.coins`: `notes.coins` was pre-computed at order-creation
+    time from the raw, un-paise-quantized `amount_inr` (see create_order()),
+    which can diverge from what Razorpay actually charged
+    (`int(round(amount_inr * 100))` paise) by a fraction of a coin. This
+    mirrors how /api/payments/verify already recomputes coins from the fetched
+    `amount_inr` rather than trusting client- or notes-supplied figures.
 
     Args:
         event: The parsed JSON webhook body.
@@ -259,13 +265,11 @@ def extract_payment_from_webhook(event: dict) -> Optional[dict]:
     # Amount is authoritative from Razorpay, in paise. Convert to rupees.
     amount_inr = float(entity.get("amount", 0)) / 100.0
 
-    # Prefer the coins we pre-computed at order time; fall back to deriving
-    # them from the settled amount so the credit is never zero due to notes.
-    coins_raw = notes.get("coins")
-    try:
-        coins = float(coins_raw) if coins_raw is not None else calculate_coins(amount_inr)
-    except (TypeError, ValueError):
-        coins = calculate_coins(amount_inr)
+    # Coins are always derived from the authoritative captured amount — never
+    # from notes.coins, which can diverge from what was actually charged (see
+    # the docstring above). This matches /api/payments/verify's own
+    # calculate_coins(amount_inr) call on the Razorpay-fetched amount.
+    coins = calculate_coins(amount_inr)
 
     return {
         "payment_id": payment_id,
