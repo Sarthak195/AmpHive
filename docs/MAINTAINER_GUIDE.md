@@ -112,8 +112,7 @@ commands you run against the VM there.**
   from `.env` (`MQTT_*`), and every gateway needs `mqtt_user`/`mqtt_pwd` in
   NVS — an unprovisioned gateway cannot connect.
 - **Firmware builds on ESP-IDF v5.3.3**, not v6 (v6 causes a LoadProhibited panic
-  on custom netif registration). `eim_config.toml` mentions v6.0.1 — ignore it
-  for building; use v5.3.x.
+  on custom netif registration); use v5.3.x.
 - **Live telemetry is Socket.io only** (the legacy SSE endpoint was retired
   2026-07-07).
 

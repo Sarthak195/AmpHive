@@ -198,21 +198,13 @@ retirement time (namespace `amphive`, all Deployments `replicas: 1`):
   auth/payments/direct-mode would be unconfigured on K8s.
 - No resource limits/requests; STUN/DERP ports not exposed via a Service.
 
-## 6. Submodules (`.gitmodules` → `context_repos/`)
-
-Reference repos under the author's GitHub (read-only context, not build inputs):
-`ChargeHub` (prototype), `headscale` (control-server fork), `ESP32-Tailscale-WoL`
-(firmware reference, source of `wireguard_lwip`).
-
-## 7. Runbooks (`deploy/docs/`)
+## 6. Runbooks (`deploy/docs/`)
 
 | File | Covers |
 |------|--------|
 | `web_tls_rollout.md` | Caddy HTTPS front door — rollout, verification, rollback |
 | `db_backup_restore.md` | Nightly DB/config backups + disk snapshots — setup, restore, restore test |
 | `new_device_setup.md` | Setting up a new dev workstation |
-| `deploy_guide.md` | Cloud hosting, DuckDNS, VPN networking |
-| `deployment_checklist.md` | Step-by-step physical site deployment |
 | `gcp_migration_runbook.md` | Full AWS EC2 → GCP, then region migration log |
 | `wireguard_tunnel_setup.md` | Direct-Mode WireGuard setup — **retired** (Path B is gone; kept as historical reference) |
 | `phase2_walkthrough.md` | Phase-2 work log |

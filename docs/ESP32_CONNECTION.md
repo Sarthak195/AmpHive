@@ -1,8 +1,8 @@
 # ESP32 Connection, Build & Flashing Guide
 
 Complete reference for building, flashing, and monitoring the AmpHive gateway
-firmware — on the default **ESP32-S3** board and on **other ESP32 models**. Firmware
-architecture is in [FIRMWARE.md](FIRMWARE.md).
+firmware — on the real fielded **ESP32-C3** board and on **other ESP32 models**.
+Firmware architecture is in [FIRMWARE.md](FIRMWARE.md).
 
 > **Toolchain version matters.** This firmware is written for **ESP-IDF v5.3**
 > (v5.x LTS). It does **not** build as-is on **ESP-IDF v6.0** — v6 removed the
@@ -16,13 +16,16 @@ architecture is in [FIRMWARE.md](FIRMWARE.md).
 
 | Item | Detail |
 |------|--------|
-| **Default board** | ESP32-S3-N16R8 (16 MB flash, 8 MB octal PSRAM) |
+| **Default board (real fielded hardware)** | ESP32-C3 (~4 MB flash, **no PSRAM**) |
 | **Cable** | USB-C **data** cable — charge-only cables silently fail to enumerate |
 | **USB-UART bridge** | Onboard CP210x or native USB-Serial/JTAG, depending on board |
 
 The firmware also runs on other ESP32 targets (see [§5](#5-flashing-other-esp32-models)),
-but the committed `sdkconfig.defaults` is tuned for the S3-N16R8 (octal PSRAM, 16 MB
-flash). Other chips need PSRAM/flash settings adjusted.
+but the committed `sdkconfig.defaults` is tuned for the C3 (4 MB flash, no PSRAM —
+no `CONFIG_SPIRAM*` lines are set). Other chips, especially ones **with** PSRAM,
+need flash/PSRAM settings adjusted (see §5). An earlier revision of this doc
+described an ESP32-S3-N16R8 (16 MB flash / 8 MB octal PSRAM) default; that was
+never what `sdkconfig.defaults` actually targets and has been corrected here.
 
 ### Identify the serial port
 
@@ -53,7 +56,7 @@ installs the framework under e.g. `C:\esp\v5.3\esp-idf` and the tools under `C:\
 ```bash
 mkdir -p ~/esp && cd ~/esp
 git clone -b v5.3.2 --recursive https://github.com/espressif/esp-idf.git
-cd esp-idf && ./install.sh esp32s3        # Windows: .\install.ps1 esp32s3
+cd esp-idf && ./install.sh esp32c3        # Windows: .\install.ps1 esp32c3
 ```
 
 **C. VS Code** — the *Espressif IDF* extension installs and manages v5.3 for you.
@@ -104,13 +107,13 @@ idf.py --version    # expect: ESP-IDF v5.3.x
 
 ---
 
-## 4. Build, flash & monitor (default ESP32-S3)
+## 4. Build, flash & monitor (default ESP32-C3)
 
 ```bash
 cd firmware
 
 # 1. One-time (or after changing chip target): generates sdkconfig from sdkconfig.defaults
-idf.py set-target esp32s3
+idf.py set-target esp32c3
 
 # 2. Build
 idf.py build
@@ -142,14 +145,14 @@ button, tap **RESET/EN**, release BOOT once "Connecting…" appears (forces down
 ## 5. Flashing other ESP32 models
 
 The build is retargetable. The only per-chip step is `set-target`, plus adjusting
-PSRAM/flash config for boards that differ from the S3-N16R8.
+PSRAM/flash config for boards that differ from the real fielded C3 (which has none).
 
 ```bash
 # Pick the chip, then rebuild + flash
-idf.py set-target esp32s3     # ESP32-S3  (default; Xtensa, PSRAM)
+idf.py set-target esp32c3     # ESP32-C3  (default; RISC-V, no PSRAM — real fielded hardware)
 idf.py set-target esp32       # classic ESP32 (Xtensa)
 idf.py set-target esp32s2     # ESP32-S2  (Xtensa, single core)
-idf.py set-target esp32c3     # ESP32-C3  (RISC-V)
+idf.py set-target esp32s3     # ESP32-S3  (Xtensa, PSRAM-capable — historical dev-board target, not fielded)
 idf.py set-target esp32c6     # ESP32-C6  (RISC-V, Wi-Fi 6)
 idf.py set-target esp32h2     # ESP32-H2  (RISC-V, 802.15.4 — no Wi-Fi, not usable as a gateway)
 idf.py build
@@ -159,20 +162,27 @@ idf.py -p <PORT> flash monitor
 `set-target` **wipes `sdkconfig`** and regenerates it from `sdkconfig.defaults`, so
 re-apply any board-specific settings afterward (or put them in `sdkconfig.defaults`):
 
-- **PSRAM:** `sdkconfig.defaults` enables **octal** PSRAM (`CONFIG_SPIRAM_MODE_OCT`) for
-  the S3-N16R8. Boards with **quad** PSRAM (most WROVER/other S3 modules) need
-  `CONFIG_SPIRAM_MODE_QUAD`; chips with **no PSRAM** (C3, plain ESP32 without PSRAM)
-  must remove the `CONFIG_SPIRAM*` lines — otherwise the `microlink` 32 KB task can't
-  get its external-RAM stack and the board crashes on boot. See AGENTS.md rule 3.
-- **Flash size:** set `CONFIG_ESPTOOLPY_FLASHSIZE_*` to match the module (e.g. `4MB`).
+- **PSRAM:** `sdkconfig.defaults` has **no `CONFIG_SPIRAM*` lines** — correct for the
+  real fielded **C3, which has no PSRAM**. Boards **with** PSRAM (S3 modules) need
+  `CONFIG_SPIRAM_MODE_OCT` (octal, e.g. S3-N16R8) or `CONFIG_SPIRAM_MODE_QUAD`
+  (quad, most WROVER/other S3 modules) added back. This matters much less than it
+  once did: the only PSRAM-hungry code was the `microlink` overlay client's 32 KB
+  task, and `microlink` is **retired and compiled out by default** since the
+  2026-07-10 direct-MQTT pivot (see [FIRMWARE.md §5](FIRMWARE.md#5-microlink--the-tailscale-client--substantial-some-todos--retired)) —
+  so a no-PSRAM chip building the default direct-MQTT firmware is expected, not a
+  degraded fallback. See AGENTS.md rule 3.
+- **Flash size:** set `CONFIG_ESPTOOLPY_FLASHSIZE_*` to match the module (the
+  fielded C3 uses `4MB`).
 - **Chip family:** RISC-V targets (C3/C6/H2) use a different toolchain, installed
   automatically by `install.sh <target>` or EIM.
 - Use `idf.py menuconfig` to change these interactively, or edit `sdkconfig.defaults`
   and `rm -rf build sdkconfig` for a clean regeneration.
 
-> Practical note: the gateway needs **Wi-Fi + enough RAM for the overlay client**.
-> ESP32-S3 with PSRAM is the intended target. ESP32/-S2/-C3/-C6 can build, but a
-> no-PSRAM chip may not fit the `microlink` stacks — validate on serial before relying on it.
+> Practical note: the gateway just needs **Wi-Fi**; it no longer needs "enough RAM
+> for the overlay client" now that direct MQTT is the default and `microlink` is
+> compiled out. **ESP32-C3 (no PSRAM) is the intended, fielded target.** ESP32-S3
+> (with PSRAM) remains buildable and is only relevant if you deliberately flip back
+> to the legacy overlay build (`AMPHIVE_DIRECT_MQTT=0`) for rollback testing.
 
 ---
 
@@ -233,7 +243,7 @@ parttool.py -p COM3 erase_partition --partition-name nvs
 Raw esptool equivalents (when idf.py isn't available, e.g. flashing a prebuilt binary):
 ```bash
 esptool.py -p COM3 -b 460800 erase_flash
-esptool.py -p COM3 -b 460800 --chip esp32s3 write_flash 0x0 build/flash_image.bin
+esptool.py -p COM3 -b 460800 --chip esp32c3 write_flash 0x0 build/flash_image.bin
 # or the individual images idf.py prints after a build:
 #   0x0 bootloader/bootloader.bin, 0x8000 partition_table/partition-table.bin,
 #   0x10000 amphive-gateway.bin
@@ -278,7 +288,17 @@ impractical without reworking `microlink`.
 
 ---
 
-## 10. Verifying the Implementation (NAT Traversal & Magicsock)
+## 10. Verifying the Implementation (NAT Traversal & Magicsock) — RETIRED
+
+> **RETIRED (2026-07-10 direct-MQTT pivot).** This whole verification procedure
+> is for the `microlink` Tailscale-overlay transport, which is defeated by
+> symmetric NAT (root-caused 2026-07-09) and **compiled out of the default
+> build** (`AMPHIVE_DIRECT_MQTT=1`; see [FIRMWARE.md §5](FIRMWARE.md#5-microlink--the-tailscale-client--substantial-some-todos--retired)).
+> There is no GCP-VM Tailscale node or magicsock path to verify on a
+> direct-MQTT gateway anymore — the equivalent live check is confirming a TLS
+> session to the public broker (`mqtts://mqtt.amphive.app:8883`) in the
+> gateway's serial log and an `online` MQTT status. Kept below only as
+> historical reference for anyone reviving the `AMPHIVE_DIRECT_MQTT=0` build.
 
 To verify that the unified port architecture (magicsock mode) is functioning correctly and a direct connection is established between the ESP32 and the GCP VM:
 
@@ -350,7 +370,7 @@ $env:IDF_TOOLS_PATH = "$env:USERPROFILE\.espressif"; . C:\esp\v5.3.3\esp-idf\exp
 
 # --- build/flash cycle ---
 cd firmware
-idf.py set-target esp32                   # classic ESP32 target (used on this workstation)
+idf.py set-target esp32c3                 # real fielded target: ESP32-C3, no PSRAM, direct-MQTT default
 idf.py build
 idf.py -p COM5 flash monitor              # replace COM5 with your CP210x COM port
 

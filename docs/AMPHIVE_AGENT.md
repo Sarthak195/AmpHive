@@ -22,11 +22,15 @@ re-implement vendor protocols. See [PLUG_CONNECTIVITY_OPTIONS.md](PLUG_CONNECTIV
   brand-agnostic plug adoption; the backend now consumes them
   ([implemented](MQTT_CONTRACT.md)).
 
-> **Status (2026-07-09):** implemented as a runnable package under
+> **Status (2026-07-20):** implemented as a runnable package under
 > [`agent/`](../agent) (providers: `kasa`, `shelly`, `sim`) and verified
 > end-to-end against a real broker — discovery → backend assign → adopt →
 > session-relative telemetry. The backend side (`_persist_plug_discovery` +
 > `/assign`) is wired and unit-tested (`backend/tests/test_mqtt_manager.py`).
+> **2026-07-20:** the agent also runs a local kWh + duration watchdog — same
+> shape as the firmware's — that cuts a plug OFF over the LAN on limit even
+> with the broker unreachable, closing the "no local limit → unbilled
+> offline tail" gap (see below). Tests: `agent/test_local_limits.py`.
 
 ## Relationship to the ESP32 gateway
 The ESP32 gateway is a single-brand hub (Tapo, in C). The Agent is the same idea

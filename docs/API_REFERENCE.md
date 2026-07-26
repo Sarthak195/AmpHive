@@ -285,7 +285,7 @@ read-only — resolution stays here).
 
 ## Platform Admin Console (`/api/admin/*`, `routers/admin.py`, redesign/ui-v3)
 
-The admin console's API surface (2026-07-21 — `plans/redesign-v3-contract.md` §4):
+The admin console's API surface (implemented in `routers/admin.py`):
 cross-tenant visibility plus the two platform-level user mutations. Every endpoint
 requires the **`admin`** role via `require_role("admin")` and deliberately does
 NOT require a `tenant_id` on the caller — platform admins have `tenant_id NULL`
