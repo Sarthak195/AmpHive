@@ -572,6 +572,21 @@ async def get_active_session(
             # progress toward them ("0.42 / 1.00 kWh · stops automatically").
             "max_kwh": session.max_kwh,
             "max_duration_seconds": session.max_duration_seconds,
+            # [Restore/switch preview] Without these, a client restoring or
+            # switching between active sessions has no energy/cost to show and
+            # fabricates 0 — understating the stop-confirmation preview and
+            # breaking the low-balance warning (which needs hold_coins). Same
+            # segment-aware session_cost the stop/detail paths bill with, at
+            # this session's current energy_kwh (read-only — no billing here).
+            "energy_kwh": session.energy_kwh or 0.0,
+            "cost_coins": float(session_cost(session, session.energy_kwh or 0.0)),
+            "hold_coins": (
+                float(session.hold_coins) if session.hold_coins is not None else None
+            ),
+            "rate_coins_per_kwh": (
+                float(session.rate_coins_per_kwh)
+                if session.rate_coins_per_kwh is not None else None
+            ),
         }
         for session, plug_name in result.all()
     ]
