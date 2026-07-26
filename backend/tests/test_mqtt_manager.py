@@ -871,6 +871,153 @@ async def test_malformed_telemetry_dropped_without_crashing(payload):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("bad_kwh", [
+    1e30,   # DoS: finite, so it sails past isfinite() — the monotonic max()
+            # in _persist_telemetry would pin it onto active_session.energy_kwh,
+            # then session_cost -> to_money's Decimal.quantize would raise a
+            # raw decimal.InvalidOperation on every finalize path (a ~30-digit
+            # number can't be rounded to 2dp in the default Decimal context),
+            # wedging the session ACTIVE and the plug OCCUPIED forever.
+    -5.0,   # negative energy is never plausible either.
+])
+async def test_implausible_kwh_dropped_before_persistence(bad_kwh):
+    """
+    A kwh far outside MAX_PLAUSIBLE_KWH (or negative) must be dropped by the
+    handler itself, same as the non-finite/malformed cases above — it must
+    never reach the TelemetryStore or get scheduled onto _persist_telemetry,
+    so it can never be pinned onto a session's stored energy.
+    """
+    MQTTManager._instance = None
+    loop = asyncio.get_running_loop()
+    store = MagicMock()
+    mgr = MQTTManager(telemetry_store=store, db_session_factory=lambda: None,
+                      event_loop=loop)
+
+    persists = []
+
+    async def fake_persist(*a, **k):
+        persists.append(a)
+
+    mgr._persist_telemetry = fake_persist
+
+    mgr._handle_gateway_telemetry("gw-1", {
+        "plug_id": 1, "watts": 100.0, "kwh": bad_kwh,
+        "voltage": 230.0, "current": 1.0, "status": "occupied",
+    })
+    await asyncio.sleep(0.05)
+
+    store.update.assert_not_called()
+    assert persists == []
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_kwh_at_the_plausible_ceiling_is_not_dropped():
+    """The ceiling is inclusive: a reading exactly at MAX_PLAUSIBLE_KWH is a
+    real (if extreme) value, not garbage, and must still be processed."""
+    from backend.services.mqtt.telemetry import MAX_PLAUSIBLE_KWH
+
+    MQTTManager._instance = None
+    loop = asyncio.get_running_loop()
+    store = MagicMock()
+    mgr = MQTTManager(telemetry_store=store, db_session_factory=lambda: None,
+                      event_loop=loop)
+
+    persists = []
+
+    async def fake_persist(gateway_id, plug_id, watts, kwh, session_id=None,
+                           sample=None, relay_on=False, is_offline=False):
+        persists.append(kwh)
+
+    mgr._persist_telemetry = fake_persist
+
+    mgr._handle_gateway_telemetry("gw-1", {
+        "plug_id": 1, "watts": 100.0, "kwh": MAX_PLAUSIBLE_KWH,
+        "voltage": 230.0, "current": 1.0, "status": "occupied",
+    })
+    await asyncio.sleep(0.05)
+
+    assert persists == [MAX_PLAUSIBLE_KWH]
+    store.update.assert_called_once()
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_implausible_kwh_frame_does_not_block_a_following_normal_frame():
+    """
+    A dropped 1e30 kwh frame must not wedge the handler for the next reading —
+    e.g. the normal-sized frame that reports a session's actual stop must
+    still be processed exactly as if the bad frame had never arrived.
+    """
+    MQTTManager._instance = None
+    loop = asyncio.get_running_loop()
+    store = MagicMock()
+    mgr = MQTTManager(telemetry_store=store, db_session_factory=lambda: None,
+                      event_loop=loop)
+
+    persists = []
+
+    async def fake_persist(gateway_id, plug_id, watts, kwh, session_id=None,
+                           sample=None, relay_on=False, is_offline=False):
+        persists.append(kwh)
+
+    mgr._persist_telemetry = fake_persist
+
+    mgr._handle_gateway_telemetry("gw-1", {
+        "plug_id": 1, "watts": 100.0, "kwh": 1e30,
+        "voltage": 230.0, "current": 1.0, "status": "occupied",
+    })
+    mgr._handle_gateway_telemetry("gw-1", {
+        "plug_id": 1, "watts": 0.0, "kwh": 0.75,
+        "voltage": 230.0, "current": 0.0, "status": "available",
+    })
+    await asyncio.sleep(0.05)
+
+    # Only the normal (stop) frame made it through.
+    assert persists == [0.75]
+    store.update.assert_called_once()
+    assert store.update.call_args.args[3] == 0.75  # energy_kwh positional arg
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_implausible_kwh_never_reaches_the_db_or_pins_session_energy():
+    """
+    End-to-end proof (handler -> scheduled persist, not just the isolated
+    _persist_telemetry unit): a 1e30 kwh frame must never reach the DB layer
+    at all, so it can never be pinned onto active_session.energy_kwh via the
+    monotonic max() in _persist_telemetry. Plug/session wiring mirrors
+    test_persist_telemetry_drops_foreign_plug below.
+    """
+    MQTTManager._instance = None
+    loop = asyncio.get_running_loop()
+
+    plug = MagicMock()
+    plug.gateway_id = "gw-1"
+    sess_row = MagicMock()
+    sess_row.energy_kwh = 0.5  # the real, pre-frame stored energy
+
+    session = _FakeSession([
+        _FakeResult(scalar=plug),
+        _FakeResult(scalar=sess_row),
+    ])
+    mgr = MQTTManager(db_session_factory=lambda: session, event_loop=loop)
+
+    mgr._handle_gateway_telemetry("gw-1", {
+        "plug_id": 5, "watts": 100.0, "kwh": 1e30,
+        "voltage": 230.0, "current": 1.0, "status": "occupied",
+        "session_id": "42",
+    })
+    await asyncio.sleep(0.05)
+
+    # The frame never reached the DB layer: no query, no commit, and the
+    # session's stored energy is untouched.
+    assert session.committed is False
+    assert sess_row.energy_kwh == 0.5
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
 async def test_string_plug_id_coerced_to_int():
     """A numeric-string plug_id ("3") is coerced to int so downstream DB
     comparisons and store keys stay type-consistent."""

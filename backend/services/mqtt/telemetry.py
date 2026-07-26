@@ -23,12 +23,25 @@ import asyncio
 import functools
 import logging
 import math
+import os
 import time
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger("amphive.mqtt")
+
+# Hard ceiling on inbound kwh magnitude. math.isfinite() below only rejects
+# NaN/Infinity — a garbage or malicious frame reporting a huge but perfectly
+# *finite* kwh (e.g. 1e30) would otherwise sail through, get pinned onto
+# active_session.energy_kwh via the monotonic `max()` in _persist_telemetry,
+# and then wedge session_cost()/to_money()'s Decimal.quantize() into a raw
+# decimal.InvalidOperation on EVERY finalize path (the default Decimal
+# context can't round a ~30-digit number to 2dp) — the session could never
+# finalize and the plug would stay OCCUPIED forever. No real session gets
+# remotely close to this (a home/commercial charger tops out at a few dozen
+# kWh per session); env-overridable for exotic fleets or tests.
+MAX_PLAUSIBLE_KWH = float(os.getenv("MAX_PLAUSIBLE_KWH", "1000.0"))
 
 
 class MQTTTelemetryMixin:
@@ -95,6 +108,21 @@ class MQTTTelemetryMixin:
             logger.warning(
                 "Telemetry has non-finite values, ignoring",
                 extra={"gateway_id": gateway_id, "plug_id": plug_id, "payload": payload},
+            )
+            return
+
+        # Implausible kwh magnitude (or negative): drop the whole frame rather
+        # than clamp it. Clamping would still let a garbage value inflate a
+        # bill up to the clamp ceiling; dropping means it can never advance
+        # billed energy or trigger relay actuation at all. See MAX_PLAUSIBLE_KWH
+        # above for why this exists.
+        if kwh < 0 or kwh > MAX_PLAUSIBLE_KWH:
+            logger.warning(
+                "Telemetry kwh outside plausible bounds, dropping frame",
+                extra={
+                    "gateway_id": gateway_id, "plug_id": plug_id,
+                    "kwh": kwh, "max_plausible_kwh": MAX_PLAUSIBLE_KWH,
+                },
             )
             return
 
