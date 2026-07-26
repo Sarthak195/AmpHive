@@ -13,8 +13,16 @@ disagree.
 Earnings math
 -------------
 A tenant's gross earnings over a window = SUM(coins_spent) of that tenant's
-COMPLETED charging sessions with ended_at in the window. ChargingSession.
-tenant_id is already denormalized (set at session-start from the plug's
+FINISHED charging sessions (ChargingSession.status COMPLETED or PAID — the
+same two-status definition of "finished revenue" already used by
+routers/admin.py's _REVENUE_STATUSES, routers/cpo/_analytics.py, and
+services/invoices.py's _INVOICEABLE_STATUSES; this module used to filter on
+COMPLETED alone, which would have silently under-counted gross the moment
+anything transitions a session to PAID) with ended_at in the window. Note
+this SessionStatus.PAID is unrelated to Payout.status PAID a few paragraphs
+below — one says "this charging session's invoice is settled", the other
+says "this CPO's payout batch was wired". ChargingSession.tenant_id is
+already denormalized (set at session-start from the plug's
 gateway's tenant at that time), so this is a single aggregate query — no
 join and no per-plug looping (the N+1 shape this repo avoids elsewhere; see
 cpo_analytics_overview/revenue/energy in routers/cpo.py, which use the same
@@ -27,7 +35,10 @@ session actually ran.
 Refunds (session disputes) net out of this same gross:
 `sum_completed_session_coins` also subtracts the SUM(refund_coins) of every
 APPROVED SessionDispute for this tenant whose resolved_at falls in the same
-[window_start, window_end) (see `sum_approved_refund_coins`). The refund is
+[window_start, window_end) (see `sum_approved_refund_coins`, which joins on
+the same COMPLETED-or-PAID status set as the gross query above, so a
+session's refund still nets out no matter which of the two finished
+statuses it currently carries). The refund is
 windowed by the dispute's own *resolved_at* — deliberately NOT by the
 session's ended_at — because a dispute can be approved long after its
 session was already settled into a REQUESTED/PAID payout. Keying the refund
@@ -64,6 +75,28 @@ CANCELLED payouts are excluded, which frees their window for a future
 request. See routers/cpo.py for how the request endpoint makes the
 watermark-read + insert atomic per tenant.
 
+Settlement lag (payout watermark race)
+---------------------------------------
+`finalize_charging_session` (services/session_lifecycle.py) stamps
+``ChargingSession.ended_at`` and then, after a wallet-debit DB round trip,
+commits — there is an unavoidable gap between "the value baked into
+ended_at" and "the row becomes visible to other transactions". If a payout
+snapshot landed in that gap and used raw wall-clock `now` as both its
+window's upper edge AND the new watermark it advances to, the straddled
+session would be excluded from THAT payout (it isn't committed yet) AND
+from every future one too, the instant the watermark passes its own
+ended_at — a permanent drain of real earnings, not just a delayed payout.
+`tenant_earnings_summary` closes this by never treating anything as
+"settled up to now": it uses ``now - PAYOUT_SETTLEMENT_LAG_SEC`` (floored at
+the watermark itself) as the window's upper edge instead of raw `now`. A
+session that finishes inside the lag is simply deferred to the next
+dashboard read / payout request — it can never be dropped, because the
+watermark that would exclude it never advances past the lagged cutoff
+either. The lag only needs to comfortably exceed one wallet-lock DB round
+trip, not eliminate the assignment-to-commit gap outright — session_lifecycle
+stamps ended_at as late as possible, right before its commit, as a second,
+complementary narrowing of that same gap.
+
 Offline top-up pool
 --------------------
 A CPO can also credit a driver's wallet directly for cash collected offline
@@ -78,7 +111,7 @@ this one function, so the two can never disagree (same principle as the
 gross/fee/net split above).
 """
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Optional, Tuple
 
@@ -100,7 +133,21 @@ from backend.services.money import ZERO_MONEY, to_money
 # runs from the beginning of time to now (i.e. all of its lifetime earnings).
 EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
+# ChargingSession statuses that count as "finished revenue" for the payout
+# ledger — kept in lockstep with routers/admin.py's _REVENUE_STATUSES,
+# routers/cpo/_analytics.py, and services/invoices.py's
+# _INVOICEABLE_STATUSES (see the module docstring's "Earnings math" section).
+FINISHED_SESSION_STATUSES = (SessionStatus.COMPLETED, SessionStatus.PAID)
+
 _DEFAULT_PLATFORM_FEE_PCT = Decimal("10.0")
+
+# See the module docstring's "Settlement lag" section: never treat earnings
+# as settled up through raw wall-clock `now` -- floor the window's upper edge
+# (and thus the watermark a payout would advance to) at `now` minus this many
+# seconds, so a finalize_charging_session commit that's still in flight can
+# never be straddled and permanently excluded. Only needs to comfortably
+# exceed one wallet-lock DB round trip.
+PAYOUT_SETTLEMENT_LAG_SEC = int(os.getenv("PAYOUT_SETTLEMENT_LAG_SEC", "5"))
 
 
 def platform_fee_pct() -> Decimal:
@@ -139,11 +186,12 @@ async def sum_approved_refund_coins(
     still claws back off the current unsettled window instead of vanishing
     before the watermark (see the module docstring's "Refunds" paragraph for
     the full rationale and the pay-then-refund drain it closes). Joins
-    ChargingSession only to scope by tenant/COMPLETED, since refund_coins and
-    resolved_at both live on SessionDispute."""
+    ChargingSession only to scope by tenant/status (COMPLETED or PAID — see
+    FINISHED_SESSION_STATUSES), since refund_coins and resolved_at both live
+    on SessionDispute."""
     conditions = [
         ChargingSession.tenant_id == tenant_id,
-        ChargingSession.status == SessionStatus.COMPLETED,
+        ChargingSession.status.in_(FINISHED_SESSION_STATUSES),
         SessionDispute.status == DisputeStatus.APPROVED,
     ]
     if window_start is not None:
@@ -166,9 +214,11 @@ async def sum_completed_session_coins(
     window_start: Optional[datetime] = None,
     window_end: Optional[datetime] = None,
 ) -> Decimal:
-    """SUM(coins_spent) for this tenant's COMPLETED sessions with ended_at in
-    the half-open window [window_start, window_end), minus the SUM of any
-    APPROVED SessionDispute.refund_coins against those same sessions (see
+    """SUM(coins_spent) for this tenant's FINISHED sessions (status COMPLETED
+    or PAID — see FINISHED_SESSION_STATUSES and the module docstring's
+    "Earnings math" section) with ended_at in the half-open window
+    [window_start, window_end), minus the SUM of any APPROVED
+    SessionDispute.refund_coins against those same sessions (see
     `sum_approved_refund_coins` and the module docstring's "Refunds"
     paragraph) — clamped at zero so a data inconsistency can't produce a
     negative gross. Either bound omitted means unbounded on that side (omit
@@ -176,10 +226,12 @@ async def sum_completed_session_coins(
     the earnings dashboard (gross/fee/net) and the offline top-up pool read,
     so a dispute refund is reflected everywhere coins_spent is, without
     mutating coins_spent itself (that stays the driver's original
-    receipt/invoice)."""
+    receipt/invoice). The name predates PAID being included here — kept
+    as-is since it's the shared public entry point every payout/earnings
+    caller already imports."""
     conditions = [
         ChargingSession.tenant_id == tenant_id,
-        ChargingSession.status == SessionStatus.COMPLETED,
+        ChargingSession.status.in_(FINISHED_SESSION_STATUSES),
     ]
     if window_start is not None:
         conditions.append(ChargingSession.ended_at >= window_start)
@@ -237,17 +289,29 @@ async def tenant_settlement_watermark(db: AsyncSession, tenant_id: int) -> datet
 
 
 async def tenant_earnings_summary(db: AsyncSession, tenant_id: int) -> dict:
-    """Lifetime + unsettled (watermark -> now) earnings for the CPO earnings
-    dashboard. Shared by GET /api/cpo/earnings and (for the unsettled leg)
-    POST /api/cpo/payouts, so the two can never disagree."""
+    """Lifetime + unsettled (watermark -> settlement cutoff) earnings for the
+    CPO earnings dashboard. Shared by GET /api/cpo/earnings and (for the
+    unsettled leg) POST /api/cpo/payouts, so the two can never disagree."""
     now = datetime.now(timezone.utc)
     watermark = await tenant_settlement_watermark(db, tenant_id)
+
+    # [Payout watermark race] Never treat anything as settled up through raw
+    # wall-clock `now` -- a session mid-finalize (ended_at already stamped,
+    # commit not yet landed — see services/session_lifecycle.py
+    # finalize_charging_session) could straddle exactly that instant. Floor
+    # the window's upper edge (and, via routers/cpo/_payouts.py, the new
+    # watermark a payout request would advance to) at `now -
+    # PAYOUT_SETTLEMENT_LAG_SEC` instead, clamped to never go BEHIND the
+    # existing watermark (so it can only defer earnings, never regress the
+    # window). See the module docstring's "Settlement lag" section for the
+    # full rationale.
+    settlement_cutoff = max(watermark, now - timedelta(seconds=PAYOUT_SETTLEMENT_LAG_SEC))
 
     lifetime_gross = await sum_completed_session_coins(db, tenant_id)
     lifetime_fee, lifetime_net = compute_fee_and_net(lifetime_gross)
 
     unsettled_gross = await sum_completed_session_coins(
-        db, tenant_id, window_start=watermark, window_end=now
+        db, tenant_id, window_start=watermark, window_end=settlement_cutoff
     )
     unsettled_fee, unsettled_net = compute_fee_and_net(unsettled_gross)
 
@@ -259,13 +323,17 @@ async def tenant_earnings_summary(db: AsyncSession, tenant_id: int) -> dict:
     # forward), but clamp anyway so a data inconsistency can't produce a
     # negative pool figure on this read-only dashboard endpoint.
     topups_since_watermark = await sum_offline_topups(
-        db, tenant_id, window_start=watermark, window_end=now
+        db, tenant_id, window_start=watermark, window_end=settlement_cutoff
     )
     available_pool_coins = to_money(max(unsettled_net - topups_since_watermark, ZERO_MONEY))
 
     return {
         "watermark": watermark,
-        "now": now,
+        # The lag-floored cutoff, NOT raw wall-clock `now` -- this is what
+        # routers/cpo/_payouts.py snapshots as a new payout's period_end (and
+        # therefore the tenant's next watermark), so it must be the same
+        # value the unsettled_* aggregates above were actually windowed to.
+        "now": settlement_cutoff,
         "lifetime_gross_coins": lifetime_gross,
         "lifetime_platform_fee_coins": lifetime_fee,
         "lifetime_net_coins": lifetime_net,

@@ -444,6 +444,33 @@ async def test_gross_earnings_sums_only_completed_sessions_in_window(factory):
     assert gross == Decimal("17.50")
 
 
+@requires_db
+@pytest.mark.asyncio
+async def test_gross_earnings_includes_paid_status_alongside_completed(factory):
+    """SessionStatus.PAID must count as finished revenue too, same as
+    routers/admin.py's _REVENUE_STATUSES / routers/cpo/_analytics.py /
+    services/invoices.py's _INVOICEABLE_STATUSES already treat (COMPLETED,
+    PAID) -- payouts.py filtering on COMPLETED alone would silently
+    under-report gross the moment anything transitions a session to PAID."""
+    tenant_id, _ = await _seed_tenant(factory, "PaidStatusCo")
+    now = datetime.now(timezone.utc)
+    ended_at = now - timedelta(hours=1)
+
+    await _seed_session(factory, tenant_id, "10.00", SessionStatus.COMPLETED, ended_at=ended_at)
+    await _seed_session(factory, tenant_id, "6.00", SessionStatus.PAID, ended_at=ended_at)
+    # Still excluded -- ACTIVE/CANCELLED are not finished revenue.
+    await _seed_session(factory, tenant_id, "99.00", SessionStatus.CANCELLED, ended_at=ended_at)
+
+    async with factory() as db:
+        gross = await payout_service.sum_completed_session_coins(
+            db, tenant_id,
+            window_start=now - timedelta(days=1),
+            window_end=now + timedelta(minutes=1),
+        )
+
+    assert gross == Decimal("16.00")
+
+
 async def _seed_driver(factory, tag):
     """A standalone driver User row (no tenant), for FKs that need a real
     driver id -- e.g. SessionDispute.driver_user_id below. Mirrors
@@ -516,6 +543,46 @@ async def test_approved_dispute_refund_nets_out_of_gross_in_its_sessions_window(
 
 @requires_db
 @pytest.mark.asyncio
+async def test_approved_dispute_refund_nets_out_against_a_paid_status_session(factory):
+    """The refund netting must apply to a PAID session too, not just
+    COMPLETED -- sum_approved_refund_coins joins on the same
+    FINISHED_SESSION_STATUSES set as the gross query, so a session that later
+    transitions to PAID doesn't stop having its approved refunds subtracted."""
+    from backend.database.models import DisputeStatus, SessionDispute
+
+    tenant_id, _ = await _seed_tenant(factory, "RefundPaidCo")
+    driver_id = await _seed_driver(factory, "paiddisputer")
+    now = datetime.now(timezone.utc)
+    ended_at = now - timedelta(hours=1)
+
+    session_id = await _seed_session(
+        factory, tenant_id, "20.00", SessionStatus.PAID, ended_at=ended_at
+    )
+
+    async with factory() as db:
+        db.add(SessionDispute(
+            session_id=session_id,
+            tenant_id=tenant_id,
+            driver_user_id=driver_id,
+            reason="Charger stopped early",
+            status=DisputeStatus.APPROVED,
+            refund_coins=Decimal("5.00"),
+            resolved_at=now,
+        ))
+        await db.commit()
+
+    async with factory() as db:
+        gross = await payout_service.sum_completed_session_coins(
+            db, tenant_id,
+            window_start=now - timedelta(days=1),
+            window_end=now + timedelta(minutes=1),
+        )
+
+    assert gross == Decimal("15.00")
+
+
+@requires_db
+@pytest.mark.asyncio
 async def test_approved_dispute_refund_reduces_available_pool_and_payable_net(factory):
     """End-to-end through tenant_earnings_summary: a session billed N=20.00
     coins with an APPROVED dispute refund R=5.00 must reduce both the
@@ -553,7 +620,9 @@ async def test_approved_dispute_refund_reduces_available_pool_and_payable_net(fa
             reason="Session cut off early",
             status=DisputeStatus.APPROVED,
             refund_coins=Decimal("5.00"),
-            resolved_at=now,
+            # Resolved comfortably past the settlement lag so it lands inside
+            # the summary's lagged cutoff window (see PAYOUT_SETTLEMENT_LAG_SEC).
+            resolved_at=now - timedelta(seconds=30),
         ))
         await db.commit()
 
@@ -573,6 +642,78 @@ async def test_approved_dispute_refund_reduces_available_pool_and_payable_net(fa
     _, refund_net = payout_service.compute_fee_and_net(Decimal("5.00"))
     assert baseline["unsettled_net_coins"] - after_refund["unsettled_net_coins"] == refund_net
     assert baseline["available_pool_coins"] - after_refund["available_pool_coins"] == refund_net
+
+
+@requires_db
+@pytest.mark.asyncio
+async def test_settlement_lag_defers_a_freshly_ended_session_without_dropping_it(factory):
+    """WATERMARK RACE regression: finalize_charging_session stamps
+    ChargingSession.ended_at and commits shortly after (a wallet-debit DB
+    round trip sits in between) -- a payout snapshot landing in that gap must
+    not be able to (a) miss the session AND (b) advance its watermark past
+    it, which would drop the session's earnings from every future payout
+    forever. A session that "just" ended (inside PAYOUT_SETTLEMENT_LAG_SEC)
+    must be excluded from the CURRENT window, but the window's own cutoff
+    (which becomes the next watermark) must sit BEFORE the session's
+    ended_at, not after -- so the very next read, once the lag has passed,
+    picks the same session up in full instead of having lost it."""
+    tenant_id, user_id = await _seed_tenant(factory, "LagRaceCo")
+    now = datetime.now(timezone.utc)
+
+    # A session that ended "just now" -- inside the safety-lag window.
+    await _seed_session(factory, tenant_id, "20.00", SessionStatus.COMPLETED, ended_at=now)
+
+    async with factory() as db:
+        summary = await payout_service.tenant_earnings_summary(db, tenant_id)
+    # Deferred, not counted, this instant...
+    assert summary["unsettled_gross_coins"] == Decimal("0.00")
+    # ...because the effective cutoff was pulled backward from raw `now`,
+    # landing strictly before the session's own ended_at.
+    assert summary["now"] < now
+
+    user = _cpo_user(tenant_id, user_id)
+    async with factory() as db:
+        with pytest.raises(HTTPException) as exc:
+            await cpo_request_payout(user=user, db=db)
+    assert exc.value.status_code == 400  # nothing (yet) unsettled to pay out
+    assert await _payout_count_for(factory, tenant_id) == 0
+
+    # Once the lag has genuinely passed (simulated here by backdating the
+    # session's ended_at, exactly as if real wall-clock time had elapsed),
+    # the same session is picked up in full -- proving it was deferred, not
+    # permanently dropped behind a prematurely-advanced watermark.
+    from sqlalchemy import select
+
+    from backend.database.models import ChargingSession
+
+    async with factory() as db:
+        row = (
+            await db.execute(
+                select(ChargingSession).where(ChargingSession.tenant_id == tenant_id)
+            )
+        ).scalar_one()
+        row.ended_at = now - timedelta(seconds=payout_service.PAYOUT_SETTLEMENT_LAG_SEC + 5)
+        await db.commit()
+
+    async with factory() as db:
+        summary_after = await payout_service.tenant_earnings_summary(db, tenant_id)
+    assert summary_after["unsettled_gross_coins"] == Decimal("20.00")
+
+    async with factory() as db:
+        payout = await cpo_request_payout(user=user, db=db)
+    assert payout["gross_coins"] == pytest.approx(20.00)
+
+
+async def _payout_count_for(factory, tenant_id: int) -> int:
+    from sqlalchemy import func, select
+
+    from backend.database.models import Payout
+
+    async with factory() as db:
+        result = await db.execute(
+            select(func.count(Payout.id)).where(Payout.tenant_id == tenant_id)
+        )
+        return result.scalar() or 0
 
 
 @requires_db
@@ -706,7 +847,9 @@ async def test_refund_approved_after_payout_still_claws_back_next_window(factory
             reason="Approved long after the session was paid out",
             status=DisputeStatus.APPROVED,
             refund_coins=Decimal("5.00"),
-            resolved_at=now,
+            # Past the settlement lag (still well after the PAID payout's
+            # period_end watermark), so it nets into the current window.
+            resolved_at=now - timedelta(seconds=30),
         ))
         await db.commit()
 
