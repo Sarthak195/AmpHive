@@ -1049,6 +1049,55 @@ async def test_persist_telemetry_no_active_session_skips_limit_check():
     MQTTManager._instance = None
 
 
+@pytest.mark.asyncio
+async def test_persist_telemetry_post_reset_frame_still_triggers_max_kwh_stop():
+    """[Fix] A frame arriving right after a mid-session gateway reboot reports
+    a tiny raw kwh (the device counter reset to ~0), but the session's
+    PERSISTED total already exceeds max_kwh. The auto-stop mirror must be
+    driven by the session's MONOTONIC total (active_session.energy_kwh, post
+    the REC-01 max() clamp) — not the raw per-frame value — or a reset would
+    silently defeat the limit and let charging continue unbilled/uncapped."""
+    from backend.services.mqtt_manager import MQTTManager
+
+    MQTTManager._instance = None
+    plug = MagicMock()
+    plug.gateway_id = "gw-1"
+    plug.last_telemetry_at = None
+    sess_row = MagicMock()
+    sess_row.id = 42
+    sess_row.user_id = 3
+    sess_row.rate_coins_per_kwh = Decimal("5.00")
+    sess_row.hold_coins = None
+    sess_row.max_kwh = 1.0  # already exceeded by the persisted total below
+    sess_row.max_duration_seconds = None
+    sess_row.started_at = datetime.now(timezone.utc) - timedelta(minutes=10)
+    sess_row.energy_kwh = 5.0    # real float: the PRE-frame persisted total (past max_kwh)
+    sess_row.peak_power_w = 0.0
+    sess_row.rate_valid_until = None
+    sess_row.settled_cost_coins = None
+    sess_row.rate_segment_start_kwh = None
+
+    session = _FakeSession([
+        _FakeResult(scalar=plug),
+        _FakeResult(scalar=sess_row),
+    ])
+    mgr = MQTTManager(db_session_factory=lambda: session)
+    mgr._maybe_auto_stop_on_exhaustion = AsyncMock()
+
+    finalize_mock = AsyncMock(return_value={"energy_kwh": 5.0, "coins_spent": 0})
+    with patch("backend.services.session_lifecycle.finalize_charging_session", finalize_mock), \
+         patch("backend.services.pricing.reprice_session_if_due", AsyncMock(return_value=None)):
+        # Raw frame kwh is tiny (post-reboot device counter) — on its own it
+        # would be far under max_kwh, but the persisted total must win.
+        await mgr._persist_telemetry("gw-1", 5, 100.0, 0.05,
+                                     session_id=42, sample=None, relay_on=True)
+
+    finalize_mock.assert_awaited_once()
+    assert finalize_mock.call_args.args[1] == 42  # session_id
+    assert finalize_mock.call_args.kwargs.get("reason") == "auto-stopped: energy limit reached"
+    MQTTManager._instance = None
+
+
 def test_finalize_maps_limit_reasons_into_the_stop_notification():
     """The session-stopped notification (emitted inside finalize) must map
     the limit reasons — the reason string itself lands in the body (extends

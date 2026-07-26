@@ -1255,7 +1255,8 @@ async def test_persist_telemetry_relay_on_no_session_republishes_off():
     MQTTManager._instance = None
     session = _FakeSession([
         _FakeResult(scalar=_owned_plug()),
-        _FakeResult(scalar=None),   # no ACTIVE session
+        _FakeResult(scalar=None),   # no ACTIVE session (id-scoped/plug-scoped lookup)
+        _FakeResult(scalar=None),   # [REC-02 race guard] plug-scoped recheck: still none
     ])
     mgr = MQTTManager(db_session_factory=lambda: session)
     mgr.send_plug_command = MagicMock()
@@ -1266,6 +1267,30 @@ async def test_persist_telemetry_relay_on_no_session_republishes_off():
     mgr.send_plug_command.assert_called_once_with(
         "gw-1", 7, "OFF", local_ip="10.0.0.5", wait=False
     )
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_persist_telemetry_stale_session_id_does_not_off_a_different_active_session():
+    """[REC-02 race guard] A frame carries a STALE claimed session_id (that
+    session already finalized), so the id-scoped lookup misses — but a
+    DIFFERENT session now legitimately owns the plug (a new one started on it
+    since). The reconciliation OFF must not fire and cut power out from under
+    the session that's really running."""
+    MQTTManager._instance = None
+    other_active = MagicMock()  # the NEW session that now legitimately owns the plug
+    session = _FakeSession([
+        _FakeResult(scalar=_owned_plug()),      # plug ownership
+        _FakeResult(scalar=None),               # id-scoped lookup misses (stale id)
+        _FakeResult(scalar=other_active),        # plug-scoped recheck: a DIFFERENT session IS active
+    ])
+    mgr = MQTTManager(db_session_factory=lambda: session)
+    mgr.send_plug_command = MagicMock()
+
+    await mgr._persist_telemetry("gw-1", 7, 50.0, 0.0,
+                                 session_id=999, sample=None, relay_on=True)
+
+    mgr.send_plug_command.assert_not_called()
     MQTTManager._instance = None
 
 
@@ -1349,6 +1374,56 @@ async def test_persist_telemetry_rebaselines_powered_since_after_gap():
 
     assert plug.powered_since > old              # power resumed after a gap
     assert plug.last_telemetry_at > old
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_persist_telemetry_offline_frame_does_not_bump_freshness_clock():
+    """[Plug power / TD#24] An offline-replay frame (buffered historical
+    reading drained on resync) must NOT stamp last_telemetry_at/powered_since —
+    those drive plug_is_powered()'s freshness check, and a buffered frame is
+    not proof the plug is live right now. Without this, a backlog of replayed
+    frames after a real power-cycle would make a de-powered plug look freshly
+    powered."""
+    MQTTManager._instance = None
+    plug = _owned_plug()
+    old = datetime.now(timezone.utc) - timedelta(seconds=600)  # older than PLUG_POWER_STALE_SEC
+    plug.last_telemetry_at = old
+    plug.powered_since = old
+    session = _FakeSession([
+        _FakeResult(scalar=plug),
+        _FakeResult(scalar=None),   # no ACTIVE session
+    ])
+    mgr = MQTTManager(db_session_factory=lambda: session)
+
+    await mgr._persist_telemetry("gw-1", 5, 100.0, 1.0, None, None,
+                                 relay_on=False, is_offline=True)
+
+    assert plug.last_telemetry_at == old   # untouched by the historical frame
+    assert plug.powered_since == old
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_persist_telemetry_offline_first_frame_does_not_set_power_clock():
+    """[Plug power / TD#24] Even as the very first frame ever seen for a plug
+    (last_telemetry_at NULL), an offline-replay frame must not seed
+    powered_since/last_telemetry_at — a historical reading proves nothing
+    about the plug's live state now."""
+    MQTTManager._instance = None
+    plug = _owned_plug()  # last_telemetry_at = None
+    plug.powered_since = None
+    session = _FakeSession([
+        _FakeResult(scalar=plug),
+        _FakeResult(scalar=None),   # no ACTIVE session
+    ])
+    mgr = MQTTManager(db_session_factory=lambda: session)
+
+    await mgr._persist_telemetry("gw-1", 5, 100.0, 1.0, None, None,
+                                 relay_on=False, is_offline=True)
+
+    assert plug.last_telemetry_at is None
+    assert plug.powered_since is None
     MQTTManager._instance = None
 
 
