@@ -1,9 +1,0 @@
-[submodule "context_repos/ChargeHub"]
-	path = context_repos/ChargeHub
-	url = https://github.com/Sarthak195/ChargeHub.git
-[submodule "context_repos/headscale"]
-	path = context_repos/headscale
-	url = https://github.com/Sarthak195/headscale.git
-[submodule "context_repos/ESP32-Tailscale-WoL"]
-	path = context_repos/ESP32-Tailscale-WoL
-	url = https://github.com/Sarthak195/ESP32-Tailscale-WoL.git

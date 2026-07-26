@@ -1,10 +1,16 @@
 # AmpHive — Shared EV Charging Platform
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 AmpHive turns budget, off-the-shelf smart plugs (TP-Link Tapo P110) into a secure,
 monetizable, shared EV charging network. A driver enters a **Plug ID** in a web
 app, the backend authorizes and bills against a prepaid coin wallet, and the
 command reaches the plug through an ESP32 gateway that dials outbound over
 direct TLS MQTT — no VPN or overlay network involved.
+
+> **Note:** AmpHive is a **portfolio / showcase project**. The hosted instance is
+> a **live demo**, not a commercial service — it runs in sandbox mode (no real
+> payments) and is published as a reference implementation.
 
 ---
 
@@ -35,7 +41,8 @@ direct TLS MQTT — no VPN or overlay network involved.
 ## 📖 Documentation
 
 The **[`docs/`](docs/)** folder is the single source of truth — it describes what
-the code actually does today, verified against source.
+the code actually does today, verified against source. Start at
+[docs/README.md](docs/README.md) for the full index.
 
 | | |
 |--|--|
@@ -57,18 +64,18 @@ Read [AGENTS.md](AGENTS.md).
 
 ---
 
-## Repository layout
+## Repository structure
 
 ```
 AmpHive/
-├── docs/          Technical reference (source of truth) — see above
 ├── backend/       FastAPI app: main.py (assembly/lifespan only), routers/*.py (routes), services/, database/, seed.py
 ├── frontend/      React 19 + Vite SPA: driver app + CPO operator portal
 ├── firmware/      ESP32-C3 (ESP-IDF) gateway: direct MQTT client + Tapo driver
+├── agent/         Software gateway ("AmpHive Agent"): discovers LAN smart plugs (Kasa/Shelly/sim), speaks the same MQTT contract as a firmware gateway
 ├── deploy/        Docker Compose (dev/prod), K8s manifests, configs, runbooks
-├── scripts/       Windows ops helpers (VM start/stop, remote compose/logs)
+├── docs/          Technical reference (source of truth) — see below
 ├── tools/         Direct-Mode Tapo helpers (run on the home PC)
-├── context_repos/ Read-only reference submodules (ChargeHub, headscale, ESP32-WoL)
+├── scripts/       Windows ops helpers (VM start/stop, remote compose/logs)
 ├── docker-compose.yml   Local-dev convenience (mirrors deploy/docker/docker-compose.dev.yml)
 ├── AGENTS.md / CLAUDE.md   Contributor + AI-agent guidance
 ├── requirements.md / features_list.md   Product vision & roadmap
@@ -76,7 +83,38 @@ AmpHive/
 
 ---
 
-## Quick start (local development)
+## Getting started (local development)
+
+**Backend** — Python 3.11, tests only need a venv (no live Postgres for the
+non-DB-gated suite):
+
+```bash
+python -m venv .venv
+# Windows:  .venv\Scripts\Activate.ps1   |   Linux/macOS:  source .venv/bin/activate
+pip install -r backend/requirements.txt -r backend/requirements-dev.txt
+pytest backend/tests
+```
+
+**Frontend** — Node 20:
+
+```bash
+cd frontend
+npm ci
+npm run dev      # Vite dev server at http://localhost:5173
+npm run build    # production build
+npx vitest run   # test suite
+```
+
+> **This repo does not run the full application stack (backend + PostgreSQL +
+> MQTT broker) or a database locally.** The shared, canonical environment is
+> the GCP VM, operated via `deploy/scripts/deploy.ps1`. See
+> [AGENTS.md](AGENTS.md) for the full rule and the reasoning behind it. The
+> `docker compose up` flow below is kept for optional full-stack exploration,
+> but day-to-day development, tests, and CI all work from the commands above.
+
+---
+
+## Quick start (Docker, full stack)
 
 Launch the full stack (backend + frontend + MQTT + PostgreSQL) with Docker:
 
@@ -102,7 +140,7 @@ docker exec -it amphive-backend-dev python seed.py
 
 ## API at a glance
 
-The FastAPI backend exposes **86 REST endpoints** across 9 routers. Full details in
+The FastAPI backend exposes **86 REST endpoints** across 10 routers. Full details in
 [docs/API_REFERENCE.md](docs/API_REFERENCE.md); interactive Swagger at
 `http://localhost:8000/docs`.
 
@@ -148,18 +186,17 @@ backend on `:8000` is firewalled to the VM only; MQTT is TLS-only on `:8883`
 ```
 
 See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) and the runbooks in
-[`deploy/docs/`](deploy/docs/) (device setup, deployment checklist, GCP
-migration log).
+[`deploy/docs/`](deploy/docs/) (new-device setup, GCP migration, gateway
+provisioning, and more).
 
 ---
 
 ## Setup on a new development device
 
 ```bash
-# 1. Clone with submodules
+# 1. Clone
 git clone https://github.com/Sarthak195/AmpHive.git
 cd AmpHive
-git submodule update --init --recursive
 
 # 2. Python venv for backend script editing
 python -m venv .venv
@@ -177,3 +214,14 @@ docker compose up --build
 **Firmware:** open `firmware/` in an ESP-IDF v5.x environment,
 `idf.py set-target esp32c3`, then `idf.py -p COMX flash monitor`. See
 [docs/FIRMWARE.md](docs/FIRMWARE.md).
+
+---
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, test/lint commands, and PR
+conventions.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

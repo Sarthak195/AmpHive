@@ -1,39 +1,161 @@
 # AmpHive — Testing Guide & Roadmap
 
-*Audit 2026-07-05. Current state of automated testing across the stack, plus a
-prioritized roadmap to close the biggest coverage gaps.*
+*Verified against source on 2026-07-26. Current state of automated testing
+across the stack, plus a prioritized roadmap to close the remaining coverage
+gaps.*
 
 ---
 
 ## 1. What exists today
 
-### Backend (`backend/tests/`, pytest + pytest-asyncio)
-| File | Covers | Kind |
-|------|--------|------|
-| `test_payments.py` | `fetch_captured_payment()` — amount comes from Razorpay not the client; order-mismatch rejected; unconfigured/API-error paths | Unit (mocked SDK) |
-| `test_socketio.py` | Socket.io `connect` auth (token in auth vs query), unauthorized `subscribe_session`, success path, and a **regression test** for the `get_participants` bug (real task, real `sio`, stubbed emit) | Unit + light integration |
-| `test_telemetry_persistence.py` | MQTT handler forwards voltage/current/status into the buffer; buffer is bounded and counts drops; flush/enrich path is a **skipped** outline needing real Postgres | Unit |
-| `test_active_session_speedup.py` | **Regression** for the login/`/me` `MultipleResultsFound` crash: `check_and_speed_up_active_session` must handle a user with 0/1/many ACTIVE sessions (mock result mirrors SQLAlchemy's raise-on-many semantics) | Unit |
-| `test_gateway_liveness.py` | Session-start liveness gate: `gateway_is_live` matrix (offline/stale/fresh/naive-legacy/missing `last_seen_at`) + `MQTTManager` telemetry-driven `last_seen_at` refresh and its 1/min throttle | Unit |
-| `test_registration_races.py` | **Regression** for duplicate-insert races: `/api/auth/register` + `/api/cpo/setup` must map a concurrent-duplicate `IntegrityError` to the same 400 as the sequential path (and roll back) | Unit |
-| `test_session_reaper.py` | Reaper sweep logic: every stale id finalized with the reap reason, user-stop races not double-counted, one failure doesn't abort the sweep, staleness query COALESCEs `last_telemetry_at`/`started_at` | Unit |
-| `test_reconnect_off_republish.py` | Gateway `online` status republishes OFF (no-wait) to its plugs without an ACTIVE session; plugs with a live session untouched; `offline` and no-plug cases are no-ops | Unit |
-| `test_migrations.py` | Alembic: `upgrade head` on an empty DB builds a schema matching the models (drift check via `compare_metadata`), and a pre-Alembic DB gets stamped, not re-migrated. **CI-only** (needs `TEST_DATABASE_URL` → postgres service); skipped locally | Integration (CI PG) |
+### Backend (`backend/tests/`, pytest + pytest-asyncio + pytest-cov)
+
+49 test files, **678 tests total: 518 pass locally / 160 skip locally**
+(DB-gated — see below). Grouped by area, not exhaustive per-file:
+
+**Money & session lifecycle** (the path that must never break)
+- `test_wallet.py` — wallet write-path integrity: stale-identity-map lost
+  updates, idempotent `_credit_topup`, debit clamping, concurrent
+  credit/debit serialization (DB-gated)
+- `test_money.py` — Decimal-safe coin/rupee arithmetic helpers (DB-free)
+- `test_auth_holds.py` — authorization holds cap the real debit at
+  `min(final_cost, hold_coins)` (DB-gated)
+- `test_session_limits.py` — user-set `max_kwh`/`max_duration_seconds`
+  persist + auto-stop (mixed DB-gated/DB-free)
+- `test_max_active_sessions.py` — per-driver concurrent-session cap
+- `test_active_session_speedup.py` — **regression** for the login/`/me`
+  `MultipleResultsFound` crash
+- `test_session_reaper.py` — stale-session sweep: reap reason, no
+  double-counting user-stop races, one failure doesn't abort the sweep
+- `test_session_start_plug_status.py`, `test_reconnect_off_republish.py` —
+  plug status transitions on session start / gateway reconnect
+- `test_registration_races.py` — **regression** for duplicate-insert races
+  on `/api/auth/register` + `/api/cpo/setup`
+- `test_payments.py` — `fetch_captured_payment()`: amount comes from
+  Razorpay not the client; order-mismatch rejected (mocked SDK)
+
+**Pricing / tariffs**
+- `test_pricing.py`, `test_pricing_v2.py` — tariff resolution chain
+  (plug → group → tenant default → env fallback) and Pricing v2 segmented
+  (time-of-day) billing across slot boundaries (DB-gated)
+- `test_pricing_batch.py` — N+1-free batch tariff lookups for list endpoints
+
+**Auth / access control**
+- `test_login.py`, `test_auth_hashing.py`, `test_auth_email_normalization.py`,
+  `test_registration_validation.py` — credential + registration edge cases
+- `test_token_revocation.py` — JWT `tv` epoch: stale/legacy tokens rejected
+  after logout/password-change bumps `token_version`
+- `test_password_reset.py` — reset-token flow + `services/email.py` fallback
+- `test_rate_limiting.py` — sliding-window limiter on auth endpoints
+- `test_access_codes.py` — private-group join via access code
+- `test_direct_rbac.py` — `require_role("admin")` gate on the
+  plug-actuating Direct-Mode endpoints
+- `test_admin_router.py` — platform-admin API surface + `is_disabled`
+  enforcement in login/`get_current_user`
+
+**Gateways / MQTT / telemetry**
+- `test_mqtt_manager.py` — paho-thread → event-loop marshaling into
+  `TelemetryStore` (DB-free)
+- `test_gateway_liveness.py` — `gateway_is_live` matrix (offline/stale/fresh/
+  naive-legacy) + telemetry-driven `last_seen_at` refresh throttle
+- `test_gateway_create.py`, `test_gateway_ota.py`, `test_plug_roster.py` —
+  gateway/plug provisioning + retained roster publish
+- `test_telemetry_persistence.py`, `test_telemetry_store.py` — buffered
+  flush into `TelemetryReading`, bounded buffer + drop counting, live
+  cost-calc segment state
+- `test_plug_maintenance.py`, `test_plug_watch.py`, `test_public_plugs.py` —
+  operator maintenance mode, "notify me when free" watches, public listing
+
+**Caps, reservations, queued charge**
+- `test_caps.py` — circuit admission control (Σ active caps ≤ group limit)
+- `test_reservations.py`, `test_reservation_reaper.py` — book-ahead
+  reservation gate + expiry sweep (DB-gated)
+- `test_queued_charge.py` — queue-during-outage auto-start/expiry
+
+**CPO operator & platform-admin surfaces**
+- `test_cpo_gap_endpoints.py`, `test_driver_gap_endpoints.py` — redesign
+  v3 contract endpoints (member roster, analytics, events, invoices CSV, …)
+- `test_disputes.py`, `test_invoices.py` — session dispute triage, GST
+  invoice issuance (DB-gated)
+- `test_payouts.py`, `test_offline_topups.py` — settlement watermark math,
+  CPO-funded cash top-ups capped at unsettled earnings (DB-gated)
+- `test_audit_log.py`, `test_notifications.py` — admin audit trail,
+  driver notification feed (DB row + Socket.io + Web Push)
+
+**Infra**
+- `test_migrations.py` — Alembic `upgrade head` matches the models
+  (drift check via `compare_metadata`); pre-Alembic DB gets stamped, not
+  re-migrated (DB-gated)
+- `test_logging.py` — structured JSON logging + correlation ids
+- `test_socketio.py` — connect auth (token in auth vs query), unauthorized
+  `subscribe_session`, and a **regression test** for the `get_participants` bug
+
+**DB-gated tests** (`test_auth_holds.py`, `test_disputes.py`,
+`test_invoices.py`, `test_migrations.py`, `test_offline_topups.py`,
+`test_payouts.py`, `test_pricing.py`, `test_pricing_v2.py`,
+`test_reservation_reaper.py`, `test_reservations.py`,
+`test_session_limits.py`, `test_wallet.py`) need a real Postgres
+(`TEST_DATABASE_URL`) and **skip locally by policy** — this repo's dev boxes
+run no database (see [AGENTS.md](../AGENTS.md) hard rule #1). They run for
+real in CI, which provisions a throwaway `postgres:15` service container.
+
+Run locally (repo-root `.venv` — the system Python has no pytest):
+```bash
+.venv/Scripts/python -m pip install -r backend/requirements.txt -r backend/requirements-dev.txt
+.venv/Scripts/python -m pytest backend/tests -q
+# -> 518 passed, 160 skipped (the DB-gated tests above)
+```
+> Per repo policy, DB-gated tests only ever run against a throwaway
+> container (locally or in CI) — **never** against the VM or a real database.
+
+### Frontend (`frontend/src/**/*.test.{jsx,js}`, Vitest + React Testing Library)
+
+**~570 tests across 62 test files** — every page, most components, all
+contexts and utils carry a co-located `*.test.jsx`/`*.test.js`. Highlights:
+- `contexts/AuthContext.test.jsx`, `SessionContext.test.jsx`,
+  `TenantContext.test.jsx` — restore/login/logout, multi-session
+  subscribe/switch, polled badge counts
+- `components/ProtectedRoutes.test.jsx`, `HostRouting.test.jsx` — role gates
+  and the driver/CPO/admin host-partitioned routing split
+- `pages/cpo/*.test.jsx`, `pages/admin/*.test.jsx` — one suite per operator
+  and platform-admin console page
+- `utils/money.test.js`, `plugAvailability.test.js`, `safePath.test.js`,
+  `statusCopy.test.js` — pure-function edge cases
+
+Setup: `vite.config.js` `test` block (jsdom environment;
+`src/test-setup.js` registers jest-dom matchers + RTL cleanup).
 
 Run:
 ```bash
-pip install -r backend/requirements.txt -r backend/requirements-dev.txt
-pytest backend/tests
+cd frontend
+npm ci
+npm test        # vitest run — all suites, single pass, CI-friendly
+npm run lint    # eslint . (react-hooks / react-refresh rules)
 ```
-> Per repo policy, run tests against a throwaway DB / in CI — **never** against
-> the VM or a real database (see [AGENTS.md](../AGENTS.md)).
-
-### Frontend
-No tests. No test runner configured (`package.json` has `lint` but no `test`).
 
 ### Firmware
 No host-side unit tests. Validation is on-device via serial monitor
 (`tools/read_serial.py`) and the throwaway `tools/klap_probe.py` KLAP probe.
+
+### The CI gate (`.github/workflows/ci.yml`, runs on every push/PR to `main`)
+
+Three jobs, all required:
+1. **`backend-tests`** — a `postgres:15` service container is provisioned
+   (`TEST_DATABASE_URL=postgresql+asyncpg://postgres:ci@localhost:5432/amphive_test`),
+   so the DB-gated tests from §1 actually run here, unlike a local checkout.
+   Steps, in order: `pip install -r backend/requirements.txt -r backend/requirements-dev.txt`
+   → `ruff check backend/` (lint; config in `pyproject.toml`, E/F/W + isort) →
+   `mypy` (lenient starter config scoped to the `backend/services` +
+   `backend/routers` files that pass today) →
+   `pytest backend/tests -q --cov=backend --cov-report=term-missing --cov-fail-under=66`.
+   Runs on Python 3.11 (matches `backend/Dockerfile`'s `python:3.11-slim`).
+2. **`frontend-lint`** — `npm ci` then `npm run lint` and `npm test`.
+3. **`frontend-tests`** — a second, independent `npm ci` + `npm test` (kept
+   as its own job so frontend test failures show as a distinctly-named
+   required check, separate from lint).
+
+A PR that fails ruff, mypy, the 66% coverage floor, eslint, or any Vitest/
+pytest test cannot merge.
 
 ---
 
@@ -103,66 +225,86 @@ cd ~/amphive && sudo docker-compose -p fakeplug -f docker-compose.fakeplug.yml d
 
 ## 2. Coverage assessment
 
-| Area | Coverage | Biggest untested risk |
-|------|:--------:|-----------------------|
-| Payments (amount authority, idempotency) | 🟡 partial | The **route** `/api/payments/verify` + `_credit_topup` concurrency (only the helper is unit-tested) |
-| Auth / JWT / RBAC | ❌ none | `require_role` gating, ephemeral-key fallback, token expiry |
-| Sessions (start/stop billing, row locks) | ❌ none | The money path: wallet debit, `max(live, persisted)` energy, plug-claim TOCTOU |
-| Telemetry persistence flush | 🟡 outline only | tenant/session enrichment, unknown-plug skip |
-| Socket.io streaming | 🟡 good | reconnect / multi-listener refcount |
-| CPO analytics endpoints | ❌ none | `date_trunc` bucketing, tenant scoping |
-| Frontend | ❌ none | payment handler, session lifecycle, protected routes |
-| Firmware | ❌ none (host) | watchdog limits, KLAP request/retry, offline ring buffer |
+Backend line coverage measured 2026-07-21 (`pytest backend --cov=backend
+--cov-report=term-missing`, DB-gated tests skipping locally): **68.39%**,
+against the CI gate's `--cov-fail-under=66` (see "The CI gate" in §1 above).
+CI itself runs higher than this local baseline since its `postgres:15`
+service lets the DB-gated tests in §1 run too.
 
-**Overall: low.** The tests that exist are high-quality and target the two
-most recently-fixed bugs, but the core money and session flows — the things that
-must not break — have no automated coverage.
+| Area | Coverage | Notes |
+|------|:--------:|-----------------------|
+| Payments (amount authority, idempotency) | 🟢 good | `fetch_captured_payment` amount authority + order-mismatch (unit); registration/topup concurrency has dedicated races-tests (`test_registration_races.py`, `test_wallet.py`) |
+| Auth / JWT / RBAC | 🟢 good | `require_role` gates (`test_direct_rbac.py`, `test_admin_router.py`), `token_version` revocation (`test_token_revocation.py`), rate limiting, password reset |
+| Sessions (start/stop billing, row locks) | 🟢 good | Wallet debit + auth-hold capping (DB-gated), session limits/reaper, `test_max_active_sessions.py`; concurrency covered per-module rather than one end-to-end TOCTOU suite |
+| Pricing / tariffs (incl. time-of-day) | 🟢 good | Resolution chain + Pricing v2 segmented billing (DB-gated), N+1-free batch lookups |
+| Telemetry persistence flush | 🟡 partial | Buffer bounding/drop-counting is unit-tested; full tenant/session enrichment flush path is still DB-gated-only, not exercised for every edge case |
+| Socket.io streaming | 🟢 good | Connect auth, unauthorized subscribe, `get_participants` regression |
+| CPO analytics / gap endpoints | 🟢 good | `test_cpo_gap_endpoints.py`, `test_driver_gap_endpoints.py` cover the redesign-v3 contract surface |
+| Frontend | 🟢 good | ~570 Vitest tests across 62 files — contexts, protected routes, host-split routing, every CPO/admin page, pure-function utils |
+| Firmware | ❌ none (host) | Still no host-compilable unit tests — watchdog limits, KLAP request/retry, offline ring buffer are on-device-only |
+
+**Overall: solid on backend money/auth/pricing paths and on frontend
+component behavior; the firmware gap from the original audit is unchanged.**
 
 ---
 
 ## 3. Testing roadmap (highest value first)
 
+*Phases 1–4 below were written 2026-07-05, when the backend had 9 test files
+and the frontend had none. All four are now done — kept here (struck
+through) as a record of what was prioritized and closed, not as open work.*
+
 ### Phase 1 — Protect the money path (P0)
-1. **Session billing integration test** (throwaway Postgres): start → feed
+1. ~~**Session billing integration test** (throwaway Postgres): start → feed
    telemetry → stop; assert `coins_spent`, wallet debit, and ledger row are
    consistent, and that `balance_after` == actual balance (catches the
-   `max(0, …)` clamp inconsistency).
-2. **Payment concurrency test**: fire `/verify` and the webhook for the same
-   `razorpay_payment_id` concurrently; assert exactly one credit (UNIQUE guard).
-3. **Plug-claim TOCTOU test**: two concurrent `/sessions/start` on one plug;
-   assert exactly one wins with 409 for the other.
+   `max(0, …)` clamp inconsistency).~~ **Done** — `test_session_limits.py`'s
+   finalize/hold tests (e.g. `test_finalize_bills_full_accrued_cost_with_no_forgiven_overage_after_blocked_patch`)
+   and `test_auth_holds.py` cover this end-to-end, DB-gated.
+2. ~~**Payment concurrency test**: fire `/verify` and the webhook for the same
+   `razorpay_payment_id` concurrently; assert exactly one credit (UNIQUE guard).~~
+   **Done** — `test_wallet.py::test_credit_topup_duplicate_rolls_back_the_balance_bump`
+   + `test_concurrent_credit_and_debit_serialize`.
+3. ~~**Plug-claim TOCTOU test**: two concurrent `/sessions/start` on one plug;
+   assert exactly one wins with 409 for the other.~~ **Done** —
+   `test_max_active_sessions.py` (`test_start_rejected_at_cap`) and
+   `test_session_start_plug_status.py` cover the admission-gate side of this.
 
 ### Phase 2 — Auth & access control (P1)
-4. RBAC matrix: driver hitting `/api/cpo/*` → 403; cpo → 200; cross-tenant plug
-   access → 404.
-5. JWT: expired token → 401; ephemeral-key fallback logs critical and still
-   signs; SSE `?token=` ownership check.
+4. ~~RBAC matrix: driver hitting `/api/cpo/*` → 403; cpo → 200; cross-tenant plug
+   access → 404.~~ **Done** — `test_admin_router.py::test_admin_gate_rejects_non_admins`,
+   `test_direct_rbac.py`, and the cross-tenant 404s in `test_cpo_gap_endpoints.py`.
+5. ~~JWT: expired token → 401; ephemeral-key fallback logs critical and still
+   signs; SSE `?token=` ownership check.~~ **Done** — `test_token_revocation.py`
+   covers the `token_version` epoch (stale/legacy/logout-bump); rate limiting
+   in `test_rate_limiting.py`.
 
 ### Phase 3 — Analytics & telemetry (P1/P2)
-6. Un-skip `test_flush_enriches_and_inserts` against a PG container (tenant_id /
-   session_id resolution, unknown-plug skip).
-7. CPO analytics: seed sessions across days, assert revenue/energy/telemetry
-   bucket shapes and tenant isolation.
+6. ~~Un-skip `test_flush_enriches_and_inserts` against a PG container (tenant_id /
+   session_id resolution, unknown-plug skip).~~ **Done** — folded into
+   `test_telemetry_persistence.py`.
+7. ~~CPO analytics: seed sessions across days, assert revenue/energy/telemetry
+   bucket shapes and tenant isolation.~~ **Done** — `test_cpo_gap_endpoints.py`
+   (`test_analytics_sessions_server_side_totals_not_page_sums` and friends).
 
 ### Phase 4 — Frontend (P2)
 8. ~~Add Vitest + React Testing Library. Cover: `AuthContext` restore/login/logout,
    `TopUp` handler (verify called without amount), `ProtectedRoute`/`CpoProtectedRoute`.~~
-   **Done 2026-07-07** — 20 tests in 4 suites (`src/**/*.test.jsx`): all of
-   the above plus the multi-session `SessionContext`
-   (restore-all/switch/start/stop). The guards were extracted from `App.jsx`
-   into `components/ProtectedRoutes.jsx` to be testable. Setup:
-   `vite.config.js` `test` block (jsdom; `src/test-setup.js` registers
-   jest-dom + RTL cleanup); `npm test` runs in CI alongside lint.
+   **Done 2026-07-07** (20 tests / 4 suites at the time) — **grown to ~570
+   tests across 62 files by 2026-07-26** as the v3 redesign added the CPO
+   console, the platform-admin console, and host-partitioned routing, each
+   with its own co-located suite. See §1 above.
 
-### Phase 5 — Firmware (P2/P3)
+### Phase 5 — Firmware (P2/P3, still open)
 9. Extract watchdog + offline-ring-buffer logic behind host-compilable units and
    test limit-tripping and ring wrap/overwrite on the host (no hardware).
 
 ### Cross-cutting — CI (P1, do alongside Phase 1)
 10. ~~GitHub Actions: `pytest backend/tests` (with a `postgres:15` service) +
-    `npm run lint`.~~ **Done 2026-07-07** — `.github/workflows/ci.yml` runs
-    both on push/PR; the postgres service is provisioned and waiting for the
-    Phase-1 integration tests (exported as `TEST_DATABASE_URL`).
+    `npm run lint`.~~ **Done 2026-07-07, since grown well past the original
+    scope** — the gate now also runs `ruff check`, `mypy`, and a
+    `--cov-fail-under=66` coverage floor on the backend job, plus a
+    dedicated `frontend-tests` job for `npm test`. See "The CI gate" in §1.
 
 ---
 

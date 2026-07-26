@@ -288,7 +288,7 @@ BFG + force-push) to purge the dead values entirely.
 - The **VM public IP is ephemeral** and is recorded inconsistently across docs
   (`35.200.131.98`, `34.100.200.152`, and others). The committed
   `amphive_tunnel.conf` endpoint will break whenever the VM IP changes. Prefer a
-  stable hostname (DuckDNS) or a static IP, and always re-check with `gcloud`.
+  stable hostname (`amphive.app`) or a static IP, and always re-check with `gcloud`.
 - **Firmware control plane defaults to Tailscale's public servers**, not the
   self-hosted Headscale, unless the host constants are overridden.
 

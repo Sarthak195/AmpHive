@@ -1,5 +1,15 @@
 # Plug → Server Connectivity Options
 
+> **Status (2026-07-26): the recommendation below to drop the overlay for direct
+> outbound MQTT/TLS already SHIPPED** — the direct-MQTT pivot landed 2026-07-10
+> (`AMPHIVE_DIRECT_MQTT=1`, the default; see [FIRMWARE.md](FIRMWARE.md) and
+> [MQTT_CONTRACT.md](MQTT_CONTRACT.md)). The Tailscale/WireGuard overlay
+> (`microlink`) referenced throughout this doc is retired and compiled out of
+> the default build. The rest of this document — the Tuya/Shelly/Matter/Kasa
+> comparison research and the option catalog — remains useful reference for
+> future connectivity/plug-brand decisions; only the "current state" framing
+> below (§ context, §4, §recommendation) is now historical.
+
 How can a smart plug's data (state + energy) reach the AmpHive server? This
 surveys every viable path, documents the two vendor-API repos we pulled into
 `research/`, and gives a recommendation for a **plug-and-play** client install.

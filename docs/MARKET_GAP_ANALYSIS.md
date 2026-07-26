@@ -116,12 +116,12 @@ Legend: ✅ present · 🟡 partial · ❌ absent.
 
 | Market feature | Seen in | AmpHive | Verdict |
 |----------------|---------|:-------:|---------|
-| Charging-complete alert | all | ❌ | Should-do |
-| Session start/stop confirmation | all | ❌ | Should-do |
-| Low-balance / wallet warning | Indian wallet apps; specs §4 | ❌ | Should-do |
-| Fault / safety alert to driver | ChargePoint, EA | ❌ (and the backend doesn't even ingest firmware `/alarms`) | Should-do |
+| Charging-complete alert | all | ✅ (2026-07-11) feed, Socket.io, Web Push alerts | — |
+| Session start/stop confirmation | all | ✅ (2026-07-11) session alerts | — |
+| Low-balance / wallet warning | Indian wallet apps; specs §4 | ✅ (2026-07-11) low-balance alerts | — |
+| Fault / safety alert to driver | ChargePoint, EA | ✅ (2026-07-11) fault alerts via `+/alarms` ingestion; `/cpo/faults` console | — |
 | Idle-fee warning before charging | Tesla, EA | ❌ | Aspirational |
-| Channels: push / SMS / email | all; specs §4 | ❌ none wired | Should-do |
+| Channels: push / SMS / email | all; specs §4 | ✅ (2026-07-11) Web Push + feed | — |
 
 ## 5. Session start & control
 
@@ -155,10 +155,10 @@ Benchmarked against ChargePoint/Statiq/Kazam operator dashboards.
 | Market feature | AmpHive | Verdict |
 |----------------|:-------:|---------|
 | Gateway / plug / group CRUD | ✅ | — |
-| Utilization & revenue analytics | 🟡 charts, no export | — |
-| CSV / Excel export of sessions & revenue | ❌ (specs §4 want it) | Should-do |
-| Configurable pricing / tariff UI | ❌ (no price model) | Should-do |
-| Tax / GST configuration | ❌ | Should-do |
+| Utilization & revenue analytics | 🟡 charts + CSV export | — |
+| CSV / Excel export of sessions & revenue | ✅ (shipped) | — |
+| Configurable pricing / tariff UI | ✅ (2026-07-14) Pricing-v2 Phase 4 editor (`/cpo/tariffs` + `tariff_slots` CRUD with TOD slots, overlap validation) | — |
+| Tax / GST configuration | ✅ (2026-07-16) GST Settings page; GSTIN/legal name storage + rate configuration | — |
 | Payout / earnings withdrawal | ✅ (2026-07-12) `/cpo/earnings` portal page over the `Payout` ledger (earnings summary, request/cancel, admin mark-paid, audited); settlement itself stays manual/out-of-band — no payment-gateway money-out | — |
 | Remote diagnostics / fault console | ✅ (2026-07-12) `/cpo/faults`: lists `gateway_events` (severity/unacknowledged filters), acknowledge, and a top strip of plugs currently in maintenance | — |
 | Maintenance-mode toggle per plug | ✅ (2026-07-12) `POST /api/cpo/plugs/{id}/maintenance` (`enter`/`clear`, audited); a THERMAL_CUTOFF/OVERCURRENT_CUTOFF alarm now auto-enters MAINTENANCE too | — |

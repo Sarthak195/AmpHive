@@ -171,8 +171,9 @@ Driver host routes (day theme; mobile gets a bottom tab bar):
 |-------|------|--------|---------|
 | `/` | `Marketing.jsx` / `Dashboard.jsx` | public / authed | Marketing homepage for visitors; charge-now dashboard (plug-ID lookup, PlugCard grid, reservations/queued strip, wallet rail) when signed in |
 | `/map` | `MapPage.jsx` | public (richer when authed) | Unified map+list discovery (replaces `/map` public page + Home's map tab) |
+| `/terms` | `Terms.jsx` | public | Charging Credit Terms — closed-loop-credit clause (2026-07-22 Razorpay reframe), linked from the marketing footer and the credit page |
 | `/session` | `Session.jsx` | protected | Live monitor (ChargeRing dial + Socket.io) and post-stop receipt w/ invoice + dispute |
-| `/wallet` | `Wallet.jsx` | protected | Balance, Razorpay top-up (lazy-loaded SDK), ledger (replaces `/topup`, which redirects) |
+| `/credit` | `Wallet.jsx` | protected | Balance, Razorpay top-up (lazy-loaded SDK), ledger — user-facing copy says "charging credit" (2026-07-22 Razorpay reframe; internal identifiers `coin_balance`/`WalletContext`/`/api/wallet/ledger` unchanged). Renamed from `/wallet`; legacy `/wallet` and `/topup` both redirect here |
 | `/activity` | `Activity.jsx` | protected | Paginated session history + receipt revisit + dispute tracking (replaces `/history`) |
 | `/groups`, `/account` | `Groups.jsx`, `Account.jsx` | protected | Group join/leave; profile, push-notification prefs, become-a-host |
 | `/login`, `/signup`, `/forgot-password`, `/reset-password` | auth pages | public | Split sign-in/sign-up on a shared `AuthShell` |
@@ -216,7 +217,7 @@ with a `VITE_FORCE_CPO_HOST` dev/test override, plus `cpoOrigin()` /
   (`CpoLanding`): anonymous → `/login` (same `Login.jsx`), `cpo` →
   `/cpo/dashboard`, `admin` → `/admin`, a driver-role login gets a "not an
   operator account" notice linking to the driver origin and to the `/cpo`
-  become-a-host flow. Driver routes (`/map`, `/wallet`, `/session`, `/groups`,
+  become-a-host flow. Driver routes (`/map`, `/credit`, `/session`, `/groups`,
   `/activity`, `/account`) hard-redirect to the driver origin. Both hostnames
   are in the backend CORS/Socket.io allowlists.
 

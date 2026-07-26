@@ -1,14 +1,17 @@
-# AmpHive — ESP32-S3 Gateway Firmware
+# AmpHive — ESP32-C3 Gateway Firmware
 
 > Quick setup? See [ESP32_CONNECTION.md](ESP32_CONNECTION.md) for build/flash/monitor commands and common connection issues.
 
-*Verified against `firmware/` on 2026-07-06; multi-plug refactor (TD#20) shipped
+*Verified against `firmware/` on 2026-07-26 (well past the 2026-07-10
+direct-MQTT pivot; current shipped fw is **2.3.0-direct**, per
+`firmware/CMakeLists.txt`'s `PROJECT_VER`). Multi-plug refactor (TD#20) shipped
 in fw **1.7.1-direct** and **verified on-device 2026-07-12** (single-plug
 charging regression on the real gateway — see §3; two-real-plug validation still
 needs a second unit).*
 
-The gateway is an ESP-IDF application targeting **ESP32-S3-N16R8** (16 MB flash /
-8 MB PSRAM). Since fw **1.3.0** it connects **directly to the public broker over
+The gateway is an ESP-IDF application targeting the real fielded hardware,
+**ESP32-C3** (~4 MB flash, **no PSRAM** — see `firmware/sdkconfig.defaults`).
+Since fw **1.3.0** it connects **directly to the public broker over
 outbound MQTT/TLS** (`AMPHIVE_DIRECT_MQTT=1`, the default — NAT/CGNAT-immune, no
 overlay; see [MQTT_CONTRACT.md](MQTT_CONTRACT.md) and [SECURITY.md §3](SECURITY.md)),
 receives MQTT commands, drives **one or more** local Tapo plugs (each in its own
@@ -21,7 +24,7 @@ defeated by symmetric NAT (root-caused 2026-07-09) and no longer the default.
 ```
 firmware/
 ├── CMakeLists.txt            # ESP-IDF project "amphive-gateway"
-├── sdkconfig.defaults        # PSRAM octal, 16MB flash, dual-OTA custom partition
+├── sdkconfig.defaults        # ESP32-C3: 4MB flash, no PSRAM, dual-OTA custom partition
 ├── main/
 │   ├── main.c                # boot, WiFi, captive portal, MQTT loop, per-plug slots + watchdogs
 │   ├── tapo_protocol.c/.h    # Tapo P110 driver — real KLAP v2 (mbedTLS + esp_http_client); per-plug context
@@ -29,8 +32,8 @@ firmware/
 │   ├── offline_log.c/.h      # NVS ring buffer — cache telemetry during MQTT outages
 │   └── CMakeLists.txt
 └── components/
-    ├── microlink/            # custom Tailscale client (Noise/ts2021, DERP, DISCO, STUN, WG)
-    └── wireguard_lwip/       # vendored WireGuard-over-lwIP (BSD-3, ref-C crypto)
+    ├── microlink/            # RETIRED — custom Tailscale client (Noise/ts2021, DERP, DISCO, STUN, WG); compiled out by default (§5)
+    └── wireguard_lwip/       # RETIRED — vendored WireGuard-over-lwIP (BSD-3, ref-C crypto); only used by microlink
 ```
 
 ---
@@ -269,7 +272,15 @@ Because there is no real temperature, the thermal watchdog now trips on the plug
 > **Credentials caveat:** the Tapo email/password are stored in NVS in plaintext
 > (acceptable for the prototype; a future hardening item).
 
-## 5. `microlink` — the Tailscale client (✅ substantial, some TODOs)
+## 5. `microlink` — the Tailscale client (✅ substantial, some TODOs) — **RETIRED**
+
+> **RETIRED (2026-07-10 direct-MQTT pivot).** This entire section describes the
+> legacy overlay transport, which is **compiled out of the default build**
+> (`#if AMPHIVE_DIRECT_MQTT ... #else start microlink_vpn ... #endif` in
+> `app_main`, `main.c` — see §1). It is defeated by symmetric NAT
+> (root-caused 2026-07-09) and superseded by direct outbound MQTT/TLS; kept
+> compilable only for emergency rollback (`AMPHIVE_DIRECT_MQTT=0`), not as an
+> active code path. The rest of §5 is historical reference.
 
 A genuine ts2021 client in C (~13.5k LOC). Public API in
 `components/microlink/include/microlink.h`. Subsystems:
@@ -302,8 +313,14 @@ an auth key but not a control-plane host.
 
 ## 6. Build config (`sdkconfig.defaults`)
 
-- PSRAM: `CONFIG_SPIRAM=y`, octal 80 MHz; stacks allowed in external RAM; 32 KB
-  internal reserved. 16 MB flash.
+- **Target hardware: ESP32-C3, no PSRAM.** `sdkconfig.defaults` sets
+  `CONFIG_ESPTOOLPY_FLASHSIZE_4MB` and has **no `CONFIG_SPIRAM*` lines** — the
+  real fielded gateways have no PSRAM to configure. (An earlier revision of
+  this doc described an ESP32-S3-N16R8 target with octal PSRAM and 16 MB
+  flash; that was never what's in `sdkconfig.defaults` and has been corrected
+  here. `microlink`'s PSRAM buffer allocation, §5, falls back to plain heap
+  when PSRAM is absent — moot anyway since that transport is compiled out by
+  default.)
 - **Partition table:** `CONFIG_PARTITION_TABLE_CUSTOM` → `partitions_ota.csv`
   (2026-07-07) — **dual OTA app slots** (`ota_0`/`ota_1`, 1920 KB each) +
   `otadata`, with `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`. NVS keeps its
@@ -327,7 +344,7 @@ an auth key but not a control-plane host.
 
 ```bash
 cd firmware
-idf.py set-target esp32
+idf.py set-target esp32c3
 idf.py -p COM5 flash monitor
 ```
 
@@ -357,8 +374,10 @@ runbook (including the one-time bucket setup that was run 2026-07-10):
 
 ## 8. Maturity summary
 
-A working **demo/prototype**, not production firmware: `microlink` is deep and
-mostly functional (with unified magicsock NAT traversal now fully operational), the captive portal and watchdogs work,
+A working **demo/prototype**, not production firmware: `microlink` was deep and
+mostly functional (with unified magicsock NAT traversal fully operational) before
+being **retired and compiled out by the 2026-07-10 direct-MQTT pivot** (see §5),
+the captive portal and watchdogs work,
 **session state is persisted in NVS with offline telemetry buffering**, and the
 **Tapo driver is now a real KLAP v2 implementation** (protocol-validated against a
 real P110 via `tools/klap_probe.py`; builds on **ESP-IDF v5.3**, not v6).
@@ -396,7 +415,7 @@ signatures; the signature is a trailer it ignores); from 1.4.0 on, only
 signed images install. See
 [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for the full matrix.
 
-**fw `1.5.0-direct` (current) — OTA'd + verified on the real gateway
+**fw `1.5.0-direct` (historical milestone) — OTA'd + verified on the real gateway
 `1cc3abb4fb54` 2026-07-10** (`1.3.2 → 1.5.0`; the new `relay` field seen on
 the wire). Three changes:
 - **Unauthorized physical-on guard** — with no active session, a relay found
@@ -410,3 +429,13 @@ the wire). Three changes:
   cadence (`s_energy_last_power_w` holds the previous sample). See §4.
 - **Telemetry `relay` field** — telemetry now includes `"relay":<bool>` (the
   actual `device_on`), distinct from `"status"` (session state). See §3.
+
+**Current: fw `2.3.0-direct`** (`firmware/CMakeLists.txt` `PROJECT_VER`). Fw has
+advanced well past 1.5.0 through many small, individually-verified jumps — DNS-based
+broker addressing with legacy-IP self-migration (§1), the multi-plug refactor
+(TD#20) with a backend-pushed retained plug roster replacing captive-portal plug
+IPs, per-plug current caps (REC-03) persisted across crash recovery, a Wi-Fi
+pre-check at provisioning (TD#31), and WARN/ERROR log forwarding over MQTT
+(TD#28) — none of which change the overall shape described in §§1–4 above. See
+[IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for the version-by-version
+matrix and on-device verification history.

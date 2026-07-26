@@ -25,14 +25,20 @@ This folder is the **technical reference** for the AmpHive platform, and the
 | [DEPENDENCIES.md](DEPENDENCIES.md) | Backend/frontend/firmware import graphs, package dependencies, high-impact files, and known dead code. |
 | [MQTT_CONTRACT.md](MQTT_CONTRACT.md) | The exact MQTT topic/payload contract between the backend and the ESP32 gateway. |
 | [FIRMWARE.md](FIRMWARE.md) | ESP32-S3 firmware: boot flow, tasks, watchdogs, the Tapo KLAP v2 driver, and the `microlink` Tailscale-protocol client. |
+| [ESP32_CONNECTION.md](ESP32_CONNECTION.md) | Build, flash, and monitor guide for the ESP32 gateway firmware, including toolchain version pins and other-board notes. |
+| [PLUG_CONNECTIVITY_OPTIONS.md](PLUG_CONNECTIVITY_OPTIONS.md) | Survey of every viable plug-to-server connectivity path versus today's ESP32 gateway, and a recommendation for a plug-and-play client. |
+| [AMPHIVE_AGENT.md](AMPHIVE_AGENT.md) | A Home-Assistant-style local hub that discovers multi-brand smart plugs on a client's LAN and bridges them into the existing MQTT contract. |
 | [DEPLOYMENT.md](DEPLOYMENT.md) | How the system is deployed (GCP VM + Docker Compose), the helper scripts, and the K8s manifests. |
 | [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) | Honest "what works / what's a stub / what's aspirational" matrix and the full list of doc-vs-code discrepancies. |
 | [SECURITY.md](SECURITY.md) | Committed secrets, the open MQTT broker, auth gaps, and remediation notes. |
 | [MAINTAINER_GUIDE.md](MAINTAINER_GUIDE.md) | Operational "how to work on and run this" guide for whoever owns the repo next. |
+| [PRICING_V2_SPEC.md](PRICING_V2_SPEC.md) | Time-of-day tariffs and forward-only segmented billing design spec — all 4 phases shipped and live in prod. |
 | [TECH_DEBT.md](TECH_DEBT.md) | Prioritized technical-debt register (cause / impact / effort / priority). |
+| [MARKET_GAP_ANALYSIS.md](MARKET_GAP_ANALYSIS.md) | Competitive gap analysis against commercial EV-charging apps — a product view, distinct from the engineering-debt view in TECH_DEBT.md. |
 | [TESTING.md](TESTING.md) | Current test coverage across the stack and a prioritized testing roadmap. |
 | [TODO.md](TODO.md) | Prioritized improvement roadmap (immediate → long term). |
-| [reference/](reference/) | Background notes on the upstream projects AmpHive builds on (ESP32-Tailscale-WoL firmware, Headscale control server). |
+| [proposals/](proposals/) | Design proposals for individual features (e.g. faster gateway-offline detection, queued charging on an offline plug), each tagged with its own shipped/pending status. |
+| [audits/](audits/) | Point-in-time audit reports (e.g. the 2026-07-14 reconciliation & billing-divergence audit) with per-finding resolution status. |
 
 ## Project map (one-liner per component)
 

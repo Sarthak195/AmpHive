@@ -1,6 +1,6 @@
 # Pricing v2 — Time-of-Day Tariffs & Forward-Only Segmented Billing
 
-*Design spec, drafted 2026-07-13. Status: **ALL PHASES 1–4 BUILT (2026-07-14).**
+*Design spec, drafted 2026-07-13. Status: **ALL PHASES 1–4 SHIPPED (2026-07-14).**
 Phase 1 = schema + resolution + billing helpers; Phase 2 = billing wired to
 `session_cost` + forward-only reprice (telemetry frame hook + reaper backstop) +
 `rate_changed` notification + start-time hold at `max_rate_over_window`;
@@ -10,8 +10,8 @@ hold-at-`max_rate_over_window`; Phase 4 = operator slot-editor (`/cpo/tariffs` +
 `tariff_slots` CRUD API with overlap validation) and driver current+next price
 (`resolve_price_display` → `PlugResponse.price_next_per_kwh`/`price_changes_at`
 → Home ribbon hint). Deployed-safe: a flat tariff resolves no boundary, so it
-bills byte-identically until a CPO adds a slot. Phases 1/2/4 are live in prod
-(main @ 3a54377); Phase 3 pending merge.*
+bills byte-identically until a CPO adds a slot. All phases 1–4 are live in prod
+(main @ 3a54377) and deployed.*
 
 Related: [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) "Per-CPO/per-site
 tariff model" (🟡) · [MARKET_GAP_ANALYSIS.md](MARKET_GAP_ANALYSIS.md) §1.5/§3 ·
