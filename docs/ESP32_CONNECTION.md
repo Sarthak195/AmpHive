@@ -341,7 +341,7 @@ To verify that the unified port architecture (magicsock mode) is functioning cor
    ```
    Confirm that the path for `gateway-1` is marked as `active; direct <IP>:<PORT>` instead of `relay "blr"`:
    ```
-   100.83.175.20  gateway-1        sarthakj1195@  linux    active; direct 106.222.215.123:17014, tx 4268 rx 10884
+   100.x.x.x      gateway-1        you@example.com  linux  active; direct <public-ip>:<port>, tx <n> rx <n>
    ```
 
 3. **Ping from the GCP VM**:
