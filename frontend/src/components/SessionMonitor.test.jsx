@@ -43,6 +43,7 @@ const baseSession = (overrides = {}) => ({
   lastFrameAt: Date.now(),
   focusedStartedAt: new Date().toISOString(),
   focusedLimits: null,
+  focusedHoldCoins: null,
   alarms: [],
   ...overrides,
 });
@@ -192,15 +193,47 @@ describe('SessionMonitor — notices', () => {
     expect(screen.queryByText(/Low balance/)).not.toBeInTheDocument();
   });
 
-  it('uses availableBalance (not the raw balance) for the low-balance check, respecting a concurrent hold', async () => {
+  it('falls back to availableBalance for a legacy session with no hold (hold_coins null)', async () => {
     // Raw balance looks comfortable, but a second session's hold leaves only
-    // 12 coins actually available — the low-balance warning should still fire.
+    // 12 coins actually available — the low-balance warning should still fire
+    // for a legacy/unheld session, matching the backend's own fallback.
     useWallet.mockReturnValue({ balance: 1000, availableBalance: 12 });
     useSession.mockReturnValue(
-      baseSession({ sessionData: { ...baseData, cost_coins: 10, is_stale: false } })
+      baseSession({
+        sessionData: { ...baseData, cost_coins: 10, is_stale: false },
+        focusedHoldCoins: null,
+      })
     );
     await renderMonitor();
     expect(screen.getByText(/Low balance/)).toBeInTheDocument();
+  });
+
+  it('uses the session’s own hold_coins (not availableBalance) as the threshold when the session has a hold', async () => {
+    // The wallet looks comfortable, but THIS session's own authorization
+    // hold — the backend's actual auto-stop threshold — is nearly exhausted.
+    useWallet.mockReturnValue({ balance: 1000, availableBalance: 1000 });
+    useSession.mockReturnValue(
+      baseSession({
+        sessionData: { ...baseData, cost_coins: 9, is_stale: false },
+        focusedHoldCoins: 10,
+      })
+    );
+    await renderMonitor();
+    expect(screen.getByText(/Low balance/)).toBeInTheDocument();
+  });
+
+  it('does not warn when the session hold comfortably covers the accrued cost, even with a tight wallet', async () => {
+    // The wallet is nearly empty, but this session reserved its own hold up
+    // front — a sibling session's spending shouldn't false-trigger this one.
+    useWallet.mockReturnValue({ balance: 12, availableBalance: 12 });
+    useSession.mockReturnValue(
+      baseSession({
+        sessionData: { ...baseData, cost_coins: 1, is_stale: false },
+        focusedHoldCoins: 100,
+      })
+    );
+    await renderMonitor();
+    expect(screen.queryByText(/Low balance/)).not.toBeInTheDocument();
   });
 });
 
@@ -278,6 +311,46 @@ describe('SessionMonitor — limit editor', () => {
     fireEvent.click(screen.getByRole('button', { name: /Save limit/i }));
 
     expect(screen.getByText(/Enter an energy/i)).toBeInTheDocument();
+    expect(updateLimits).not.toHaveBeenCalled();
+  });
+
+  it('blocks a kWh target below what has already been consumed', async () => {
+    const updateLimits = vi.fn();
+    useSession.mockReturnValue(
+      baseSession({
+        sessionData: { ...baseData, energy_kwh: 0.5, is_stale: false },
+        updateLimits,
+        focusedLimits: { max_kwh: 1.0, max_duration_seconds: null },
+      })
+    );
+    await renderMonitor();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    fireEvent.change(screen.getByLabelText(/Energy limit/i), { target: { value: '0.2' } });
+    fireEvent.click(screen.getByRole('button', { name: /Save limit/i }));
+
+    expect(screen.getByText(/already used/i)).toBeInTheDocument();
+    expect(updateLimits).not.toHaveBeenCalled();
+  });
+
+  it('blocks a time target below the elapsed time', async () => {
+    const updateLimits = vi.fn();
+    useSession.mockReturnValue(
+      baseSession({
+        sessionData: { ...baseData, is_stale: false },
+        focusedStartedAt: new Date(Date.now() - 3600 * 1000).toISOString(), // 1 h elapsed
+        updateLimits,
+        focusedLimits: { max_kwh: null, max_duration_seconds: 7200 },
+      })
+    );
+    await renderMonitor();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    // 0.25 h (15 min) is below the ~1 h already elapsed.
+    fireEvent.change(screen.getByLabelText(/Time limit/i), { target: { value: '0.25' } });
+    fireEvent.click(screen.getByRole('button', { name: /Save limit/i }));
+
+    expect(screen.getByText(/elapsed time/i)).toBeInTheDocument();
     expect(updateLimits).not.toHaveBeenCalled();
   });
 });

@@ -184,7 +184,7 @@ export const API_ERROR_COPY = {
   queue_disabled: "Queued charging isn't available for this charger",
   plug_powered: 'This charger has power now — start charging directly',
   queue_cap: "You've reached the limit of queued charges",
-  balance_too_low: 'Add charging credit first',
+  insufficient_balance: 'Add charging credit first',
 };
 
 const GENERIC_ERROR = 'Something went wrong. Please try again.';

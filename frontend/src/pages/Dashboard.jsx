@@ -203,7 +203,7 @@ const Dashboard = () => {
     const t = setTimeout(async () => {
       try {
         const plug = await api.get(`/api/plugs/${q}`);
-        if (!cancelled) setLookup({ status: 'found', plug });
+        if (!cancelled) setLookup({ status: 'found', plug, query: q });
       } catch (err) {
         if (cancelled) return;
         if (err?.status === 404) setLookup({ status: 'notfound', query: q });
@@ -378,6 +378,8 @@ const Dashboard = () => {
     const reservedByOther = plug.reserved_now === true && plug.reserved_now_by_me !== true;
     const startable = state === 'available' && !reservedByOther;
     const queueable = state === 'unpowered' && plug.queue_available === true;
+    // Guard against stale closure: only allow actions if this lookup is current
+    const isCurrentLookup = lookup.query === query;
 
     return (
       <div className="dash-lookup-preview" role="status">
@@ -392,12 +394,12 @@ const Dashboard = () => {
           )}
         </div>
         <div className="dash-lookup-action">
-          {startable && (
+          {startable && isCurrentLookup && (
             <button type="button" className="btn btn-primary btn-sm" onClick={() => openCharge(plug)}>
               Start charging
             </button>
           )}
-          {queueable && (
+          {queueable && isCurrentLookup && (
             <button type="button" className="btn btn-primary btn-sm" onClick={() => openQueue(plug)}>
               Queue charge
             </button>
@@ -409,7 +411,7 @@ const Dashboard = () => {
                 : plugStateHint(state) || plugStateLabel(state)}
             </span>
           )}
-          {(state === 'available' || state === 'in_use') && (
+          {(state === 'available' || state === 'in_use') && isCurrentLookup && (
             <button type="button" className="btn btn-ghost btn-sm" onClick={() => setReservePlug(plug)}>
               Reserve
             </button>

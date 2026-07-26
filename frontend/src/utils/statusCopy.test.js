@@ -129,6 +129,9 @@ describe('apiErrorCopy', () => {
     expect(apiErrorCopy({ code: 'queue_disabled' })).toBe(
       "Queued charging isn't available for this charger"
     );
+    expect(apiErrorCopy({ code: 'insufficient_balance' })).toBe(
+      'Add charging credit first'
+    );
   });
 
   it('falls back to the server message, then a generic line', () => {
