@@ -8,6 +8,10 @@ app, the backend authorizes and bills against a prepaid coin wallet, and the
 command reaches the plug through an ESP32 gateway that dials outbound over
 direct TLS MQTT — no VPN or overlay network involved.
 
+> **Note:** AmpHive is a **portfolio / showcase project**. The hosted instance is
+> a **live demo**, not a commercial service — it runs in sandbox mode (no real
+> payments) and is published as a reference implementation.
+
 ---
 
 ## Safety & Disclaimer
