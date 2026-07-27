@@ -1,0 +1,199 @@
+# =============================================================================
+# AmpHive Relay-Consolidation Docker Compose
+#
+# Target: amphive-relay (GCP e2-micro, us-west1, 1 GB RAM, free tier). Deployed
+# by the companion deploy/relay/deploy-relay.sh, which lives in $WORKDIR
+# (default ~/amphive on the relay VM) alongside this file, a real .env
+# (deploy/config/.env.template filled in), mosquitto.conf, mqtt-certs/, and the
+# backend/ + frontend/ source trees. See
+# deploy/docs/relay_consolidation_runbook.md for the full cutover plan
+# (restore, DNS repoint, decommission of amphive-vm-in) — that doc is
+# descriptive; THIS FILE is the source of truth for exact service shape if the
+# two ever drift.
+#
+# Services: same 5 as deploy/docker/docker-compose.tls.yml (db, mqtt, backend,
+# frontend, caddy) — frontend is kept even though it wasn't spelled out in the
+# original 4-service shorthand (db/backend/mqtt/caddy), because Caddy's site
+# block reverse_proxies to frontend:80 (frontend's nginx proxies /api and
+# /socket.io to backend:8000) — dropping it would leave Caddy with nothing to
+# serve. It gets a conservative, ungenerous mem_limit of its own below.
+#
+# RAM: this is the whole reason for this file's existence. e2-micro = 1 GB
+# physical, so every service below gets a hard mem_limit (Compose v2 supports
+# this as a plain per-service key, no `deploy:`/swarm needed, since
+# deploy-relay.sh installs the modern `docker compose` plugin). Ceiling sum:
+#   256 (db) + 300 (backend) + 48 (mqtt) + 48 (frontend) + 64 (caddy) = 716 MB
+# That is a CAP per container, not a reservation — actual RSS on a demo/
+# low-traffic box runs well under it — but it still leaves only ~300 MB for
+# the host OS + Docker daemon + build layers. deploy-relay.sh provisions a 2 GB
+# swapfile specifically so a transient burst (a `--build` step, a slow query)
+# gets throttled instead of OOM-killed. If you see restart-looping, check
+# `docker stats --no-stream` and `free -h` before raising any limit here.
+#
+# No top-level `version:` key: Compose Spec / the `docker compose` v2 plugin
+# ignores (warns on) it now, and every field used below (mem_limit,
+# depends_on.condition, healthcheck.start_period) works without one.
+# =============================================================================
+
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: amphive-db
+    restart: unless-stopped
+    mem_limit: 256m
+    # Tuned down from Postgres' stock defaults (128MB shared_buffers, 100 max
+    # connections) — this box has no room for either, and a single-tenant
+    # demo backend never approaches 20 concurrent connections.
+    command: ["postgres", "-c", "shared_buffers=32MB", "-c", "max_connections=20"]
+    # Pulls POSTGRES_PASSWORD (matching DATABASE_URL's password) from .env.
+    # POSTGRES_USER/POSTGRES_DB aren't in .env.template, so they're pinned
+    # explicitly here (matches prod's hardcoded "postgres"/"amphive").
+    env_file: .env
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_DB: amphive
+    volumes:
+      # Named volume — survives `docker compose up --build` / container
+      # recreation. This is the ONE volume that must never be lost: it's the
+      # entire point of the zero-data-loss migration (see the runbook).
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  mqtt:
+    image: eclipse-mosquitto:2.0
+    container_name: amphive-mqtt
+    restart: unless-stopped
+    mem_limit: 48m
+    ports:
+      # Direct-MQTT: gateways/agents dial mqtts://mqtt.amphive.app:8883 (or the
+      # relay's IP directly) from anywhere. Plaintext 1883 is intentionally
+      # NOT published here (matches docker-compose.tls.yml — the whole fleet
+      # is on 8883; the backend reaches 'mqtt:1883' over the internal compose
+      # network, which needs no published port).
+      - "${MQTT_TLS_BIND_IP:-0.0.0.0}:8883:8883"
+    volumes:
+      # Config/identity files below are bind mounts, not named volumes — they
+      # are operator-supplied or generated once by deploy-relay.sh, and must
+      # match exactly what's restored from the prod config tarball (per-
+      # gateway credentials live in mosquitto_passwd; losing that file means
+      # re-provisioning every fielded device).
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf
+      - ./mosquitto_passwd:/mosquitto/config/passwd
+      - ./mosquitto_acl:/mosquitto/config/acl
+      - ./mqtt-certs:/mosquitto/config/certs:ro
+      - mosquitto_data:/mosquitto/data
+      - mosquitto_log:/mosquitto/log
+    healthcheck:
+      # Authenticates (allow_anonymous=false) using the backend's own account.
+      test: ["CMD-SHELL", "mosquitto_sub -t '$$SYS/#' -C 1 -W 5 -u ${MQTT_USERNAME} -P ${MQTT_PASSWORD} || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    # Bounded harder than prod (10m/5) — this box's disk is as tight as its RAM.
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "3"
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: amphive-backend
+    restart: unless-stopped
+    mem_limit: 300m
+    # Every backend setting (DATABASE_URL, MQTT_*, JWT_SECRET_KEY, RAZORPAY_*,
+    # coin/GST/reservation config, VAPID, SMTP, ...) comes straight from .env —
+    # .env.template's MQTT_BROKER_HOST=mqtt / MQTT_BROKER_PORT=1883 already
+    # resolve correctly on this compose network, so no per-var overrides are
+    # needed the way prod's compose files spell out ~30 individually (this is
+    # the simplification the env_file switch buys you).
+    env_file: .env
+    ports:
+      # Published for VM-local debugging (curl/health polling), same as prod.
+      # Not meant to be reachable from the internet — do not open GCP firewall
+      # tcp:8000 to 0.0.0.0/0; only 80/443 (caddy) and 8883 (mqtt) should be.
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      mqtt:
+        condition: service_healthy
+    healthcheck:
+      # No curl in python:3.11-slim by default; urllib avoids adding a package.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "3"
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: amphive-frontend
+    restart: unless-stopped
+    # Not explicitly sized in the original 4-service memory budget (db/
+    # backend/mqtt/caddy) — this nginx-alpine static-file server is very
+    # light (typically well under 20 MB RSS), so 48m is a generous ceiling
+    # rather than a real requirement. Kept so Caddy has something to proxy to.
+    mem_limit: 48m
+    # No host port: caddy is the only public web entrypoint and reaches this
+    # container over the internal network as 'frontend:80' (matches
+    # docker-compose.tls.yml).
+    expose:
+      - "80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:80/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: amphive-caddy
+    restart: unless-stopped
+    mem_limit: 64m
+    ports:
+      - "80:80"   # ACME HTTP-01 challenge + HTTP->HTTPS redirect
+      - "443:443"
+    volumes:
+      # Generated once (if missing) by deploy-relay.sh from CADDY_DOMAIN /
+      # CADDY_CPO_DOMAIN / ACME_EMAIL in .env — edit in place afterwards for
+      # changes; the script will not clobber an existing Caddyfile.
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data      # persists the issued Let's Encrypt cert(s) —
+                              # losing this on a redeploy risks ACME rate limits
+      - caddy_config:/config
+    depends_on:
+      frontend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:80/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  postgres_data:    # Real prod data, restored — THE volume that must not be lost.
+  mosquitto_data:
+  mosquitto_log:
+  caddy_data:       # Let's Encrypt certs — also must survive redeploys.
+  caddy_config:
