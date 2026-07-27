@@ -39,20 +39,14 @@ spec:
               name: postgres
           env:
             - name: POSTGRES_USER
-              valueFrom:
-                secretKeyRef:
-                  name: amphive-env
-                  key: POSTGRES_USER
+              value: postgres
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: amphive-env
                   key: POSTGRES_PASSWORD
             - name: POSTGRES_DB
-              valueFrom:
-                secretKeyRef:
-                  name: amphive-env
-                  key: POSTGRES_DB
+              value: amphive
             # Explicit subdir so the PVC's lost+found doesn't collide with initdb.
             - name: PGDATA
               value: /var/lib/postgresql/data/pgdata

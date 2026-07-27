@@ -37,7 +37,7 @@ spec:
       containers:
         - name: backend
           image: amphive-backend:local
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Never
           envFrom:
             # DATABASE_URL, JWT_SECRET_KEY, MQTT_USERNAME/PASSWORD, RAZORPAY_*,
             # COINS_*, MIN_START_BALANCE_COINS, PLATFORM_FEE_PCT, GST_RATE_PCT,
@@ -55,6 +55,12 @@ spec:
           ports:
             - containerPort: 8000
               name: api
+          startupProbe:
+            httpGet:
+              path: /api/health
+              port: 8000
+            failureThreshold: 30
+            periodSeconds: 5
           readinessProbe:
             # Verified: backend/main.py:219 defines GET /api/health -> 200
             # {"status":"healthy",...} with no DB dependency. (There is no
