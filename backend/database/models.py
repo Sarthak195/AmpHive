@@ -1187,7 +1187,10 @@ class UserFavorite(Base):
     - UNIQUE(user_id, plug_id): starring twice is idempotent (the router
       catches the IntegrityError on a double-tap race); the leading user_id
       also serves the "which plugs has this user favorited" lookup the plug
-      list/detail responses make (their `is_favorite` field).
+      list/detail responses make (their `is_favorite` field). Declared as a
+      unique INDEX (not a UniqueConstraint like PlugWatch) because 0031's
+      DDL is `CREATE UNIQUE INDEX` — the two must be the same object kind
+      or alembic autogenerate flags drift (test_migrations.py).
     - idx_user_favorites_plug: not read yet, but the same shape as
       idx_plug_watches_plug for a future per-plug fan-out/count.
     - FKs CASCADE both ways: a favorite is meaningless without its user or
@@ -1203,7 +1206,7 @@ class UserFavorite(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
 
     __table_args__ = (
-        UniqueConstraint("user_id", "plug_id", name="uq_user_favorites_user_plug"),
+        Index("uq_user_favorites_user_plug", "user_id", "plug_id", unique=True),
         Index("idx_user_favorites_plug", "plug_id"),
     )
 
