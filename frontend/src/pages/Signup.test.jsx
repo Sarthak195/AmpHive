@@ -12,8 +12,10 @@ import { MemoryRouter, Routes, Route, useLocation } from 'react-router-dom';
 
 import Signup from './Signup';
 import { useAuth } from '../contexts/AuthContext';
+import { useConfig } from '../contexts/ConfigContext';
 
 vi.mock('../contexts/AuthContext', () => ({ useAuth: vi.fn() }));
+vi.mock('../contexts/ConfigContext', () => ({ useConfig: vi.fn() }));
 
 const toast = { ok: vi.fn(), error: vi.fn(), info: vi.fn(), warn: vi.fn() };
 vi.mock('../components/ui', () => ({ useToast: () => toast }));
@@ -39,6 +41,7 @@ const renderSignup = (initialEntry = '/signup') =>
 beforeEach(() => {
   vi.clearAllMocks();
   useAuth.mockReturnValue({ register: registerSpy });
+  useConfig.mockReturnValue({ google_login_enabled: false });
 });
 
 describe('Signup', () => {
@@ -118,5 +121,20 @@ describe('Signup', () => {
   it('links back to Login', () => {
     renderSignup();
     expect(screen.getByRole('link', { name: 'Sign in' })).toHaveAttribute('href', '/login');
+  });
+});
+
+describe('Google sign-in button (config-gated)', () => {
+  it('is hidden when the backend reports Google sign-in unconfigured', () => {
+    useConfig.mockReturnValue({ google_login_enabled: false });
+    renderSignup();
+    expect(screen.queryByRole('link', { name: /Continue with Google/i })).not.toBeInTheDocument();
+  });
+
+  it('renders a top-level link to the backend redirect when enabled', () => {
+    useConfig.mockReturnValue({ google_login_enabled: true });
+    renderSignup();
+    const link = screen.getByRole('link', { name: /Continue with Google/i });
+    expect(link).toHaveAttribute('href', '/api/auth/google/login');
   });
 });

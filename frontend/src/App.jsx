@@ -47,6 +47,7 @@ const Login = lazy(() => import('./pages/Login'));
 const Signup = lazy(() => import('./pages/Signup'));
 const ForgotPassword = lazy(() => import('./pages/ForgotPassword'));
 const ResetPassword = lazy(() => import('./pages/ResetPassword'));
+const GoogleCallback = lazy(() => import('./pages/GoogleCallback'));
 // Console (CPO) pages
 const CpoSetup = lazy(() => import('./pages/cpo/CpoSetup'));
 const CpoDashboard = lazy(() => import('./pages/cpo/CpoDashboard'));
@@ -115,6 +116,10 @@ const authRoutes = (
     <Route path="/login" element={<Login />} />
     <Route path="/signup" element={<Signup />} />
     {passwordResetRoutes}
+    {/* "Sign in with Google" lands here with the app JWT in the URL
+        fragment (#token=...) — see backend/routers/auth.py google_callback
+        and pages/GoogleCallback.jsx. */}
+    <Route path="/auth/google/callback" element={<GoogleCallback />} />
   </>
 );
 

@@ -3,12 +3,18 @@ Auth routes — moved verbatim from main.py (2026-07-07, TD#7 split).
 """
 import asyncio
 import hashlib
+import hmac
 import logging
 import os
 import secrets
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlencode
 
-from fastapi import APIRouter, Depends, HTTPException
+import google.auth.transport.requests as google_auth_requests
+import google.oauth2.id_token as google_id_token
+import requests
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import JSONResponse, RedirectResponse
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -217,6 +223,271 @@ async def logout(
         extra={"user_id": user.id, "email": user.email, "token_version": new_epoch},
     )
     return {"status": "logged_out"}
+
+
+# ===========================================================================
+# "Sign in with Google" (backend-driven authorization-code flow, no JS SDK)
+# ===========================================================================
+#
+# GET /api/auth/google/login redirects the browser to Google; Google redirects
+# back to GET /api/auth/google/callback with a `code`, which this backend
+# exchanges server-side and turns into the SAME app JWT the password flow
+# issues (create_access_token) — handed to the frontend via a URL fragment on
+# the final redirect (never hits server access logs, unlike a query string).
+#
+# No separate identities table: a Google-only signup gets hashed_password set
+# to a random unusable hash (secrets.token_urlsafe(32) through hash_password
+# — the same trick as services.auth._DUMMY_PASSWORD_HASH), so the existing
+# /api/auth/login route refuses it with zero changes. A password-created
+# account can additionally link a google_sub without losing its password.
+#
+# Unset GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET/GOOGLE_OAUTH_REDIRECT_URI ⇒ the
+# feature is hidden everywhere: GET /api/config's google_login_enabled is
+# false (frontend hides the button) and /google/login 503s defensively even
+# if it's hit directly.
+
+GOOGLE_STATE_COOKIE = "google_oauth_state"
+GOOGLE_STATE_COOKIE_MAX_AGE = 600  # 10 minutes — this leg of the flow is fast
+GOOGLE_AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+
+
+def _google_oauth_config():
+    """Read the three Google OAuth env vars at CALL time, not import time, so
+    tests can monkeypatch os.environ (mirrors services/email.py's
+    frontend_origin()/SMTP env reads). Returns None — feature fully hidden —
+    unless all three are set; a half-configured deploy must fail closed, not
+    accept sign-ins it can't correctly redirect or verify."""
+    client_id = os.getenv("GOOGLE_CLIENT_ID")
+    client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
+    redirect_uri = os.getenv("GOOGLE_OAUTH_REDIRECT_URI")
+    if not (client_id and client_secret and redirect_uri):
+        return None
+    return client_id, client_secret, redirect_uri
+
+
+def _google_error_response(status_code: int, detail: str) -> JSONResponse:
+    """Build a callback-error response with the single-use state cookie
+    cleared. Every exit out of google_callback past the state check —
+    success or failure — clears the cookie the same way, so this is the one
+    place that shape is defined instead of repeating .delete_cookie() at each
+    call site."""
+    response = JSONResponse(status_code=status_code, content={"detail": detail})
+    response.delete_cookie(GOOGLE_STATE_COOKIE)
+    return response
+
+
+@router.get("/api/auth/google/login")
+async def google_login():
+    """
+    Start the Google sign-in redirect. 503s if Google OAuth isn't configured
+    (mirrors payments.create_payment_order's "service not configured" 503).
+
+    Sets `google_oauth_state`: a random CSRF nonce, httpOnly + Secure +
+    SameSite=Lax, 10-minute max-age. This is the app's FIRST cookie — it is
+    NOT a session mechanism (the app stays bearer-JWT-only for actual auth);
+    it exists solely so google_callback can confirm the code it receives
+    really came from a redirect this backend initiated, not a forged request.
+    SameSite=Lax (not Strict) is required: the cookie must still be sent when
+    Google's callback navigates the browser back to us, which is a top-level
+    cross-site GET — Lax allows that; Strict would drop it.
+    """
+    config = _google_oauth_config()
+    if config is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Google sign-in is not configured. Contact support.",
+        )
+    client_id, _client_secret, redirect_uri = config
+
+    state = secrets.token_urlsafe(24)
+    authorize_url = f"{GOOGLE_AUTHORIZE_URL}?" + urlencode({
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "scope": "openid email profile",
+        "state": state,
+    })
+
+    response = RedirectResponse(url=authorize_url, status_code=302)
+    response.set_cookie(
+        GOOGLE_STATE_COOKIE,
+        state,
+        max_age=GOOGLE_STATE_COOKIE_MAX_AGE,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+    )
+    return response
+
+
+@router.get("/api/auth/google/callback")
+async def google_callback(request: Request, db: AsyncSession = Depends(get_db)):
+    """
+    Finish the Google sign-in redirect: verify the CSRF state, exchange the
+    authorization code, verify the ID token, then find-or-create/link the
+    AmpHive account and redirect to the frontend with a normal app JWT in the
+    URL fragment (`#token=...` — a fragment never leaves the browser, so it
+    never hits this server's or any proxy's access logs, unlike a query
+    string).
+
+    Every branch below returns an explicit Response (JSONResponse for errors,
+    RedirectResponse on success) instead of raising HTTPException, so the
+    single-use state cookie can be cleared on the SAME response that answers
+    the request — raising would hand the exception middleware a fresh
+    Response of its own and silently drop that cookie mutation.
+    """
+    config = _google_oauth_config()
+    if config is None:
+        # Not normally reachable (the /login leg already 503s first), but
+        # config could in principle change between the two legs.
+        return _google_error_response(503, "Google sign-in is not configured.")
+    client_id, client_secret, redirect_uri = config
+
+    # --- CSRF state check (constant-time; state is a secret nonce) ---------
+    cookie_state = request.cookies.get(GOOGLE_STATE_COOKIE)
+    query_state = request.query_params.get("state")
+    if not cookie_state or not query_state or not hmac.compare_digest(cookie_state, query_state):
+        return _google_error_response(
+            400, "Invalid or expired sign-in attempt. Please try again."
+        )
+
+    code = request.query_params.get("code")
+    if not code:
+        # e.g. the user hit "Cancel" on Google's consent screen
+        # (?error=access_denied&state=... with no code).
+        return _google_error_response(
+            400, "Google sign-in was cancelled or did not return an authorization code."
+        )
+
+    # --- Exchange the code for tokens ---------------------------------------
+    # Blocking HTTP call — run off the event loop (mirrors services/email.py's
+    # asyncio.to_thread(send_email, ...) pattern for smtplib).
+    def _exchange_code():
+        return requests.post(
+            GOOGLE_TOKEN_URL,
+            data={
+                "code": code,
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "redirect_uri": redirect_uri,
+                "grant_type": "authorization_code",
+            },
+            timeout=10,
+        )
+
+    try:
+        token_response = await asyncio.to_thread(_exchange_code)
+        token_response.raise_for_status()
+        token_payload = token_response.json()
+    except Exception:
+        logger.exception("Google token exchange failed")
+        return _google_error_response(400, "Could not complete Google sign-in. Please try again.")
+
+    id_tok = token_payload.get("id_token")
+    if not id_tok:
+        return _google_error_response(400, "Google did not return an identity token.")
+
+    # --- Verify the ID token -------------------------------------------------
+    # verify_oauth2_token fetches Google's JWKS to check the signature (also
+    # blocking network I/O) and validates issuer/audience/expiry itself.
+    try:
+        claims = await asyncio.to_thread(
+            google_id_token.verify_oauth2_token,
+            id_tok,
+            google_auth_requests.Request(),
+            client_id,
+        )
+    except Exception:
+        logger.exception("Google id_token verification failed")
+        return _google_error_response(400, "Could not verify Google identity token.")
+
+    if not claims.get("email_verified"):
+        return _google_error_response(400, "Google account email is not verified.")
+    email_claim = claims.get("email")
+    if not email_claim:
+        return _google_error_response(400, "Google did not return an email address.")
+    google_sub = claims.get("sub")
+    if not google_sub:
+        return _google_error_response(400, "Google did not return an account identifier.")
+
+    email = normalize_email(email_claim)
+    result = await db.execute(select(User).where(func.lower(User.email) == email))
+    user = result.scalar_one_or_none()
+
+    if user is None:
+        # New signup — DRIVER role, dummy unusable password hash (same trick
+        # as services.auth._DUMMY_PASSWORD_HASH), no tenant (mirrors
+        # /api/auth/register exactly — tenants are assigned later via
+        # /api/cpo/setup, not at signup).
+        full_name = claims.get("name") or email.split("@", 1)[0]
+        user = User(
+            email=email,
+            hashed_password=hash_password(secrets.token_urlsafe(32)),
+            full_name=full_name,
+            role=UserRole.DRIVER,
+            coin_balance=0.0,
+            auth_provider="google",
+            google_sub=google_sub,
+        )
+        db.add(user)
+        try:
+            await db.commit()
+        except IntegrityError:
+            # Lost the race to a concurrent signup/link with the same email
+            # (or, vanishingly unlikely, google_sub) — same pattern as
+            # /api/auth/register's duplicate-email catch.
+            await db.rollback()
+            return _google_error_response(400, "An account with this email already exists.")
+        await db.refresh(user)
+        logger.info(
+            "New user registered via Google",
+            extra={"user_id": user.id, "email": user.email},
+        )
+    elif user.google_sub is None:
+        # Existing password account, first-time Google link. auth_provider
+        # stays 'password' — linking adds a sign-in method, it doesn't
+        # rewrite how the account originated.
+        user.google_sub = google_sub
+        try:
+            await db.commit()
+        except IntegrityError:
+            # This google_sub got linked to a DIFFERENT account in the
+            # window between our SELECT and this commit (the partial unique
+            # index is the authoritative guard) — same duplicate-race
+            # pattern as the branch above.
+            await db.rollback()
+            return _google_error_response(
+                400, "This Google account is already linked to a different AmpHive account."
+            )
+        await db.refresh(user)
+        logger.info(
+            "Linked Google identity to existing account",
+            extra={"user_id": user.id, "email": user.email},
+        )
+    elif user.google_sub != google_sub:
+        # This email is already linked to a DIFFERENT Google account than
+        # the one that just signed in — never silently switch it.
+        return _google_error_response(
+            403, "This email is linked to a different Google account."
+        )
+
+    # [Admin] Same kill switch as password login — an admin-disabled account
+    # must not be able to bypass disablement by signing in with Google.
+    if user.is_disabled:
+        return _google_error_response(403, "account_disabled")
+
+    token = create_access_token(user.id, user.role.value, user.email, user.token_version)
+    logger.info(
+        "User logged in via Google",
+        extra={"user_id": user.id, "email": user.email},
+    )
+    await check_and_speed_up_active_session(db, user.id)
+
+    redirect_url = f"{email_service.frontend_origin()}/auth/google/callback#token={token}"
+    response = RedirectResponse(url=redirect_url, status_code=302)
+    response.delete_cookie(GOOGLE_STATE_COOKIE)
+    return response
 
 
 # ===========================================================================

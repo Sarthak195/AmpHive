@@ -15,6 +15,9 @@ const DEFAULTS = {
   min_start_balance_coins: 50,
   coin_inr_rate: 1.0,
   currency: 'INR',
+  // "Continue with Google" is hidden until the backend confirms it's
+  // configured (GOOGLE_CLIENT_ID set) — see backend/main.py public_config().
+  google_login_enabled: false,
 };
 
 const ConfigContext = createContext(DEFAULTS);

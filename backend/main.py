@@ -204,6 +204,13 @@ def public_config():
         "min_start_balance_coins": MIN_START_BALANCE_COINS,
         "coin_inr_rate": 1.0,
         "currency": "INR",
+        # [Google OAuth] Gates the frontend's "Continue with Google" button.
+        # Mirrors GOOGLE_CLIENT_ID specifically (not the other two Google env
+        # vars) — the authoritative full-config check lives in
+        # routers/auth.py's google_login()/google_callback(), which 503 if
+        # GOOGLE_CLIENT_SECRET or GOOGLE_OAUTH_REDIRECT_URI is missing even
+        # when this flag is true.
+        "google_login_enabled": bool(os.getenv("GOOGLE_CLIENT_ID")),
     }
 
 

@@ -15,13 +15,27 @@ vi.mock('../api/client', () => ({
   default: { get: vi.fn(), post: vi.fn(), put: vi.fn(), delete: vi.fn() },
 }));
 
+// Mutable so individual loginWithToken tests can swap in a different fake
+// JWT before clicking — mirrors login()'s hardcoded test creds above, just
+// parameterized since the token content is what's under test there.
+let googleToken = 'unset';
+
+// Minimal base64url JWT builder — header/signature are irrelevant (the app
+// JWT was already verified server-side; loginWithToken only reads the
+// payload for an optimistic render), only the payload segment needs to
+// decode to real JSON the way a real JWT's does.
+const base64url = (obj) =>
+  btoa(JSON.stringify(obj)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const makeFakeToken = (payload) => `header.${base64url(payload)}.signature`;
+
 const Probe = () => {
-  const { user, login, logout, loading } = useAuth();
+  const { user, login, logout, loginWithToken, loading } = useAuth();
   return (
     <div>
       <div data-testid="user">{user ? user.email : 'anonymous'}</div>
       <div data-testid="loading">{String(loading)}</div>
       <button onClick={() => login('driver@amphive.test', 'pw').catch(() => {})}>login</button>
+      <button onClick={() => loginWithToken(googleToken).catch(() => {})}>loginWithToken</button>
       <button onClick={logout}>logout</button>
     </div>
   );
@@ -165,5 +179,47 @@ describe('login / logout', () => {
 
     await waitFor(() => expect(screen.getByTestId('user')).toHaveTextContent('anonymous'));
     expect(localStorage.getItem('amphive_token')).toBeNull();
+  });
+});
+
+describe('loginWithToken (Google sign-in redirect)', () => {
+  it('persists the JWT, renders an optimistic user from its payload, then refreshes from /me', async () => {
+    googleToken = makeFakeToken({ sub: '9', email: 'googledriver@amphive.test', role: 'driver' });
+    let resolveMe;
+    api.get.mockReturnValue(new Promise((resolve) => { resolveMe = resolve; }));
+    renderProbe();
+    await screen.findByTestId('user');
+
+    await userEvent.click(screen.getByText('loginWithToken'));
+
+    // Optimistic render straight from the (already server-verified) token
+    // payload, before the /me round trip below resolves.
+    expect(localStorage.getItem('amphive_token')).toBe(googleToken);
+    expect(screen.getByTestId('user')).toHaveTextContent('googledriver@amphive.test');
+    expect(JSON.parse(localStorage.getItem('amphive_user'))).toEqual({
+      id: 9, email: 'googledriver@amphive.test', role: 'driver',
+    });
+
+    resolveMe({
+      id: 9, email: 'googledriver@amphive.test', role: 'driver',
+      full_name: 'Google Driver', coin_balance: 0,
+    });
+    await waitFor(() => expect(api.get).toHaveBeenCalledWith('/api/auth/me'));
+    await waitFor(() =>
+      expect(JSON.parse(localStorage.getItem('amphive_user')).full_name).toBe('Google Driver')
+    );
+  });
+
+  it('tolerates a malformed token payload and still calls refreshUser', async () => {
+    googleToken = 'not-a-valid-jwt';
+    api.get.mockResolvedValue({ email: 'driver@amphive.test', role: 'driver' });
+    renderProbe();
+    await screen.findByTestId('user');
+
+    await userEvent.click(screen.getByText('loginWithToken'));
+
+    expect(localStorage.getItem('amphive_token')).toBe('not-a-valid-jwt');
+    await waitFor(() => expect(api.get).toHaveBeenCalledWith('/api/auth/me'));
+    expect(await screen.findByTestId('user')).toHaveTextContent('driver@amphive.test');
   });
 });

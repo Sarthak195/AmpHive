@@ -47,7 +47,7 @@ Interactive docs: `http://<host>:8000/docs`.
 | Method | Path | Auth | Response |
 |--------|------|------|----------|
 | GET | `/api/health` | none | `{"status":"healthy","service":"amphive-backend","version":"2.0.0"}` |
-| GET | `/api/config` | none | Public pricing/config so the UI doesn't hardcode it: `{coins_per_kwh, min_start_balance_coins, coin_inr_rate, currency}`. `min_start_balance_coins` matches the 402 the session-start path enforces (`MIN_START_BALANCE_COINS`, env). |
+| GET | `/api/config` | none | Public pricing/config so the UI doesn't hardcode it: `{coins_per_kwh, min_start_balance_coins, coin_inr_rate, currency, google_login_enabled}`. `min_start_balance_coins` matches the 402 the session-start path enforces (`MIN_START_BALANCE_COINS`, env). `google_login_enabled` (added 2026-08-02) is `bool(GOOGLE_CLIENT_ID)` — gates the frontend's "Continue with Google" button; see the Google OAuth rows below. |
 
 ## Authentication (`services/auth.py`)
 
@@ -59,6 +59,8 @@ Interactive docs: `http://<host>:8000/docs`.
 | POST | `/api/auth/logout` | JWT | — | Revokes every token for the caller (bumps `users.token_version`; "log out everywhere") → `{status:"logged_out"}`. |
 | POST | `/api/auth/forgot-password` | none | `{email}` | Issues a single-use reset token (SHA-256 digest stored in `password_reset_tokens`, `RESET_TOKEN_TTL_MIN` expiry, prior unused tokens voided) and emails `FRONTEND_ORIGIN/reset-password?token=...` via `services/email.py` (SMTP if `SMTP_HOST` set, else the link is logged at WARNING). **Always the same generic 200** — no account enumeration. Rate-limited (`FORGOT_PASSWORD_RATE_LIMIT`). |
 | POST | `/api/auth/reset-password` | none | `{token, password}` | Consumes the token: 8-72 char rule (as registration), bcrypt rehash, bumps `users.token_version` (revokes every session), stamps the token used. Uniform 400 for unknown/expired/already-used tokens. Rate-limited (`RESET_PASSWORD_RATE_LIMIT`). → `{status:"password_reset"}` |
+| GET | `/api/auth/google/login` | none | — | **(2026-08-02)** "Sign in with Google" — backend-driven authorization-code flow, no JS SDK. 503 if `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET`/`GOOGLE_OAUTH_REDIRECT_URI` aren't all set. Sets a short-lived `google_oauth_state` CSRF-nonce cookie (httpOnly, Secure, SameSite=Lax, 10 min — the app's only cookie; auth stays bearer-JWT-only) and 302s to Google's consent screen. |
+| GET | `/api/auth/google/callback` | none | query `code`, `state` | **(2026-08-02)** Google's redirect target. Validates `state` against the cookie (constant-time compare; 400 + cookie cleared on mismatch/absence), exchanges `code` server-side, verifies the ID token against Google's JWKS (`google-auth`), and rejects an unverified email (400). Existing account by email + no linked Google identity → links it; linked to a *different* Google account → 403; no account → creates a `driver` with an unusable random password hash (`auth_provider="google"`, same "dummy hash" trick as `_DUMMY_PASSWORD_HASH`) so `/api/auth/login` refuses it unchanged. Disabled accounts get the same `account_disabled` 403 as password login. On success, 302s to `FRONTEND_ORIGIN/auth/google/callback#token=<jwt>` — the JWT rides in the URL **fragment**, never a query string, so it never reaches server access logs. |
 
 `user` object shape: `{id, email, full_name, role, coin_balance}` (where `coin_balance` is a float; the `/api/auth/register`/`/api/auth/login` `AuthResponse.user` dict predates `available_balance` and hasn't been extended to it — only `GET /api/auth/me` (`UserResponse`) carries the new field today).
 Token: HS256 JWT, claims `sub`/`role`/`email`/`iat`/`exp`, **7-day** expiry.
@@ -330,8 +332,9 @@ surface in the tenant-scoped `GET /api/cpo/audit`).
 | `LOGIN_RATE_LIMIT` / `REGISTER_RATE_LIMIT` | `10/60` / `10/3600` | Auth rate limits, `"<attempts>/<window sec>"` per client IP (429 + Retry-After) |
 | `FORGOT_PASSWORD_RATE_LIMIT` / `RESET_PASSWORD_RATE_LIMIT` | `5/3600` / `10/3600` | Password-reset rate limits, same format/mechanism as the login/register limits |
 | `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASSWORD` / `SMTP_FROM` | `""` / `587` / `""` / `""` / `""` | Outbound email (STARTTLS) for password-reset links; `SMTP_HOST` unset = console fallback (link logged at WARNING). Login skipped when `SMTP_USER` empty |
-| `FRONTEND_ORIGIN` | `https://amphive.app` | Base URL for links in outbound email (`/reset-password?token=...`) |
+| `FRONTEND_ORIGIN` | `https://amphive.app` | Base URL for links in outbound email (`/reset-password?token=...`) and the Google OAuth callback redirect (`/auth/google/callback#token=...`) |
 | `RESET_TOKEN_TTL_MIN` | `30` | Minutes a password-reset link stays valid (single use) |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_OAUTH_REDIRECT_URI` | `""` / `""` / `""` | **(2026-08-02)** OAuth client from the Google Cloud Console; `GOOGLE_OAUTH_REDIRECT_URI` must exactly match an "Authorized redirect URI" on that client (e.g. `https://amphive.app/api/auth/google/callback`). Any one unset = "Sign in with Google" hidden everywhere (`google_login_enabled: false`, `/api/auth/google/login` 503s) |
 | `VAPID_PRIVATE_KEY` / `VAPID_SUBJECT` | `""` / `mailto:admin@amphive.example` | Web Push signing key + contact; empty key = push disabled (feed + Socket.io still work) |
 | `LOW_BALANCE_WARN_FRACTION` | `0.8` | Notify the driver once per session when accrued cost crosses this fraction of the wallet balance (`0` disables) |
 | `PLATFORM_FEE_PCT` | `10.0` | Platform's cut of CPO gross earnings, percent — the fee/net split on `/api/cpo/earnings` and payout snapshots (`services/payouts.py`; falls back to the default on a malformed value) |
