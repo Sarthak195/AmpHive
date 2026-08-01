@@ -14,3 +14,15 @@
   color: var(--ink-2);
   white-space: nowrap;
 }
+
+.reliability-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  white-space: nowrap;
+}
+
+.reliability-badge-skeleton {
+  width: 7em;
+  height: 1em;
+}

@@ -22,6 +22,7 @@ import { useConfig } from '../contexts/ConfigContext';
 import usePoll from '../hooks/usePoll';
 import { PageHeader, ErrorState, EmptyState, Skeleton, StatusDot, Money, useToast } from '../components/ui';
 import MapComponent from '../components/MapComponent';
+import ReportProblemModal from '../components/ReportProblemModal';
 import { AVAILABILITY_STATES, AVAILABILITY_LABELS, getPlugAvailability } from '../utils/plugAvailability';
 import './MapPage.css';
 
@@ -53,6 +54,7 @@ export default function MapPage() {
   const [userLocation, setUserLocation] = useState(null);
   const [flyTarget, setFlyTarget] = useState(null);
   const [geoBusy, setGeoBusy] = useState(false);
+  const [reportPlug, setReportPlug] = useState(null);
 
   const fetchPlugs = useCallback(async () => {
     try {
@@ -129,6 +131,7 @@ export default function MapPage() {
             plugs={plugs}
             authed={Boolean(user)}
             onSelectPlug={handleSelectPlug}
+            onReportPlug={setReportPlug}
             flyTo={flyTarget}
             userLocation={userLocation}
           />
@@ -223,6 +226,13 @@ export default function MapPage() {
           </div>
         </div>
       </div>
+
+      <ReportProblemModal
+        open={Boolean(reportPlug)}
+        onClose={() => setReportPlug(null)}
+        plugId={reportPlug?.id}
+        plugName={reportPlug?.name}
+      />
     </main>
   );
 }

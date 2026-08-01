@@ -46,6 +46,7 @@ import {
 import PlugCard from '../components/PlugCard';
 import ChargeSetupModal from '../components/ChargeSetupModal';
 import ReserveModal from '../components/ReserveModal';
+import ReportProblemModal from '../components/ReportProblemModal';
 import { AVAILABILITY_STATES, getPlugAvailability } from '../utils/plugAvailability';
 import { apiErrorCopy, plugStateHint, plugStateLabel } from '../utils/statusCopy';
 import { coinsToINR, formatKw, formatKwh } from '../utils/money';
@@ -280,6 +281,7 @@ const Dashboard = () => {
   const [setupPlug, setSetupPlug] = useState(null);
   const [setupMode, setSetupMode] = useState('start');
   const [reservePlug, setReservePlug] = useState(null);
+  const [reportPlug, setReportPlug] = useState(null);
 
   const openCharge = (plug) => {
     setSetupMode('start');
@@ -661,6 +663,7 @@ const Dashboard = () => {
                         onQueue={openQueue}
                         onReserve={setReservePlug}
                         onToggleWatch={toggleWatch}
+                        onReport={setReportPlug}
                       />
                     ))}
                   </div>
@@ -721,6 +724,14 @@ const Dashboard = () => {
           fetchUpNext();
           fetchPlugs(); // reserved_now / next_reservation may have changed
         }}
+      />
+
+      {/* Report a problem */}
+      <ReportProblemModal
+        open={Boolean(reportPlug)}
+        onClose={() => setReportPlug(null)}
+        plugId={reportPlug?.id}
+        plugName={reportPlug?.name}
       />
 
       {/* Cancel confirmations */}

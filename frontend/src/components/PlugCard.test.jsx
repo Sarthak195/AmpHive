@@ -3,7 +3,9 @@
  * available → Charge + Reserve (with reserved-for-you / reserved-by-other
  * variants), in_use → Notify-me bell + Reserve, unpowered → Queue charge only
  * when the payload advertises queue_available (else the bell) with its
- * sublabel, offline / maintenance → no actions. Plus price + next-price meta.
+ * sublabel, offline / maintenance → no state actions. Plus price + next-price
+ * meta, and the "Report" flag action present in every state (including
+ * offline/maintenance — those are exactly the plugs most worth reporting).
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen } from '@testing-library/react';
@@ -30,6 +32,7 @@ const handlers = {
   onReserve: vi.fn(),
   onQueue: vi.fn(),
   onToggleWatch: vi.fn(),
+  onReport: vi.fn(),
 };
 
 const renderCard = (plug) => render(<PlugCard plug={plug} {...handlers} />);
@@ -122,15 +125,27 @@ describe('PlugCard — unpowered', () => {
 });
 
 describe('PlugCard — offline and maintenance', () => {
-  it('offline: no action buttons, "Can\'t be reached" sublabel', () => {
+  it('offline: no state actions, "Can\'t be reached" sublabel, but still reportable', () => {
     renderCard({ ...BASE, gateway_online: false });
     expect(screen.getByText("Can't be reached right now")).toBeInTheDocument();
-    expect(screen.queryAllByRole('button')).toHaveLength(0);
+    expect(screen.queryAllByRole('button')).toHaveLength(1);
+    expect(screen.getByRole('button', { name: /report/i })).toBeInTheDocument();
   });
 
-  it('maintenance: no action buttons, "Under maintenance" badge', () => {
+  it('maintenance: no state actions, "Under maintenance" badge, but still reportable', () => {
     renderCard({ ...BASE, status: 'maintenance' });
     expect(screen.getAllByText('Under maintenance').length).toBeGreaterThan(0);
-    expect(screen.queryAllByRole('button')).toHaveLength(0);
+    expect(screen.queryAllByRole('button')).toHaveLength(1);
+    expect(screen.getByRole('button', { name: /report/i })).toBeInTheDocument();
+  });
+});
+
+describe('PlugCard — Report action', () => {
+  it('renders a Report action in every state and wires onReport', async () => {
+    renderCard(BASE);
+    const reportBtn = screen.getByRole('button', { name: /report/i });
+    expect(reportBtn).toBeInTheDocument();
+    await userEvent.click(reportBtn);
+    expect(handlers.onReport).toHaveBeenCalledWith(BASE);
   });
 });

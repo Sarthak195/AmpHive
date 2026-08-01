@@ -4,18 +4,34 @@
  * tokens), never the raw `status` field. The popup's action button is gated
  * the same way: authed drivers only get an enabled "Charge" button when the
  * plug is actually available; anonymous visitors always get "Sign in to
- * charge" regardless of plug state (signing in never depends on it).
+ * charge" regardless of plug state (signing in never depends on it). Authed
+ * popups also get a ReliabilityBadge (mocked network) and a "Report a
+ * problem" action; anonymous popups get neither — GET
+ * /api/plugs/{id}/reliability and POST /api/plugs/{id}/report both require
+ * a signed-in caller.
  *
  * react-leaflet is mocked out — these tests aren't about Leaflet's map
  * engine, just that MapComponent hands each Marker the right icon/position,
  * filters out plugs with no known location, gates the popup action
  * correctly, and forwards plug selection.
  */
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 import MapComponent from './MapComponent';
+import api from '../api/client';
+
+vi.mock('../api/client', () => ({
+  default: { get: vi.fn() },
+}));
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  // ReliabilityBadge quiet-fails on any rejection — a never-resolving-with-
+  // data stub keeps it invisible (renders nothing) unless a test overrides it.
+  api.get.mockResolvedValue({ uptime_pct: null });
+});
 
 vi.mock('react-leaflet', () => ({
   MapContainer: ({ children, bounds, center, zoom }) => (
@@ -133,6 +149,26 @@ describe('MapComponent popup — signed-in driver', () => {
     render(<MapComponent plugs={[PLUGS[1]]} authed onSelectPlug={vi.fn()} />);
     expect(screen.getByTestId('popup')).toHaveTextContent('In use');
   });
+
+  it('mounts ReliabilityBadge (lazy per-popup fetch) and shows the reachability stat once loaded', async () => {
+    api.get.mockResolvedValue({ uptime_pct: 97, sample_window_days: 7, last_seen_at: null });
+    render(<MapComponent plugs={[PLUGS[0]]} authed onSelectPlug={vi.fn()} />);
+    expect(await screen.findByText(/97% online/)).toBeInTheDocument();
+    expect(api.get).toHaveBeenCalledWith('/api/plugs/1/reliability');
+  });
+
+  it('offers a "Report a problem" action when onReportPlug is given, and forwards the plug', async () => {
+    const onReportPlug = vi.fn();
+    render(<MapComponent plugs={[PLUGS[0]]} authed onSelectPlug={vi.fn()} onReportPlug={onReportPlug} />);
+    const button = screen.getByRole('button', { name: /report a problem/i });
+    await userEvent.click(button);
+    expect(onReportPlug).toHaveBeenCalledWith(PLUGS[0]);
+  });
+
+  it('omits "Report a problem" when onReportPlug is not given', () => {
+    render(<MapComponent plugs={[PLUGS[0]]} authed onSelectPlug={vi.fn()} />);
+    expect(screen.queryByRole('button', { name: /report a problem/i })).not.toBeInTheDocument();
+  });
 });
 
 describe('MapComponent popup — anonymous visitor', () => {
@@ -147,5 +183,13 @@ describe('MapComponent popup — anonymous visitor', () => {
   it('still shows "Sign in to charge" even when the plug is occupied — signing in never depends on plug state', () => {
     render(<MapComponent plugs={[PLUGS[1]]} authed={false} onSelectPlug={vi.fn()} />);
     expect(screen.getByRole('button', { name: 'Sign in to charge' })).toBeInTheDocument();
+  });
+
+  it('never mounts ReliabilityBadge or "Report a problem" for an anonymous visitor', () => {
+    render(
+      <MapComponent plugs={[PLUGS[0]]} authed={false} onSelectPlug={vi.fn()} onReportPlug={vi.fn()} />
+    );
+    expect(api.get).not.toHaveBeenCalled();
+    expect(screen.queryByRole('button', { name: /report a problem/i })).not.toBeInTheDocument();
   });
 });

@@ -48,3 +48,13 @@
   gap: var(--sp-2);
   margin-top: var(--sp-1);
 }
+
+.plug-card-footer {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: var(--sp-1);
+}
+
+.plug-card-report {
+  color: var(--ink-3);
+}
