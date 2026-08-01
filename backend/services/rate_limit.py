@@ -11,13 +11,27 @@ Rules are env-configurable as "<attempts>/<window seconds>":
   REGISTER_RATE_LIMIT        (default 10/3600 — 10 registrations per hour per IP)
   FORGOT_PASSWORD_RATE_LIMIT (default 5/3600  — 5 reset emails per hour per IP)
   RESET_PASSWORD_RATE_LIMIT  (default 10/3600 — 10 token submissions per hour per IP)
+
+Per-account limits (below) close the gap the per-IP limiters above leave open:
+a single account rotating source IPs (e.g. a residential proxy pool, or just a
+mobile client hopping cell towers) is invisible to a limiter keyed on IP alone.
+These are layered ON TOP of the per-IP limiters, not a replacement:
+  SESSION_START_ACCOUNT_RATE_LIMIT         (default 20/60 — 20 session starts per minute per account)
+  SESSION_STOP_ACCOUNT_RATE_LIMIT          (default 20/60 — 20 session stops per minute per account)
+  PAYMENTS_CREATE_ORDER_ACCOUNT_RATE_LIMIT (default 10/60 — 10 payment orders per minute per account)
+  CPO_TOPUP_ACCOUNT_RATE_LIMIT             (default 20/60 — 20 offline top-ups per minute per CPO actor)
+  LOGIN_ACCOUNT_RATE_LIMIT                 (default 10/60 — 10 login attempts per minute per account/email)
 """
 import logging
 import os
 import time
 from collections import deque
 
-from fastapi import HTTPException, Request
+from fastapi import Depends, HTTPException, Request
+
+from backend.database.models import User
+from backend.schemas import LoginRequest
+from backend.services.auth import get_current_user, normalize_email
 
 logger = logging.getLogger("amphive.rate_limit")
 
@@ -119,6 +133,70 @@ def rate_limit_dependency(limiter: SlidingWindowRateLimiter, action: str):
     return dependency
 
 
+def account_rate_limit_dependency(limiter: SlidingWindowRateLimiter, action: str):
+    """FastAPI dependency enforcing `limiter` per authenticated account (keyed
+    by user id, not IP) — layered ON TOP of a route's existing per-IP
+    dependency, not a replacement for it. Closes the "one account, rotating
+    IPs" gap: SlidingWindowRateLimiter's per-IP keying can't see repeated
+    attempts from the same account arriving over different source addresses.
+
+    Depends on `get_current_user`, which FastAPI resolves once per request and
+    caches by default (Depends(..., use_cache=True) is the default) — a route
+    that also takes `user: User = Depends(get_current_user)` (directly, or via
+    require_role()) shares that cached User with this dependency, so wiring
+    this in does not add a second DB hit.
+    """
+    async def dependency(user: User = Depends(get_current_user)) -> User:
+        retry_after = limiter.check(f"user:{user.id}")
+        if retry_after is not None:
+            seconds = int(retry_after) + 1
+            raise HTTPException(
+                status_code=429,
+                detail=f"Too many {action} attempts on this account. Try again in {seconds} s.",
+                headers={"Retry-After": str(seconds)},
+            )
+        return user
+    return dependency
+
+
+def login_account_rate_limit_dependency(limiter: SlidingWindowRateLimiter):
+    """FastAPI dependency enforcing `limiter` per normalized login email —
+    layered ON TOP of the existing per-IP login dependency, not a replacement
+    for it. Closes the "one account, rotating IPs" gap for credential
+    stuffing/brute force targeted at a single account.
+
+    There is no authenticated user yet at /login, so this keys off the
+    request body instead of get_current_user. It takes the body as `req:
+    LoginRequest` — the SAME parameter name and type the route itself
+    declares. FastAPI's dependency resolver merges body parameters that share
+    a name across a route and its sub-dependencies into a single parsed body
+    ("more than one dependency could have the same field... count them by
+    name" — fastapi.dependencies.utils._should_embed_body_fields) instead of
+    embedding each under its own key, so this does not change the request
+    shape or double-parse the body. See test_rate_limiting.py for a wiring
+    test that calls the route through FastAPI's own dependency resolution
+    (TestClient) to prove it. (If this dependency's parameter were named
+    anything other than `req`, FastAPI would instead require the client to
+    send `{"req": {...}, "<other-name>": {...}}` and every existing login
+    caller would start getting 422s — the matching name is load-bearing.)
+
+    The 429 copy is deliberately IDENTICAL in shape to the per-IP login
+    limiter's generic message — it must never let a caller distinguish "this
+    email doesn't exist" from "this email is rate-limited" (no account
+    enumeration oracle).
+    """
+    async def dependency(req: LoginRequest) -> None:
+        retry_after = limiter.check(f"login:{normalize_email(req.email)}")
+        if retry_after is not None:
+            seconds = int(retry_after) + 1
+            raise HTTPException(
+                status_code=429,
+                detail=f"Too many login attempts. Try again in {seconds} s.",
+                headers={"Retry-After": str(seconds)},
+            )
+    return dependency
+
+
 login_rate_limiter = SlidingWindowRateLimiter(*_rule_from_env("LOGIN_RATE_LIMIT", "10/60"))
 register_rate_limiter = SlidingWindowRateLimiter(*_rule_from_env("REGISTER_RATE_LIMIT", "10/3600"))
 # Password reset: forgot-password is tighter than login (each allowed call can
@@ -130,3 +208,20 @@ reset_password_rate_limiter = SlidingWindowRateLimiter(*_rule_from_env("RESET_PA
 # browsing visitor may refresh/poll live availability — but bounded so the
 # open endpoint can't be hammered to enumerate/scrape or exhaust the DB.
 public_map_rate_limiter = SlidingWindowRateLimiter(*_rule_from_env("PUBLIC_MAP_RATE_LIMIT", "60/60"))
+
+# --- Per-account limiters (layered on top of the per-IP limiters above) ---
+session_start_account_rate_limiter = SlidingWindowRateLimiter(
+    *_rule_from_env("SESSION_START_ACCOUNT_RATE_LIMIT", "20/60")
+)
+session_stop_account_rate_limiter = SlidingWindowRateLimiter(
+    *_rule_from_env("SESSION_STOP_ACCOUNT_RATE_LIMIT", "20/60")
+)
+payments_create_order_account_rate_limiter = SlidingWindowRateLimiter(
+    *_rule_from_env("PAYMENTS_CREATE_ORDER_ACCOUNT_RATE_LIMIT", "10/60")
+)
+cpo_topup_account_rate_limiter = SlidingWindowRateLimiter(
+    *_rule_from_env("CPO_TOPUP_ACCOUNT_RATE_LIMIT", "20/60")
+)
+login_account_rate_limiter = SlidingWindowRateLimiter(
+    *_rule_from_env("LOGIN_ACCOUNT_RATE_LIMIT", "10/60")
+)
