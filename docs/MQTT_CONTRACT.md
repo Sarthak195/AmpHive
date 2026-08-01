@@ -56,16 +56,24 @@
 > the session's own cap rather than the gateway default. Older firmware ignores it.
 | gateway → backend | `amphive/gateways/{gateway_id}/status` | 1 | yes | `{"status":"online","fw":"<ver>"}` (on connect) / `{"status":"offline"}` (LWT) |
 | gateway → backend | `amphive/gateways/{gateway_id}/alarms` | 1 | no | `{"error":"THERMAL_CUTOFF"\|"OVERCURRENT_CUTOFF"\|"OVERCURRENT_CAP"\|"UNAUTHORIZED_ON","plug_id":<int>}` or `{"event":"OTA_STARTED"\|"OTA_OK_REBOOTING"\|"OTA_FAILED"\|"OTA_REFUSED_SESSION_ACTIVE"\|...}` or (software agent) `{"event":"LOCAL_LIMIT_CUTOFF","reason":"ENERGY_LIMIT"\|"DURATION_LIMIT","plug_id":<int>}` |
-| gateway → backend | `amphive/gateways/{gateway_id}/logs` | 0 | no | raw WARN/ERROR log line as plain text (fw ≥ 2.1.0-direct). Field diagnostics; the backend does **not** subscribe yet (`mosquitto_sub` ad hoc). Covered by the `amphive/gateways/%u/#` ACL. |
+| gateway → backend | `amphive/gateways/{gateway_id}/logs` | 0 | no | raw WARN/ERROR log line as plain text (fw ≥ 2.1.0-direct). Field diagnostics — persisted as `gateway_logs` rows (see `services/mqtt/logs.py`), no notify/socket fan-out. Covered by the `amphive/gateways/%u/#` ACL. |
 | agent → backend | `amphive/gateways/{gateway_id}/discovery` | 1 | no | `{"unique_id":"<str>","provider":"<str>","model":"<str>","alias":"<str>","capabilities":["switch","power","energy"]}` |
 | backend → agent | `amphive/gateways/{gateway_id}/assign` | 1 | yes | `{"<unique_id>":<plug_id:int>, ...}` (full map for the gateway) |
 
 The backend subscribes with wildcards: `amphive/gateways/+/telemetry` (QoS 0),
 `amphive/gateways/+/status` (QoS 1), `amphive/gateways/+/discovery` (QoS 1),
-and `amphive/gateways/+/alarms` (QoS 1). Alarm/event messages are persisted as
-`gateway_events` rows (tenant resolved from the gateway) and broadcast to
-clients via the `gateway_alarm` Socket.io event; a CPO reads them through
-`GET /api/cpo/events` and clears them with `POST /api/cpo/events/{id}/ack`.
+`amphive/gateways/+/alarms` (QoS 1), and `amphive/gateways/+/logs` (QoS 0).
+Alarm/event messages are persisted as `gateway_events` rows (tenant resolved
+from the gateway) and broadcast to clients via the `gateway_alarm` Socket.io
+event; a CPO reads them through `GET /api/cpo/events` and clears them with
+`POST /api/cpo/events/{id}/ack`. Log lines are persisted as `gateway_logs`
+rows (plain-text payload, matched and dispatched *before* the JSON parse in
+`services/mqtt/router.py` — see `services/mqtt/logs.py`) with **no**
+notify/socket fan-out (a diagnostics feed, not an alert); a CPO reads them
+through `GET /api/cpo/gateways/{gateway_id}/logs`, an admin cross-tenant
+through `GET /api/admin/gateway-logs`, and they are pruned after
+`GATEWAY_LOGS_RETENTION_DAYS` (default 14) by the session reaper's
+`reap_gateway_logs_once()`.
 
 The `relay` field (firmware ≥ 1.5.0) is the plug's **actual** reported relay
 state (`device_on`), distinct from `status` (the gateway's own session state).

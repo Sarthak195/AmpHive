@@ -116,6 +116,38 @@ notification and the socket push).
 
 ---
 
+## Status (2026-08-02): Levers 1+3 shipped, Lever 2 deliberately held
+
+**Lever 1 — done, including the silence-case backstop.**
+`mqtt/status.py._broadcast_plug_connectivity` emits `plug_connectivity` on every real
+online<->offline transition; `socketio_manager.emit_plug_connectivity` carries it to
+clients; `Dashboard.jsx`'s `handlePlugConnectivity` and `CpoChargers.jsx` both patch their
+in-place state on the socket event instead of waiting for a refetch. The silence case (no
+LWT, telemetry just stops) is covered by `session_reaper.py`'s
+`reap_gateway_silence_once()` — a per-reaper-tick sweep that reuses
+`session_lifecycle.gateway_is_live()` and emits `plug_connectivity(False)` once per gateway
+that goes non-live (bounded in-memory dedup, `_silence_pushed`, mirroring the
+`_low_balance_warned` idiom), then `True` once it recovers.
+
+**Lever 3 — done.** `Dashboard.jsx` (30s), `CpoGateways.jsx` (30s), and now
+`CpoChargers.jsx` (30s, added alongside the silence-sweep work) all `usePoll` their list
+endpoints as the catch-all backstop for a missed/dropped socket event.
+
+**Lever 2 — held**, exactly per the recommendation above: no field data yet showing the
+~90s LWT / ~120s liveness window is too slow for real operator needs, and it's the
+knob most likely to trade latency for flap. The relevant env knobs, unchanged, for whoever
+picks this up next:
+- `GATEWAY_LIVENESS_WINDOW_SEC` (default 120) — `session_lifecycle.gateway_is_live()`'s
+  freshness window; also read by the silence sweep above.
+- `GATEWAY_SEEN_BUMP_INTERVAL_SEC` (constant, 60, `mqtt_manager.py`) — how often
+  `last_seen_at` is actually refreshed from telemetry; should move in proportion to the
+  liveness window if that window is ever tightened.
+- MQTT `keepalive` (currently 60s — `agent/amphive_agent/core.py`, `tools/fake_plug.py`,
+  `backend/services/mqtt_manager.py`'s own client) — governs how fast the broker fires the
+  LWT after a hard disconnect (~1.5x keepalive per the MQTT spec).
+
+---
+
 ## Verification
 
 Hardware-free via the fake-plug rig (`tools/fake_plug.py`, gateway `fakeplug-gw-01`,

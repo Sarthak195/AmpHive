@@ -28,6 +28,7 @@ from backend.database.models import (
     ChargingSession,
     DisputeStatus,
     Gateway,
+    GatewayLog,
     GatewayStatus,
     LedgerTransaction,
     Payout,
@@ -724,6 +725,58 @@ async def admin_list_gateways(
                 "plug_count": int(plug_count or 0),
             }
             for gw, tenant_name, plug_count in rows.all()
+        ],
+    }
+
+
+@router.get("/api/admin/gateway-logs")
+async def admin_list_gateway_logs(
+    user: User = Depends(require_role("admin")),
+    db: AsyncSession = Depends(get_db),
+    gateway_id: Optional[str] = None,
+    tenant_id: Optional[int] = None,
+    level: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+):
+    """Cross-tenant forwarded firmware log lines (TD#28 diagnostics feed —
+    row shape mirrors GET /api/cpo/gateways/{id}/logs), newest first. Optional
+    `gateway_id`/`tenant_id`/`level` filters."""
+    limit, offset = _clamp_page(limit, offset)
+
+    conditions = []
+    if gateway_id:
+        conditions.append(GatewayLog.gateway_id == gateway_id)
+    if tenant_id is not None:
+        conditions.append(GatewayLog.tenant_id == tenant_id)
+    if level:
+        conditions.append(GatewayLog.level == level)
+
+    total = (
+        await db.execute(select(func.count(GatewayLog.id)).where(*conditions))
+    ).scalar() or 0
+
+    rows = await db.execute(
+        select(GatewayLog, Tenant.name)
+        .outerjoin(Tenant, Tenant.id == GatewayLog.tenant_id)
+        .where(*conditions)
+        .order_by(GatewayLog.created_at.desc(), GatewayLog.id.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+    return {
+        "total": int(total),
+        "items": [
+            {
+                "id": log.id,
+                "gateway_id": log.gateway_id,
+                "tenant_id": log.tenant_id,
+                "tenant_name": tenant_name,
+                "level": log.level,
+                "message": log.message,
+                "created_at": _iso(log.created_at),
+            }
+            for log, tenant_name in rows.all()
         ],
     }
 

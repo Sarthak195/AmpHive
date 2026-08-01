@@ -570,6 +570,45 @@ class GatewayEvent(Base):
     )
 
 
+class GatewayLog(Base):
+    """
+    Raw firmware WARN/ERROR log lines forwarded over MQTT (TD#28,
+    `amphive/gateways/{gw}/logs`, fw >= 2.1.0-direct — see
+    firmware/main/main.c log_forward_task and docs/MQTT_CONTRACT.md). A
+    diagnostics feed distinct from GatewayEvent: these are raw ESP-IDF log
+    lines (not structured alarm/event payloads), so a CPO/operator can see
+    what a deployed gateway printed without a serial cable. No socket/notify
+    fan-out — see services/mqtt/logs.py's module docstring.
+
+    Design notes mirror GatewayEvent/TelemetryReading:
+    - level is a plain String, not a PG enum — mirrors the firmware's own
+      E/W/I/D/V letters (mapped to error/warning/info), not a fixed schema.
+    - tenant_id is denormalized (gateway -> tenant) so the CPO/admin feeds
+      filter without a join.
+    - message is capped at 220 chars — firmware truncates lines to
+      LOG_FWD_LINE_MAX (200) before publishing; 220 leaves headroom.
+    - Pruned by services/session_reaper.py reap_gateway_logs_once() per
+      GATEWAY_LOGS_RETENTION_DAYS (default 14) — much shorter than
+      GatewayEvent/TelemetryReading retention since this is high-volume,
+      low-value-per-row diagnostic noise, not an audit trail.
+    """
+    __tablename__ = "gateway_logs"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    gateway_id: Mapped[str] = mapped_column(String(50), ForeignKey("gateways.id", ondelete="CASCADE"), nullable=False)
+    # "error" | "warning" | "info" — mapped from the firmware's E/W/I/D/V
+    # level letter (see services/mqtt/logs.py's log_line_level port).
+    level: Mapped[str] = mapped_column(String(16), nullable=False)
+    message: Mapped[str] = mapped_column(String(220), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+
+    __table_args__ = (
+        Index("idx_gateway_logs_tenant_created", "tenant_id", "created_at"),
+        Index("idx_gateway_logs_gateway_created", "gateway_id", "created_at"),
+    )
+
+
 # --- CPO Admin Audit Trail ---
 
 class AuditLog(Base):
@@ -632,15 +671,24 @@ class AuditLog(Base):
 
 class Notification(Base):
     """
-    Per-user notification feed (drivers first; the CPO alarm feed stays on
-    gateway_events). Written by services/notifications.py at the session
-    lifecycle / wallet / safety emit points, delivered live over Socket.io
-    (user room) + Web Push, and listed by GET /api/notifications.
+    Per-user notification feed (drivers first — most notify() call sites are
+    driver-facing session/wallet/safety events; the CPO alarm feed
+    historically stayed on gateway_events instead). As of the orphan-OFF
+    operator alert (mqtt/status.py._republish_off_for_orphaned_plugs, the
+    first CPO-targeted bell notification: user_id there is a CPO, not a
+    driver), this feed is no longer driver-EXCLUSIVE — it's just per-USER,
+    and a CPO's user_id works exactly like a driver's. gateway_events remains
+    the primary structured operator alert/audit feed (GET /api/cpo/events);
+    this row type is for the rarer one-off "you should know this happened"
+    push to a specific person, driver or CPO. Written by
+    services/notifications.py at the session lifecycle / wallet / safety /
+    ops emit points, delivered live over Socket.io (user room) + Web Push,
+    and listed by GET /api/notifications.
 
     Design notes mirror GatewayEvent:
     - type/severity are plain Strings, not PG enums — the set evolves without
       a schema migration ("session_stopped", "low_balance", "charger_offline",
-      "safety_cutoff", "topup_credited", ...).
+      "safety_cutoff", "topup_credited", "orphan_off", ...).
     - plug_id/session_id are nullable SET NULL context refs: deleting a plug
       or session must not erase a user's notification history.
     - read (not "acknowledged") — driver-facing wording; flipping it hides the

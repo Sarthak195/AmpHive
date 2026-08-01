@@ -16,6 +16,16 @@
  * POST /api/cpo/plugs/{id}/maintenance (per-row enter/clear — the dedicated,
  * audited maintenance workflow; refuses `clear` with an active session).
  * POST /api/cpo/plugs registers a new charger.
+ *
+ * Live updates (faster-gateway-offline-detection, lever 1+3): a 30s usePoll
+ * refetch is the catch-all backstop (mirrors CpoGateways), and a
+ * `plug_connectivity` socket listener (mirrors Dashboard.jsx's
+ * handlePlugConnectivity) patches the effective-status computation in place
+ * so a gateway going offline/online reflects immediately without waiting on
+ * the poll. Patched as a plug_id-keyed override on top of the polled
+ * gatewaysById status (cheaper than resolving plug_id -> gateway_id -> row
+ * patch) and reset on every fetchAll so the poll always wins as the source
+ * of truth between socket pushes.
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
@@ -44,6 +54,8 @@ import Money from '../../components/ui/Money';
 import { useToast } from '../../components/ui';
 import api from '../../api/client';
 import { useConfig } from '../../contexts/ConfigContext';
+import { useSession } from '../../contexts/SessionContext';
+import usePoll from '../../hooks/usePoll';
 import { getPlugAvailability, AVAILABILITY_STATES, AVAILABILITY_LABELS } from '../../utils/plugAvailability';
 import { apiErrorCopy } from '../../utils/statusCopy';
 import './CpoChargers.css';
@@ -65,6 +77,7 @@ function Section({ title, children }) {
 
 export default function CpoChargers() {
   const { coin_inr_rate: rate = 1 } = useConfig();
+  const { socket } = useSession() || {};
   const toast = useToast();
   const [searchParams] = useSearchParams();
 
@@ -75,9 +88,12 @@ export default function CpoChargers() {
   const [priceByPlug, setPriceByPlug] = useState({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  // Live plug_connectivity pushes, keyed by plug_id — overrides the polled
+  // gatewaysById status until the next fetchAll (see the module doc comment
+  // above). Reset on every successful poll so the poll stays authoritative.
+  const [connectivityOverrides, setConnectivityOverrides] = useState({});
 
   const fetchAll = useCallback(async () => {
-    setLoading(true);
     setError(null);
     try {
       const [plugsRes, gatewaysRes, groupsRes, tariffsRes] = await Promise.all([
@@ -90,6 +106,7 @@ export default function CpoChargers() {
       setGateways(Array.isArray(gatewaysRes) ? gatewaysRes : gatewaysRes?.items || []);
       setGroups(Array.isArray(groupsRes) ? groupsRes : groupsRes?.items || []);
       setTariffs(Array.isArray(tariffsRes) ? tariffsRes : tariffsRes?.items || []);
+      setConnectivityOverrides({});
     } catch (err) {
       setError(err);
     } finally {
@@ -97,9 +114,7 @@ export default function CpoChargers() {
     }
   }, []);
 
-  useEffect(() => {
-    fetchAll();
-  }, [fetchAll]);
+  usePoll(fetchAll, 30_000);
 
   // Best-effort "price now" per charger. Non-blocking: a failed/slow preview
   // just leaves that row's price cell blank.
@@ -121,6 +136,19 @@ export default function CpoChargers() {
     };
   }, [plugs]);
 
+  // Gateway connectivity push (faster-gateway-offline-detection, lever 1) —
+  // patches the effective-status computation without waiting on the 30s poll.
+  useEffect(() => {
+    if (!socket) return undefined;
+    const handlePlugConnectivity = ({ plug_id, gateway_online }) => {
+      setConnectivityOverrides((prev) => ({ ...prev, [plug_id]: gateway_online }));
+    };
+    socket.on('plug_connectivity', handlePlugConnectivity);
+    return () => {
+      socket.off('plug_connectivity', handlePlugConnectivity);
+    };
+  }, [socket]);
+
   const gatewaysById = useMemo(
     () => Object.fromEntries(gateways.map((g) => [g.id, g])),
     [gateways]
@@ -128,12 +156,13 @@ export default function CpoChargers() {
   const tariffsById = useMemo(() => Object.fromEntries(tariffs.map((t) => [t.id, t])), [tariffs]);
 
   const effectiveState = useCallback(
-    (plug) =>
-      getPlugAvailability({
-        ...plug,
-        gateway_online: gatewaysById[plug.gateway_id]?.status === 'online',
-      }),
-    [gatewaysById]
+    (plug) => {
+      const override = connectivityOverrides[plug.id];
+      const gateway_online =
+        override !== undefined ? override : gatewaysById[plug.gateway_id]?.status === 'online';
+      return getPlugAvailability({ ...plug, gateway_online });
+    },
+    [gatewaysById, connectivityOverrides]
   );
 
   /* ---- filters ------------------------------------------------------------ */
@@ -398,9 +427,11 @@ export default function CpoChargers() {
       label: 'Gateway',
       render: (row) => {
         const gw = gatewaysById[row.gateway_id];
+        const override = connectivityOverrides[row.id];
+        const online = override !== undefined ? override : gw?.status === 'online';
         return (
           <span className="cpo-chargers-gw-cell">
-            <StatusDot tone={gw?.status === 'online' ? 'ok' : 'danger'} />
+            <StatusDot tone={online ? 'ok' : 'danger'} />
             {gw?.name || row.gateway_id}
           </span>
         );

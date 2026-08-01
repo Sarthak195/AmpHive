@@ -592,7 +592,8 @@ def _manager(execute_results):
 async def test_orphan_off_skips_mid_debounce_queued_plug():
     """A plug with a WAITING queued charge that is still mid-debounce is left
     OFF for the queue sweep to energize — NOT orphan-OFF'd. A plug with no
-    queued charge still gets its OFF (existing behavior preserved)."""
+    queued charge still gets its OFF (existing behavior preserved), and each
+    CPO of the tenant gets one orphan_off bell notification for it."""
     from backend.services.mqtt_manager import MQTTManager
 
     gw = MagicMock()
@@ -601,24 +602,34 @@ async def test_orphan_off_skips_mid_debounce_queued_plug():
     tenant = _tenant(delay=2)
 
     mgr = _manager([
-        _result_scalar_one_or_none(gw),                       # gateway lookup
-        _result_rows([(1, "10.0.0.11"), (2, "10.0.0.12")]),   # plugs
-        _result_scalars([]),                                  # no ACTIVE sessions
-        _result_rows([(queued_plug, tenant)]),                # plug 1 has a WAITING queue
+        _result_scalar_one_or_none(gw),                                  # gateway lookup
+        _result_rows([(1, "10.0.0.11", "Bay 1"), (2, "10.0.0.12", "Bay 2")]),  # plugs
+        _result_scalars([]),                                             # no ACTIVE sessions
+        _result_rows([(queued_plug, tenant)]),                           # plug 1 has a WAITING queue
+        _result_scalars([101, 102]),                                     # CPO user ids for the tenant
     ])
 
-    await mgr._persist_gateway_status("gw-1", "online")
+    with patch("backend.services.mqtt.status.notify", AsyncMock()) as notify_mock:
+        await mgr._persist_gateway_status("gw-1", "online")
 
     # Plug 2 (no queue) gets OFF; plug 1 (mid-debounce queue) is skipped.
     called = [c.args[1] for c in mgr.send_plug_command.call_args_list]
     assert called == [2]
+
+    # One orphan_off notify per (off'd plug, CPO) pair — here 1 plug x 2 CPOs.
+    assert notify_mock.await_count == 2
+    notified_cpos = [c.args[0] for c in notify_mock.await_args_list]
+    assert notified_cpos == [101, 102]
+    assert all(c.args[1] == "orphan_off" for c in notify_mock.await_args_list)
+    assert all(c.kwargs.get("plug_id") == 2 for c in notify_mock.await_args_list)
     MQTTManager._instance = None
 
 
 @pytest.mark.asyncio
 async def test_orphan_off_still_offs_eligible_queued_plug():
     """A queued plug that is already powered PAST its debounce is not held back
-    (the sweep will do a proper start); it still gets the safety OFF here."""
+    (the sweep will do a proper start); it still gets the safety OFF here,
+    and the tenant's CPOs are notified."""
     from backend.services.mqtt_manager import MQTTManager
 
     gw = MagicMock()
@@ -629,13 +640,46 @@ async def test_orphan_off_still_offs_eligible_queued_plug():
 
     mgr = _manager([
         _result_scalar_one_or_none(gw),
-        _result_rows([(1, "10.0.0.11")]),
+        _result_rows([(1, "10.0.0.11", "Bay 1")]),
         _result_scalars([]),
         _result_rows([(eligible_plug, tenant)]),
+        _result_scalars([101]),   # one CPO for the tenant
     ])
 
-    await mgr._persist_gateway_status("gw-1", "online")
+    with patch("backend.services.mqtt.status.notify", AsyncMock()) as notify_mock:
+        await mgr._persist_gateway_status("gw-1", "online")
 
     called = [c.args[1] for c in mgr.send_plug_command.call_args_list]
     assert called == [1]
+
+    notify_mock.assert_awaited_once()
+    assert notify_mock.await_args.args[0] == 101
+    assert notify_mock.await_args.args[1] == "orphan_off"
+    assert notify_mock.await_args.kwargs.get("plug_id") == 1
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_orphan_off_no_orphans_skips_cpo_lookup_and_notify():
+    """When every plug already has an ACTIVE session (nothing actually gets
+    OFF'd), the CPO lookup query is never issued and notify() is never
+    called — the common case (a clean reconnect) stays cheap."""
+    from backend.services.mqtt_manager import MQTTManager
+
+    gw = MagicMock()
+    gw.status = GatewayStatus.ONLINE
+
+    mgr = _manager([
+        _result_scalar_one_or_none(gw),                 # gateway lookup
+        _result_rows([(1, "10.0.0.11", "Bay 1")]),       # plugs
+        _result_scalars([1]),                            # plug 1 has an ACTIVE session
+        _result_rows([]),                                # no queued charges
+        # No 5th result: the CPO-users query must not be issued.
+    ])
+
+    with patch("backend.services.mqtt.status.notify", AsyncMock()) as notify_mock:
+        await mgr._persist_gateway_status("gw-1", "online")
+
+    mgr.send_plug_command.assert_not_called()
+    notify_mock.assert_not_awaited()
     MQTTManager._instance = None
