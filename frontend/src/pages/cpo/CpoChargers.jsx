@@ -54,6 +54,11 @@ const QUEUED_OPTIONS = [
   { value: 'false', label: 'Disabled' },
 ];
 
+// [Discovery] Advertised connector types shown to drivers. A plain string on
+// the backend (VARCHAR, like plug_model) — this list is just the UI's menu
+// and can grow without a migration.
+const CONNECTOR_OPTIONS = ['3-pin 16A', '3-pin 6A', 'Type 2'];
+
 function Section({ title, children }) {
   return (
     <div className="cpo-chargers-section">
@@ -247,12 +252,16 @@ export default function CpoChargers() {
 
   /* ---- add charger ---------------------------------------------------------- */
   const [addOpen, setAddOpen] = useState(false);
-  const [addForm, setAddForm] = useState({ gateway_id: '', name: '', local_ip: '', group_id: '' });
+  const [addForm, setAddForm] = useState({
+    gateway_id: '', name: '', local_ip: '', group_id: '', rated_power_w: '', connector_type: '',
+  });
   const [addError, setAddError] = useState('');
   const [addBusy, setAddBusy] = useState(false);
 
   const openAdd = () => {
-    setAddForm({ gateway_id: '', name: '', local_ip: '', group_id: '' });
+    setAddForm({
+      gateway_id: '', name: '', local_ip: '', group_id: '', rated_power_w: '', connector_type: '',
+    });
     setAddError('');
     setAddOpen(true);
   };
@@ -272,6 +281,9 @@ export default function CpoChargers() {
         local_ip: addForm.local_ip.trim(),
       };
       if (addForm.group_id) body.group_id = Number(addForm.group_id);
+      // [Discovery] Optional advertised specs — omitted when left blank.
+      if (addForm.rated_power_w !== '') body.rated_power_w = Number(addForm.rated_power_w);
+      if (addForm.connector_type) body.connector_type = addForm.connector_type;
       await api.post('/api/cpo/plugs', body);
       toast.ok(`${addForm.name.trim()} added.`);
       setAddOpen(false);
@@ -293,6 +305,8 @@ export default function CpoChargers() {
     queued_charging_enabled: '',
     auto_start_delay_min: '',
     tariff_id: '',
+    rated_power_w: '',
+    connector_type: '',
   });
   const [editError, setEditError] = useState('');
   const [editBusy, setEditBusy] = useState(false);
@@ -307,6 +321,8 @@ export default function CpoChargers() {
         plug.queued_charging_enabled == null ? '' : String(plug.queued_charging_enabled),
       auto_start_delay_min: plug.auto_start_delay_min ?? '',
       tariff_id: plug.tariff_id != null ? String(plug.tariff_id) : '',
+      rated_power_w: plug.rated_power_w ?? '',
+      connector_type: plug.connector_type ?? '',
     });
     setEditError('');
     setEditOpen(true);
@@ -343,6 +359,15 @@ export default function CpoChargers() {
       if (String(editForm.auto_start_delay_min) !== String(editingPlug.auto_start_delay_min ?? '')) {
         body.auto_start_delay_min =
           editForm.auto_start_delay_min === '' ? null : Number(editForm.auto_start_delay_min);
+      }
+
+      // [Discovery] Advertised specs — blank clears (0 / "" are the backend's
+      // sentinel-clear values, same convention as max_current_a).
+      if (String(editForm.rated_power_w) !== String(editingPlug.rated_power_w ?? '')) {
+        body.rated_power_w = editForm.rated_power_w === '' ? 0 : Number(editForm.rated_power_w);
+      }
+      if (editForm.connector_type !== (editingPlug.connector_type ?? '')) {
+        body.connector_type = editForm.connector_type;
       }
 
       if (Object.keys(body).length > 0) {
@@ -676,6 +701,43 @@ export default function CpoChargers() {
               ))}
             </select>
           </div>
+          <div className="field">
+            <label className="field-label" htmlFor="cpo-chargers-add-rated-power">
+              Rated power (W, optional)
+            </label>
+            <input
+              id="cpo-chargers-add-rated-power"
+              className="input"
+              type="number"
+              min="0"
+              step="100"
+              placeholder="e.g. 3300"
+              value={addForm.rated_power_w}
+              onChange={(e) => setAddForm({ ...addForm, rated_power_w: e.target.value })}
+            />
+            <p className="field-help">
+              What the socket supports, shown to drivers. Separate from the max-current
+              safety cap.
+            </p>
+          </div>
+          <div className="field">
+            <label className="field-label" htmlFor="cpo-chargers-add-connector">
+              Connector (optional)
+            </label>
+            <select
+              id="cpo-chargers-add-connector"
+              className="select"
+              value={addForm.connector_type}
+              onChange={(e) => setAddForm({ ...addForm, connector_type: e.target.value })}
+            >
+              <option value="">Not specified</option>
+              {CONNECTOR_OPTIONS.map((c) => (
+                <option key={c} value={c}>
+                  {c}
+                </option>
+              ))}
+            </select>
+          </div>
           {addError && <p className="field-error">{addError}</p>}
         </form>
       </Modal>
@@ -726,6 +788,52 @@ export default function CpoChargers() {
                   {groups.map((g) => (
                     <option key={g.id} value={g.id}>
                       {g.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </Section>
+
+            <Section title="Specs">
+              <div className="field">
+                <label className="field-label" htmlFor="cpo-chargers-edit-rated-power">
+                  Rated power (W)
+                </label>
+                <input
+                  id="cpo-chargers-edit-rated-power"
+                  className="input"
+                  type="number"
+                  min="0"
+                  step="100"
+                  placeholder="Not specified"
+                  value={editForm.rated_power_w}
+                  onChange={(e) => setEditForm({ ...editForm, rated_power_w: e.target.value })}
+                />
+                <p className="field-help">
+                  What the socket supports, shown to drivers (and their power filter).
+                  Separate from the max-current safety cap below. Blank = not specified.
+                </p>
+              </div>
+              <div className="field">
+                <label className="field-label" htmlFor="cpo-chargers-edit-connector">
+                  Connector
+                </label>
+                <select
+                  id="cpo-chargers-edit-connector"
+                  className="select"
+                  value={editForm.connector_type}
+                  onChange={(e) => setEditForm({ ...editForm, connector_type: e.target.value })}
+                >
+                  <option value="">Not specified</option>
+                  {/* Preserve a stored value outside today's preset list (the
+                      column is a plain VARCHAR) so opening the modal never
+                      silently reads as "Not specified" and clears it on save. */}
+                  {editForm.connector_type && !CONNECTOR_OPTIONS.includes(editForm.connector_type) && (
+                    <option value={editForm.connector_type}>{editForm.connector_type}</option>
+                  )}
+                  {CONNECTOR_OPTIONS.map((c) => (
+                    <option key={c} value={c}>
+                      {c}
                     </option>
                   ))}
                 </select>

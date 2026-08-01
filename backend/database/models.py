@@ -270,6 +270,17 @@ class Plug(Base):
     # auto_start_delay(). Mirrors the max_current_a override precedent above.
     queued_charging_enabled: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
     auto_start_delay_min: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # [Discovery] Driver-facing charger specs (0030_plug_specs). NULL until a
+    # CPO fills them in on create/edit.
+    # rated_power_w: the ADVERTISED spec (what the driver is told the socket
+    # supports) — deliberately SEPARATE from max_current_a above, which is
+    # load-balancing POLICY (an operator can cap a plug's draw below its
+    # rated power for circuit admission). Only feeds the discovery power
+    # filter + spec display, never caps.py.
+    # connector_type: VARCHAR not a native enum — same rationale as
+    # plug_model, connector naming evolves without a migration.
+    rated_power_w: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    connector_type: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
 
     # Relationships
     gateway: Mapped[Gateway] = relationship("Gateway", back_populates="plugs")
@@ -1159,6 +1170,41 @@ class PlugWatch(Base):
     __table_args__ = (
         UniqueConstraint("user_id", "plug_id", name="uq_plug_watches_user_plug"),
         Index("idx_plug_watches_plug", "plug_id"),
+    )
+
+
+# --- User Favorites (discovery bundle: "star this charger") ---
+
+class UserFavorite(Base):
+    """
+    A driver's standing "favorite this charger" star — styled exactly after
+    PlugWatch above, EXCEPT it is not one-shot: nothing deletes the row
+    automatically (unlike a watch, which self-clears when the plug flips
+    available). It only goes away via DELETE /api/plugs/{id}/favorite or a
+    CASCADE from either FK.
+
+    Design notes (mirrors PlugWatch):
+    - UNIQUE(user_id, plug_id): starring twice is idempotent (the router
+      catches the IntegrityError on a double-tap race); the leading user_id
+      also serves the "which plugs has this user favorited" lookup the plug
+      list/detail responses make (their `is_favorite` field).
+    - idx_user_favorites_plug: not read yet, but the same shape as
+      idx_plug_watches_plug for a future per-plug fan-out/count.
+    - FKs CASCADE both ways: a favorite is meaningless without its user or
+      its plug.
+    - No relationship() back-refs on User/Plug: same rationale as PlugWatch
+      — never a lazy-loadable collection.
+    """
+    __tablename__ = "user_favorites"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    plug_id: Mapped[int] = mapped_column(Integer, ForeignKey("plugs.id", ondelete="CASCADE"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "plug_id", name="uq_user_favorites_user_plug"),
+        Index("idx_user_favorites_plug", "plug_id"),
     )
 
 

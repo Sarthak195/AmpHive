@@ -182,6 +182,16 @@ class PlugResponse(BaseModel):
     # /api/plugs/{id}/watch). Drives the Home card's bell toggle; cleared
     # server-side when the watch fires (services/plug_watch.py).
     watching: bool = False
+    # [Discovery] Advertised charger specs — 0030_plug_specs. NULL when the
+    # CPO hasn't set them. rated_power_w is the SPEC (what the driver is told
+    # the socket supports), deliberately distinct from any load-balancing cap.
+    rated_power_w: Optional[int] = Field(default=None, ge=0)
+    connector_type: Optional[str] = Field(default=None, max_length=32)
+    # [Favorites] True when the CURRENT user has starred this plug (POST/DELETE
+    # /api/plugs/{id}/favorite) — a standing preference, unlike `watching`
+    # (one-shot, self-clears). services/... none yet: plain CRUD on
+    # UserFavorite.
+    is_favorite: bool = False
 
 
 class PublicPlugResponse(BaseModel):
@@ -201,6 +211,10 @@ class PublicPlugResponse(BaseModel):
     # Whether the plug's gateway is reachable right now — lets the public map
     # color a marker offline (same meaning as PlugResponse.gateway_online).
     gateway_online: bool = True
+    # [Discovery] Advertised specs — safe to expose publicly (not per-user,
+    # not network detail). Same meaning as PlugResponse's fields.
+    rated_power_w: Optional[int] = Field(default=None, ge=0)
+    connector_type: Optional[str] = Field(default=None, max_length=32)
 
 
 class GatewayEventResponse(BaseModel):
@@ -357,6 +371,10 @@ class CpoPlugCreateRequest(BaseModel):
     # Optional geolocation; when omitted the plug inherits its gateway's coords.
     latitude: Optional[float] = Field(default=None, ge=-90, le=90)
     longitude: Optional[float] = Field(default=None, ge=-180, le=180)
+    # [Discovery] Advertised specs shown to drivers (0030_plug_specs). Both
+    # optional — omit to leave unset.
+    rated_power_w: Optional[int] = Field(default=None, ge=0)
+    connector_type: Optional[str] = Field(default=None, max_length=32)
 
 
 class CpoPlugUpdateRequest(BaseModel):
@@ -380,6 +398,12 @@ class CpoPlugUpdateRequest(BaseModel):
     # debounce (minutes) — send 0 to clear it back to the tenant default (NULL).
     queued_charging_enabled: Optional[bool] = None
     auto_start_delay_min: Optional[int] = Field(default=None, ge=0, le=1440)
+    # [Discovery] Advertised specs shown to drivers (0030_plug_specs). Omit
+    # to leave unchanged; send rated_power_w=0 / connector_type="" to clear
+    # back to unset (NULL) — the same sentinel-clear convention as
+    # max_current_a above.
+    rated_power_w: Optional[int] = Field(default=None, ge=0)
+    connector_type: Optional[str] = Field(default=None, max_length=32)
 
 
 class CpoPlugMaintenanceRequest(BaseModel):

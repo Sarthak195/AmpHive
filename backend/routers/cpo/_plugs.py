@@ -65,6 +65,9 @@ async def cpo_list_plugs(
             "longitude": plug.longitude,
             # [Caps] The per-plug current cap (None = default hardware cutoff).
             "max_current_a": plug.max_current_a,
+            # [Discovery] Advertised specs shown to drivers — pre-fill the edit form.
+            "rated_power_w": plug.rated_power_w,
+            "connector_type": plug.connector_type,
             # [Queued charge] Per-plug overrides (None = inherit the tenant
             # default) — pre-fill the edit form.
             "queued_charging_enabled": plug.queued_charging_enabled,
@@ -140,6 +143,8 @@ async def cpo_create_plug(
         group_id=req.group_id,
         latitude=req.latitude,
         longitude=req.longitude,
+        rated_power_w=req.rated_power_w,
+        connector_type=req.connector_type,
     )
     db.add(plug)
     await db.commit()
@@ -231,6 +236,14 @@ async def cpo_update_plug(
     if req.auto_start_delay_min is not None:
         # [Queued charge] 0 clears the override back to the tenant default (NULL).
         plug.auto_start_delay_min = req.auto_start_delay_min or None
+    if req.rated_power_w is not None:
+        # [Discovery] 0 clears the advertised spec back to unset (NULL) —
+        # same convention as max_current_a above.
+        plug.rated_power_w = req.rated_power_w or None
+    if req.connector_type is not None:
+        # [Discovery] Empty string clears it back to unset (NULL), the
+        # string-field analogue of "0 clears" above.
+        plug.connector_type = req.connector_type or None
 
     await db.commit()
     await db.refresh(plug)

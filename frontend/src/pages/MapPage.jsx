@@ -12,10 +12,17 @@
  * off the shared `getPlugAvailability` classification — never the raw
  * `status` field — so a reachable-but-unpowered or gateway-offline plug is
  * never offered as chargeable here.
+ *
+ * [Discovery] The list panel adds a client-side search box + power / price /
+ * connector / favorites-only filters (utils/plugSearch — shared with the
+ * Dashboard) over the fetched array; they narrow the LIST, the map keeps
+ * plotting everything. Once "use my location" resolves, the list sorts by
+ * haversine distance (fetch order otherwise), and each located row gets a
+ * "Navigate" hand-off to the device's maps app (utils/navHandoff).
  */
 import { useCallback, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { RefreshCw, LocateFixed, MapPin } from 'lucide-react';
+import { RefreshCw, LocateFixed, MapPin, Navigation, Star } from 'lucide-react';
 import api from '../api/client';
 import { useAuth } from '../contexts/AuthContext';
 import { useConfig } from '../contexts/ConfigContext';
@@ -23,6 +30,16 @@ import usePoll from '../hooks/usePoll';
 import { PageHeader, ErrorState, EmptyState, Skeleton, StatusDot, Money, useToast } from '../components/ui';
 import MapComponent from '../components/MapComponent';
 import { AVAILABILITY_STATES, AVAILABILITY_LABELS, getPlugAvailability } from '../utils/plugAvailability';
+import {
+  POWER_BUCKETS,
+  PRICE_BUCKETS,
+  distinctConnectors,
+  matchesPowerBucket,
+  matchesPriceBucket,
+  matchesQuery,
+} from '../utils/plugSearch';
+import { googleMapsDirUrl } from '../utils/navHandoff';
+import { apiErrorCopy } from '../utils/statusCopy';
 import './MapPage.css';
 
 const EARTH_RADIUS_KM = 6371;
@@ -53,6 +70,13 @@ export default function MapPage() {
   const [userLocation, setUserLocation] = useState(null);
   const [flyTarget, setFlyTarget] = useState(null);
   const [geoBusy, setGeoBusy] = useState(false);
+
+  // [Discovery] Client-side list search + filters (shared utils/plugSearch).
+  const [search, setSearch] = useState('');
+  const [powerFilter, setPowerFilter] = useState('');
+  const [priceFilter, setPriceFilter] = useState('');
+  const [connectorFilter, setConnectorFilter] = useState('');
+  const [favoritesOnly, setFavoritesOnly] = useState(false);
 
   const fetchPlugs = useCallback(async () => {
     try {
@@ -106,9 +130,60 @@ export default function MapPage() {
     );
   };
 
+  // [Favorites] Star toggle in the map popup (authed only) — the same
+  // optimistic patch-then-rollback pattern as the Dashboard's toggleWatch.
+  const toggleFavorite = useCallback(
+    async (plug) => {
+      const next = !plug.is_favorite;
+      const patch = (is_favorite) => (prev) =>
+        prev.map((p) => (p.id === plug.id ? { ...p, is_favorite } : p));
+      setPlugs(patch(next));
+      try {
+        if (next) await api.post(`/api/plugs/${plug.id}/favorite`);
+        else await api.delete(`/api/plugs/${plug.id}/favorite`);
+      } catch (err) {
+        setPlugs(patch(!next));
+        toast.error(apiErrorCopy(err));
+      }
+    },
+    [toast]
+  );
+
   const unlocatedCount = useMemo(
     () => plugs.filter((p) => p.latitude == null || p.longitude == null).length,
     [plugs]
+  );
+
+  const connectorOptions = useMemo(() => distinctConnectors(plugs), [plugs]);
+
+  // [Discovery] The LIST view: search + filters narrow it, then (once the
+  // driver has shared their location) it sorts nearest-first — plugs without
+  // coordinates sink to the end. Without a location it keeps fetch order.
+  // The map itself keeps plotting the full fetched array.
+  const listPlugs = useMemo(() => {
+    const filtered = plugs.filter((p) => {
+      if (!matchesQuery(p, search)) return false;
+      if (!matchesPowerBucket(p, powerFilter)) return false;
+      if (!matchesPriceBucket(p, priceFilter)) return false;
+      if (connectorFilter && p.connector_type !== connectorFilter) return false;
+      if (favoritesOnly && p.is_favorite !== true) return false;
+      return true;
+    });
+    if (!userLocation) return filtered;
+    return filtered
+      .map((p) => ({
+        plug: p,
+        dist:
+          p.latitude != null && p.longitude != null
+            ? distanceKm(userLocation, { lat: p.latitude, lng: p.longitude })
+            : Infinity,
+      }))
+      .sort((a, b) => a.dist - b.dist)
+      .map((x) => x.plug);
+  }, [plugs, search, powerFilter, priceFilter, connectorFilter, favoritesOnly, userLocation]);
+
+  const listFiltersActive = Boolean(
+    search.trim() || powerFilter || priceFilter || connectorFilter || favoritesOnly
   );
 
   return (
@@ -129,6 +204,7 @@ export default function MapPage() {
             plugs={plugs}
             authed={Boolean(user)}
             onSelectPlug={handleSelectPlug}
+            onToggleFavorite={user ? toggleFavorite : undefined}
             flyTo={flyTarget}
             userLocation={userLocation}
           />
@@ -156,6 +232,69 @@ export default function MapPage() {
             >
               <RefreshCw size={16} aria-hidden="true" />
             </button>
+          </div>
+
+          <div className="map-list-filters">
+            <input
+              className="input"
+              type="search"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search by name, ID, or group"
+              aria-label="Search chargers"
+            />
+            <div className="map-list-filter-row">
+              <select
+                className="select"
+                value={powerFilter}
+                onChange={(e) => setPowerFilter(e.target.value)}
+                aria-label="Filter by power"
+              >
+                {POWER_BUCKETS.map((b) => (
+                  <option key={b.value} value={b.value}>
+                    {b.label}
+                  </option>
+                ))}
+              </select>
+              <select
+                className="select"
+                value={priceFilter}
+                onChange={(e) => setPriceFilter(e.target.value)}
+                aria-label="Filter by price"
+              >
+                {PRICE_BUCKETS.map((b) => (
+                  <option key={b.value} value={b.value}>
+                    {b.label}
+                  </option>
+                ))}
+              </select>
+              {connectorOptions.length > 1 && (
+                <select
+                  className="select"
+                  value={connectorFilter}
+                  onChange={(e) => setConnectorFilter(e.target.value)}
+                  aria-label="Filter by connector"
+                >
+                  <option value="">Any connector</option>
+                  {connectorOptions.map((c) => (
+                    <option key={c} value={c}>
+                      {c}
+                    </option>
+                  ))}
+                </select>
+              )}
+              {user && (
+                <button
+                  type="button"
+                  className={`btn btn-sm ${favoritesOnly ? 'btn-primary' : 'btn-ghost'}`}
+                  aria-pressed={favoritesOnly}
+                  onClick={() => setFavoritesOnly((v) => !v)}
+                >
+                  <Star size={14} aria-hidden="true" />
+                  Favorites
+                </button>
+              )}
+            </div>
           </div>
 
           <div className="map-legend">
@@ -190,8 +329,11 @@ export default function MapPage() {
                     {unlocatedCount} charger{unlocatedCount === 1 ? '' : 's'} not on the map yet
                   </p>
                 )}
+                {listPlugs.length === 0 && listFiltersActive ? (
+                  <p className="text-3 text-sm">No chargers match the current filters.</p>
+                ) : (
                 <ul className="map-list">
-                  {plugs.map((plug) => {
+                  {listPlugs.map((plug) => {
                     const state = getPlugAvailability(plug);
                     const hasLocation = plug.latitude != null && plug.longitude != null;
                     const dist = userLocation && hasLocation
@@ -214,10 +356,27 @@ export default function MapPage() {
                             <span className="map-list-row-distance">{formatDistance(dist)}</span>
                           )}
                         </span>
+                        {hasLocation && (
+                          <button
+                            type="button"
+                            className="btn btn-quiet btn-icon map-list-row-nav"
+                            aria-label={`Navigate to ${plug.name}`}
+                            onClick={() =>
+                              window.open(
+                                googleMapsDirUrl(plug.latitude, plug.longitude),
+                                '_blank',
+                                'noopener'
+                              )
+                            }
+                          >
+                            <Navigation size={14} aria-hidden="true" />
+                          </button>
+                        )}
                       </li>
                     );
                   })}
                 </ul>
+                )}
               </>
             )}
           </div>

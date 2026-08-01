@@ -17,14 +17,21 @@
  * `flyTo` lets the page pan the (already-mounted) map imperatively — used
  * for the geolocate button — via a tiny useMap child, since MapContainer's
  * own `center`/`bounds` props only apply once, at creation.
+ *
+ * [Discovery] The popup also carries a favorite star (authed users, when the
+ * page passes `onToggleFavorite`) and a "Navigate" hand-off that opens the
+ * device's maps app with directions (utils/navHandoff) — navigation needs no
+ * account, so that one shows for everyone.
  */
 import { useEffect } from 'react';
 import { MapContainer, TileLayer, Marker, Popup, useMap } from 'react-leaflet';
 import L from 'leaflet';
+import { Navigation, Star } from 'lucide-react';
 import 'leaflet/dist/leaflet.css';
 import { StatusDot, Money } from './ui';
 import { useConfig } from '../contexts/ConfigContext';
 import { AVAILABILITY_CSS_VAR, getPlugAvailability } from '../utils/plugAvailability';
+import { googleMapsDirUrl } from '../utils/navHandoff';
 import '../pages/MapPage.css';
 
 // Colored dot markers (Available / In use / No power / Offline / Maintenance)
@@ -57,7 +64,7 @@ function ViewController({ flyTo }) {
   return null;
 }
 
-export default function MapComponent({ plugs, authed, onSelectPlug, flyTo, userLocation }) {
+export default function MapComponent({ plugs, authed, onSelectPlug, onToggleFavorite, flyTo, userLocation }) {
   const { coin_inr_rate: rate } = useConfig();
 
   // Center roughly on India, or a default location, when nothing has coordinates.
@@ -112,6 +119,26 @@ export default function MapComponent({ plugs, authed, onSelectPlug, flyTo, userL
                       <span>/kWh</span>
                     </div>
                   )}
+                  {authed && onToggleFavorite && (
+                    <button
+                      type="button"
+                      className={`map-popup-fav${plug.is_favorite ? ' active' : ''}`}
+                      aria-pressed={plug.is_favorite === true}
+                      aria-label={
+                        plug.is_favorite
+                          ? `Remove ${plug.name} from favorites`
+                          : `Add ${plug.name} to favorites`
+                      }
+                      onClick={() => onToggleFavorite(plug)}
+                    >
+                      <Star
+                        size={14}
+                        aria-hidden="true"
+                        fill={plug.is_favorite ? 'currentColor' : 'none'}
+                      />
+                      {plug.is_favorite ? 'Favorited' : 'Favorite'}
+                    </button>
+                  )}
                   {authed ? (
                     canCharge ? (
                       <button
@@ -133,6 +160,20 @@ export default function MapComponent({ plugs, authed, onSelectPlug, flyTo, userL
                       Sign in to charge
                     </button>
                   )}
+                  <button
+                    type="button"
+                    className="btn btn-quiet btn-sm btn-full"
+                    onClick={() =>
+                      window.open(
+                        googleMapsDirUrl(plug.latitude, plug.longitude),
+                        '_blank',
+                        'noopener'
+                      )
+                    }
+                  >
+                    <Navigation size={14} aria-hidden="true" />
+                    Navigate
+                  </button>
                 </div>
               </Popup>
             </Marker>

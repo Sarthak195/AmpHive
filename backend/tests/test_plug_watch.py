@@ -63,6 +63,10 @@ def _plug(plug_id=7, status=PlugStatus.OCCUPIED, group_id=None, name="Bay 1",
     # [Queued charge] No per-plug override -> inherits the tenant default.
     p.queued_charging_enabled = None
     p.auto_start_delay_min = None
+    # [Discovery] Unset by default — MagicMock auto-attrs aren't valid
+    # Optional[int]/Optional[str] values, so these must be explicit.
+    p.rated_power_w = None
+    p.connector_type = None
     return p
 
 
@@ -571,6 +575,10 @@ async def test_available_plugs_carry_watching_via_one_extra_query():
     watched_result = MagicMock()
     watched_result.scalars.return_value.all.return_value = [2]  # watching plug B
 
+    # [Favorites] Same shape as watched_result — one more constant query.
+    favorited_result = MagicMock()
+    favorited_result.scalars.return_value.all.return_value = []
+
     # [Reservations] The list endpoint also runs its grouped reservation
     # lookup: one lazy-expiry UPDATE (rowcount=0 → nothing flipped → no
     # commit) + one grouped SELECT — a constant 2 more queries for any list
@@ -579,7 +587,7 @@ async def test_available_plugs_carry_watching_via_one_extra_query():
     reservations_result = MagicMock()
     reservations_result.scalars.return_value = []
 
-    db = _db(rows_result, watched_result, expire_result, reservations_result)
+    db = _db(rows_result, watched_result, favorited_result, expire_result, reservations_result)
 
     with patch("backend.routers.plugs.gateway_is_live", return_value=True), \
          patch("backend.routers.plugs.resolve_price_display_batch",
@@ -587,9 +595,9 @@ async def test_available_plugs_carry_watching_via_one_extra_query():
                                        2: (Decimal("5.00"), None, None)})):
         responses = await get_available_plugs(user, db)
 
-    # plugs+joins, the watches, then the reservation expiry+grouped pair —
-    # constant query count regardless of list size (no N+1).
-    assert db.execute.await_count == 4
+    # plugs+joins, the watches, the favorites, then the reservation
+    # expiry+grouped pair — constant query count regardless of list size (no N+1).
+    assert db.execute.await_count == 5
     by_id = {r.id: r for r in responses}
     assert by_id[1].watching is False
     assert by_id[2].watching is True
@@ -612,6 +620,7 @@ async def test_get_plug_reports_watching_true():
         expire_result,                    # reservation lazy-expiry UPDATE
         reservations_result,              # grouped reservation SELECT
         _scalar_one_or_none(101),         # a watch row id exists
+        _scalar_one_or_none(None),        # [Favorites] no favorite row
     )
 
     with patch("backend.routers.plugs.resolve_price_display",
@@ -619,4 +628,5 @@ async def test_get_plug_reports_watching_true():
         res = await get_plug(7, user, db)
 
     assert res.watching is True
+    assert res.is_favorite is False
     assert res.status == "occupied"
