@@ -122,6 +122,15 @@ the CANCELLED status, so a cancelled payout's earnings aren't stranded —
 they're simply claimable again by the next request, same as the watermark's
 CANCELLED-payout exclusion always did for the window it used to define.
 
+Legacy data: payouts created BEFORE settlement marking never claimed their
+sessions, so on upgrade every historic already-paid-out session would have
+counted as unsettled and been re-paid by the very next request. Migration
+0028_payout_settlement_marking therefore backfills the old scheme's
+attribution once: each FINISHED session whose ended_at falls inside a
+non-CANCELLED payout's [period_start, period_end) window gets stamped with
+that payout's id (see the migration's docstring for the full rationale,
+including why race-lost sessions stay lost retroactively).
+
 Offline top-up pool
 --------------------
 A CPO can also credit a driver's wallet directly for cash collected offline
@@ -303,7 +312,11 @@ async def sum_unsettled_session_coins(db: AsyncSession, tenant_id: int) -> Decim
 
 
 async def mark_unsettled_sessions_and_sum_gross(
-    db: AsyncSession, tenant_id: int, payout_id: int
+    db: AsyncSession,
+    tenant_id: int,
+    payout_id: int,
+    refund_window_start: datetime,
+    refund_window_end: datetime,
 ) -> Decimal:
     """Atomically claim every one of this tenant's unsettled FINISHED
     sessions for `payout_id` and return their post-refund gross.
@@ -322,14 +335,18 @@ async def mark_unsettled_sessions_and_sum_gross(
 
     Refund windowing is UNCHANGED and out of scope for this fix: the
     approved-dispute-refund subtraction below still runs over the tenant's
-    current [watermark, now) window via `sum_approved_refund_coins`, exactly
-    as the old ended_at-windowed gross path did (see "Refunds" in the module
-    docstring for why that clawback must stay keyed to the dispute's own
-    resolved_at, not to when a session gets claimed).
+    [refund_window_start, refund_window_end) window — the caller's
+    watermark -> now, i.e. the new payout's own period bounds — via
+    `sum_approved_refund_coins`, exactly as the old ended_at-windowed gross
+    path did (see "Refunds" in the module docstring for why that clawback
+    must stay keyed to the dispute's own resolved_at, not to when a session
+    gets claimed). The window MUST be passed in as the watermark the caller
+    read BEFORE inserting/flushing the new Payout row: recomputing
+    `tenant_settlement_watermark` here would see that flushed row inside the
+    same transaction and return the new payout's OWN period_end — an almost
+    empty refund window that silently skips every pending refund and
+    over-pays the CPO.
     """
-    watermark = await tenant_settlement_watermark(db, tenant_id)
-    now = datetime.now(timezone.utc)
-
     result = await db.execute(
         update(ChargingSession)
         .where(
@@ -344,7 +361,9 @@ async def mark_unsettled_sessions_and_sum_gross(
     )
     gross = to_money(sum(result.scalars().all(), ZERO_MONEY))
 
-    refunds = await sum_approved_refund_coins(db, tenant_id, window_start=watermark, window_end=now)
+    refunds = await sum_approved_refund_coins(
+        db, tenant_id, window_start=refund_window_start, window_end=refund_window_end
+    )
     return to_money(max(gross - refunds, ZERO_MONEY))
 
 

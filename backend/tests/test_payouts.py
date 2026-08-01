@@ -737,21 +737,34 @@ async def test_refund_approved_after_payout_still_claws_back_next_window(factory
     dispute's resolved_at, not the session's ended_at. Under the old ended_at
     windowing the refund fell behind the watermark and vanished, letting a CPO
     be paid in full and then approve the refund for free."""
-    from backend.database.models import DisputeStatus, Payout, SessionDispute
+    from sqlalchemy import update
+
+    from backend.database.models import (
+        ChargingSession,
+        DisputeStatus,
+        Payout,
+        SessionDispute,
+    )
 
     tenant_id, user_id = await _seed_tenant(factory, "PayThenRefundCo")
     driver_id = await _seed_driver(factory, "latedisputer")
     now = datetime.now(timezone.utc)
 
     # S1 ended 2h ago and was fully settled into a PAID payout whose period_end
-    # (90m ago) becomes the tenant's watermark -> S1 now sits behind it.
+    # (90m ago) becomes the tenant's watermark. Under settlement marking a
+    # settled session is one the payout CLAIMED (settled_payout_id), so the
+    # seeding stamps the claim explicitly — for a payout created through the
+    # API that's what cpo_request_payout does, and for a pre-marking payout
+    # like this fabricated one it's what migration 0028's backfill does
+    # (test_backfill_claims_windowed_sessions_for_legacy_payouts proves that
+    # SQL produces exactly this state).
     old_session_id = await _seed_session(
         factory, tenant_id, "20.00", SessionStatus.COMPLETED,
         ended_at=now - timedelta(hours=2),
     )
     settled_at = now - timedelta(minutes=90)
     async with factory() as db:
-        db.add(Payout(
+        paid_payout = Payout(
             tenant_id=tenant_id,
             period_start=payout_service.EPOCH,
             period_end=settled_at,
@@ -760,7 +773,14 @@ async def test_refund_approved_after_payout_still_claws_back_next_window(factory
             net_coins=Decimal("18.00"),
             status=PayoutStatus.PAID,
             requested_by_user_id=user_id,
-        ))
+        )
+        db.add(paid_payout)
+        await db.flush()
+        await db.execute(
+            update(ChargingSession)
+            .where(ChargingSession.id == old_session_id)
+            .values(settled_payout_id=paid_payout.id)
+        )
         await db.commit()
 
     # Fresh earnings in the current unsettled window for the clawback to bite.
@@ -1160,23 +1180,139 @@ async def test_sum_unsettled_session_coins_matches_what_a_request_would_claim(fa
     mark_unsettled_sessions_and_sum_gross actually claims -- GET
     /api/cpo/earnings and POST /api/cpo/payouts must never disagree, and the
     preview call itself must not have claimed anything (still unsettled
-    afterwards, claimable by the real request)."""
+    afterwards, claimable by the real request). Seeds an APPROVED refund so
+    the agreement covers the refund-clawback subtraction too, on BOTH paths:
+    a preview that skipped the subtraction would over-show, and a claim that
+    skipped it (e.g. by recomputing the watermark after the new payout row
+    is flushed, seeing its own period_end, and windowing the refund out --
+    the exact bug this guards against) would over-PAY."""
+    from backend.database.models import DisputeStatus, SessionDispute
+
     tenant_id, user_id = await _seed_tenant(factory, "PreviewMatchesCo")
+    driver_id = await _seed_driver(factory, "previewdisputer")
     user = _cpo_user(tenant_id, user_id)
     now = datetime.now(timezone.utc)
 
-    await _seed_session(factory, tenant_id, "13.50", SessionStatus.COMPLETED, ended_at=now - timedelta(hours=1))
+    session_id = await _seed_session(
+        factory, tenant_id, "13.50", SessionStatus.COMPLETED, ended_at=now - timedelta(hours=1)
+    )
+    async with factory() as db:
+        db.add(SessionDispute(
+            session_id=session_id,
+            tenant_id=tenant_id,
+            driver_user_id=driver_id,
+            reason="Partial refund before any payout",
+            status=DisputeStatus.APPROVED,
+            refund_coins=Decimal("2.00"),
+            resolved_at=now,
+        ))
+        await db.commit()
 
+    # Preview: 13.50 session gross minus the 2.00 approved refund.
     async with factory() as db:
         preview = await payout_service.sum_unsettled_session_coins(db, tenant_id)
-    assert preview == Decimal("13.50")
+    assert preview == Decimal("11.50")
 
+    # The claim must compute the exact same post-refund gross.
     async with factory() as db:
         payout = await cpo_request_payout(user=user, db=db)
-    assert payout["gross_coins"] == pytest.approx(13.50)
+    assert payout["gross_coins"] == pytest.approx(11.50)
 
     # The preview read didn't claim anything -- a second preview right after
-    # the real request correctly shows zero unsettled left.
+    # the real request correctly shows zero unsettled left (and the already-
+    # subtracted refund, now behind the new watermark, is not re-subtracted).
     async with factory() as db:
         after = await payout_service.sum_unsettled_session_coins(db, tenant_id)
     assert after == Decimal("0.00")
+
+
+@requires_db
+@pytest.mark.asyncio
+async def test_backfill_claims_windowed_sessions_for_legacy_payouts(factory):
+    """Migration 0028's backfill: payouts that predate settlement marking
+    never claimed their sessions, so without a one-time backfill the first
+    post-deploy request would re-pay all of history. The backfill stamps
+    each FINISHED session whose ended_at falls in a non-CANCELLED payout's
+    [period_start, period_end) window with that payout's id -- and nothing
+    else: out-of-window sessions and CANCELLED payouts' windows stay NULL.
+    Executes the migration's own _BACKFILL_SQL verbatim (imported from the
+    version file) against a seeded schema, since the alembic-driven
+    migration tests only ever run against an empty database."""
+    import importlib.util
+    from pathlib import Path
+
+    from sqlalchemy import select, text
+
+    from backend.database.models import ChargingSession, Payout
+
+    spec = importlib.util.spec_from_file_location(
+        "migration_0028",
+        Path(__file__).parents[1] / "migrations" / "versions" / "0028_payout_settlement_marking.py",
+    )
+    migration_0028 = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration_0028)
+
+    tenant_id, user_id = await _seed_tenant(factory, "BackfillCo")
+    now = datetime.now(timezone.utc)
+
+    in_window_id = await _seed_session(
+        factory, tenant_id, "20.00", SessionStatus.COMPLETED, ended_at=now - timedelta(hours=2)
+    )
+    paid_in_window_id = await _seed_session(
+        factory, tenant_id, "5.00", SessionStatus.PAID, ended_at=now - timedelta(hours=3)
+    )
+    after_window_id = await _seed_session(
+        factory, tenant_id, "8.00", SessionStatus.COMPLETED, ended_at=now - timedelta(minutes=30)
+    )
+    cancelled_window_id = await _seed_session(
+        factory, tenant_id, "7.00", SessionStatus.COMPLETED, ended_at=now - timedelta(minutes=70)
+    )
+
+    settled_at = now - timedelta(minutes=90)
+    async with factory() as db:
+        legacy_paid = Payout(
+            tenant_id=tenant_id,
+            period_start=payout_service.EPOCH,
+            period_end=settled_at,
+            gross_coins=Decimal("25.00"),
+            platform_fee_coins=Decimal("2.50"),
+            net_coins=Decimal("22.50"),
+            status=PayoutStatus.PAID,
+            requested_by_user_id=user_id,
+        )
+        # A CANCELLED payout whose window covers cancelled_window_id: its
+        # sessions must NOT be claimed (cancel always freed its window).
+        legacy_cancelled = Payout(
+            tenant_id=tenant_id,
+            period_start=settled_at,
+            period_end=now - timedelta(minutes=60),
+            gross_coins=Decimal("7.00"),
+            platform_fee_coins=Decimal("0.70"),
+            net_coins=Decimal("6.30"),
+            status=PayoutStatus.CANCELLED,
+            requested_by_user_id=user_id,
+        )
+        db.add(legacy_paid)
+        db.add(legacy_cancelled)
+        await db.commit()
+        legacy_paid_id = legacy_paid.id
+
+    async with factory() as db:
+        await db.execute(text(migration_0028._BACKFILL_SQL))
+        await db.commit()
+
+    async with factory() as db:
+        rows = {
+            row.id: row.settled_payout_id
+            for row in (await db.execute(select(ChargingSession))).scalars().all()
+        }
+    assert rows[in_window_id] == legacy_paid_id
+    assert rows[paid_in_window_id] == legacy_paid_id
+    assert rows[after_window_id] is None
+    assert rows[cancelled_window_id] is None
+
+    # Post-backfill, the unsettled preview shows only the truly-unsettled
+    # sessions -- history is not re-payable.
+    async with factory() as db:
+        unsettled = await payout_service.sum_unsettled_session_coins(db, tenant_id)
+    assert unsettled == Decimal("15.00")  # 8.00 + 7.00, not the settled 25.00

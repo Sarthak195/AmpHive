@@ -14,7 +14,7 @@ claimed rows back to NULL, freeing them for the next request. Refund/top-up
 windowing is UNCHANGED -- still watermark/ended_at/resolved_at-based -- and
 out of scope for this migration.
 
-Two changes:
+Three changes:
 
 1. `charging_sessions.settled_payout_id` INTEGER, FK -> payouts(id) ON
    DELETE SET NULL, nullable (NULL = unsettled). A payout row disappearing
@@ -28,9 +28,30 @@ Two changes:
    unsettled-sessions query (mark_unsettled_sessions_and_sum_gross /
    sum_unsettled_session_coins) -- same partial-index idiom as
    0011_disputes' ix_session_disputes_one_open_per_session.
+3. BACKFILL (`_BACKFILL_SQL` -- the part that makes this deployable on real
+   data): every payout that already exists was created under the OLD
+   windowed scheme and therefore never claimed its sessions -- their
+   settled_payout_id is NULL across the board. Without a backfill, the
+   first post-deploy payout request would claim (and RE-PAY) every historic
+   already-paid-out session in one shot. So this migration reproduces the
+   old scheme's attribution once, as data: each FINISHED session
+   (status completed/paid, matching services/payouts.py's
+   FINISHED_SESSION_STATUSES) whose ended_at falls inside a non-CANCELLED
+   payout's [period_start, period_end) window is stamped with that payout's
+   id. Non-cancelled windows are disjoint and tile [EPOCH, watermark) by
+   construction (each new payout's period_start = the previous
+   MAX(period_end)), so the attribution is deterministic. Sessions that
+   were LOST to the old watermark race (committed after their covering
+   payout's snapshot ran) get stamped too -- they were never actually paid,
+   but retroactively distinguishing them from paid ones is impossible (the
+   old scheme kept no per-session record; that is exactly the defect), so
+   the backfill preserves the old scheme's attribution as-was and the fix
+   is forward-looking. The `cs.settled_payout_id IS NULL` guard makes the
+   statement idempotent: re-running never re-stamps a claimed row.
 
 Idempotent add (same rationale as 0025/0026): a create_all()-built database
-already has this column/indexes from database/models.py.
+already has this column/indexes from database/models.py (and, being brand
+new, no legacy rows for the backfill to touch).
 
 PROVISIONAL NUMBERING: down_revision chains to 0026_offline_topups, the
 actual migration head on main at the time this was written (there was no
@@ -49,6 +70,22 @@ revision = "0028_payout_settlement_marking"
 down_revision = "0026_offline_topups"
 branch_labels = None
 depends_on = None
+
+# Module-level so backend/tests/test_payouts.py can execute the exact same
+# statement against a seeded schema (the alembic-driven migration tests only
+# run against an EMPTY database, which can't exercise a data backfill).
+# See point 3 of the module docstring for the full rationale.
+_BACKFILL_SQL = """
+    UPDATE charging_sessions AS cs
+    SET settled_payout_id = p.id
+    FROM payouts AS p
+    WHERE cs.settled_payout_id IS NULL
+      AND cs.tenant_id = p.tenant_id
+      AND p.status != 'cancelled'
+      AND cs.status IN ('completed', 'paid')
+      AND cs.ended_at >= p.period_start
+      AND cs.ended_at < p.period_end
+"""
 
 
 def upgrade() -> None:
@@ -75,6 +112,10 @@ def upgrade() -> None:
         "CREATE INDEX IF NOT EXISTS idx_charging_sessions_unsettled "
         "ON charging_sessions (tenant_id, status) WHERE settled_payout_id IS NULL"
     )
+    # Claim legacy sessions for the pre-marking payouts that covered them --
+    # see point 3 of the module docstring. Runs after the indexes exist so
+    # the join is cheap even on a large history.
+    op.execute(_BACKFILL_SQL)
 
 
 def downgrade() -> None:

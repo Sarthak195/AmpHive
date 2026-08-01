@@ -162,8 +162,16 @@ async def cpo_request_payout(
 
     # Claim every unsettled session for this payout and sum their post-refund
     # gross in one statement — services/payouts.py's "Settlement marking".
+    # The refund window is the watermark/now read BEFORE the flush above: the
+    # service must not recompute the watermark itself, or it would see the
+    # just-flushed payout's own period_end inside this transaction and skip
+    # every pending refund (see its docstring).
     gross = await payout_service.mark_unsettled_sessions_and_sum_gross(
-        db, tenant_id, payout.id
+        db,
+        tenant_id,
+        payout.id,
+        refund_window_start=watermark,
+        refund_window_end=now,
     )
     fee, net = payout_service.compute_fee_and_net(gross)
 
