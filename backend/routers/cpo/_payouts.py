@@ -12,11 +12,18 @@ earnings/watermark math (requirements.md §5.1's "withdraw earnings" promise
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import and_, select
+from sqlalchemy import and_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database.db import get_db
-from backend.database.models import Payout, PayoutStatus, Tenant, User, UserRole
+from backend.database.models import (
+    ChargingSession,
+    Payout,
+    PayoutStatus,
+    Tenant,
+    User,
+    UserRole,
+)
 from backend.services import payouts as payout_service
 from backend.services.audit import try_record_audit
 from backend.services.money import ZERO_MONEY, to_money
@@ -34,10 +41,17 @@ async def cpo_earnings(
 ):
     """
     Lifetime + unsettled earnings for the CPO's tenant: gross coins collected
-    from COMPLETED sessions, the platform's cut, and the net owed to the CPO
-    — plus the settlement watermark (unsettled = watermark -> now). This is
-    the read-only dashboard view; POST /api/cpo/payouts snapshots the
-    unsettled leg into a payout request.
+    from COMPLETED sessions, the platform's cut, and the net owed to the CPO.
+    Unsettled gross is every FINISHED session not yet claimed by a payout
+    (``settled_payout_id IS NULL`` — services/payouts.py's "Settlement
+    marking (gross)"), computed read-only via `sum_unsettled_session_coins`
+    so viewing the dashboard can never claim a session out from under a
+    future payout. `period_start`/`period_end` below still reflect the
+    tenant's settlement watermark, which POST /api/cpo/payouts still uses for
+    its refund-clawback window and its own period bounds — see
+    services/payouts.py for the full watermark definition. This is the
+    read-only dashboard view; POST /api/cpo/payouts is what actually claims
+    the unsettled sessions into a payout request.
 
     `topup_pool` is the CPO offline-top-up feature's available balance:
     unsettled net earnings since the watermark, minus offline top-ups already
@@ -78,15 +92,27 @@ async def cpo_request_payout(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Snapshot the tenant's unsettled earnings (watermark -> now) into a new
-    REQUESTED payout. The payable net is capped by the same available top-up
-    pool GET /api/cpo/earnings shows (unsettled net minus offline top-ups
-    already issued since the watermark — services/payouts.py's "Offline
-    top-up pool"), so a CPO can never draw a bank payout AND a cash top-up
-    from the same earnings. 400 if there's nothing left to settle (payable
-    net <= 0 — including the case where top-ups already consumed all of it),
-    409 if a payout is already REQUESTED for this tenant (only one pending
-    settlement at a time).
+    Snapshot the tenant's unsettled earnings into a new REQUESTED payout.
+    "Unsettled" gross is now determined by row-ownership, not a time window:
+    every FINISHED session with ``settled_payout_id IS NULL`` is claimed for
+    this payout in one atomic UPDATE ... RETURNING
+    (services/payouts.py's `mark_unsettled_sessions_and_sum_gross` — see the
+    module docstring's "Settlement marking (gross)" section for the watermark
+    race this closes). The payable net is still capped by the same available
+    top-up pool GET /api/cpo/earnings shows (unsettled net minus offline
+    top-ups already issued since the watermark — services/payouts.py's
+    "Offline top-up pool"), so a CPO can never draw a bank payout AND a cash
+    top-up from the same earnings. 400 if there's nothing left to settle
+    (payable net <= 0 — including the case where top-ups already consumed all
+    of it), 409 if a payout is already REQUESTED for this tenant (only one
+    pending settlement at a time).
+
+    Claim-then-check: the sessions are claimed (and a Payout row inserted)
+    BEFORE the payable-net check, because the claim and the gross read are
+    one inseparable statement. If the check then fails, the whole attempt is
+    rolled back — both the claim and the Payout insert — so a 400 response
+    never leaves an orphaned payout row or permanently-claimed sessions
+    behind; the sessions go straight back to unsettled for the next request.
 
     Race-safe: row-locks the tenant for the duration of this transaction, so
     two concurrent requests — or a concurrent offline top-up, which locks the
@@ -114,32 +140,60 @@ async def cpo_request_payout(
             detail="A payout request is already pending for this tenant.",
         )
 
-    # Single source of truth for the earnings/pool math — same function GET
-    # /api/cpo/earnings calls, so the two can never disagree.
-    summary = await payout_service.tenant_earnings_summary(db, tenant_id)
-    watermark = summary["watermark"]
-    now = summary["now"]
-    gross = summary["unsettled_gross_coins"]
-    fee = summary["unsettled_platform_fee_coins"]
-    topups = summary["topups_since_watermark_coins"]
-    payable_net = summary["available_pool_coins"]  # unsettled net, minus top-ups already issued
+    watermark = await payout_service.tenant_settlement_watermark(db, tenant_id)
+    now = datetime.now(timezone.utc)
+
+    # Insert first (placeholder money columns) so the claiming UPDATE below
+    # has a real payout id to stamp onto the sessions it claims. flush(), not
+    # commit(): nothing is durable/visible to other transactions yet, so a
+    # failed payable-net check below can still roll the whole attempt back.
+    payout = Payout(
+        tenant_id=tenant_id,
+        period_start=watermark,
+        period_end=now,
+        gross_coins=ZERO_MONEY,
+        platform_fee_coins=ZERO_MONEY,
+        net_coins=ZERO_MONEY,
+        status=PayoutStatus.REQUESTED,
+        requested_by_user_id=user.id,
+    )
+    db.add(payout)
+    await db.flush()
+
+    # Claim every unsettled session for this payout and sum their post-refund
+    # gross in one statement — services/payouts.py's "Settlement marking".
+    # The refund window is the watermark/now read BEFORE the flush above: the
+    # service must not recompute the watermark itself, or it would see the
+    # just-flushed payout's own period_end inside this transaction and skip
+    # every pending refund (see its docstring).
+    gross = await payout_service.mark_unsettled_sessions_and_sum_gross(
+        db,
+        tenant_id,
+        payout.id,
+        refund_window_start=watermark,
+        refund_window_end=now,
+    )
+    fee, net = payout_service.compute_fee_and_net(gross)
+
+    # Same top-up-pool deduction as GET /api/cpo/earnings (unchanged windowing
+    # — services/payouts.py's "Offline top-up pool").
+    topups = await payout_service.sum_offline_topups(
+        db, tenant_id, window_start=watermark, window_end=now
+    )
+    payable_net = to_money(max(net - topups, ZERO_MONEY))
     if payable_net <= ZERO_MONEY:
+        # Undo the claim AND the payout insert -- neither is committed yet,
+        # so the claimed sessions simply go back to unsettled (settled_payout_id
+        # reverts with the transaction) and no orphaned payout row survives.
+        await db.rollback()
         detail = "No unsettled earnings to pay out."
         if topups > ZERO_MONEY:
             detail += f" ({topups} coins of this window were already issued as offline top-ups.)"
         raise HTTPException(status_code=400, detail=detail)
 
-    payout = Payout(
-        tenant_id=tenant_id,
-        period_start=watermark,
-        period_end=now,
-        gross_coins=gross,
-        platform_fee_coins=fee,
-        net_coins=payable_net,
-        status=PayoutStatus.REQUESTED,
-        requested_by_user_id=user.id,
-    )
-    db.add(payout)
+    payout.gross_coins = gross
+    payout.platform_fee_coins = fee
+    payout.net_coins = payable_net
     await db.commit()
     await db.refresh(payout)
 
@@ -147,7 +201,7 @@ async def cpo_request_payout(
         f"CPO payout requested: tenant={tenant_id} payout={payout.id} "
         f"window=[{watermark.isoformat()}, {now.isoformat()}) "
         f"gross={gross} fee={fee} net={payable_net} "
-        f"(raw_net={to_money(gross - fee)}, topups_deducted={topups}) by {user.email}"
+        f"(raw_net={net}, topups_deducted={topups}) by {user.email}"
     )
 
     # Snapshot the response BEFORE the audit attempt: try_record_audit's
@@ -250,11 +304,15 @@ async def cpo_cancel_payout(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Cancel a REQUESTED payout, freeing its window for a future request (the
-    watermark excludes CANCELLED payouts). The owning CPO or an admin may
-    cancel; any other tenant's CPO gets 404 (not "403", so a cross-tenant
-    caller can't distinguish "not yours" from "doesn't exist"). 409 if the
-    payout isn't REQUESTED — same race-safe row-lock as mark_paid.
+    Cancel a REQUESTED payout, freeing every session it had claimed for a
+    future request: ``ChargingSession.settled_payout_id`` is reset back to
+    NULL for every row claiming this payout's id (services/payouts.py's
+    "Settlement marking (gross)"), the row-ownership replacement for the old
+    "watermark excludes CANCELLED payouts" window-freeing behavior. The
+    owning CPO or an admin may cancel; any other tenant's CPO gets 404 (not
+    "403", so a cross-tenant caller can't distinguish "not yours" from
+    "doesn't exist"). 409 if the payout isn't REQUESTED — same race-safe
+    row-lock as mark_paid.
     """
     result = await db.execute(
         select(Payout).where(Payout.id == payout_id).with_for_update()
@@ -270,6 +328,13 @@ async def cpo_cancel_payout(
             detail=f"Payout is '{payout.status.value}', not 'requested'.",
         )
 
+    # Free every session this payout had claimed -- they go back to
+    # unsettled (settled_payout_id NULL) so the next request can claim them.
+    await db.execute(
+        update(ChargingSession)
+        .where(ChargingSession.settled_payout_id == payout.id)
+        .values(settled_payout_id=None)
+    )
     payout.status = PayoutStatus.CANCELLED
     await db.commit()
     await db.refresh(payout)

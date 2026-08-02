@@ -386,6 +386,30 @@ class ChargingSession(Base):
     rate_segment_start_kwh: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     rate_valid_until: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    # [Payout settlement-marking] Row-ownership replacement for the
+    # ended_at/watermark TIME-WINDOW that used to decide which sessions were
+    # "unsettled" for GROSS (services/payouts.py's module docstring,
+    # "Settlement marking" section). A payout claims its sessions by
+    # stamping its own id here in the SAME UPDATE...RETURNING statement that
+    # sums their coins_spent (services.payouts.
+    # mark_unsettled_sessions_and_sum_gross), so the read (which sessions are
+    # unsettled) and the write (mark them settled) can never disagree.
+    # NULL = unsettled/eligible for the NEXT payout request, regardless of
+    # when ended_at falls relative to any watermark -- this is what closes
+    # the race where a session finalizing concurrently with a payout
+    # snapshot could land with an ended_at just behind the snapshot's `now`
+    # and never be paid out under the old windowed scheme (see "Watermark
+    # race (closed)" in services/payouts.py). A CANCELLED payout
+    # (routers/cpo/_payouts.py cpo_cancel_payout) resets every session it had
+    # claimed back to NULL, freeing them for a future payout instead of
+    # stranding them forever behind a cancelled snapshot. Refund/top-up
+    # windowing is UNCHANGED by this column -- those stay keyed off the
+    # tenant's watermark (Payout.period_end) and each dispute's own
+    # resolved_at, exactly as before.
+    settled_payout_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("payouts.id", ondelete="SET NULL"), nullable=True
+    )
+
     # [REC-01 follow-up — energy counter reset] The P110/ESP32 wire `kwh` is a
     # SESSION-RELATIVE counter maintained on the device; a mid-session device
     # reboot/reflash (or the ESP32 losing its NVS baseline) restarts that
@@ -413,10 +437,26 @@ class ChargingSession(Base):
     # plug_id/status backs "is this plug's session still active", user_id/status
     # backs a driver's active/past sessions, tenant_id/started_at backs CPO
     # session history ordered newest-first.
+    #
+    # settled_payout_id (Alembic revision 0028_payout_settlement_marking):
+    # a plain btree backs the FK lookup and cpo_cancel_payout's free-on-cancel
+    # UPDATE; the partial composite backs the new unsettled-sessions query
+    # (mark_unsettled_sessions_and_sum_gross / sum_unsettled_session_coins) --
+    # only rows with settled_payout_id IS NULL are ever read by that path, so
+    # indexing just those keeps the index small and the settled majority of
+    # rows out of it entirely (mirrors ix_session_disputes_one_open_per_session's
+    # partial-index style).
     __table_args__ = (
         Index("ix_charging_sessions_plug_status", "plug_id", "status"),
         Index("ix_charging_sessions_user_status", "user_id", "status"),
         Index("ix_charging_sessions_tenant_started", "tenant_id", "started_at"),
+        Index("idx_charging_sessions_settled_payout_id", "settled_payout_id"),
+        Index(
+            "idx_charging_sessions_unsettled",
+            "tenant_id",
+            "status",
+            postgresql_where=text("settled_payout_id IS NULL"),
+        ),
     )
 
 
