@@ -29,7 +29,7 @@ by reading the versions/ directory rather than assuming; per this repo's
 renumbering-at-merge convention, any further migrations still in flight get
 re-chained past this one when they land).
 
-Revision ID: 0027_plug_reports
+Revision ID: 0032_plug_reports
 Revises: 0026_offline_topups
 Create Date: 2026-08-01
 """
