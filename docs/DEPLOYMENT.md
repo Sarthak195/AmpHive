@@ -9,40 +9,50 @@ they are unmaintained reference material, not an alternative.)
 
 ---
 
-## 1. Live deployment — GCP VM + Docker Compose
+## 1. Live deployment — GCP free-tier VM + Docker Compose
+
+**Since the 2026-07-27 consolidation** the whole stack runs on ONE always-free
+e2-micro (see `deploy/docs/relay_consolidation_runbook.md` for how it got
+there; the previous paid `amphive-vm-in` / static-IP setup is deleted).
 
 | Resource | Value |
 |----------|-------|
-| Compute VM | `amphive-vm-in`, zone `asia-south1-a` (Mumbai), `e2-standard-2` (2 vCPU / 8GB RAM), Debian 11, 50 GB disk |
-| Static IP | `8.231.81.12` (reserved as `amphive-static-ip` — **does not change on restart**) |
-| Database | PostgreSQL 15 running as a **Docker container** (`amphive-db`) on the VM. Data persists in the `postgres_data` named Docker volume. |
-| ~~Cloud SQL~~ | ~~`amphive-db-in`~~ — **Decommissioned and deleted** on 2026-06-29. |
+| Compute VM | `amphive-relay`, zone `us-west1-a`, `e2-micro` (2 shared vCPU / 1 GB RAM + 2 GB swapfile), always-free tier — hosting cost $0/mo |
+| Public IP | `136.117.94.209` — **ephemeral** (not reserved). If GCP ever reassigns it, repoint the `@`, `cpo`, and `mqtt` A records at the registrar. |
+| Database | PostgreSQL 15 as a Docker container. Data persists in the `amphive-relay_pgdata` named volume; nightly pg_dump → GCS + a recovery disk snapshot exist (see runbooks). |
 
-The VM runs the **TLS compose** (`deploy/docker/docker-compose.tls.yml`, shipped
-as `docker-compose.yml` — the default since 2026-07-11) from a flat `~/amphive/`
-directory (`docker-compose.yml`, `Caddyfile`, `mosquitto.conf`,
-`mosquitto_passwd`, `mosquitto_acl`, `mqtt-certs/`, `.env`, `backend/`,
-`frontend/`). `docker-compose.prod.yml` is the plain-HTTP variant, kept in
-lockstep as the `-NoTls` rollback target.
+The VM runs `deploy/relay/docker-compose.relay.yml` from `~/amphive-relay/`
+(`docker-compose.relay.yml`, `.env`, `Caddyfile`, `config/` with the mosquitto
+config + broker certs + passwd/ACL, and `backend/` + `frontend/` source staged
+by the deploy script). Services are **image-pinned** (`amphive_backend:latest`,
+`amphive_frontend:latest`) with per-container `mem_limit`s sized for 1 GB RAM —
+there are no `build:` keys; the deploy script rebuilds the images explicitly.
+The older `deploy/docker/docker-compose.tls.yml` / `docker-compose.prod.yml`
+files describe the retired two-VM-era stack and are kept for reference.
 
-### Containers (TLS compose)
+### Containers (relay compose)
+
+Compose-default names (`amphive-relay-<service>-1`) except the fake plug
+(`fakeplug`); mosquitto logs to **stdout only** (bounded by the compose
+json-file limits — no file mirror on this stack). Restart policy
+`unless-stopped`.
 
 | Container | Image/build | Port | Notes |
 |-----------|-------------|------|---------|
-| `amphive-caddy` | `caddy:2-alpine` | **80, 443** | The only public web entrypoint. Terminates HTTPS with an auto-renewed Let's Encrypt cert for `CADDY_DOMAIN` (HTTP-01; cert persists in the `caddy_data` volume); HTTP and bare-IP requests redirect to the canonical https origin. |
-| `amphive-frontend` | build `./frontend` | internal | Nginx serves the SPA + proxies `/api/` and `/socket.io/` → backend; reached only by Caddy as `frontend:80`. |
-| `amphive-backend` | build `./backend` | 8000 | env via `${...}` from `.env`; depends on `db` + `mqtt`. |
-| `amphive-db` | `postgres:15-alpine` | internal | Postgres on the VM itself. `POSTGRES_PASSWORD` interpolated from `.env` (value rotated 2026-07-06). |
-| `amphive-mqtt` | `eclipse-mosquitto:2.0` | 1883 (overlay-bound), **8883 public TLS** | auth + topic ACLs + persistence volumes + authenticated healthcheck — see [§2](#2-mqtt-broker-config-deployconfigmosquittoconf) |
+| caddy | `caddy:2-alpine` | **80, 443** | The only public web entrypoint. Terminates HTTPS with an auto-renewed Let's Encrypt cert for `CADDY_DOMAIN` (HTTP-01; cert persists in the `caddy_data` volume); HTTP and bare-IP requests redirect to the canonical https origin. |
+| frontend | `amphive_frontend:latest` | internal | Nginx serves the SPA + proxies `/api/` and `/socket.io/` → backend; reached only by Caddy as `frontend:80`. |
+| backend | `amphive_backend:latest` | 8000 | env via `${...}` from `.env`; depends on `db` + `mqtt`. |
+| db | `postgres:15-alpine` | internal | Postgres on the VM itself. `POSTGRES_PASSWORD` interpolated from `.env` (value rotated 2026-07-06). |
+| mqtt | `eclipse-mosquitto:2.0` | **8883 public TLS** (1883 internal-only) | auth + topic ACLs + persistence volumes + authenticated healthcheck — see [§2](#2-mqtt-broker-config-deployconfigmosquittoconf) |
 
-Restart policy `always`.
+
 
 ### Compose file differences
 
 | | root `docker-compose.yml` | `deploy/docker/docker-compose.dev.yml` | `deploy/docker/docker-compose.prod.yml` |
 |--|--|--|--|
 | Local Postgres | ✅ `amphive-db-dev` | ✅ | ✅ `amphive-db` (same VM) |
-| Secrets/Tapo env | ✅ via `${...}` | ❌ (DB+MQTT only) | ✅ via `${...}` |
+| Secrets env | ✅ via `${...}` | ❌ (DB+MQTT only) | ✅ via `${...}` |
 | mqtt healthcheck | ❌ | ❌ | ✅ |
 | db healthcheck | ❌ | ❌ | ✅ `pg_isready` |
 | restart | `unless-stopped` | `unless-stopped` | `always` |
@@ -51,33 +61,38 @@ Restart policy `always`.
 Root and dev are local stacks (include Postgres); prod targets the VM. The dev
 file omits all secrets, so Direct Mode / Razorpay won't work there.
 
-### Deploy script — `deploy/scripts/deploy.ps1` (default: TLS stack; `-NoTls` for plain HTTP)
+### Deploy script — `deploy/scripts/deploy.ps1` (rewritten 2026-08-02 for the relay)
 
-1. Validate `.env` (refuses missing/weak `JWT_SECRET_KEY` / `POSTGRES_PASSWORD` /
-   MQTT credentials) and set
-   `DATABASE_URL=postgresql+asyncpg://postgres:<POSTGRES_PASSWORD>@db:5432/amphive`
-   (the hostname `db` resolves within the Docker Compose network). Reads
-   `CADDY_DOMAIN` (defaults to `amphive.app` if missing) and optional
-   `ACME_EMAIL` for the TLS front door.
-2. `tar` up `backend/` + `frontend/` (excluding node_modules/.venv/.git) and
-   `gcloud compute scp` the tarball to `~/amphive/`.
-3. SCP `mosquitto.conf` + the broker TLS certs (via `/tmp/` + `sudo mv` to
-   handle permissions), `docker-compose.tls.yml` (as `docker-compose.yml`;
-   `-NoTls` ships `docker-compose.prod.yml` instead), and `.env`; generate the
-   mosquitto passwd + ACL files and the **Caddyfile** (from
-   `CADDY_DOMAIN`/`ACME_EMAIL`) on the VM.
-4. SSH: extract and `sudo docker-compose up -d --build`.
+Ships the **committed git HEAD** (not the working tree) and rebuilds images
+on-box:
 
-**Total time:** ~1–2 minutes (no Cloud SQL polling wait). First TLS deploy also
-needs ~a minute for Caddy's initial Let's Encrypt issuance (requires tcp:80 +
-tcp:443 open — firewall rules `allow-amphive-ports` / `allow-amphive-https` —
-and `CADDY_DOMAIN` resolving to the VM's static IP). **DNS (as of 2026-07-20):**
-`amphive.app` (driver) and `cpo.amphive.app` (CPO operator portal) are real,
-statically-configured A records at the domain registrar pointing at the VM's
-static IP; there's also an `mqtt.amphive.app` A record for the direct-MQTT
-broker endpoint (§2). DuckDNS is **retired** — no dynamic-DNS updater cron
-runs on the VM anymore, and `scripts/setup_duckdns.sh` is unused/retired
-(kept only as reference; see [SECURITY.md](SECURITY.md)).
+1. **Preflight**: hard-gates the gcloud default project (other projects' work
+   can silently switch it); resolves the repo's newest migration id (what
+   `alembic_version` must equal afterwards); refuses to run if the VM is
+   missing its operator-managed `.env`/compose file.
+2. `git archive HEAD backend frontend` → tarball → `gcloud compute scp`.
+3. **Stage via swap** (extract to `.deploy_stage`, then `rm -rf backend
+   frontend && mv`): a corrupt tarball fails before the live tree is touched,
+   and local deletions/renames propagate (the 2026-07-13 stale-overlay lesson).
+4. Build `amphive_backend:latest` then `amphive_frontend:latest` sequentially
+   under `nohup` (survives SSH drops; 1 GB RAM can't take parallel builds) and
+   poll `~/build.log` for the result.
+5. `docker compose -f docker-compose.relay.yml up -d` — recreates only the
+   containers whose image changed; migrations auto-apply at backend startup.
+6. **Verify**: `/api/health`, `alembic_version` == the expected head,
+   backend restart count 0, and public `https://amphive.app/api/health` 200.
+
+**What it deliberately does NOT ship:** the VM's `.env` (live secrets — DB,
+MQTT, Razorpay, SMTP, Google OAuth), the `Caddyfile`, and the mosquitto
+config/passwd/ACL under `config/` — those are operator-managed on the VM
+(first-time bootstrap: `deploy/relay/deploy-relay.sh`; per-gateway broker
+accounts: `add_gateway_user.ps1`). To add/rotate `.env` keys, append on the VM
+and `docker compose up -d backend`.
+
+**Total time:** ~10–15 min, dominated by the on-box image builds (mostly
+cache-hits when only a few files changed). **DNS:** `amphive.app` (driver),
+`cpo.amphive.app` (CPO portal) and `mqtt.amphive.app` (direct-MQTT broker) are
+A records at the registrar pointing at the relay VM. DuckDNS is retired.
 
 ### Backend dependency lockfile — `backend/requirements.lock.txt`
 
@@ -162,26 +177,26 @@ The passwd and ACL files are generated on the VM by `deploy.ps1`; per-gateway
 accounts are added with `deploy/scripts/add_gateway_user.ps1`. Full history and
 verification in [SECURITY.md §3](SECURITY.md).
 
-## 3. Direct-Mode WireGuard tunnel
+## 3. Direct-Mode WireGuard tunnel (RETIRED — removed 2026-08-02)
 
-`deploy/config/amphive_tunnel.conf` is the Windows-PC client config:
-`Address 10.10.0.2/24`, peer endpoint `<vm-ip>:51820`, `AllowedIPs 10.10.0.0/24`.
-The VM is the WG server `10.10.0.1/24` on UDP/51820 (firewall rule
-`allow-amphive-wireguard`). The backend reaches the home relay through this
-tunnel. (This file **commits a WireGuard private key** — see [SECURITY.md](SECURITY.md).)
+The pre-ESP32 "Direct Mode" (backend drives the Tapo plug over a WireGuard
+tunnel to the home PC) was removed in the 2026-08-02 legacy purge along with
+`backend/services/tapo_direct.py`, `backend/routers/direct.py`, and
+`tools/relay_server.py`. `deploy/config/amphive_tunnel.conf` remains only as a
+historical reference (its keys were rotated dead long ago — see
+[SECURITY.md](SECURITY.md)); the retired runbooks live in `deploy/docs/`.
 
-> Port note: `wireguard_tunnel_setup.md` documents the relay at `:80`, but the
-> actual `tools/relay_server.py` and `phase2_walkthrough.md` use **`:8000`**.
-
-## 4. `tools/` (Direct-Mode helpers, run on the home PC)
+## 4. `tools/` (bench/dev helpers, run on the dev box)
 
 | Script | Purpose |
 |--------|---------|
-| `relay_server.py` | stdlib HTTP server on `0.0.0.0:8000`; routes `/health`, `/info`, `/on`, `/off`; uses the `tapo` lib to drive the real plug. This is what the backend's `TAPO_RELAY_URL` points at. |
-| `local_tapo_test.py` | Connection self-test (info → on → 3 s → off). |
-| `turn_on.py` / `turn_off.py` | Minimal manual on/off. |
+| `fake_plug.py` | Hardware-free gateway+plug simulator speaking the real MQTT contract (runs as the `fakeplug` container on the VM). |
+| `local_tapo_test.py` | LAN Tapo connection self-test (info → on → 3 s → off). |
+| `turn_on.py` / `turn_off.py` | Minimal manual on/off against a LAN plug. |
+| `klap_probe.py` / `read_serial.py` | Tapo KLAP protocol probe / ESP32 serial monitor. |
 
-⚠️ All four hard-code Tapo account credentials — see [SECURITY.md](SECURITY.md).
+Tapo credentials come from `TAPO_EMAIL`/`TAPO_PASSWORD` env vars — never
+hardcoded.
 
 ## 5. Kubernetes manifests (`deploy/k8s/`, RETIRED)
 
