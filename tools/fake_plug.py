@@ -149,8 +149,8 @@ POWER_FACTOR = float(os.getenv("FAKE_PLUG_POWER_FACTOR", "0.95"))
 # Reported in the retained online status payload. Prefixed "fake-" so it can
 # never be confused with a real device in the backend/UI; the numeric part
 # tracks the firmware generation this simulator mirrors (firmware/CMakeLists.txt
-# PROJECT_VER, 2.3.2-direct as of this writing).
-DEFAULT_FW = os.getenv("FAKE_PLUG_FW", "fake-2.3.2-direct")
+# PROJECT_VER, 2.4.0-direct as of this writing).
+DEFAULT_FW = os.getenv("FAKE_PLUG_FW", "fake-2.4.0-direct")
 # Matches the firmware's per-plug current-cap default (REC-03) — see
 # firmware/main/main.c's DEFAULT_PLUG_CAP_A / backend/services/caps.py's
 # DEFAULT_PLUG_CAP_A. Used when an ON/SET_LIMITS payload omits max_current_a.
