@@ -15,8 +15,10 @@ import { MemoryRouter, Routes, Route, useLocation } from 'react-router-dom';
 
 import Login from './Login';
 import { useAuth } from '../contexts/AuthContext';
+import { useConfig } from '../contexts/ConfigContext';
 
 vi.mock('../contexts/AuthContext', () => ({ useAuth: vi.fn() }));
+vi.mock('../contexts/ConfigContext', () => ({ useConfig: vi.fn() }));
 
 const loginSpy = vi.fn();
 
@@ -49,6 +51,7 @@ const submitLogin = async () => {
 beforeEach(() => {
   vi.clearAllMocks();
   useAuth.mockReturnValue({ login: loginSpy });
+  useConfig.mockReturnValue({ google_login_enabled: false });
 });
 
 describe('Login redirect target', () => {
@@ -122,5 +125,20 @@ describe('Login redirect target', () => {
     renderLogin('/login');
     expect(screen.getByRole('link', { name: 'Create an account' })).toHaveAttribute('href', '/signup');
     expect(screen.getByRole('link', { name: 'Forgot password?' })).toHaveAttribute('href', '/forgot-password');
+  });
+});
+
+describe('Google sign-in button (config-gated)', () => {
+  it('is hidden when the backend reports Google sign-in unconfigured', () => {
+    useConfig.mockReturnValue({ google_login_enabled: false });
+    renderLogin('/login');
+    expect(screen.queryByRole('link', { name: /Continue with Google/i })).not.toBeInTheDocument();
+  });
+
+  it('renders a top-level link to the backend redirect when enabled', () => {
+    useConfig.mockReturnValue({ google_login_enabled: true });
+    renderLogin('/login');
+    const link = screen.getByRole('link', { name: /Continue with Google/i });
+    expect(link).toHaveAttribute('href', '/api/auth/google/login');
   });
 });

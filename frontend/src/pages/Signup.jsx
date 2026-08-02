@@ -14,6 +14,7 @@ import { useState } from 'react';
 import { Link, useNavigate, useLocation } from 'react-router-dom';
 import { Eye, EyeOff } from 'lucide-react';
 import AuthShell from '../components/AuthShell';
+import GoogleSignInButton from '../components/GoogleSignInButton';
 import { useToast } from '../components/ui';
 import { useAuth } from '../contexts/AuthContext';
 import { apiErrorCopy } from '../utils/statusCopy';
@@ -153,6 +154,8 @@ const Signup = () => {
           {busy ? 'Creating account…' : 'Create account'}
         </button>
       </form>
+
+      <GoogleSignInButton />
     </AuthShell>
   );
 };

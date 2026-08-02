@@ -27,4 +27,15 @@ pywebpush>=2.0.0
 # standalone tools/turn_on.py, turn_off.py, local_tapo_test.py bench scripts;
 # no longer imported by backend runtime (tapo_direct.py removed 2026-08-02).
 tapo<1.0  # upper-bounded pending a full lockfile (audit L6)
+# "Sign in with Google" (routers/auth.py google_login/google_callback):
+# verifies the Google-issued ID token (fetches + checks against Google's
+# JWKS). Does NOT hard-depend on `requests`, but google.auth.transport.
+# requests (the transport we use for that JWKS fetch) does at import time —
+# pinned explicitly below rather than relying on it staying an incidental
+# transitive dep of razorpay/pywebpush.
+google-auth>=2.28.0
+# Blocking HTTP client for the OAuth token exchange (routers/auth.py) and
+# google-auth's requests transport above. Already resolved transitively
+# (razorpay, pywebpush) — pinned directly since we now import it ourselves.
+requests>=2.31.0
 

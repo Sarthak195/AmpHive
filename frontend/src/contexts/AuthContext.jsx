@@ -71,6 +71,31 @@ export const AuthProvider = ({ children }) => {
     return data;
   }, [refreshUser]);
 
+  // "Sign in with Google" (GoogleCallback page): the backend already did the
+  // OAuth round-trip server-side and handed back a normal app JWT (same
+  // shape/claims as login()'s) via the callback redirect's URL fragment —
+  // there's no separate token exchange to do here, just the same
+  // persist-then-restore tail login() does. The JWT payload (base64url,
+  // NOT signature-verified here — verification already happened server-side
+  // when this token was minted; get_current_user/refreshUser below are the
+  // actual trust boundary) gives an optimistic {id, email, role} to render
+  // immediately, same spirit as login()'s optimistic data.user.
+  const loginWithToken = useCallback(async (token) => {
+    localStorage.setItem('amphive_token', token);
+    try {
+      const payload = JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
+      const optimisticUser = { id: Number(payload.sub), email: payload.email, role: payload.role };
+      localStorage.setItem('amphive_user', JSON.stringify(optimisticUser));
+      setUser(optimisticUser);
+    } catch (err) {
+      // Malformed token payload — skip the optimistic render, refreshUser
+      // below still does the real work (and will clear the token if the
+      // server rejects it).
+      console.warn('Could not parse Google login token for optimistic user:', err.message);
+    }
+    await refreshUser();
+  }, [refreshUser]);
+
   const register = useCallback(async (email, password, fullName) => {
     const data = await api.post('/api/auth/register', {
       email,
@@ -104,7 +129,7 @@ export const AuthProvider = ({ children }) => {
   // Children always render — consumers branch on `loading` themselves
   // (App holds the route tree behind <BootSplash/> until restore settles).
   return (
-    <AuthContext.Provider value={{ user, login, register, logout, refreshUser, loading }}>
+    <AuthContext.Provider value={{ user, login, register, loginWithToken, logout, refreshUser, loading }}>
       {children}
     </AuthContext.Provider>
   );

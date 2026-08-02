@@ -162,6 +162,17 @@ class User(Base):
     # 0002 (which also clamps pre-existing negative rows to 0).
     __table_args__ = (
         CheckConstraint("coin_balance >= 0", name="ck_users_coin_balance_non_negative"),
+        # [Google OAuth] A Google identity ("sub" claim) can back at most one
+        # AmpHive account — partial unique index so the many NULLs (accounts
+        # that never linked Google) don't collide with each other. Mirrors
+        # the session_disputes "one open dispute" partial-unique pattern.
+        # Alembic revision 0033_google_identity.
+        Index(
+            "uq_users_google_sub",
+            "google_sub",
+            unique=True,
+            postgresql_where=text("google_sub IS NOT NULL"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -185,6 +196,22 @@ class User(Base):
     # Soft lock, not a delete — balance/ledger/session history stay intact.
     # Alembic revision 0025_user_disable.
     is_disabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"), nullable=False)
+    # [Google OAuth] Which identity provider created this account: 'password'
+    # (default — every pre-existing row backfills here) or 'google'. Purely
+    # informational — it does NOT gate password login by itself: a
+    # Google-only account's hashed_password is an unusable random hash (see
+    # services/auth._DUMMY_PASSWORD_HASH for the same "unusable hash" trick),
+    # so password login already refuses it with zero changes to that route.
+    # Alembic revision 0033_google_identity.
+    auth_provider: Mapped[str] = mapped_column(String(20), default="password", server_default=text("'password'"), nullable=False)
+    # The stable Google account identifier (the verified ID token's "sub"
+    # claim) once this account has signed in with Google at least once —
+    # either created via Google (auth_provider='google') or a
+    # password-created account that later linked one (auth_provider stays
+    # 'password': linking adds a second sign-in method, it doesn't rewrite
+    # how the account originated). NULL = never linked. See the partial
+    # unique index above. Alembic revision 0033_google_identity.
+    google_sub: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
 
     # Relationships
