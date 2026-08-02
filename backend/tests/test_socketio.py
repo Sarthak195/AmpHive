@@ -34,7 +34,10 @@ async def test_connect_valid_token():
         # Token in the auth payload (CONNECT packet body) — the only accepted path
         res = await connect("sid-123", {}, {"token": "valid-jwt"})
         assert res is True
-        mock_sio.save_session.assert_awaited_once_with("sid-123", {"user_id": 42})
+        # The saved session now also carries the token's tv claim, so
+        # authenticated event handlers can re-validate the account later
+        # without re-decoding the JWT.
+        mock_sio.save_session.assert_awaited_once_with("sid-123", {"user_id": 42, "tv": 0})
         # Joined the per-user room (driver notification delivery target)
         mock_sio.enter_room.assert_awaited_once_with("sid-123", "user_42")
 
@@ -88,14 +91,18 @@ async def test_subscribe_session_unauthorized():
     with patch("backend.services.socketio_manager.sio") as mock_sio, \
          patch("backend.services.socketio_manager.async_session_factory") as mock_db_factory:
 
-        mock_sio.get_session = AsyncMock(return_value={"user_id": 42})
+        mock_sio.get_session = AsyncMock(return_value={"user_id": 42, "tv": 0})
         mock_sio.emit = AsyncMock()
+        mock_sio.disconnect = AsyncMock()
 
-        # Setup mock db session returning None (no session found or unauthorized)
+        # Two DB reads happen in order: the re-auth helper's User query (a live,
+        # matching, non-disabled user), then the handler's ownership query
+        # (None → session not found or unauthorized).
+        live_user = MagicMock(token_version=0, is_disabled=False)
         mock_db = AsyncMock()
         mock_db.execute = AsyncMock()
         mock_result = MagicMock()
-        mock_result.scalar_one_or_none.return_value = None
+        mock_result.scalar_one_or_none.side_effect = [live_user, None]
         mock_db.execute.return_value = mock_result
         mock_db_factory.return_value.__aenter__.return_value = mock_db
 
@@ -104,6 +111,8 @@ async def test_subscribe_session_unauthorized():
         mock_sio.emit.assert_awaited_once_with(
             "subscription_error", {"detail": "Session not found or unauthorized"}, to="sid-123"
         )
+        # Re-auth passed, so the socket is not force-disconnected.
+        mock_sio.disconnect.assert_not_awaited()
 
 @pytest.mark.asyncio
 async def test_subscribe_session_success():
@@ -112,18 +121,22 @@ async def test_subscribe_session_success():
          patch("backend.services.socketio_manager.stream_telemetry_task"), \
          patch("backend.services.socketio_manager.active_streams", {}) as mock_active_streams:
 
-        mock_sio.get_session = AsyncMock(return_value={"user_id": 42})
+        mock_sio.get_session = AsyncMock(return_value={"user_id": 42, "tv": 0})
         mock_sio.emit = AsyncMock()
         mock_sio.enter_room = AsyncMock()
+        mock_sio.disconnect = AsyncMock()
 
-        # Setup mock db session returning a valid session
+        # Two DB reads happen in order: the re-auth helper's User query (a live,
+        # matching, non-disabled user), then the handler's ownership query
+        # (a valid ChargingSession).
+        live_user = MagicMock(token_version=0, is_disabled=False)
         mock_session = MagicMock()
         mock_session.plug_id = 9
 
         mock_db = AsyncMock()
         mock_db.execute = AsyncMock()
         mock_result = MagicMock()
-        mock_result.scalar_one_or_none.return_value = mock_session
+        mock_result.scalar_one_or_none.side_effect = [live_user, mock_session]
         mock_db.execute.return_value = mock_result
         mock_db_factory.return_value.__aenter__.return_value = mock_db
 
@@ -132,6 +145,93 @@ async def test_subscribe_session_success():
         mock_sio.enter_room.assert_awaited_once_with("sid-123", "session_100")
         mock_sio.emit.assert_awaited_once_with("subscription_success", {"session_id": 100}, to="sid-123")
         assert 100 in mock_active_streams
+        # Valid, unchanged user → not force-disconnected (regression guard).
+        mock_sio.disconnect.assert_not_awaited()
+
+
+def _configure_reauth_db(mock_db_factory, user):
+    """Wire the mocked async_session_factory so the re-auth helper's User query
+    (the first DB read in an authenticated handler) yields `user`."""
+    mock_db = AsyncMock()
+    mock_db.execute = AsyncMock()
+    mock_result = MagicMock()
+    mock_result.scalar_one_or_none.return_value = user
+    mock_db.execute.return_value = mock_result
+    mock_db_factory.return_value.__aenter__.return_value = mock_db
+
+
+@pytest.mark.asyncio
+async def test_subscribe_session_reauth_rejects_revoked_tv():
+    """A still-open socket whose account has since bumped token_version (logout
+    everywhere / password reset / demote) must be refused AND force-disconnected
+    on its next event — parity with the HTTP token_version re-check."""
+    with patch("backend.services.socketio_manager.sio") as mock_sio, \
+         patch("backend.services.socketio_manager.async_session_factory") as mock_db_factory:
+
+        # Socket saved tv=0 at connect; the DB user has since moved to tv=1.
+        mock_sio.get_session = AsyncMock(return_value={"user_id": 42, "tv": 0})
+        mock_sio.emit = AsyncMock()
+        mock_sio.enter_room = AsyncMock()
+        mock_sio.disconnect = AsyncMock()
+        _configure_reauth_db(mock_db_factory, MagicMock(token_version=1, is_disabled=False))
+
+        await subscribe_session("sid-123", {"session_id": 100})
+
+        # Action refused: no room join, no success emit.
+        mock_sio.enter_room.assert_not_awaited()
+        mock_sio.emit.assert_not_awaited()
+        # Socket booted from all rooms (also cuts off future private pushes).
+        mock_sio.disconnect.assert_awaited_once_with("sid-123")
+
+
+@pytest.mark.asyncio
+async def test_subscribe_session_reauth_rejects_disabled_user():
+    """A still-open socket whose account has since been disabled (is_disabled)
+    must be refused AND force-disconnected, even if token_version still matches."""
+    with patch("backend.services.socketio_manager.sio") as mock_sio, \
+         patch("backend.services.socketio_manager.async_session_factory") as mock_db_factory:
+
+        mock_sio.get_session = AsyncMock(return_value={"user_id": 42, "tv": 0})
+        mock_sio.emit = AsyncMock()
+        mock_sio.enter_room = AsyncMock()
+        mock_sio.disconnect = AsyncMock()
+        _configure_reauth_db(mock_db_factory, MagicMock(token_version=0, is_disabled=True))
+
+        await subscribe_session("sid-123", {"session_id": 100})
+
+        mock_sio.enter_room.assert_not_awaited()
+        mock_sio.emit.assert_not_awaited()
+        mock_sio.disconnect.assert_awaited_once_with("sid-123")
+
+
+@pytest.mark.asyncio
+async def test_subscribe_session_reauth_allows_unchanged_user():
+    """A valid, unchanged account (tv matches, not disabled) passes re-auth and
+    is never force-disconnected."""
+    with patch("backend.services.socketio_manager.sio") as mock_sio, \
+         patch("backend.services.socketio_manager.async_session_factory") as mock_db_factory, \
+         patch("backend.services.socketio_manager.stream_telemetry_task"), \
+         patch("backend.services.socketio_manager.active_streams", {}):
+
+        mock_sio.get_session = AsyncMock(return_value={"user_id": 42, "tv": 0})
+        mock_sio.emit = AsyncMock()
+        mock_sio.enter_room = AsyncMock()
+        mock_sio.disconnect = AsyncMock()
+
+        live_user = MagicMock(token_version=0, is_disabled=False)
+        mock_session = MagicMock()
+        mock_session.plug_id = 9
+        mock_db = AsyncMock()
+        mock_db.execute = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.side_effect = [live_user, mock_session]
+        mock_db.execute.return_value = mock_result
+        mock_db_factory.return_value.__aenter__.return_value = mock_db
+
+        await subscribe_session("sid-123", {"session_id": 100})
+
+        mock_sio.disconnect.assert_not_awaited()
+        mock_sio.emit.assert_awaited_once_with("subscription_success", {"session_id": 100}, to="sid-123")
 
 
 @pytest.mark.asyncio

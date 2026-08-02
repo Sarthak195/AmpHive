@@ -22,6 +22,10 @@ from backend.schemas import (
 from backend.services.auth import (
     get_current_user,
 )
+from backend.services.rate_limit import (
+    account_rate_limit_dependency,
+    group_join_account_rate_limiter,
+)
 
 logger = logging.getLogger("amphive.api")
 router = APIRouter()
@@ -30,7 +34,12 @@ router = APIRouter()
 # Charger Group Endpoints
 # ===========================================================================
 
-@router.post("/api/groups/join")
+@router.post(
+    "/api/groups/join",
+    dependencies=[
+        Depends(account_rate_limit_dependency(group_join_account_rate_limiter, "group join"))
+    ],
+)
 async def join_group(
     req: JoinGroupRequest,
     user: User = Depends(get_current_user),
@@ -74,12 +83,19 @@ async def join_group(
 async def get_my_groups(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    limit: int = 200,
 ):
     """
     List all charger groups the current user has access to:
     - All public groups
     - All private groups the user has joined
+
+    `limit` capped at 200 (same house pagination bound as the other list
+    endpoints, see routers/admin.py) so a growing public-group count can't
+    return an unbounded payload.
     """
+    limit = max(1, min(limit, 200))
+
     # One round-trip: public groups ∪ joined groups, with plug counts
     # aggregated in SQL (previously one COUNT query per group — N+1).
     # DISTINCT on the plug count because a (theoretical) duplicate membership
@@ -96,6 +112,7 @@ async def get_my_groups(
         .outerjoin(Plug, Plug.group_id == ChargerGroup.id)
         .where(or_(ChargerGroup.is_public == True, GroupMembership.id.is_not(None)))  # noqa: E712 (SQL boolean, not Python)
         .group_by(ChargerGroup.id)
+        .limit(limit)
     )
 
     return [

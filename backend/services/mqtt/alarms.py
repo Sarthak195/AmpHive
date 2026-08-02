@@ -142,7 +142,7 @@ class MQTTAlarmMixin:
         """Store the event (tenant resolved from the gateway) and broadcast it."""
         from sqlalchemy import select
 
-        from backend.database.models import Gateway, GatewayEvent
+        from backend.database.models import Gateway, GatewayEvent, Plug
         from backend.services.mqtt_manager import AUTO_MAINTENANCE_ON_CRITICAL_ALARM
 
         try:
@@ -162,6 +162,35 @@ class MQTTAlarmMixin:
                 # default, so a post-commit `gw.tenant_id` read could need a
                 # lazy-load with no active session/greenlet to run it in.
                 tenant_id = gw.tenant_id
+
+                # Ownership check (mirrors services/mqtt/telemetry.py's
+                # "the payload's plug_id must name a plug of this gateway"):
+                # broker ACLs scope *topics*, not payload claims, so a gateway
+                # with valid creds for its OWN alarms topic could otherwise put
+                # ANOTHER tenant's plug_id in the payload and force-finalize /
+                # maintenance / unmetered-notify a victim plug (plug ids are
+                # small sequential ints). Resolve the plug in the same session
+                # and require it to belong to THIS gateway; a foreign or unknown
+                # plug_id is spoofed, so drop it to None. That degrades the alarm
+                # to a gateway-level event — persisted + broadcast on the
+                # attacker's OWN tenant exactly as a genuine plug_id=None event
+                # already is — and every plug-scoped action below is gated on
+                # `plug_id is not None`, so none of them touch the victim.
+                if plug_id is not None:
+                    plug = (await session.execute(
+                        select(Plug).where(Plug.id == plug_id)
+                    )).scalar_one_or_none()
+                    if plug is None or plug.gateway_id != gateway_id:
+                        logger.warning(
+                            "Alarm plug ownership mismatch — dropping foreign plug_id",
+                            extra={
+                                "gateway_id": gateway_id,
+                                "plug_id": plug_id,
+                                "actual_owner_gateway_id": plug.gateway_id if plug else None,
+                                "event_type": event_type,
+                            },
+                        )
+                        plug_id = None
 
                 event = GatewayEvent(
                     tenant_id=tenant_id,

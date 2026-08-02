@@ -27,6 +27,8 @@ These are layered ON TOP of the per-IP limiters, not a replacement:
   CPO_TOPUP_ACCOUNT_RATE_LIMIT             (default 20/60 — 20 offline top-ups per minute per CPO actor)
   LOGIN_ACCOUNT_RATE_LIMIT                 (default 10/60 — 10 login attempts per minute per account/email)
   CPO_GATEWAY_CLAIM_ACCOUNT_RATE_LIMIT     (default 10/60 — 10 gateway-claim attempts per minute per CPO actor)
+  GROUP_JOIN_ACCOUNT_RATE_LIMIT            (default 10/60 — 10 group-join attempts per minute per account)
+  CPO_SETUP_ACCOUNT_RATE_LIMIT             (default 5/300 — 5 workspace-setup attempts per 5 minutes per account)
 """
 import logging
 import os
@@ -289,6 +291,20 @@ login_account_rate_limiter = SlidingWindowRateLimiter(
 # rate limit is the practical anti-brute-force control regardless.
 cpo_gateway_claim_account_rate_limiter = SlidingWindowRateLimiter(
     *_rule_from_env("CPO_GATEWAY_CLAIM_ACCOUNT_RATE_LIMIT", "10/60")
+)
+# [Group join] Bounds guessing at private-group access codes (POST
+# /api/groups/join): an 8-char alphanumeric code with no dedicated per-route
+# limiter until now — only the blanket per-IP floor covered it. Same
+# brute-force reasoning as the claim-code limiter above.
+group_join_account_rate_limiter = SlidingWindowRateLimiter(
+    *_rule_from_env("GROUP_JOIN_ACCOUNT_RATE_LIMIT", "10/60")
+)
+# [CPO setup] POST /api/cpo/setup leaks tenant-name existence (400 "a tenant
+# with the name ... already exists"). The message stays — a driver setting up
+# their own workspace needs to know to pick a different name — but this
+# throttles using that oracle to probe for existing tenant names.
+cpo_setup_account_rate_limiter = SlidingWindowRateLimiter(
+    *_rule_from_env("CPO_SETUP_ACCOUNT_RATE_LIMIT", "5/300")
 )
 
 # Blanket /api floor (api_rate_limit_middleware above). 300/60 ≈ 5 req/s

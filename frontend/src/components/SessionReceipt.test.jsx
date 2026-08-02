@@ -131,7 +131,7 @@ describe('SessionReceipt — invoice', () => {
       expect.stringContaining('/api/sessions/42/invoice?format=html'),
       { headers: { Authorization: 'Bearer test-token' } }
     );
-    expect(window.open).toHaveBeenCalledWith('blob:mock', '_blank');
+    expect(window.open).toHaveBeenCalledWith('blob:mock', '_blank', 'noopener');
 
     // Revocation is deferred (not immediate) so the new tab has time to load
     // the blob first.

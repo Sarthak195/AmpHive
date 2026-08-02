@@ -69,7 +69,7 @@ const SessionReceipt = () => {
       if (!res.ok) throw new Error("Couldn't load the invoice. Please try again.");
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
-      window.open(url, '_blank');
+      window.open(url, '_blank', 'noopener');
       // Give the new tab time to load the blob before reclaiming it.
       setTimeout(() => URL.revokeObjectURL(url), 60_000);
     } catch (err) {

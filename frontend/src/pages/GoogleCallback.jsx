@@ -37,6 +37,13 @@ const GoogleCallback = () => {
     const hash = new URLSearchParams(window.location.hash.replace(/^#/, ''));
     const token = hash.get('token');
 
+    // Scrub the token out of the address bar/history immediately — do this
+    // unconditionally (before the async login work below) so it happens
+    // whether that work succeeds, throws, or never runs (no token at all).
+    // Leaving it in place would keep the JWT recoverable from browser
+    // history on a shared machine even after an error.
+    window.history.replaceState(null, '', window.location.pathname + window.location.search);
+
     if (!token) {
       setError('Google sign-in did not complete. Please try again.');
       return;

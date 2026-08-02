@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database.db import get_db
 from backend.database.models import Invoice, User
+from backend.services.csv_safe import sanitize_csv_cell
 from backend.services.invoices import invoice_to_dict
 from backend.services.rbac import require_role
 
@@ -92,7 +93,7 @@ async def cpo_export_invoices_csv(
     ])
     for inv in result.scalars().all():
         writer.writerow([
-            inv.invoice_number,
+            sanitize_csv_cell(inv.invoice_number),
             inv.issued_at.isoformat() if inv.issued_at else "",
             inv.session_id,
             inv.driver_user_id,
@@ -103,8 +104,8 @@ async def cpo_export_invoices_csv(
             round(float(inv.gst_rate_pct), 2),
             round(float(inv.gst_amount_inr), 2),
             round(float(inv.total_inr), 2),
-            inv.seller_legal_name or "",
-            inv.seller_gstin or "",
+            sanitize_csv_cell(inv.seller_legal_name or ""),
+            sanitize_csv_cell(inv.seller_gstin or ""),
         ])
 
     filename = f"amphive-invoices-{datetime.now(timezone.utc).strftime('%Y%m%d')}.csv"

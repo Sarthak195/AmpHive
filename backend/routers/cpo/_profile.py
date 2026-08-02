@@ -12,6 +12,10 @@ from backend.database.db import get_db
 from backend.database.models import ChargerGroup, Gateway, Plug, Tenant, User, UserRole
 from backend.schemas import CpoProfileUpdateRequest, CpoSetupRequest
 from backend.services.auth import get_current_user
+from backend.services.rate_limit import (
+    account_rate_limit_dependency,
+    cpo_setup_account_rate_limiter,
+)
 from backend.services.rbac import require_role
 
 from ._common import logger
@@ -21,7 +25,12 @@ router = APIRouter()
 
 # --- CPO Setup & Profile ---
 
-@router.post("/api/cpo/setup")
+@router.post(
+    "/api/cpo/setup",
+    dependencies=[
+        Depends(account_rate_limit_dependency(cpo_setup_account_rate_limiter, "workspace setup"))
+    ],
+)
 async def cpo_setup(
     req: CpoSetupRequest,
     user: User = Depends(get_current_user),

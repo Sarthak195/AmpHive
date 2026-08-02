@@ -12,6 +12,7 @@ Design decisions:
   idle timeouts.
 """
 
+import logging
 import os
 from typing import AsyncGenerator
 
@@ -19,7 +20,24 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 # Read the database URL from environment. Expected format:
 # postgresql+asyncpg://user:password@host:port/dbname
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+asyncpg://postgres:amphive_dev@localhost:5432/amphive")
+#
+# The fallback below is a LOCAL DEV credential only (guessable password,
+# "amphive_dev") — local dev/tests rely on it, so it is NOT removed or
+# swapped for something safer here (unlike services/auth.py's
+# JWT_SECRET_KEY guard, there's no safe auto-generated substitute for a DB
+# password: a broken/garbage DATABASE_URL must fail on the actual connection
+# attempt, not be silently patched). Mirrors that guard's logging style —
+# loud instead of silent when the weak default is in play.
+_DEV_DATABASE_URL_DEFAULT = "postgresql+asyncpg://postgres:amphive_dev@localhost:5432/amphive"
+_env_database_url = os.getenv("DATABASE_URL")
+DATABASE_URL = _env_database_url or _DEV_DATABASE_URL_DEFAULT
+if not _env_database_url or "amphive_dev" in DATABASE_URL:
+    logging.getLogger("amphive.db").critical(
+        "DATABASE_URL is unset (falling back to the local-dev default) or "
+        "still uses the known-insecure 'amphive_dev' password. This is "
+        "expected in local development/tests, but a real deployment MUST "
+        "set a strong DATABASE_URL in the environment/.env to fix this."
+    )
 
 # Create the async engine with connection pooling.
 # pool_pre_ping=True: issues a lightweight "SELECT 1" before reusing a pooled

@@ -18,8 +18,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
-from backend.schemas import LoginRequest
+from backend.schemas import LoginRequest, RegisterRequest
 from backend.services import rate_limit
 from backend.services.rate_limit import (
     SlidingWindowRateLimiter,
@@ -237,9 +238,9 @@ async def test_login_dependency_different_email_is_unaffected():
     limiter = SlidingWindowRateLimiter(1, 60, clock=FakeClock())
     dep = login_account_rate_limit_dependency(limiter)
 
-    await dep(LoginRequest(email="a@amphive.test", password="x"))
+    await dep(LoginRequest(email="a@example.com", password="x"))
     with pytest.raises(HTTPException):
-        await dep(LoginRequest(email="a@amphive.test", password="y"))
+        await dep(LoginRequest(email="a@example.com", password="y"))
     await dep(LoginRequest(email="b@amphive.test", password="z"))  # different bucket
 
 
@@ -377,6 +378,8 @@ def test_login_route_also_carries_the_account_rate_limit_dependency():
         ("backend.routers.payments", "/api/payments/create-order", "POST"),
         ("backend.routers.cpo._topups", "/api/cpo/topups", "POST"),
         ("backend.routers.cpo._gateways", "/api/cpo/gateways/claim", "POST"),
+        ("backend.routers.groups", "/api/groups/join", "POST"),
+        ("backend.routers.cpo._profile", "/api/cpo/setup", "POST"),
     ],
 )
 def test_account_scoped_routes_carry_the_account_rate_limit_dependency(module_path, route_path, method):
@@ -484,6 +487,21 @@ def test_optional_limiter_off_and_rule_parsing(monkeypatch):
 def _mw_kwargs(m):
     # Starlette's Middleware carried .options before 0.35 and .kwargs after.
     return getattr(m, "kwargs", None) or getattr(m, "options", {})
+
+
+# ---------------------------------------------------- schema-level bounds ---
+
+def test_register_full_name_over_150_chars_is_rejected():
+    """users.full_name is String(150) (database/models.py) — an oversized
+    value must fail Pydantic validation (422) rather than reach the DB and
+    raise an uncaught DataError (500)."""
+    with pytest.raises(ValidationError):
+        RegisterRequest(email="a@example.com", password="correct-horse", full_name="x" * 151)
+
+
+def test_register_full_name_at_150_chars_is_accepted():
+    req = RegisterRequest(email="a@example.com", password="correct-horse", full_name="x" * 150)
+    assert len(req.full_name) == 150
 
 
 def test_app_registers_the_blanket_middleware_inside_cors():

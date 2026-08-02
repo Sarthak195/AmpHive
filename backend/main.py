@@ -22,6 +22,7 @@ from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from backend.database.db import async_session_factory, init_db
 from backend.logging_config import configure_logging, set_correlation_id
@@ -119,6 +120,50 @@ app = FastAPI(
 # are answered by CORS without spending budget, and a 429 still gets CORS
 # headers stamped on the way out (a cross-origin page can read the error).
 app.middleware("http")(api_rate_limit_middleware)
+
+# --- Request body-size cap (DoS hardening) ---
+# nginx's compiled-in ~1 MB default is the only bound today, and it's
+# undeclared (see frontend/nginx.conf's explicit client_max_body_size for the
+# defense-in-depth companion to this) — a request that reaches uvicorn
+# directly (e.g. the VM-local :8000 debug port, bypassing nginx entirely) had
+# ZERO app-layer limit. This is a pure JSON API, so a cheap Content-Length
+# check is sufficient; there is no need to stream-count the body. A request
+# with no Content-Length (chunked transfer) is let through unchecked — nginx
+# still caps it in every deployed environment.
+#
+# Registered here (AFTER api_rate_limit_middleware, BEFORE CORSMiddleware)
+# so it runs early relative to the rest of the stack — an oversized request
+# is rejected before it can spend any rate-limit budget — while still being
+# wrapped BY CORSMiddleware (registered next), same rationale as the limiter
+# above: a 413 still gets CORS headers stamped on the way out. Reads
+# MAX_REQUEST_BODY_BYTES as a module global (not a closed-over parameter),
+# mirroring api_rate_limiter's "looked up per-call" pattern in
+# services/rate_limit.py, so tests can monkeypatch it directly.
+MAX_REQUEST_BODY_BYTES = int(os.getenv("MAX_REQUEST_BODY_BYTES", 1024 * 1024))
+
+
+@app.middleware("http")
+async def max_body_size_middleware(request: Request, call_next):
+    """Reject a request whose declared Content-Length exceeds the cap with a
+    413 and a JSON {"detail": ...} body, before it reaches routing/handlers."""
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            declared_length = int(content_length)
+        except ValueError:
+            declared_length = None
+        if declared_length is not None and declared_length > MAX_REQUEST_BODY_BYTES:
+            return JSONResponse(
+                status_code=413,
+                content={
+                    "detail": (
+                        f"Request body too large ({declared_length} bytes; "
+                        f"max {MAX_REQUEST_BODY_BYTES} bytes)."
+                    )
+                },
+            )
+    return await call_next(request)
+
 
 # --- CORS Middleware ---
 # Allow the frontend (running on a different port/domain) to make API requests.

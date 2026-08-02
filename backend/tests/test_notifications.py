@@ -300,11 +300,16 @@ async def test_cutoff_alarm_finalizes_active_session(event_type, should_finalize
     gw = MagicMock()
     gw.tenant_id = 1
 
+    owned_plug = MagicMock()
+    owned_plug.gateway_id = "gw-1"  # matches the topic gateway → passes the ownership check
+
     class _SeqDB(_UserDB):
-        """gateway lookup → event insert → session-id lookup → finalize db."""
+        """gateway lookup → plug-ownership lookup → event insert → session-id
+        lookup → finalize db."""
         def __init__(self):
             super().__init__(gw)
             self.added = []
+            self._calls = 0
 
         def add(self, row):
             row.id = 55
@@ -312,8 +317,14 @@ async def test_cutoff_alarm_finalizes_active_session(event_type, should_finalize
             self.added.append(row)
 
         async def execute(self, *_a, **_k):
+            self._calls += 1
             r = MagicMock()
-            r.scalar_one_or_none.return_value = gw if not self.added else 42
+            if self._calls == 1:
+                r.scalar_one_or_none.return_value = gw          # gateway lookup
+            elif self._calls == 2:
+                r.scalar_one_or_none.return_value = owned_plug  # plug-ownership check
+            else:
+                r.scalar_one_or_none.return_value = 42          # session-id lookup
             return r
 
         async def commit(self):
