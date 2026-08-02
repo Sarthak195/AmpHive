@@ -116,12 +116,6 @@ services:
       - SMTP_USER=${SMTP_USER:-}
       - SMTP_PASSWORD=${SMTP_PASSWORD:-}
       - SMTP_FROM=${SMTP_FROM:-}
-      # [Direct Mode] Tapo P110 control via WireGuard tunnel (bypasses ESP32)
-      - DIRECT_MODE=${DIRECT_MODE}
-      - TAPO_USERNAME=${TAPO_USERNAME}
-      - TAPO_PASSWORD=${TAPO_PASSWORD}
-      - TAPO_PLUG_IP=${TAPO_PLUG_IP}
-      - TAPO_RELAY_URL=${TAPO_RELAY_URL}
       # Circuit admission control and caps configuration; empty = code defaults
       - DEFAULT_PLUG_CAP_A=${DEFAULT_PLUG_CAP_A}
       - ENFORCE_CIRCUIT_ADMISSION=${ENFORCE_CIRCUIT_ADMISSION}

@@ -229,6 +229,15 @@ class GatewayEventResponse(BaseModel):
     created_at: Optional[str] = None
 
 
+class GatewayLogResponse(BaseModel):
+    """One forwarded firmware log line (diagnostics feed — see GatewayLog)."""
+    id: int
+    gateway_id: str
+    level: str
+    message: str
+    created_at: Optional[str] = None
+
+
 # --- Payment Schemas ---
 
 class LedgerEntryResponse(BaseModel):
@@ -317,14 +326,6 @@ class PushSubscribeRequest(BaseModel):
 
 class PushUnsubscribeRequest(BaseModel):
     endpoint: str = Field(min_length=1, max_length=1024)
-
-
-# --- Direct Mode Schemas ---
-
-class DirectPlugRequest(BaseModel):
-    """Optional request body for direct plug control. If plug_ip is not provided,
-    falls back to the TAPO_PLUG_IP environment variable."""
-    plug_ip: Optional[str] = None
 
 
 # --- CPO Schemas ---

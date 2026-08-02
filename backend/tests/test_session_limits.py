@@ -1003,6 +1003,10 @@ async def test_persist_telemetry_forwards_session_limits_into_the_check():
     sess_row.rate_valid_until = None
     sess_row.settled_cost_coins = None
     sess_row.rate_segment_start_kwh = None
+    # [REC-01 follow-up] real values: the reset-detection comparison needs
+    # actual numerics, not auto-attribute Mocks.
+    sess_row.energy_counter_last_raw_kwh = None
+    sess_row.energy_reset_offset_kwh = 0.0
 
     session = _FakeSession([
         _FakeResult(scalar=plug),      # ownership lookup
@@ -1076,6 +1080,10 @@ async def test_persist_telemetry_post_reset_frame_still_triggers_max_kwh_stop():
     sess_row.rate_valid_until = None
     sess_row.settled_cost_coins = None
     sess_row.rate_segment_start_kwh = None
+    # [REC-01 follow-up] real values: the reset-detection comparison needs
+    # actual numerics, not auto-attribute Mocks.
+    sess_row.energy_counter_last_raw_kwh = None
+    sess_row.energy_reset_offset_kwh = 0.0
 
     session = _FakeSession([
         _FakeResult(scalar=plug),

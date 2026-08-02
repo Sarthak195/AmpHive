@@ -75,8 +75,8 @@ session-relative energy delivery. See
 Gateways formerly joined a Headscale/Tailscale overlay (`100.64.x.x` VPN IPs,
 `microlink` firmware component) and reached the broker over that tunnel at
 `mqtt://100.64.0.1:1883`. The direct-MQTT pivot removed this hop entirely; the
-overlay control plane is decommissioned and the `microlink` firmware task is
-compiled out.
+overlay control plane is decommissioned and the `microlink` firmware component
+(plus its vendored `wireguard_lwip` dependency) was **removed 2026-08-02**.
 
 ### Retired — Direct Mode over WireGuard (retired 2026-07-06 — kept for reference)
 1. A WireGuard tunnel linked the GCP VM (`10.10.0.1`) to the developer's home PC
@@ -88,7 +88,8 @@ compiled out.
 3. Exposed under `POST/GET /api/direct/plug/*` and gated by `DIRECT_MODE=true`.
 
 This was a **temporary bypass** used before physical ESP32 hardware was
-available; the code (`tapo_direct`, `/direct/*`) remains but is dormant.
+available; the code (`tapo_direct`, `/direct/*`, `tools/relay_server.py`) was
+**removed 2026-08-02**.
 
 ---
 

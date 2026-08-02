@@ -39,6 +39,10 @@ class MQTTConnectionMixin:
             # Firmware safety alarms (THERMAL/OVERCURRENT/UNAUTHORIZED_ON) + OTA
             # lifecycle events — persisted as GatewayEvents and surfaced to CPOs.
             self.client.subscribe("amphive/gateways/+/alarms", qos=1)
+            # Firmware WARN/ERROR log lines (TD#28, fw >= 2.1.0-direct) — plain
+            # text, QoS 0 (best-effort diagnostics, matches the firmware's own
+            # publish QoS; see services/mqtt/logs.py).
+            self.client.subscribe("amphive/gateways/+/logs", qos=0)
         else:
             logger.error("Failed to connect to MQTT broker", extra={"rc": rc})
 

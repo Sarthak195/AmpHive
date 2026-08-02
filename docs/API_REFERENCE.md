@@ -3,7 +3,7 @@
 *Verified against `backend/` on 2026-07-02; endpoint list refreshed 2026-07-21.*
 
 Routes live in `backend/routers/*.py` (`{auth,groups,plugs,sessions,payments,
-direct,cpo,notifications,reservations,admin}.py`), each an `APIRouter` mounted on the FastAPI `app` in
+cpo,notifications,reservations,admin}.py`), each an `APIRouter` mounted on the FastAPI `app` in
 `backend/main.py` (the 2026-07-07 `main.py` split — TD#7). Every path is
 hard-coded under `/api` (no router `prefix=`). The app title is
 **"AmpHive Shared EV Charging API"**, version **2.0.0**.
@@ -25,10 +25,11 @@ Interactive docs: `http://<host>:8000/docs`.
   describes the whole filtered set, never the page.
 - **CORS:** explicit allowlist (localhost dev origins, `amphive.app`, `cpo.amphive.app`) —
   locked down 2026-07-06.
-- **106 `@router` route decorators total** across 10 routers (see Swagger
+- **101 `@router` route decorators total** across 9 routers (see Swagger
   `/docs` for the live, authoritative list): admin (10), auth (6), cpo (48),
-  direct (5), groups (3), notifications (6), payments (4), plugs (7),
-  reservations (4), sessions (13). (`cpo` grew from 46 to 48 with the
+  groups (3), notifications (6), payments (4), plugs (7),
+  reservations (4), sessions (13). (`direct` — 5 dev/test-only Tapo-bypass
+  routes — was removed 2026-08-02. `cpo` grew from 46 to 48 with the
   2026-07-21 offline top-up endpoints, `POST`/`GET /api/cpo/topups`.)
   (The legacy SSE endpoint `/api/sessions/live/{id}` was retired 2026-07-07 —
   live telemetry is Socket.io only. The CPO gateway OTA-trigger endpoint was
@@ -188,21 +189,6 @@ Socket.io event (server → the user's room only): `notification` with the same
 object shape as the feed entries. Dead push subscriptions (push service
 returns 404/410) are pruned automatically on the next send.
 
-## Direct Mode — Tapo P110 (dev/test, ESP32 bypass)
-
-All require **JWT** *and* `DIRECT_MODE=true` with an initialized driver (else
-503). The plug IP comes from the request body/query `plug_ip`, falling back to
-the `TAPO_PLUG_IP` env (400 if neither). See [ARCHITECTURE.md](ARCHITECTURE.md#path-b)
-and `backend/services/tapo_direct.py`.
-
-| Method | Path | Body/Params | Response |
-|--------|------|-------------|----------|
-| POST | `/api/direct/plug/on` | `{plug_ip?}` | `{status:"on", plug_ip, message, mode:"direct"}` (502 on failure) |
-| POST | `/api/direct/plug/off` | `{plug_ip?}` | `{status:"off", ...}` (502 on failure) |
-| GET | `/api/direct/plug/info` | query `plug_ip?` | `{plug_ip, device_info, mode}` |
-| GET | `/api/direct/plug/energy` | query `plug_ip?` | `{plug_ip, energy_usage, mode}` |
-| GET | `/api/direct/plug/health` | query `plug_ip?` | `{plug_ip, health, mode}` (always 200) |
-
 ## CPO Admin Portal (`/api/cpo/*`)
 
 Powers the operator dashboard (`frontend/src/pages/cpo/`). Except `setup`, every
@@ -320,9 +306,6 @@ surface in the tenant-scoped `GET /api/cpo/audit`).
 | `JWT_SECRET_KEY` | `amphive-dev-secret-change-in-production` | JWT signing key — **change in prod** |
 | `RAZORPAY_KEY_ID` / `RAZORPAY_KEY_SECRET` / `RAZORPAY_WEBHOOK_SECRET` | `""` | Razorpay; payments disabled if unset |
 | `COINS_PER_RUPEE` | `1.0` | Coin conversion rate |
-| `DIRECT_MODE` | `false` | Enable `/api/direct/*` endpoints |
-| `TAPO_USERNAME` / `TAPO_PASSWORD` / `TAPO_PLUG_IP` | `""` | Tapo account + default plug IP for Direct Mode |
-| `TAPO_RELAY_URL` | none | If set, Direct Mode calls an HTTP relay instead of the local `tapo` lib |
 | `TELEMETRY_FLUSH_INTERVAL_SEC` | `10.0` | How often the buffered telemetry flush task drains to `telemetry_readings` |
 | `TELEMETRY_BUFFER_MAX` | `10000` | Max buffered readings; oldest dropped if the DB is unavailable |
 | `TELEMETRY_RETENTION_DAYS` | `0` | Prune `telemetry_readings` older than N days. `0` = retention disabled (keep all) |

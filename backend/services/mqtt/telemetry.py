@@ -43,6 +43,14 @@ logger = logging.getLogger("amphive.mqtt")
 # kWh per session); env-overridable for exotic fleets or tests.
 MAX_PLAUSIBLE_KWH = float(os.getenv("MAX_PLAUSIBLE_KWH", "1000.0"))
 
+# Minimum drop (raw wire kwh) between consecutive LIVE frames required to
+# treat a lower reading as a genuine counter reset rather than %.4f-rounding
+# jitter on an essentially-flat reading (the firmware reports kwh to 3dp, so a
+# same-value reading can wobble by a unit in the last digit frame to frame).
+# Only ever compared against energy_counter_last_raw_kwh, which itself is only
+# ever written from a LIVE frame — see _persist_telemetry.
+ENERGY_COUNTER_RESET_DROP_KWH = float(os.getenv("ENERGY_COUNTER_RESET_DROP_KWH", "0.005"))
+
 
 class MQTTTelemetryMixin:
     """Inbound telemetry handling: TelemetryStore feed, DB persistence, and
@@ -393,20 +401,43 @@ class MQTTTelemetryMixin:
                 # Require a matching session_id or a live relay to touch it.
                 frame_is_idle = session_id is None and not relay_on
                 if active_session is not None and not frame_is_idle:
-                    # [REC-01] Energy is monotonic: never bill down. A reading
-                    # below the stored total (meter reset) re-baselines to the
-                    # max, matching the guard already on the peak-power write.
-                    # KNOWN GAP (deferred, needs a schema column to fix
-                    # correctly): this clamp tracks no reset offset. Once the
-                    # post-reset raw counter climbs back PAST the pre-reset
-                    # total, max() starts tracking the raw value directly again
-                    # and the energy billed before the reset is silently lost
-                    # from the bill. A correct fix needs to persist the raw
-                    # counter's last value + an accumulated reset offset (so it
-                    # survives a backend restart, not just an in-process dict) —
-                    # that's a migration, so it's tracked separately rather than
-                    # guessed here.
-                    active_session.energy_kwh = max(active_session.energy_kwh or 0.0, kwh)
+                    # [REC-01] Energy is monotonic: never bill down. A raw wire
+                    # reading below the last-seen raw value on a LIVE frame is
+                    # a genuine counter reset (device reboot/reflash, or the
+                    # ESP32 losing its NVS baseline resets its session-relative
+                    # counter near 0) rather than rounding jitter — see
+                    # ENERGY_COUNTER_RESET_DROP_KWH above. When detected, the
+                    # pre-reset raw value is banked into energy_reset_offset_kwh
+                    # so billed energy keeps climbing instead of freezing at
+                    # the pre-reset peak until the raw counter climbs back past
+                    # it (the old gap: energy delivered in between went
+                    # unbilled). Only a LIVE frame can be trusted to detect
+                    # this: an offline-resync frame (is_offline) legitimately
+                    # replays older buffered readings out of order, so it must
+                    # never be mistaken for a reset — it skips detection
+                    # entirely, and energy_counter_last_raw_kwh (which tracks
+                    # only the live counter's trajectory) is left untouched.
+                    if not is_offline:
+                        last_raw = active_session.energy_counter_last_raw_kwh
+                        if last_raw is not None and kwh < last_raw - ENERGY_COUNTER_RESET_DROP_KWH:
+                            active_session.energy_reset_offset_kwh = (
+                                active_session.energy_reset_offset_kwh or 0.0
+                            ) + last_raw
+                            logger.warning(
+                                "Energy counter regression detected -- re-baselining session energy",
+                                extra={
+                                    "session_id": active_session.id,
+                                    "plug_id": plug_id,
+                                    "prior_raw_kwh": last_raw,
+                                    "new_raw_kwh": kwh,
+                                    "banked_offset_kwh": active_session.energy_reset_offset_kwh,
+                                },
+                            )
+                        active_session.energy_counter_last_raw_kwh = kwh
+                    active_session.energy_kwh = max(
+                        active_session.energy_kwh or 0.0,
+                        (active_session.energy_reset_offset_kwh or 0.0) + kwh,
+                    )
                     # Track peak power — only update if this reading is higher
                     if watts > active_session.peak_power_w:
                         active_session.peak_power_w = watts

@@ -1,12 +1,11 @@
 """
-Tests for the RBAC gate on the [Direct Mode] plug-actuating endpoints
-(routers/direct.py: direct_plug_on / direct_plug_off).
+Tests for the generic require_role RBAC dependency.
 
-These endpoints bypass the session/billing flow and energize the plug, so
-they must be admin-only. The security-relevant part is the
-require_role("admin") dependency the routes are wired to -- calling the route
-function directly bypasses FastAPI's DI entirely, so we assert the gate on
-the shared dependency the same way test_payouts.py does for mark_paid.
+Covers single-role and multi-role gating, since several plug-actuating and
+admin-only endpoints are wired to it and must reject unauthorized roles.
+Calling the route function directly bypasses FastAPI's DI entirely, so we
+assert the gate on the shared dependency the same way test_payouts.py does
+for mark_paid.
 """
 from unittest.mock import MagicMock
 
@@ -35,7 +34,7 @@ async def test_direct_plug_on_role_gate_rejects_driver():
 @pytest.mark.asyncio
 async def test_multi_role_gate_allows_admin_and_cpo_but_rejects_driver():
     """require_role("admin", "cpo") is the shape used to open an endpoint to
-    more than one role (unlike direct.py's admin-only gate above) -- both
+    more than one role (unlike the single-role gate above) -- both
     permitted roles pass through unchanged, and the excluded role still 403s."""
     checker = require_role("admin", "cpo")
 

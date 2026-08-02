@@ -30,7 +30,11 @@ direct tenant_id filter for tenant-scoped revenue). It is also the *more
 correct* scoping than joining through the plug's CURRENT gateway/tenant: if
 a plug is ever reassigned to a different gateway/tenant, a historical
 session must still be credited to whoever operated the plug when the
-session actually ran.
+session actually ran. `sum_completed_session_coins` (windowed by ended_at)
+remains the shared aggregate for LIFETIME totals (window omitted = unbounded)
+and any other ended_at-windowed caller, but a tenant's UNSETTLED gross for a
+payout is no longer computed this way — see "Settlement marking (gross)"
+below for the row-ownership mechanism that replaced it.
 
 Refunds (session disputes) net out of this same gross:
 `sum_completed_session_coins` also subtracts the SUM(refund_coins) of every
@@ -67,31 +71,65 @@ so fee + net always foot back to gross exactly.
 Watermark
 ---------
 A tenant's settlement watermark = MAX(period_end) over its non-CANCELLED
-(REQUESTED or PAID) payouts, or the epoch if it has none. "Unsettled"
-earnings always run watermark -> now: every non-cancelled payout advances
-the watermark the instant it's REQUESTED (not only once PAID), so a second
-request can't re-snapshot a window that's still pending admin settlement;
-CANCELLED payouts are excluded, which frees their window for a future
-request. See routers/cpo.py for how the request endpoint makes the
-watermark-read + insert atomic per tenant.
+(REQUESTED or PAID) payouts, or the epoch if it has none. Every non-cancelled
+payout advances the watermark the instant it's REQUESTED (not only once
+PAID), so a second request can't re-snapshot a window that's still pending
+admin settlement; CANCELLED payouts are excluded, which frees their window
+for a future request. See routers/cpo.py for how the request endpoint makes
+the watermark-read + insert atomic per tenant. As of settlement-marking
+(below), the watermark no longer decides which SESSIONS are unsettled for
+GROSS — that's ``ChargingSession.settled_payout_id IS NULL`` now — but it is
+still exactly what it always was for the REFUND clawback window and the
+OFFLINE TOP-UP window (both below), and it still seeds each new payout's
+``period_start``/``period_end`` display bounds.
 
-Watermark race (known limitation)
----------------------------------
-`finalize_charging_session` (services/session_lifecycle.py) stamps
-``ChargingSession.ended_at`` immediately before it commits. A payout
-snapshot landing in the tiny window between that commit starting and
-becoming visible could miss the session yet still advance its watermark
-past the session's ended_at, dropping those earnings from future payouts.
-Stamping ended_at right before the commit shrinks that window to the commit
-itself. A fully race-free fix needs a monotonic "settled_at" marker
-independent of ended_at (a schema change) and is deferred: the residual is
-a sub-second edge under a concurrent finalize + payout, so at most one
-session's earnings could slip a single settlement — a KNOWN LIMITATION, not
-a standing drain. (An earlier attempt floored the window at ``now - lag``
-for gross, top-ups AND refunds; it was reverted because a single shared
-watermark cannot lag the gross window without also delaying — or
-double-counting — top-ups/refunds, which must settle immediately for the
-top-up pool guard in routers/cpo/_topups.py to stay correct.)
+Settlement marking (gross) — replaces the old watermark race
+--------------------------------------------------------------
+Gross is no longer "SUM(coins_spent) of finished sessions with ended_at in
+[watermark, now)". Instead, ``ChargingSession.settled_payout_id`` (Alembic
+revision 0028_payout_settlement_marking) is the row's OWN settlement state:
+NULL means unsettled/eligible for the next payout, no matter what its
+ended_at is or when a watermark last moved. `mark_unsettled_sessions_and_
+sum_gross` claims every one of a tenant's unsettled FINISHED sessions for a
+brand-new payout id and sums their coins_spent in a SINGLE
+``UPDATE ... RETURNING`` statement — the read (which sessions are unsettled)
+and the write (mark them settled) are the same statement, so they can never
+disagree the way a separate SELECT-then-mark could under a concurrent
+commit. `sum_unsettled_session_coins` is the read-only twin (SELECT SUM, no
+mutation) used by the earnings preview, so merely looking at the dashboard
+can never claim a session out from under a future payout.
+
+This closes what used to be documented here as the "watermark race (known
+limitation)": `finalize_charging_session` (services/session_lifecycle.py)
+stamps ``ChargingSession.ended_at`` immediately before it commits, and a
+payout snapshot landing in the tiny window between that commit starting and
+becoming visible could previously miss the session yet still advance the
+watermark past its ended_at, dropping those earnings from every future
+payout permanently. Under settlement marking there is no such thing as
+"behind the watermark" for gross: a session that commits a heartbeat after
+one payout's claiming UPDATE ran is simply still NULL, and gets claimed by
+the NEXT payout instead of never. (An earlier attempt at a fix floored the
+window at ``now - lag`` for gross, top-ups AND refunds; it was reverted
+because a single shared watermark cannot lag the gross window without also
+delaying — or double-counting — top-ups/refunds, which must settle
+immediately for the top-up pool guard in routers/cpo/_topups.py to stay
+correct. Settlement marking sidesteps that entirely by not touching the
+refund/top-up windowing at all — those stay exactly as they were.)
+
+`cpo_cancel_payout` (routers/cpo/_payouts.py) resets every session it had
+claimed (``settled_payout_id == payout.id``) back to NULL before it commits
+the CANCELLED status, so a cancelled payout's earnings aren't stranded —
+they're simply claimable again by the next request, same as the watermark's
+CANCELLED-payout exclusion always did for the window it used to define.
+
+Legacy data: payouts created BEFORE settlement marking never claimed their
+sessions, so on upgrade every historic already-paid-out session would have
+counted as unsettled and been re-paid by the very next request. Migration
+0028_payout_settlement_marking therefore backfills the old scheme's
+attribution once: each FINISHED session whose ended_at falls inside a
+non-CANCELLED payout's [period_start, period_end) window gets stamped with
+that payout's id (see the migration's docstring for the full rationale,
+including why race-lost sessions stay lost retroactively).
 
 Offline top-up pool
 --------------------
@@ -102,16 +140,21 @@ unsettled net earnings, never from thin air. `tenant_earnings_summary`'s
 OfflineTopup issued since the same watermark (clamped at zero), and
 ``cpo_request_payout`` (routers/cpo/_payouts.py) pays out that reduced figure
 — not the raw unsettled net — so a CPO can never draw the same earnings out
-twice: once as a cash top-up, once as a bank/UPI payout. Both endpoints read
-this one function, so the two can never disagree (same principle as the
-gross/fee/net split above).
+twice: once as a cash top-up, once as a bank/UPI payout. Since settlement
+marking, `cpo_request_payout` no longer calls `tenant_earnings_summary`
+directly (its gross must come from the claiming `mark_unsettled_sessions_
+and_sum_gross`, not the read-only preview), but it still calls the exact
+same `sum_offline_topups` helper over the exact same
+[watermark, now) window `tenant_earnings_summary` uses, so the dashboard's
+``topup_pool.available_coins`` and a payout's actual payable net still can
+never disagree (same principle as the gross/fee/net split above).
 """
 import os
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Optional, Tuple
 
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database.models import (
@@ -237,6 +280,93 @@ async def sum_completed_session_coins(
     return to_money(max(gross - refunds, ZERO_MONEY))
 
 
+async def sum_unsettled_session_coins(db: AsyncSession, tenant_id: int) -> Decimal:
+    """Read-only preview of what `mark_unsettled_sessions_and_sum_gross` would
+    claim right now — SELECT SUM instead of UPDATE ... RETURNING, so GET
+    /api/cpo/earnings can show the unsettled figure without ever claiming a
+    session out from under a future payout request (display must never mutate
+    settlement state). Same predicate as the claiming path: FINISHED_SESSION_
+    STATUSES sessions with settled_payout_id IS NULL (see the module
+    docstring's "Settlement marking (gross)" section) — no ended_at bound at
+    all, since a session's eligibility no longer depends on timing. The
+    approved-refund subtraction still runs over the tenant's current
+    [watermark, now) window, exactly as it always has (see "Refunds" and
+    "Watermark" in the module docstring) — that windowing is unchanged by
+    settlement marking."""
+    watermark = await tenant_settlement_watermark(db, tenant_id)
+    now = datetime.now(timezone.utc)
+
+    result = await db.execute(
+        select(func.coalesce(func.sum(ChargingSession.coins_spent), 0)).where(
+            and_(
+                ChargingSession.tenant_id == tenant_id,
+                ChargingSession.status.in_(FINISHED_SESSION_STATUSES),
+                ChargingSession.settled_payout_id.is_(None),
+            )
+        )
+    )
+    gross = to_money(result.scalar() or 0)
+
+    refunds = await sum_approved_refund_coins(db, tenant_id, window_start=watermark, window_end=now)
+    return to_money(max(gross - refunds, ZERO_MONEY))
+
+
+async def mark_unsettled_sessions_and_sum_gross(
+    db: AsyncSession,
+    tenant_id: int,
+    payout_id: int,
+    refund_window_start: datetime,
+    refund_window_end: datetime,
+) -> Decimal:
+    """Atomically claim every one of this tenant's unsettled FINISHED
+    sessions for `payout_id` and return their post-refund gross.
+
+    The claim and the read are the SAME statement — a single
+    ``UPDATE charging_sessions ... WHERE settled_payout_id IS NULL
+    RETURNING coins_spent`` — so they can never disagree the way a separate
+    "SELECT which sessions are unsettled" followed by "UPDATE those ids"
+    could under a concurrent `finalize_charging_session` commit: whatever
+    this one UPDATE's WHERE clause matches (still NULL at the instant
+    Postgres evaluates each row) is claimed for THIS payout; anything that
+    commits its own settled_payout_id-eligible row a moment later is simply
+    left NULL, to be claimed by the NEXT payout instead of dropped forever.
+    See the module docstring's "Settlement marking (gross)" section for the
+    watermark race this replaces.
+
+    Refund windowing is UNCHANGED and out of scope for this fix: the
+    approved-dispute-refund subtraction below still runs over the tenant's
+    [refund_window_start, refund_window_end) window — the caller's
+    watermark -> now, i.e. the new payout's own period bounds — via
+    `sum_approved_refund_coins`, exactly as the old ended_at-windowed gross
+    path did (see "Refunds" in the module docstring for why that clawback
+    must stay keyed to the dispute's own resolved_at, not to when a session
+    gets claimed). The window MUST be passed in as the watermark the caller
+    read BEFORE inserting/flushing the new Payout row: recomputing
+    `tenant_settlement_watermark` here would see that flushed row inside the
+    same transaction and return the new payout's OWN period_end — an almost
+    empty refund window that silently skips every pending refund and
+    over-pays the CPO.
+    """
+    result = await db.execute(
+        update(ChargingSession)
+        .where(
+            and_(
+                ChargingSession.tenant_id == tenant_id,
+                ChargingSession.status.in_(FINISHED_SESSION_STATUSES),
+                ChargingSession.settled_payout_id.is_(None),
+            )
+        )
+        .values(settled_payout_id=payout_id)
+        .returning(ChargingSession.coins_spent)
+    )
+    gross = to_money(sum(result.scalars().all(), ZERO_MONEY))
+
+    refunds = await sum_approved_refund_coins(
+        db, tenant_id, window_start=refund_window_start, window_end=refund_window_end
+    )
+    return to_money(max(gross - refunds, ZERO_MONEY))
+
+
 async def sum_offline_topups(
     db: AsyncSession,
     tenant_id: int,
@@ -277,18 +407,21 @@ async def tenant_settlement_watermark(db: AsyncSession, tenant_id: int) -> datet
 
 
 async def tenant_earnings_summary(db: AsyncSession, tenant_id: int) -> dict:
-    """Lifetime + unsettled (watermark -> now) earnings for the CPO earnings
-    dashboard. Shared by GET /api/cpo/earnings and (for the unsettled leg)
-    POST /api/cpo/payouts, so the two can never disagree."""
+    """Lifetime + unsettled earnings for the CPO earnings dashboard
+    (read-only — never claims a session; see `sum_unsettled_session_coins`).
+    The unsettled leg is no longer a watermark->now window: it's every
+    FINISHED session with settled_payout_id IS NULL (see the module
+    docstring's "Settlement marking (gross)" section). `watermark`/`now` are
+    still returned (and still drive the offline-topup pool figure below)
+    since POST /api/cpo/payouts still uses them for the refund-clawback
+    window and the payout's period_start/period_end."""
     now = datetime.now(timezone.utc)
     watermark = await tenant_settlement_watermark(db, tenant_id)
 
     lifetime_gross = await sum_completed_session_coins(db, tenant_id)
     lifetime_fee, lifetime_net = compute_fee_and_net(lifetime_gross)
 
-    unsettled_gross = await sum_completed_session_coins(
-        db, tenant_id, window_start=watermark, window_end=now
-    )
+    unsettled_gross = await sum_unsettled_session_coins(db, tenant_id)
     unsettled_fee, unsettled_net = compute_fee_and_net(unsettled_gross)
 
     # Offline top-ups already issued in this same unsettled window must come
