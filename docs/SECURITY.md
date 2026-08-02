@@ -23,6 +23,37 @@ known security gaps, not a formal audit. Items are roughly ordered by severity.*
 > timeout). The still-open device items (no flash-encryption §8.2, boot-time
 > portal fallback §8.4) are the highest-severity *open* gaps — read §8 first.
 
+> **2026-08-02 whole-surface audit + hardening batch — RESOLVED.** A five-track
+> parallel audit (authz/tenancy, injection/SSRF, money-path, infra/MQTT,
+> frontend) plus a fix batch closed the following. **The one genuinely
+> exploitable cross-tenant vuln** was the MQTT alarms handler: `services/mqtt/
+> alarms.py::_persist_gateway_event` resolved the tenant from the (ACL-enforced)
+> gateway topic but never checked that the payload's `plug_id` belonged to that
+> gateway, so an operator with valid creds for their *own* gateway could publish
+> `{"error":"THERMAL_CUTOFF","plug_id":<victim>}` and force-finalize/maintenance
+> another tenant's plug (cross-tenant DoS + forced billing). Fixed by mirroring
+> the ownership check `telemetry.py` already does (drop/null a foreign `plug_id`
+> before any finalize/maintenance/notify). Also fixed: **Socket.io revocation
+> lag** (connections re-validate `token_version`/`is_disabled` on every
+> authenticated event now, force-disconnecting a revoked/disabled account —
+> previously only checked at connect); **dispute-refund clawback race**
+> (`cpo_resolve_dispute` now takes the same `Tenant` `FOR UPDATE` lock that
+> payout/top-up take, so a self-dealing CPO can't race its own dispute-approve
+> against its own payout to skip the refund deduction); **CSV/formula injection**
+> in the two `.csv` exports (`services/csv_safe.py` neutralizes leading
+> `= + - @`/tab/CR); a **blanket per-IP `/api` rate-limit floor** (`API_RATE_LIMIT`,
+> §8.6) plus dedicated limiters on **group-code join** (`GROUP_JOIN_ACCOUNT_RATE_LIMIT`)
+> and **CPO setup** (`CPO_SETUP_ACCOUNT_RATE_LIMIT`); an explicit **request-body
+> size cap** (`MAX_REQUEST_BODY_BYTES`, default 1 MB, 413) + nginx
+> `client_max_body_size`; **bounded** the previously-uncapped `/api/plugs/available`,
+> `/api/plugs/public`, `/api/groups/my` list endpoints; `RegisterRequest.full_name`
+> `max_length` (422 not 500); a loud CRITICAL guard on the weak `DATABASE_URL`
+> dev-default; and frontend **OAuth token history-scrub** + `noopener` on invoice
+> `window.open`. Confirmed clean in the same audit: no SQLi, no backend SSRF (the
+> OTA `firmware_url` is relayed to the device over MQTT, never fetched by the
+> backend, and is admin-only + ECDSA-signature-gated), no path traversal, no XSS,
+> no IDOR across all routes, CSRF-resistant bearer auth.
+
 ---
 
 ## 1. Committed secrets (ROTATED 2026-07-06)

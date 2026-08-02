@@ -20,7 +20,10 @@ class RegisterRequest(BaseModel):
     # accounts created before this rule can still sign in.
     email: EmailStr
     password: str = Field(min_length=8, max_length=72)
-    full_name: str
+    # users.full_name is String(150) (database/models.py) — bounded to match,
+    # else an oversized value reaches the DB unchecked and raises a DataError
+    # (uncaught 500) instead of a clean 422 here.
+    full_name: str = Field(max_length=150)
 
 class LoginRequest(BaseModel):
     email: str

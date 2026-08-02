@@ -67,4 +67,18 @@ describe('GoogleCallback', () => {
 
     expect(await screen.findByText('Authentication expired. Please sign in again.')).toBeInTheDocument();
   });
+
+  it('scrubs the token from the URL immediately, even when loginWithToken later rejects', async () => {
+    const replaceStateSpy = vi.spyOn(window.history, 'replaceState');
+    loginWithTokenSpy.mockRejectedValue(new Error('Authentication expired. Please sign in again.'));
+    setHash('#token=fake.jwt.token');
+
+    renderCallback();
+
+    expect(await screen.findByText('Authentication expired. Please sign in again.')).toBeInTheDocument();
+    expect(replaceStateSpy).toHaveBeenCalledWith(null, '', '/auth/google/callback');
+    expect(window.location.hash).toBe('');
+
+    replaceStateSpy.mockRestore();
+  });
 });

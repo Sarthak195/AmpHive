@@ -153,7 +153,7 @@ describe('CpoInvoices', () => {
         expect.objectContaining({ headers: expect.any(Object) })
       );
     });
-    expect(openSpy).toHaveBeenCalledWith('blob:mock', '_blank');
+    expect(openSpy).toHaveBeenCalledWith('blob:mock', '_blank', 'noopener');
 
     // Revocation is deferred (not immediate, unlike the CSV anchor-download
     // path) so the new tab has time to load the blob first.

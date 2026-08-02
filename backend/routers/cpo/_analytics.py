@@ -22,6 +22,7 @@ from backend.database.models import (
     TelemetryReading,
     User,
 )
+from backend.services.csv_safe import sanitize_csv_cell
 from backend.services.rbac import require_role
 
 router = APIRouter()
@@ -270,8 +271,8 @@ async def cpo_export_sessions_csv(
         writer.writerow([
             s.id,
             s.plug_id,
-            plug_name if plug_name is not None else f"Plug #{s.plug_id}",
-            user_email if user_email is not None else "unknown",
+            sanitize_csv_cell(plug_name if plug_name is not None else f"Plug #{s.plug_id}"),
+            sanitize_csv_cell(user_email if user_email is not None else "unknown"),
             s.started_at.isoformat() if s.started_at else "",
             s.ended_at.isoformat() if s.ended_at else "",
             duration_minutes,

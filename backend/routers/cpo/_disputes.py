@@ -18,6 +18,7 @@ from backend.database.models import (
     DisputeStatus,
     LedgerTransaction,
     SessionDispute,
+    Tenant,
     TransactionType,
     User,
 )
@@ -93,7 +94,20 @@ async def cpo_resolve_dispute(
     Reject: status + resolution_note only, no money movement.
 
     Race safety:
-    - The dispute row is locked (SELECT ... FOR UPDATE) and its status
+    - The tenant row is locked FIRST (SELECT Tenant ... FOR UPDATE), the same
+      row + statement cpo_request_payout (_payouts.py) and cpo_create_topup
+      (_topups.py) lock before they compute the tenant's payable pool. Both of
+      them read the approved-refund clawback (services/payouts.py
+      sum_approved_refund_coins, windowed by SessionDispute.resolved_at)
+      UNLOCKED, so without this an approve could commit its refund in the gap
+      after a payout has locked the tenant but before it reads that sum: the
+      refund's resolved_at lands before the payout's period_end, yet the next
+      settlement window opens at that same period_end — so the refund would be
+      dropped from this payout AND every future one, and the CPO's pool would
+      never be reduced for a credit the driver already received (money leaking
+      both sides, retryable at will). Holding this lock forces the resolve to
+      serialize against any such payout/top-up for the same tenant.
+    - The dispute row is then locked (SELECT ... FOR UPDATE) and its status
       re-checked under the lock, so two concurrent resolves of the *same*
       dispute serialize — the loser blocks on the lock, then (once it's
       free) re-reads the now-committed row and finds it's no longer OPEN
@@ -104,11 +118,32 @@ async def cpo_resolve_dispute(
       computed against a picture a sibling in-flight approval is about to
       invalidate — the dispute-row lock alone only protects THIS dispute
       from a double-resolve, not siblings on the same session.
+
+    The resulting global lock order is Tenant -> Dispute -> Session (-> User,
+    inside credit_wallet). Every tenant-locking path in the codebase acquires
+    the Tenant row first (payout, top-up, invoice issuance); none locks a
+    Dispute/Session/User row and then a Tenant, so taking Tenant up front here
+    introduces no AB-BA deadlock.
     """
     if req.action not in ("approve", "reject"):
         raise HTTPException(
             status_code=400,
             detail=f"Invalid action '{req.action}'. Must be 'approve' or 'reject'.",
+        )
+
+    # Serialize this resolution against a concurrent payout / offline-top-up
+    # pool computation for the SAME tenant (see the "Race safety" note above).
+    # Taken BEFORE the dispute/session locks below so the global order stays
+    # Tenant -> Dispute -> Session, matching the Tenant-first payout/top-up
+    # path. The dispute is tenant-scoped to user.tenant_id (the WHERE just
+    # below), so this locks the very tenant that owns it; the lock result isn't
+    # inspected because the dispute lookup is the real gate — if the tenant (or
+    # dispute) doesn't exist, that lookup 404s exactly as before. A bare admin
+    # with no tenant matches no dispute and moves no money, so there is nothing
+    # to serialize and nothing to lock.
+    if user.tenant_id is not None:
+        await db.execute(
+            select(Tenant.id).where(Tenant.id == user.tenant_id).with_for_update()
         )
 
     result = await db.execute(

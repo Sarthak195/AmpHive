@@ -220,7 +220,7 @@ describe('Activity — session detail modal', () => {
         expect.any(Object)
       );
     });
-    expect(openSpy).toHaveBeenCalledWith('blob:mock', '_blank');
+    expect(openSpy).toHaveBeenCalledWith('blob:mock', '_blank', 'noopener');
 
     expect(revokeSpy).not.toHaveBeenCalled();
     const deferredRevoke = setTimeoutSpy.mock.calls.find(([, delay]) => delay === 60_000);

@@ -63,6 +63,15 @@ async def emit_notification(user_id: int, notification: Dict[str, Any]) -> None:
     (their per-user room, joined on connect). Unlike plug_status /
     gateway_alarm this is NOT a broadcast — a notification carries
     wallet/session details that belong to one user.
+
+    Note: we do not re-authorize each socket in the room per push — the room is
+    keyed by user id, not by token, so a revoked-token socket and a valid
+    fresh-token socket for the same user can coexist here, and there is no
+    single tv to gate the whole emit on. Revocation is instead enforced when a
+    stale socket next interacts (see _socket_user_still_valid, which boots it
+    from all rooms). The residual is a fully idle revoked socket that keeps
+    receiving these pushes until it disconnects/re-interacts — bounded and
+    consistent with the per-user token_version model (no per-token blacklist).
     """
     try:
         await sio.emit("notification", notification, room=f"user_{user_id}")
@@ -122,8 +131,12 @@ async def connect(sid, environ, auth=None):
             logger.warning(f"Socket connection rejected: Revoked or unknown user (sid: {sid})")
             return False
 
-        # Save user info in connection session
-        await sio.save_session(sid, {"user_id": user_id})
+        # Save user info in connection session. Persist the token's `tv`
+        # (token_version) claim alongside the id so authenticated event
+        # handlers can re-validate the account's *current* state on later
+        # events without re-decoding the JWT — connect() is the only place the
+        # raw token is available. See _socket_user_still_valid.
+        await sio.save_session(sid, {"user_id": user_id, "tv": payload.get("tv", 0)})
         # Per-user room: lets the backend target one user's live clients
         # (driver notifications) without tracking sids ourselves.
         await sio.enter_room(sid, f"user_{user_id}")
@@ -137,12 +150,64 @@ async def connect(sid, environ, auth=None):
 async def disconnect(sid):
     logger.info(f"Socket disconnected (sid: {sid})")
 
+
+async def _socket_user_still_valid(sid) -> bool:
+    """
+    Re-authorize an already-connected socket against the account's CURRENT
+    state. connect() authenticates only once, at CONNECT time, then the
+    connection lives indefinitely. Without this, a socket that was valid at
+    connect keeps acting for the user (subscribe_session / telemetry) and keeps
+    receiving that user's private pushes to room user_{id} even after the
+    account was logged-out-everywhere / password-reset / demoted / disabled —
+    all of which bump users.token_version (disable also sets is_disabled). The
+    HTTP layer re-checks both on every request (backend.services.auth
+    .get_current_user); this brings the socket layer to parity.
+
+    Returns True only if the saved session names a user who still exists, is
+    not disabled, and whose token_version still matches the `tv` captured at
+    connect. Callers MUST force-disconnect (await sio.disconnect(sid)) on
+    False: leaving all rooms is what stops future server-pushed notifications
+    to a revoked socket.
+
+    Residual: a fully idle revoked socket that never emits another event keeps
+    receiving pushes until it disconnects or next interacts (at which point
+    this guard boots it). That is a bounded improvement over "indefinite" and
+    is consistent with the per-user token_version model — there is no
+    per-token blacklist, so revocation is enforced at the account's next touch,
+    not instantaneously mid-idle.
+    """
+    session = await sio.get_session(sid)
+    user_id = session.get("user_id")
+    if not user_id:
+        return False
+    saved_tv = session.get("tv", 0)
+
+    # Cheap single-row reload, matching connect()'s query style.
+    async with async_session_factory() as db:
+        result = await db.execute(select(User).where(User.id == user_id))
+        user = result.scalar_one_or_none()
+
+    if user is None or user.is_disabled or user.token_version != saved_tv:
+        logger.warning(
+            f"Socket re-auth failed: revoked, disabled, or unknown user (sid: {sid})"
+        )
+        return False
+    return True
+
+
 @sio.event
 async def subscribe_session(sid, data):
     """
     Subscribe a client to a charging session's real-time telemetry.
     Expected data: { "session_id": 123 }
     """
+    # Re-authorize against current account state (connect() only checked once).
+    # A revoked/disabled account gets no further action and is booted from all
+    # rooms — which also cuts off its private notification pushes.
+    if not await _socket_user_still_valid(sid):
+        await sio.disconnect(sid)
+        return
+
     if not isinstance(data, dict) or "session_id" not in data:
         await sio.emit("subscription_error", {"detail": "Invalid parameters"}, to=sid)
         return
@@ -195,6 +260,11 @@ async def unsubscribe_session(sid, data):
     Explicitly unsubscribe from session telemetry.
     Expected data: { "session_id": 123 }
     """
+    # Re-authorize against current account state (see subscribe_session).
+    if not await _socket_user_still_valid(sid):
+        await sio.disconnect(sid)
+        return
+
     if not isinstance(data, dict) or "session_id" not in data:
         return
     try:

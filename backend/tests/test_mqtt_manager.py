@@ -268,11 +268,21 @@ class _AlarmDB:
     home of the safety-cutoff decisions since the driver-notifications merge
     — see test_notifications.py's _SeqDB for the sibling pattern that tests
     _finalize_session_after_cutoff itself). The gateway lookup always
-    succeeds; add()/commit() are no-ops so the function runs past the
+    succeeds; add()/commit() are no-ops (add() also records the row so a test
+    can inspect the persisted GatewayEvent) so the function runs past the
     persist step to reach the finalize/auto-maintenance sequencing below it.
+
+    The SAME fake row answers both queries: the gateway lookup reads
+    `.tenant_id` and the plug-ownership lookup reads `.gateway_id`. `.gateway_id`
+    is preset to `owner_gateway_id` (default "gw-9", the id the alarm tests
+    publish under) so a legit alarm's own plug passes the ownership check; point
+    it at a DIFFERENT gateway to simulate a spoofed/foreign plug_id.
     """
-    def __init__(self):
+    def __init__(self, owner_gateway_id="gw-9", tenant_id=1):
         self.committed = False
+        self.added = []
+        self._owner_gateway_id = owner_gateway_id
+        self._tenant_id = tenant_id
 
     async def __aenter__(self):
         return self
@@ -282,14 +292,16 @@ class _AlarmDB:
 
     async def execute(self, *_a, **_k):
         r = MagicMock()
-        gw = MagicMock()
-        gw.tenant_id = 1
-        r.scalar_one_or_none.return_value = gw
+        row = MagicMock()
+        row.tenant_id = self._tenant_id
+        row.gateway_id = self._owner_gateway_id
+        r.scalar_one_or_none.return_value = row
         return r
 
     def add(self, row):
         row.id = 1
         row.created_at = None
+        self.added.append(row)
 
     async def commit(self):
         self.committed = True
@@ -485,6 +497,114 @@ async def test_local_limit_cutoff_finalize_reason_string():
         await mgr._finalize_session_after_cutoff(7, "LOCAL_LIMIT_CUTOFF")
 
     assert captured.get("reason") == "limit reached: session hit its energy/duration limit"
+    MQTTManager._instance = None
+
+
+# ---------------------------------------------------------------------------
+# Cross-tenant alarm plug-ownership guard (payload plug_id spoofing)
+# ---------------------------------------------------------------------------
+#
+# Broker ACLs scope *topics*, not payload claims: a gateway with valid creds
+# for its OWN alarms topic could publish {"error":"THERMAL_CUTOFF","plug_id":N}
+# naming another tenant's plug (plug ids are small sequential ints) and, without
+# a check, force-finalize/maintenance/notify that victim plug. _persist_gateway_
+# event must require the payload plug_id to belong to the publishing gateway
+# (mirrors the telemetry ownership check above), nulling out a foreign id so the
+# alarm degrades to a harmless gateway-level (plug_id=None) event.
+
+
+@pytest.mark.asyncio
+async def test_alarm_foreign_plug_id_dropped_no_finalize_maintenance_or_persist():
+    """An alarm whose payload plug_id belongs to a DIFFERENT gateway must not
+    finalize or force-maintenance the victim plug, and must not be persisted
+    carrying the foreign plug_id (the spoofed id is nulled to None)."""
+    MQTTManager._instance = None
+    # plug 5 is owned by "gw-victim"; the attacker publishes under "gw-attacker".
+    db = _AlarmDB(owner_gateway_id="gw-victim")
+    mgr = MQTTManager(db_session_factory=lambda: db)
+    finalize_mock = AsyncMock()
+    auto_maint_mock = AsyncMock()
+    mgr._finalize_session_after_cutoff = finalize_mock
+    mgr._auto_enter_maintenance = auto_maint_mock
+
+    with patch("backend.services.socketio_manager.emit_gateway_alarm", AsyncMock()):
+        await mgr._persist_gateway_event("gw-attacker", 5, "THERMAL_CUTOFF", "critical", None)
+
+    finalize_mock.assert_not_called()
+    auto_maint_mock.assert_not_called()
+    # An event is still recorded (audit of the attacker's own gateway), but the
+    # foreign plug_id was nulled out — never recorded against it as if real.
+    assert len(db.added) == 1
+    assert db.added[0].plug_id is None
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_alarm_foreign_plug_unmetered_consumption_does_not_notify_cpos():
+    """A spoofed UNMETERED_CONSUMPTION naming a victim plug must not bell-notify
+    the attacker's CPOs about that plug — the plug-gated notify never fires once
+    the foreign plug_id is nulled."""
+    MQTTManager._instance = None
+    db = _AlarmDB(owner_gateway_id="gw-victim")
+    mgr = MQTTManager(db_session_factory=lambda: db)
+    notify_mock = AsyncMock()
+    mgr._notify_cpos_unmetered_consumption = notify_mock
+
+    with patch("backend.services.socketio_manager.emit_gateway_alarm", AsyncMock()):
+        await mgr._persist_gateway_event(
+            "gw-attacker", 5, "UNMETERED_CONSUMPTION", "warning", "spoofed detail"
+        )
+
+    notify_mock.assert_not_called()
+    assert db.added[0].plug_id is None
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_alarm_own_plug_finalize_and_maintenance_still_fire():
+    """Regression guard for the ownership fix: a finalize-worthy alarm for one
+    of the gateway's OWN plugs must still finalize AND (for a hardware cutoff)
+    enter maintenance, and persist with the real plug_id — unchanged behaviour."""
+    MQTTManager._instance = None
+    db = _AlarmDB(owner_gateway_id="gw-9")  # plug 5 belongs to gw-9
+    mgr = MQTTManager(db_session_factory=lambda: db)
+    finalize_mock = AsyncMock()
+    auto_maint_mock = AsyncMock()
+    mgr._finalize_session_after_cutoff = finalize_mock
+    mgr._auto_enter_maintenance = auto_maint_mock
+
+    with patch("backend.services.socketio_manager.emit_gateway_alarm", AsyncMock()):
+        await mgr._persist_gateway_event("gw-9", 5, "THERMAL_CUTOFF", "critical", None)
+
+    finalize_mock.assert_awaited_once_with(5, "THERMAL_CUTOFF")
+    auto_maint_mock.assert_awaited_once_with(5, "THERMAL_CUTOFF")
+    assert db.added[0].plug_id == 5  # persisted with the real, owned plug_id
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_alarm_gateway_level_null_plug_still_persists_and_broadcasts():
+    """A genuine gateway-level event (plug_id=None, e.g. an OTA notice) skips the
+    ownership lookup entirely and still persists + broadcasts unchanged, with no
+    plug-scoped action firing."""
+    MQTTManager._instance = None
+    db = _AlarmDB()
+    mgr = MQTTManager(db_session_factory=lambda: db)
+    finalize_mock = AsyncMock()
+    auto_maint_mock = AsyncMock()
+    mgr._finalize_session_after_cutoff = finalize_mock
+    mgr._auto_enter_maintenance = auto_maint_mock
+
+    emit_mock = AsyncMock()
+    with patch("backend.services.socketio_manager.emit_gateway_alarm", emit_mock):
+        await mgr._persist_gateway_event("gw-9", None, "OTA_STARTED", "info", None)
+
+    finalize_mock.assert_not_called()
+    auto_maint_mock.assert_not_called()
+    assert len(db.added) == 1
+    assert db.added[0].plug_id is None
+    emit_mock.assert_awaited_once()
+    assert emit_mock.await_args.args[0]["plug_id"] is None
     MQTTManager._instance = None
 
 
@@ -2168,15 +2288,18 @@ async def test_persist_gateway_event_notifies_cpos_for_unmetered_consumption():
     gw = MagicMock()
     gw.tenant_id = 7
 
+    owned_plug = MagicMock()
+    owned_plug.gateway_id = "gw-9"  # plug 5 belongs to the publishing gateway
     plug_name_result = MagicMock()
     plug_name_result.scalar_one_or_none.return_value = "Sim Plug 1"
     cpo_ids_result = MagicMock()
     cpo_ids_result.scalars.return_value.all.return_value = [101, 102]
 
     session = _FakeSession([
-        _FakeResult(scalar=gw),   # gateway lookup (event persist)
-        plug_name_result,         # plug-name lookup (CPO notify)
-        cpo_ids_result,           # CPO id lookup (CPO notify)
+        _FakeResult(scalar=gw),              # gateway lookup (event persist)
+        _FakeResult(scalar=owned_plug),      # plug ownership check (event persist)
+        plug_name_result,                    # plug-name lookup (CPO notify)
+        cpo_ids_result,                      # CPO id lookup (CPO notify)
     ])
     mgr = MQTTManager(db_session_factory=lambda: session)
 

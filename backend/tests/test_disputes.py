@@ -24,6 +24,12 @@ What's proven here:
    resolves of the *same* dispute (only one may ever credit the wallet).
 5. Tenant scoping: a CPO can neither list nor resolve another tenant's
    dispute.
+6. Money-integrity serialization: resolving a dispute takes the tenant-row
+   FOR UPDATE lock FIRST -- the same lock a payout/top-up holds while it
+   computes the payable pool (routers/cpo/_payouts.py, _topups.py) -- before
+   the dispute/session locks, proven both by the emitted statements and
+   against a real held row lock, so an approved refund can never slip past a
+   concurrent payout's (unlocked) refund-sum read and vanish from the pool.
 """
 import asyncio
 import os
@@ -554,6 +560,123 @@ async def test_concurrent_double_resolve_credits_wallet_exactly_once(factory):
     outcomes = await asyncio.gather(_approve(), _approve())
     assert sorted(outcomes) == ["blocked", "ok"]
     # Credited exactly once, never twice.
+    assert await _fresh_balance(factory, world["driver_id"]) == Decimal("20.00")
+
+
+# --- Tenant-lock serialization vs. concurrent payout/top-up pool reads -------
+#
+# The money-integrity race this guards (Medium): cpo_request_payout and
+# cpo_create_topup both SELECT the Tenant row FOR UPDATE and THEN read the
+# approved-refund clawback (services/payouts.sum_approved_refund_coins, windowed
+# by SessionDispute.resolved_at) UNLOCKED. If a dispute-approve could commit its
+# refund in the gap after a payout took that tenant lock but before it read the
+# clawback, the refund's resolved_at would fall before the payout's period_end
+# yet the next window opens at that same period_end -- dropping the refund from
+# this payout AND every future one while the driver keeps the credit. The fix is
+# for cpo_resolve_dispute to take the SAME tenant lock FIRST.
+
+@pytest.mark.asyncio
+async def test_resolve_locks_tenant_row_for_update_before_touching_the_dispute():
+    """Asserted directly on the statements the router emits (needs no DB): the
+    FIRST thing cpo_resolve_dispute does is a SELECT ... FOR UPDATE on the
+    tenant row, only THEN the dispute-row lock. A regression that drops the
+    tenant lock or reorders it after the dispute/session locks fails here."""
+    from sqlalchemy.dialects import postgresql
+
+    from backend.database.models import SessionDispute, Tenant
+    from backend.routers.cpo import cpo_resolve_dispute
+    from backend.schemas import CpoDisputeResolveRequest
+
+    executed = []
+
+    class _Result:
+        def scalar_one_or_none(self):
+            # Miss the dispute lookup so the call 404s right after the tenant
+            # lock -- this test only cares about the ORDER of locks taken.
+            return None
+
+    class _SpyDB:
+        async def execute(self, statement, *args, **kwargs):
+            executed.append(statement)
+            return _Result()
+
+    cpo = _user_obj(42, "cpo@amphive.test", tenant_id=7)
+    with pytest.raises(HTTPException) as exc:
+        await cpo_resolve_dispute(
+            123, CpoDisputeResolveRequest(action="approve"), cpo, _SpyDB(),
+        )
+    assert exc.value.status_code == 404  # bailed at the (missing) dispute
+
+    def _sql(stmt) -> str:
+        return str(stmt.compile(dialect=postgresql.dialect())).lower()
+
+    assert len(executed) >= 2, "expected a tenant lock THEN a dispute lookup"
+    first = _sql(executed[0])
+    assert "for update" in first, "first statement must be a FOR UPDATE lock"
+    assert Tenant.__tablename__ in first, "the first lock must target the tenant row"
+    assert SessionDispute.__tablename__ not in first, (
+        "the tenant lock must precede the dispute lookup, not be it"
+    )
+
+    second = _sql(executed[1])
+    assert SessionDispute.__tablename__ in second and "for update" in second, (
+        "the dispute row lock must come AFTER the tenant lock"
+    )
+
+
+@pytest.mark.asyncio
+async def test_resolve_blocks_while_the_tenant_lock_is_held(factory):
+    """Behavioural proof against a real Postgres row lock: while another
+    transaction holds the tenant's SELECT ... FOR UPDATE (exactly what an
+    in-flight cpo_request_payout / cpo_create_topup holds), a concurrent
+    dispute-approve cannot commit its refund -- it blocks on that lock and only
+    proceeds (crediting the driver once) once the holder releases it. Without
+    the fix the approve would sail straight through, dropping its refund from
+    the pool the holder is about to compute."""
+    from sqlalchemy import select
+
+    from backend.database.models import Tenant
+    from backend.routers.cpo import cpo_resolve_dispute
+    from backend.schemas import CpoDisputeResolveRequest
+
+    world = await _seed_world(factory, coins_spent="20.00", driver_balance="0.00")
+    dispute_id = await _seed_open_dispute(factory, world)
+    cpo = _user_obj(world["cpo_id"], "cpo@amphive.test", tenant_id=world["tenant_id"])
+
+    holder_has_lock = asyncio.Event()
+    release_holder = asyncio.Event()
+
+    async def hold_tenant_lock():
+        # Stand in for a concurrent payout/top-up: grab the tenant row lock and
+        # sit on it (uncommitted) until the test lets go.
+        async with factory() as db:
+            await db.execute(
+                select(Tenant.id).where(Tenant.id == world["tenant_id"]).with_for_update()
+            )
+            holder_has_lock.set()
+            await release_holder.wait()
+            await db.rollback()
+
+    async def approve():
+        async with factory() as db:
+            await cpo_resolve_dispute(
+                dispute_id, CpoDisputeResolveRequest(action="approve"), cpo, db,
+            )
+
+    holder = asyncio.create_task(hold_tenant_lock())
+    await holder_has_lock.wait()
+
+    approver = asyncio.create_task(approve())
+    # The approve must NOT be able to finish while the tenant lock is held --
+    # it blocks on its very first statement (the tenant FOR UPDATE).
+    done, _ = await asyncio.wait({approver}, timeout=1.0)
+    assert not done, "resolve committed a refund without waiting on the tenant lock"
+    assert await _fresh_balance(factory, world["driver_id"]) == Decimal("0.00")
+
+    # Release the lock; the approve now proceeds and credits the driver once.
+    release_holder.set()
+    await asyncio.wait_for(approver, timeout=5.0)
+    await holder
     assert await _fresh_balance(factory, world["driver_id"]) == Decimal("20.00")
 
 

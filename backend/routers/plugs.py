@@ -50,6 +50,15 @@ from backend.services.session_start import queued_charging_enabled
 logger = logging.getLogger("amphive.api")
 router = APIRouter()
 
+# [Audit: DoS hardening] GET /api/plugs/available and GET /api/plugs/public
+# (the latter UNAUTHENTICATED, only rate-limited) previously .all()'d every
+# matching plug platform-wide with no bound — an uncapped payload/DoS
+# surface that only gets worse as the fleet grows. Hard-capped at the query
+# level (not a display-only truncation) so the response size stays bounded
+# regardless of how many plugs exist; 500 is generous for any realistic
+# single-user/single-map view while still being a real bound.
+PLUG_LIST_HARD_CAP = 500
+
 
 async def _reservation_fields_for_plugs(db, plug_ids, user_id, now):
     """
@@ -185,6 +194,7 @@ async def get_available_plugs(
                 Plug.group_id.in_(public_group_ids),
             )
         )
+        .limit(PLUG_LIST_HARD_CAP)
     )
 
     # [Plug watches] The current user's armed "notify me when free" watches —
@@ -206,6 +216,12 @@ async def get_available_plugs(
 
     now = datetime.now(timezone.utc)
     all_rows = rows.all()
+    if len(all_rows) >= PLUG_LIST_HARD_CAP:
+        logger.warning(
+            "GET /api/plugs/available truncated to the %d-row hard cap",
+            PLUG_LIST_HARD_CAP,
+            extra={"user_id": user.id, "cap": PLUG_LIST_HARD_CAP},
+        )
 
     # [Reservations] reserved_now / next_reservation etc. for every listed
     # plug in one grouped query — NOT per-plug (this endpoint stays N+1-free).
@@ -296,14 +312,23 @@ async def get_public_plugs(db: AsyncSession = Depends(get_db)):
                 Plug.group_id.in_(public_group_ids),
             )
         )
+        .limit(PLUG_LIST_HARD_CAP)
     )
 
     now = datetime.now(timezone.utc)
+    all_rows = rows.all()
+    if len(all_rows) >= PLUG_LIST_HARD_CAP:
+        logger.warning(
+            "GET /api/plugs/public truncated to the %d-row hard cap",
+            PLUG_LIST_HARD_CAP,
+            extra={"cap": PLUG_LIST_HARD_CAP},
+        )
+
     # Effective coords: the plug's own, else its gateway's site (same
     # fallback the authenticated list uses). No location → not mappable,
     # and only mappable plugs get priced.
     mappable = []
-    for plug, group_tariff_id, gateway, tenant in rows.all():
+    for plug, group_tariff_id, gateway, tenant in all_rows:
         lat = plug.latitude if plug.latitude is not None else gateway.latitude
         lon = plug.longitude if plug.longitude is not None else gateway.longitude
         if lat is None or lon is None:
