@@ -112,7 +112,9 @@
   flex: none;
 }
 
-.map-list-filters .input { min-height: 38px; font-size: var(--text-sm); }
+/* keep: 16px prevents iOS zoom-on-focus, same rule as base .input/.select —
+   this compact panel would otherwise fall below the anti-zoom threshold. */
+.map-list-filters .input { min-height: 44px; font-size: 16px; }
 
 .map-list-filter-row {
   display: flex;
@@ -124,8 +126,8 @@
   width: auto;
   flex: 1;
   min-width: 0;
-  min-height: 34px;
-  font-size: var(--text-xs);
+  min-height: 44px;
+  font-size: 16px;
 }
 
 .map-legend {
@@ -299,4 +301,22 @@
 .leaflet-popup-tip {
   background: var(--surface);
   color: var(--ink);
+}
+
+/* Leaflet's default zoom +/- and popup close controls render at ~26-30px —
+   under the 44px touch target a driver standing at a charger needs. Widen
+   the hit area without changing the visual chrome. */
+.leaflet-touch .leaflet-control-zoom-in,
+.leaflet-touch .leaflet-control-zoom-out {
+  width: 44px;
+  height: 44px;
+  line-height: 44px;
+  font-size: 20px;
+}
+
+.leaflet-touch .leaflet-popup-close-button {
+  width: 30px;
+  height: 30px;
+  line-height: 28px;
+  font-size: 20px;
 }

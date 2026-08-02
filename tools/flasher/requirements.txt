@@ -1,0 +1,17 @@
+# Runtime dependencies for the AmpHive gateway flasher (tools/flasher/).
+#
+# Deliberately separate from backend/requirements*.txt: this is a standalone
+# desktop tool, not part of the FastAPI app, and must never bloat the
+# backend's dependency set or its Docker image.
+#
+# esptool bundles its own vendored crypto/serial deps; pyserial is esptool's
+# own runtime dependency too, but is listed explicitly since this project's
+# own code (amphive_flasher/ports.py) imports it directly for port scanning.
+esptool>=5.3,<6
+pyserial>=3.5,<4
+
+# Dev-only: build/test tooling. Not needed to just run the flasher, only to
+# hack on it or build the EXE — kept in this one file since this tool has no
+# separate prod/dev split like the backend does.
+pytest>=8.0
+pyinstaller>=6.0

@@ -362,7 +362,10 @@
     gap: var(--sp-8);
   }
 
-  .mkt-hero-visual { justify-items: stretch; }
+  /* Contain the decorative glow's negative inset (::before above) — at this
+     width .mkt-sticker stretches to 100%, so the glow's bleed pushes the
+     document past the viewport and forces a horizontal scrollbar. */
+  .mkt-hero-visual { justify-items: stretch; overflow: hidden; }
 
   .mkt-sticker,
   .mkt-plug-form { width: 100%; }
