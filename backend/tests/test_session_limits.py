@@ -2,22 +2,37 @@
 User-set charging limits ("only charge 1 kWh") — MARKET_GAP_ANALYSIS.md §5
 "Stop at target kWh".
 
+[Opt-in charging limits, 2026-08-02] Limits are OPT-IN: a bare start with no
+limit persists NULL/NULL (charge until stopped), not the old 30 kWh / 4 h
+schema defaults. NULL is exactly the "no limit" case the auto-stop mirrors
+below already special-cased for legacy pre-migration rows — the only change
+is that NULL is now the *common* case, reached deliberately, not just a
+backfill artifact. See services/mqtt_manager.py firmware_duration/
+firmware_max_kwh for what's actually sent to the gateway instead of NULL
+(never 0, never an omitted field — both are unsafe on the firmware's local
+watchdog; see that module for why).
+
 What's proven here:
 
 1. [DB-gated — needs TEST_DATABASE_URL, CI's postgres:15 service; skipped
    locally by policy, same as test_auth_holds.py]
    POST /api/sessions/start persists the request's max_kwh /
-   max_duration_seconds onto ChargingSession (always — including the schema
-   defaults when the client sends none), echoes them in the start response,
-   GET /api/sessions/active exposes them per session, and the finalize
-   receipt carries them.
+   max_duration_seconds onto ChargingSession verbatim — NULL/NULL (no limit)
+   when the client sends none, the client's own values when it does — echoes
+   them in the start response, GET /api/sessions/active exposes them per
+   session, and the finalize receipt carries them. The ON command published
+   to the gateway always carries firmware-safe numeric values (the driver's
+   limit, or the UNLIMITED sentinel), never NULL/0/omitted. The session's
+   authorization hold is sized off the available balance alone when max_kwh
+   is NULL (no energy_cost() ceiling to bound it by).
 2. [DB-free — mirrors test_mqtt_manager.py]
    MQTTManager._maybe_auto_stop_on_limits: energy-limit auto-stop at
    energy >= max_kwh ("auto-stopped: energy limit reached"), time-limit
    auto-stop at elapsed >= max_duration_seconds ("auto-stopped: time limit
    reached"), energy reason wins when both trip on one frame, the
-   AUTO_STOP_ON_LIMITS env toggle disables it, and legacy NULL-limit
-   sessions are never limit-auto-stopped. Plus the telemetry path:
+   AUTO_STOP_ON_LIMITS env toggle disables it, and a NULL-limit session
+   (the new default, or a legacy pre-migration row) is never limit-auto-
+   stopped no matter how much energy/time accrues. Plus the telemetry path:
    _persist_telemetry forwards the session's OWN persisted limits into the
    check (this is what makes the mirror fire within ~1 s — telemetry arrives
    every ~1 s during an active session).
@@ -25,6 +40,10 @@ What's proven here:
    finalizes only sessions that outlived their own max_duration_seconds,
    honors the same env toggle, and skips NULL/naive-started_at edge rows
    correctly.
+4. The real safety nets survive an unlimited (NULL/NULL) session untouched:
+   balance-exhaustion auto-stop (_maybe_auto_stop_on_exhaustion) fires off
+   the session's own hold — sized at the available balance when max_kwh is
+   NULL — exactly as it would for any other session.
 
 Background: the firmware already enforces both limits locally (relay OFF)
 from the MQTT ON payload, but publishes NO alarm on those cutoffs — so
@@ -143,7 +162,8 @@ async def _start_session(factory, monkeypatch, *, plug_id: int, user_id: int,
                           max_kwh=None, max_duration=None):
     """Call the start handler directly against a real DB session, gateway/
     telemetry side-effects stubbed. max_kwh/max_duration None = omit from the
-    request (schema defaults apply), matching a client that sends no limit."""
+    request — the client sent no limit, so the session persists NULL/NULL
+    (opt-in limits: charge until stopped) rather than any numeric default."""
     import backend.routers.sessions as sessions_module
     from backend import state as state_module
     from backend.routers.sessions import start_charging_session
@@ -197,9 +217,11 @@ async def test_user_limits_persisted_at_start_and_echoed(factory, monkeypatch):
 
 @db_gated
 @pytest.mark.asyncio
-async def test_default_limits_persisted_when_client_sends_none(factory, monkeypatch):
-    """A bare {plug_id} start (what the pre-limit frontend always sent) still
-    persists the schema defaults — every new session has enforceable limits."""
+async def test_no_limit_persisted_when_client_sends_none(factory, monkeypatch):
+    """[Opt-in charging limits] A bare {plug_id} start — no limit chosen —
+    persists NULL/NULL, not a hidden default duration/energy: the session
+    charges until stopped. Also asserts the start RESPONSE echoes None so a
+    client can't be fooled into thinking a limit was silently applied."""
     from sqlalchemy import select
 
     from backend.database.models import ChargingSession
@@ -210,13 +232,111 @@ async def test_default_limits_persisted_when_client_sends_none(factory, monkeypa
     uid = await _seed_user(factory, "500.00", tenant_id)
 
     result = await _start_session(factory, monkeypatch, plug_id=plug_id, user_id=uid)
+    assert result["max_kwh"] is None
+    assert result["max_duration_seconds"] is None
 
     async with factory() as db:
         session = (await db.execute(
             select(ChargingSession).where(ChargingSession.id == result["session_id"])
         )).scalar_one()
-    assert session.max_kwh == 30.0            # SessionStartRequest default
-    assert session.max_duration_seconds == 14400  # 4 h default
+    assert session.max_kwh is None
+    assert session.max_duration_seconds is None
+
+
+@db_gated
+@pytest.mark.asyncio
+async def test_unlimited_start_sends_firmware_sentinels_not_zero_or_default(factory, monkeypatch):
+    """[Opt-in charging limits] The gateway ON command for a no-limit start
+    must carry the firmware-safe UNLIMITED sentinels — never 0 (an instant
+    on-device cutoff per firmware/main/main.c's watchdog: `elapsed_s >= 0`
+    and `consumed_kwh >= 0` are always true) and never omitted (the firmware
+    falls back to its OWN old hard default, 14400 s / 30 kWh, for a missing
+    field — also not "unlimited")."""
+    from backend.services.mqtt_manager import (
+        UNLIMITED_DURATION_SECONDS,
+        UNLIMITED_MAX_KWH,
+    )
+
+    tenant_id = await _seed_tenant(factory)
+    gw = await _seed_gateway(factory, tenant_id, "gw-lim-sentinel")
+    plug_id = await _seed_plug(factory, gw)
+    uid = await _seed_user(factory, "500.00", tenant_id)
+
+    import backend.routers.sessions as sessions_module
+    from backend import state as state_module
+    from backend.routers.sessions import start_charging_session
+    from backend.schemas import SessionStartRequest
+
+    mock_mgr = MagicMock(send_plug_command=MagicMock(return_value=True))
+    monkeypatch.setattr(state_module, "mqtt_manager", mock_mgr)
+    monkeypatch.setattr(sessions_module, "set_plug_telemetry_interval", AsyncMock())
+
+    req = SessionStartRequest(plug_id=plug_id)
+    async with factory() as db:
+        await start_charging_session(req, _fake_user(uid), db)
+
+    mock_mgr.send_plug_command.assert_called_once()
+    kwargs = mock_mgr.send_plug_command.call_args.kwargs
+    assert kwargs["max_duration"] == UNLIMITED_DURATION_SECONDS
+    assert kwargs["max_kwh"] == UNLIMITED_MAX_KWH
+    # Never the old hard defaults, and never the instant-cutoff 0.
+    assert kwargs["max_duration"] not in (0, 14400)
+    assert kwargs["max_kwh"] not in (0, 30.0)
+
+
+@db_gated
+@pytest.mark.asyncio
+async def test_explicit_limit_start_still_sends_that_exact_value_to_firmware(factory, monkeypatch):
+    """[Opt-in charging limits] An explicit limit is unaffected by the
+    sentinel resolution — it passes straight through to the gateway."""
+    tenant_id = await _seed_tenant(factory)
+    gw = await _seed_gateway(factory, tenant_id, "gw-lim-explicit")
+    plug_id = await _seed_plug(factory, gw)
+    uid = await _seed_user(factory, "500.00", tenant_id)
+
+    import backend.routers.sessions as sessions_module
+    from backend import state as state_module
+    from backend.routers.sessions import start_charging_session
+    from backend.schemas import SessionStartRequest
+
+    mock_mgr = MagicMock(send_plug_command=MagicMock(return_value=True))
+    monkeypatch.setattr(state_module, "mqtt_manager", mock_mgr)
+    monkeypatch.setattr(sessions_module, "set_plug_telemetry_interval", AsyncMock())
+
+    req = SessionStartRequest(plug_id=plug_id, max_kwh=2.0, max_duration_seconds=1800)
+    async with factory() as db:
+        await start_charging_session(req, _fake_user(uid), db)
+
+    kwargs = mock_mgr.send_plug_command.call_args.kwargs
+    assert kwargs["max_duration"] == 1800
+    assert kwargs["max_kwh"] == 2.0
+
+
+@db_gated
+@pytest.mark.asyncio
+async def test_unlimited_kwh_hold_sized_at_available_balance_not_crashed(factory, monkeypatch):
+    """[Opt-in charging limits] With no max_kwh, there's no energy_cost()
+    ceiling to size the authorization hold against (energy_cost(None, ...)
+    would raise) — the hold must fall back to the available balance instead,
+    which is also exactly what balance-exhaustion auto-stop needs to keep
+    working as the safety net for an unlimited session."""
+    from sqlalchemy import select
+
+    from backend.database.models import ChargingSession
+
+    tenant_id = await _seed_tenant(factory)
+    gw = await _seed_gateway(factory, tenant_id, "gw-lim-hold")
+    plug_id = await _seed_plug(factory, gw)
+    uid = await _seed_user(factory, "123.45", tenant_id)
+
+    result = await _start_session(factory, monkeypatch, plug_id=plug_id, user_id=uid)
+
+    async with factory() as db:
+        session = (await db.execute(
+            select(ChargingSession).where(ChargingSession.id == result["session_id"])
+        )).scalar_one()
+    assert session.max_kwh is None
+    assert session.hold_coins == Decimal("123.45")
 
 
 @db_gated
@@ -834,7 +954,7 @@ class _FakeSession:
     (1.0, 0.5, False),   # under the limit → keep charging
     (1.0, 1.0, True),    # exactly at the limit → stop (>=)
     (1.0, 1.2, True),    # past the limit → stop
-    (30.0, 29.99, False),  # default cap, not yet reached
+    (30.0, 29.99, False),  # an explicit 30 kWh limit, not yet reached
 ])
 async def test_energy_limit_auto_stop_via_finalize(max_kwh, energy_kwh, should_stop):
     from backend.services.mqtt_manager import MQTTManager
@@ -972,6 +1092,87 @@ async def test_legacy_null_limit_session_never_limit_auto_stops():
         )
 
     finalize_mock.assert_not_called()
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_unlimited_session_no_auto_stop_from_duration_or_energy():
+    """[Opt-in charging limits] A session started with NO explicit limit
+    (NULL/NULL — the new default, not just a legacy edge case) must run
+    indefinitely as far as the duration/energy mirror is concerned: no
+    finalize no matter how much energy accrued or how long it's been
+    running. Mirrors test_legacy_null_limit_session_never_limit_auto_stops
+    but frames the case this feature actually targets."""
+    from backend.services.mqtt_manager import MQTTManager
+
+    MQTTManager._instance = None
+    mgr = MQTTManager(db_session_factory=lambda: _NullDB())
+
+    finalize_mock = AsyncMock()
+    with patch("backend.services.session_lifecycle.finalize_charging_session", finalize_mock):
+        await mgr._maybe_auto_stop_on_limits(
+            session_id=11, user_id=4, energy_kwh=250.0,  # way past the old 30 kWh default
+            max_kwh=None, max_duration_seconds=None,
+            started_at=datetime.now(timezone.utc) - timedelta(days=7),  # way past the old 4 h default
+        )
+
+    finalize_mock.assert_not_called()
+    MQTTManager._instance = None
+
+
+def test_firmware_duration_resolves_none_to_the_unlimited_sentinel_never_zero():
+    """[Opt-in charging limits] firmware_duration(None) must return the
+    UNLIMITED sentinel — never 0 (firmware/main/main.c's watchdog reads
+    `elapsed_s >= s->max_duration_s`, and elapsed_s is always >= 0, so 0 is
+    an INSTANT on-device cutoff, not "unlimited") — while an explicit value
+    passes straight through unchanged."""
+    from backend.services.mqtt_manager import (
+        UNLIMITED_DURATION_SECONDS,
+        firmware_duration,
+    )
+
+    assert firmware_duration(None) == UNLIMITED_DURATION_SECONDS
+    assert UNLIMITED_DURATION_SECONDS > 0
+    assert firmware_duration(1800) == 1800
+    assert firmware_duration(0) == 0  # an explicit 0 (if it ever arrived) is not silently rewritten
+
+
+def test_firmware_max_kwh_resolves_none_to_the_unlimited_sentinel_never_zero():
+    """[Opt-in charging limits] firmware_max_kwh(None) must return the
+    UNLIMITED sentinel — never 0 (the watchdog reads
+    `consumed_kwh >= s->max_kwh`, and consumed_kwh starts at/near 0, so 0 is
+    an instant cutoff) — while an explicit value passes straight through."""
+    from backend.services.mqtt_manager import UNLIMITED_MAX_KWH, firmware_max_kwh
+
+    assert firmware_max_kwh(None) == UNLIMITED_MAX_KWH
+    assert UNLIMITED_MAX_KWH > 0
+    assert firmware_max_kwh(5.0) == 5.0
+
+
+@pytest.mark.asyncio
+async def test_balance_exhaustion_still_fires_on_an_unlimited_session():
+    """[Opt-in charging limits] The balance-exhaustion safety net must
+    survive an unlimited (NULL max_kwh/max_duration_seconds) session
+    untouched: it reads hold_coins as an opaque threshold regardless of how
+    that hold was sized (available balance alone, for an unlimited session —
+    see services/session_start.py begin_active_session), so it fires exactly
+    as it would for any limited session once accrued cost reaches the hold."""
+    from backend.services.mqtt_manager import MQTTManager
+
+    MQTTManager._instance = None
+    mgr = MQTTManager(db_session_factory=lambda: _NullDB())
+
+    finalize_mock = AsyncMock(return_value={"energy_kwh": 24.0, "coins_spent": 120.0})
+    with patch("backend.services.session_lifecycle.finalize_charging_session", finalize_mock):
+        # hold_coins=120.00 (this unlimited session's whole available balance
+        # at start, per begin_active_session) fully consumed by accrued_cost.
+        await mgr._maybe_auto_stop_on_exhaustion(
+            session_id=21, user_id=9, energy_kwh=24.0,
+            rate_coins_per_kwh=Decimal("5.00"), hold_coins=Decimal("120.00"),
+        )
+
+    finalize_mock.assert_awaited_once()
+    assert finalize_mock.call_args.kwargs.get("reason") == "auto-stopped: session hold exhausted"
     MQTTManager._instance = None
 
 

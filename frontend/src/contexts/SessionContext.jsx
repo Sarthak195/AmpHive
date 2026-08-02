@@ -207,8 +207,10 @@ export const SessionProvider = ({ children }) => {
   }, []);
 
   // Optional `limits`: { max_kwh?, max_duration_seconds? } — a user-chosen
-  // stop condition ("only charge 1 kWh"). Keys are only sent when set, so a
-  // driver who picks no limit gets the backend defaults exactly as before.
+  // stop condition ("only charge 1 kWh"). Keys are only sent when set.
+  // [Opt-in charging limits] A driver who picks no limit sends neither key —
+  // the backend persists no limit at all (charge until stopped), not a
+  // hidden default duration/energy.
   const startSession = useCallback(async (plugId, limits = null) => {
     setError(null);
     try {
@@ -218,8 +220,9 @@ export const SessionProvider = ({ children }) => {
       if (limits?.max_duration_seconds != null) payload.max_duration_seconds = limits.max_duration_seconds;
       const result = await api.post('/api/sessions/start', payload);
       const startedAt = new Date().toISOString();
-      // The backend echoes the EFFECTIVE limits (user-chosen or defaults);
-      // fall back to what we sent for older backends that don't echo yet.
+      // The backend echoes the EFFECTIVE limits (user-chosen, or null/null
+      // when none was set); fall back to what we sent for older backends
+      // that don't echo yet.
       const effectiveLimits = {
         max_kwh: result.max_kwh ?? limits?.max_kwh ?? null,
         max_duration_seconds: result.max_duration_seconds ?? limits?.max_duration_seconds ?? null,

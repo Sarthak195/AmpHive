@@ -189,11 +189,30 @@ Tapo app / stale NVS resume) is forced OFF locally and alarmed.
 
 ## Command publishing (backend)
 
+> **Opt-in charging limits (2026-08-02).** `max_kwh`/`max_duration_seconds` are
+> now opt-in at the API layer (`SessionStartRequest`/`QueueChargeRequest`
+> default to `None` — "charge until stopped"), but the firmware's local relay
+> watchdog has no wire representation for "no limit": an **omitted** field
+> falls back to the firmware's OWN old hard default (14400 s / 30 kWh), and a
+> **present-but-zero** value trips the watchdog on the very next poll
+> (`elapsed_s >= 0` / `consumed_kwh >= 0` are always true — an instant
+> cutoff). So every caller that publishes `ON`/`SET_LIMITS` resolves `None` to
+> a large "practically unlimited" sentinel first
+> (`services/mqtt_manager.py UNLIMITED_DURATION_SECONDS` / `UNLIMITED_MAX_KWH`,
+> via `firmware_duration()`/`firmware_max_kwh()`) — the gateway always
+> receives a concrete numeric watchdog pair, never `null`/omitted/`0`. The
+> REAL stop conditions for an unlimited session are backend-side (balance
+> exhaustion, gateway-offline reaping, overcurrent, plug caps); the sentinels
+> only keep the on-device watchdog from tripping first.
+
 - `MQTTManager.send_plug_command(gateway_id, plug_id, action, max_duration=14400, max_kwh=30.0, session_id=None, local_ip=None, max_current_a=None, wait=True)`
   publishes to the command topic at QoS 1 and `wait_for_publish(timeout=3.0)`,
   returning `is_published()`. `/api/sessions/start` passes `session_id=session.id`,
   `local_ip=plug.local_ip` and `max_current_a=effective_plug_cap(plug)` on `ON`
-  and returns HTTP 500 if the publish fails;
+  and returns HTTP 500 if the publish fails; `max_duration`/`max_kwh` are
+  always the resolved (never-`None`) values from `firmware_duration()`/
+  `firmware_max_kwh()` above — the function's own `14400`/`30.0` keyword
+  defaults are an inert fallback no real caller relies on.
   `/api/sessions/stop` (via `finalize_charging_session`) omits `session_id`,
   passes `local_ip=plug.local_ip`, and ignores the result (best-effort OFF).
   `wait=False` (event-loop callers, e.g. the reconnect OFF republish) skips the
@@ -206,12 +225,13 @@ Tapo app / stale NVS resume) is forced OFF locally and alarmed.
   watchdog thresholds without re-baselining (see the `SET_LIMITS` note above).
   **Wired best-effort into `PATCH /api/sessions/{id}/limits` (2026-07-14):** after
   the limit change commits, the route pushes the session's current `max_kwh` +
-  `max_duration_seconds` (both, always) plus `max_current_a=effective_plug_cap(plug)`
-  (so an operator's mid-session cap change lands on-device too) so RAISING a limit above the value baked
-  into the original `ON` takes effect on-device; a failed publish never fails the
-  request (the telemetry-path backend mirror still enforces within ~1 s), and
-  legacy NULL-limit sessions are skipped. On-device effect awaits an OTA to
-  firmware that handles `SET_LIMITS`.
+  `max_duration_seconds` (both, always, resolved through `firmware_max_kwh()`/
+  `firmware_duration()` so a still-unlimited side is sent as the sentinel, not
+  omitted) plus `max_current_a=effective_plug_cap(plug)` (so an operator's
+  mid-session cap change lands on-device too) so RAISING a limit above the
+  value baked into the original `ON` takes effect on-device; a failed publish
+  never fails the request (the telemetry-path backend mirror still enforces
+  within ~1 s).
 - `MQTTManager.send_gateway_ota(gateway_id, plug_id, firmware_url)`
   publishes an `OTA` command at QoS 1. Triggered by
   `POST /api/cpo/gateways/{id}/ota` (RBAC + tenant-scoped; requires the

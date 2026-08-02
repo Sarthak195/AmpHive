@@ -199,8 +199,25 @@ driver's auth hash (see §4).
 - Commands parsed with **cJSON** (`"action":"ON"`/`"OFF"`/`"SET_INTERVAL"`, optional
   `max_duration_seconds` / `max_kwh` / `session_id` / `local_ip`, `interval_ms`);
   topic/data buffers 256/512 B with an oversized/fragmented-payload guard.
-  Defaults: 14400 s, 30.0 kWh, 10000 ms. `SET_INTERVAL` is gateway-wide (one poll
+  Defaults (used ONLY when a field is genuinely absent from the payload —
+  which the backend never sends on `ON`/`SET_LIMITS` since 2026-08-02, see
+  below): 14400 s, 30.0 kWh, 10000 ms. `SET_INTERVAL` is gateway-wide (one poll
   cadence for all plugs); `OTA` is refused if **any** plug is mid-session.
+  **The firmware has no wire representation for "no limit"** — a present
+  `max_duration_seconds`/`max_kwh` of `0` is read literally and trips the
+  duration/energy watchdog below on the very next `telemetry_safety` poll
+  (`elapsed_s >= 0` and `consumed_kwh >= 0` are always true), and an absent
+  field falls back to the 14400 s/30.0 kWh defaults just above — neither is
+  "unlimited". Since [Opt-in charging limits, 2026-08-02] made backend
+  session limits opt-in (`SessionStartRequest.max_kwh`/`max_duration_seconds`
+  default to `None`), the backend resolves a driver's unset limit to a large
+  sentinel (`services/mqtt_manager.py UNLIMITED_DURATION_SECONDS` ≈ 10 years /
+  `UNLIMITED_MAX_KWH` ≈ 1 GWh) before publishing `ON`/`SET_LIMITS`, so this
+  firmware watchdog always receives a concrete, safe numeric pair — never
+  `0` and never an omitted field. The actual stop conditions for such a
+  session are backend-side (balance exhaustion, gateway-offline reaping,
+  overcurrent, plug caps); these sentinels only keep this on-device watchdog
+  from tripping first.
 - `telemetry_safety` runs at a **configurable interval** (`telemetry_interval_ms`, default **10 s** / 10000 ms) and, each sweep, **polls every known plug regardless of MQTT connectivity** (with many plugs at a fast session cadence the sweep may exceed one interval, which just stretches the effective cadence — safety still runs every sweep):
   - If a `"SET_INTERVAL"` command with `"interval_ms"` is received, the interval is updated (clamped between 500 ms and 60000 ms).
   - The published telemetry `kwh` is **session-relative** (`meter − start_energy_kwh`,
