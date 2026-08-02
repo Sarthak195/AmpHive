@@ -121,8 +121,12 @@ def _claims(email="newdriver@amphive.test", sub="google-sub-1", email_verified=T
 # --------------------------------------------------------------------------
 
 def test_config_flag_false_when_unconfigured(monkeypatch):
-    _clear_google_env(monkeypatch)
+    # Import BEFORE clearing: backend.main's import-time load_dotenv() would
+    # otherwise re-inject GOOGLE_CLIENT_ID from a developer's local .env
+    # right after the delenv (public_config reads os.getenv per call).
     from backend.main import public_config
+
+    _clear_google_env(monkeypatch)
     assert public_config()["google_login_enabled"] is False
 
 

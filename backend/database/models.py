@@ -166,7 +166,7 @@ class User(Base):
         # AmpHive account — partial unique index so the many NULLs (accounts
         # that never linked Google) don't collide with each other. Mirrors
         # the session_disputes "one open dispute" partial-unique pattern.
-        # Alembic revision 0027_google_identity.
+        # Alembic revision 0033_google_identity.
         Index(
             "uq_users_google_sub",
             "google_sub",
@@ -202,7 +202,7 @@ class User(Base):
     # Google-only account's hashed_password is an unusable random hash (see
     # services/auth._DUMMY_PASSWORD_HASH for the same "unusable hash" trick),
     # so password login already refuses it with zero changes to that route.
-    # Alembic revision 0027_google_identity.
+    # Alembic revision 0033_google_identity.
     auth_provider: Mapped[str] = mapped_column(String(20), default="password", server_default=text("'password'"), nullable=False)
     # The stable Google account identifier (the verified ID token's "sub"
     # claim) once this account has signed in with Google at least once —
@@ -210,7 +210,7 @@ class User(Base):
     # password-created account that later linked one (auth_provider stays
     # 'password': linking adds a second sign-in method, it doesn't rewrite
     # how the account originated). NULL = never linked. See the partial
-    # unique index above. Alembic revision 0027_google_identity.
+    # unique index above. Alembic revision 0033_google_identity.
     google_sub: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
 
