@@ -36,7 +36,7 @@ noted in 0014_plug_watches). 0031_user_favorites chains onto this revision.
 from alembic import op
 
 revision = "0030_plug_specs"
-down_revision = "0026_offline_topups"
+down_revision = "0029_gateway_logs"
 branch_labels = None
 depends_on = None
 
