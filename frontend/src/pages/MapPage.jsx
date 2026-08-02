@@ -29,6 +29,7 @@ import { useConfig } from '../contexts/ConfigContext';
 import usePoll from '../hooks/usePoll';
 import { PageHeader, ErrorState, EmptyState, Skeleton, StatusDot, Money, useToast } from '../components/ui';
 import MapComponent from '../components/MapComponent';
+import ReportProblemModal from '../components/ReportProblemModal';
 import { AVAILABILITY_STATES, AVAILABILITY_LABELS, getPlugAvailability } from '../utils/plugAvailability';
 import {
   POWER_BUCKETS,
@@ -70,6 +71,7 @@ export default function MapPage() {
   const [userLocation, setUserLocation] = useState(null);
   const [flyTarget, setFlyTarget] = useState(null);
   const [geoBusy, setGeoBusy] = useState(false);
+  const [reportPlug, setReportPlug] = useState(null);
 
   // [Discovery] Client-side list search + filters (shared utils/plugSearch).
   const [search, setSearch] = useState('');
@@ -204,6 +206,7 @@ export default function MapPage() {
             plugs={plugs}
             authed={Boolean(user)}
             onSelectPlug={handleSelectPlug}
+            onReportPlug={setReportPlug}
             onToggleFavorite={user ? toggleFavorite : undefined}
             flyTo={flyTarget}
             userLocation={userLocation}
@@ -382,6 +385,13 @@ export default function MapPage() {
           </div>
         </div>
       </div>
+
+      <ReportProblemModal
+        open={Boolean(reportPlug)}
+        onClose={() => setReportPlug(null)}
+        plugId={reportPlug?.id}
+        plugName={reportPlug?.name}
+      />
     </main>
   );
 }

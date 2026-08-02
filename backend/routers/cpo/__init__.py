@@ -29,6 +29,7 @@ from . import (
     _groups,
     _invoices,
     _payouts,
+    _plug_reports,
     _plugs,
     _profile,
     _reservations,
@@ -48,6 +49,7 @@ from ._common import (
     _fmt_min,
     _load_tenant_tariff,
     _payout_response,
+    _plug_report_response,
     _require_tenant_id,
     _slot_dict,
     logger,
@@ -77,6 +79,7 @@ from ._payouts import (
     cpo_mark_payout_paid,
     cpo_request_payout,
 )
+from ._plug_reports import cpo_list_plug_reports, cpo_resolve_plug_report
 from ._plugs import (
     _publish_gateway_roster,
     cpo_create_plug,
@@ -109,8 +112,10 @@ __all__ = [
     "cpo_analytics_energy", "cpo_analytics_overview", "cpo_analytics_revenue",
     "cpo_analytics_sessions", "cpo_analytics_telemetry", "cpo_export_sessions_csv",
     "_dispute_response", "_fmt_min", "_load_tenant_tariff", "_payout_response",
+    "_plug_report_response",
     "_require_tenant_id", "_slot_dict", "logger",
     "cpo_list_disputes", "cpo_resolve_dispute",
+    "cpo_list_plug_reports", "cpo_resolve_plug_report",
     "cpo_acknowledge_event", "cpo_gateway_logs", "cpo_list_audit_log", "cpo_list_events",
     "cpo_create_gateway", "cpo_gateway_ota", "cpo_list_gateways",
     "cpo_create_group", "cpo_delete_group", "cpo_list_group_members", "cpo_list_groups",
@@ -141,6 +146,7 @@ for _sub in (
     _profile.router, _gateways.router, _plugs.router, _groups.router,
     _analytics.router, _events.router, _payouts.router, _topups.router,
     _tariffs.router, _disputes.router, _invoices.router, _reservations.router,
+    _plug_reports.router,
 ):
     router.routes.extend(_sub.routes)
 router._mark_routes_changed()

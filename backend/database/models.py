@@ -1085,6 +1085,70 @@ class SessionDispute(Base):
     )
 
 
+# --- Plug Problem Reports ("report a problem with this charger") ----------
+
+class PlugReportStatus(str, enum.Enum):
+    OPEN = "open"
+    ACKNOWLEDGED = "acknowledged"
+    RESOLVED = "resolved"
+
+
+class PlugReport(Base):
+    """
+    Driver-initiated "report a problem with this charger" flag — POST
+    /api/plugs/{plug_id}/report — reviewed by the CPO owning the plug's
+    tenant (backend/routers/cpo/_plug_reports.py GET /api/cpo/plug-reports +
+    POST /api/cpo/plug-reports/{id}/resolve).
+
+    Deliberately NOT bolted onto SessionDispute: a plug report needs no
+    session (a driver can flag hardware damage without ever having charged
+    there) and carries no money — there is no refund/coupled remedy, only a
+    status lifecycle (open -> acknowledged -> resolved) with an optional
+    operator note. Mirrors SessionDispute's shape (denormalized tenant_id,
+    resolved_at/resolved_by_user_id) everywhere the two concepts overlap.
+
+    On creation the router also writes a GatewayEvent
+    (event_type="DRIVER_PROBLEM_REPORT", severity="warning") so the EXISTING
+    CPO alert strip (components/CpoAlerts.jsx) and Health nav badge pick it
+    up — this table itself feeds no alert pipeline of its own. Acknowledging
+    that GatewayEvent (the existing per-event ack endpoint) is independent of
+    resolving this PlugReport row; a CPO can clear one without the other.
+
+    No "one open report per plug" constraint (contrast SessionDispute's
+    partial unique index): multiple drivers may independently flag the same
+    charger, and each of their reports is tracked and resolved on its own —
+    a second report on an already-flagged plug is not a conflict, just
+    corroborating signal.
+
+    tenant_id is denormalized at creation (from the plug's gateway -> tenant
+    chain, the router resolves it, not a relationship) so the CPO-scoped
+    list/resolve endpoints filter with a single indexed equality — same
+    convention as GatewayEvent/TelemetryReading/SessionDispute.
+    """
+    __tablename__ = "plug_reports"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    plug_id: Mapped[int] = mapped_column(Integer, ForeignKey("plugs.id", ondelete="CASCADE"), nullable=False)
+    tenant_id: Mapped[int] = mapped_column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    driver_user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    # "damaged" | "wrong_info" | "unsafe" | "other" — validated in
+    # PlugReportCreateRequest, not a PG enum: a small, driver-facing taxonomy
+    # that may grow without a schema migration (same rationale as
+    # GatewayEvent.event_type / Notification.type).
+    category: Mapped[str] = mapped_column(String(32), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[PlugReportStatus] = mapped_column(SQLEnum(PlugReportStatus, name="plug_report_status", values_callable=lambda x: [e.value for e in x]), default=PlugReportStatus.OPEN, nullable=False)
+    resolution_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolved_by_user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+
+    __table_args__ = (
+        Index("ix_plug_reports_tenant_created", "tenant_id", "created_at"),
+        Index("ix_plug_reports_plug", "plug_id"),
+    )
+
+
 # --- GST Tax Invoices ---
 
 class Invoice(Base):

@@ -542,6 +542,58 @@ class DisputeResponse(BaseModel):
     resolved_by_user_id: Optional[int] = None
 
 
+# --- Plug Problem Reports ("report a problem with this charger") ---
+
+PLUG_REPORT_CATEGORIES = ("damaged", "wrong_info", "unsafe", "other")
+
+
+class PlugReportCreateRequest(BaseModel):
+    """Body for POST /api/plugs/{plug_id}/report. `category` is one of
+    PLUG_REPORT_CATEGORIES (validated below, same clean-400-in-router
+    convention as CpoPlugReportResolveRequest.action rather than a Literal
+    type, so an invalid value reads the same as the rest of this API).
+    `description` is length-bounded the same as DisputeCreateRequest.reason —
+    enough for the CPO to act on, without an unbounded blob."""
+    category: str
+    description: str = Field(min_length=10, max_length=1000)
+
+    @field_validator("category")
+    @classmethod
+    def _validate_category(cls, v: str) -> str:
+        if v not in PLUG_REPORT_CATEGORIES:
+            raise ValueError(
+                f"Invalid category '{v}'. Must be one of {list(PLUG_REPORT_CATEGORIES)}."
+            )
+        return v
+
+
+class CpoPlugReportResolveRequest(BaseModel):
+    """Body for POST /api/cpo/plug-reports/{id}/resolve.
+
+    ``action`` is validated in the router (matching CpoDisputeResolveRequest's
+    convention) rather than via a Literal type. "acknowledge" moves an open
+    report to ACKNOWLEDGED without closing it (mirrors acking a GatewayEvent —
+    "seen, working on it"); "resolve" closes it out (stamps resolved_at /
+    resolved_by_user_id). Both accept an optional note."""
+    action: str
+    note: Optional[str] = Field(default=None, max_length=1000)
+
+
+class PlugReportResponse(BaseModel):
+    """A driver-filed plug problem report."""
+    id: int
+    plug_id: int
+    tenant_id: int
+    driver_user_id: int
+    category: str
+    description: str
+    status: str
+    resolution_note: Optional[str] = None
+    created_at: Optional[str] = None
+    resolved_at: Optional[str] = None
+    resolved_by_user_id: Optional[int] = None
+
+
 # --- CPO Offline (cash) Top-ups ---
 
 class CpoTopupCreateRequest(BaseModel):

@@ -3,7 +3,9 @@
  * available → Charge + Reserve (with reserved-for-you / reserved-by-other
  * variants), in_use → Notify-me bell + Reserve, unpowered → Queue charge only
  * when the payload advertises queue_available (else the bell) with its
- * sublabel, offline / maintenance → no actions. Plus price + next-price meta.
+ * sublabel, offline / maintenance → no state actions. Plus price + next-price
+ * meta, and the "Report" flag action present in every state (including
+ * offline/maintenance — those are exactly the plugs most worth reporting).
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen } from '@testing-library/react';
@@ -30,6 +32,7 @@ const handlers = {
   onReserve: vi.fn(),
   onQueue: vi.fn(),
   onToggleWatch: vi.fn(),
+  onReport: vi.fn(),
   onToggleFavorite: vi.fn(),
 };
 
@@ -123,22 +126,34 @@ describe('PlugCard — unpowered', () => {
 });
 
 describe('PlugCard — offline and maintenance', () => {
-  it('offline: no action buttons beyond the favorite star, "Can\'t be reached" sublabel', () => {
+  it(`offline: only the bookmark star and Report remain, "Can't be reached" sublabel`, () => {
     renderCard({ ...BASE, gateway_online: false });
     expect(screen.getByText("Can't be reached right now")).toBeInTheDocument();
-    // The favorite star is a bookmark, not an action on the charger — it
-    // stays available in every state. Nothing else renders.
+    // The favorite star is a bookmark and Report must work on broken
+    // chargers -- both stay available in every state. No state actions render.
     const buttons = screen.queryAllByRole('button');
-    expect(buttons).toHaveLength(1);
-    expect(buttons[0]).toHaveAccessibleName(/favorites/i);
+    expect(buttons).toHaveLength(2);
+    expect(screen.getByRole('button', { name: /favorites/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /report/i })).toBeInTheDocument();
   });
 
-  it('maintenance: no action buttons beyond the favorite star, "Under maintenance" badge', () => {
+  it('maintenance: only the bookmark star and Report remain, "Under maintenance" badge', () => {
     renderCard({ ...BASE, status: 'maintenance' });
     expect(screen.getAllByText('Under maintenance').length).toBeGreaterThan(0);
     const buttons = screen.queryAllByRole('button');
-    expect(buttons).toHaveLength(1);
-    expect(buttons[0]).toHaveAccessibleName(/favorites/i);
+    expect(buttons).toHaveLength(2);
+    expect(screen.getByRole('button', { name: /favorites/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /report/i })).toBeInTheDocument();
+  });
+});
+
+describe('PlugCard — Report action', () => {
+  it('renders a Report action in every state and wires onReport', async () => {
+    renderCard(BASE);
+    const reportBtn = screen.getByRole('button', { name: /report/i });
+    expect(reportBtn).toBeInTheDocument();
+    await userEvent.click(reportBtn);
+    expect(handlers.onReport).toHaveBeenCalledWith(BASE);
   });
 });
 
@@ -157,9 +172,10 @@ describe('PlugCard — favorite star', () => {
     expect(star).toHaveAttribute('aria-pressed', 'true');
   });
 
-  it('omits the star entirely when no onToggleFavorite handler is given', () => {
+  it('omits the star when no onToggleFavorite handler is given (Report still renders)', () => {
     render(<PlugCard plug={{ ...BASE, gateway_online: false }} />);
-    expect(screen.queryAllByRole('button')).toHaveLength(0);
+    expect(screen.queryByRole('button', { name: /favorites/i })).not.toBeInTheDocument();
+    expect(screen.queryAllByRole('button')).toHaveLength(1);
   });
 
   it('shows rated power and connector chips when the specs are set', () => {

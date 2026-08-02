@@ -12,8 +12,13 @@
  * - unpowered   → "Queue charge" ONLY when the payload advertises
  *                 queue_available (CPO feature flag), else the bell;
  *                 sublabel "No mains power right now".
- * - offline     → no actions; sublabel "Can't be reached right now".
- * - maintenance → no actions; "Under maintenance" badge.
+ * - offline     → no state actions; sublabel "Can't be reached right now".
+ * - maintenance → no state actions; "Under maintenance" badge.
+ *
+ * Every state ALSO gets a small ghost "Report" flag action (footer, own
+ * row) — deliberately outside the state machine above: a broken/offline
+ * plug is exactly the one most worth reporting, so it's never gated on
+ * availability the way Charge/Reserve/Queue/Notify are.
  *
  * Plus a state-independent favorite star in the head (when the page passes
  * onToggleFavorite): a bookmark, so it stays available even for offline /
@@ -23,7 +28,7 @@
  * utils/statusCopy; colors from the --state-* tokens via StatusDot.
  */
 
-import { Bell, CalendarClock, Hourglass, Star, Zap } from 'lucide-react';
+import { Bell, CalendarClock, Flag, Hourglass, Star, Zap } from 'lucide-react';
 import './PlugCard.css';
 import StatusDot from './ui/StatusDot';
 import Money from './ui/Money';
@@ -42,7 +47,7 @@ const changeTime = (iso) => {
     : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 };
 
-export default function PlugCard({ plug, onCharge, onReserve, onQueue, onToggleWatch, onToggleFavorite }) {
+export default function PlugCard({ plug, onCharge, onReserve, onQueue, onToggleWatch, onToggleFavorite, onReport }) {
   const { coin_inr_rate } = useConfig();
   const state = getPlugAvailability(plug);
 
@@ -171,6 +176,17 @@ export default function PlugCard({ plug, onCharge, onReserve, onQueue, onToggleW
           )}
         </div>
       )}
+
+      <div className="plug-card-footer">
+        <button
+          type="button"
+          className="btn btn-ghost btn-sm plug-card-report"
+          onClick={() => onReport?.(plug)}
+        >
+          <Flag size={14} aria-hidden="true" />
+          Report
+        </button>
+      </div>
     </article>
   );
 }

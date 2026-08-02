@@ -166,7 +166,35 @@ export const EVENT_TYPE_COPY = {
   OTA_FAILED: 'Firmware update failed',
   OTA_REFUSED_SESSION_ACTIVE: 'Firmware update deferred — session active',
   OTA_START_FAILED: 'Firmware update failed to start',
+  // [Trust bundle] Written by routers/plugs.py report_plug_problem alongside
+  // every PlugReport — surfaces in the SAME CpoAlerts strip / Health feed as
+  // the hardware alarms above (no separate alert pipeline).
+  DRIVER_PROBLEM_REPORT: 'Driver-reported problem',
 };
+
+/* ---- plug problem report statuses / categories -----------------------------
+ * [Trust bundle] database/models.py PlugReportStatus / PLUG_REPORT_CATEGORIES. */
+
+export const PLUG_REPORT_STATUS_LABELS = {
+  open: 'Open',
+  acknowledged: 'Acknowledged',
+  resolved: 'Resolved',
+};
+
+export function plugReportStatusLabel(status) {
+  return PLUG_REPORT_STATUS_LABELS[status] || humanize(status);
+}
+
+export const PLUG_REPORT_CATEGORY_LABELS = {
+  damaged: 'Physically damaged',
+  wrong_info: 'Wrong info',
+  unsafe: 'Unsafe',
+  other: 'Other',
+};
+
+export function plugReportCategoryLabel(category) {
+  return PLUG_REPORT_CATEGORY_LABELS[category] || humanize(category);
+}
 
 export function eventTypeCopy(type) {
   return EVENT_TYPE_COPY[type] || humanize(type);

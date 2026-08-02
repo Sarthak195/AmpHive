@@ -42,6 +42,7 @@ const NAV_LINKS = [
   ['Gateways', '/cpo/gateways'],
   ['Groups', '/cpo/groups'],
   ['Health', '/cpo/health'],
+  ['Plug reports', '/cpo/plug-reports'],
   ['Sessions', '/cpo/sessions'],
   ['Reservations', '/cpo/reservations'],
   ['Pricing', '/cpo/pricing'],

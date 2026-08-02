@@ -18,6 +18,13 @@
  * for the geolocate button — via a tiny useMap child, since MapContainer's
  * own `center`/`bounds` props only apply once, at creation.
  *
+ * The popup is also where ReliabilityBadge (components/ui) gets mounted:
+ * Leaflet only renders a Popup's children once it's actually opened, so
+ * this is the natural lazy-fetch spot — one reliability request per plug a
+ * visitor actually clicks into, never one per marker on the map. Auth-gated
+ * (like Charge) since GET /api/plugs/{id}/reliability requires a signed-in
+ * caller — an anonymous visitor would just draw a silent 401.
+ *
  * [Discovery] The popup also carries a favorite star (authed users, when the
  * page passes `onToggleFavorite`) and a "Navigate" hand-off that opens the
  * device's maps app with directions (utils/navHandoff) — navigation needs no
@@ -26,9 +33,9 @@
 import { useEffect } from 'react';
 import { MapContainer, TileLayer, Marker, Popup, useMap } from 'react-leaflet';
 import L from 'leaflet';
-import { Navigation, Star } from 'lucide-react';
+import { Flag, Navigation, Star } from 'lucide-react';
 import 'leaflet/dist/leaflet.css';
-import { StatusDot, Money } from './ui';
+import { StatusDot, Money, ReliabilityBadge } from './ui';
 import { useConfig } from '../contexts/ConfigContext';
 import { AVAILABILITY_CSS_VAR, getPlugAvailability } from '../utils/plugAvailability';
 import { googleMapsDirUrl } from '../utils/navHandoff';
@@ -64,7 +71,7 @@ function ViewController({ flyTo }) {
   return null;
 }
 
-export default function MapComponent({ plugs, authed, onSelectPlug, onToggleFavorite, flyTo, userLocation }) {
+export default function MapComponent({ plugs, authed, onSelectPlug, onReportPlug, onToggleFavorite, flyTo, userLocation }) {
   const { coin_inr_rate: rate } = useConfig();
 
   // Center roughly on India, or a default location, when nothing has coordinates.
@@ -119,6 +126,7 @@ export default function MapComponent({ plugs, authed, onSelectPlug, onToggleFavo
                       <span>/kWh</span>
                     </div>
                   )}
+                  {authed && <ReliabilityBadge plugId={plug.id} />}
                   {authed && onToggleFavorite && (
                     <button
                       type="button"
@@ -158,6 +166,16 @@ export default function MapComponent({ plugs, authed, onSelectPlug, onToggleFavo
                       onClick={() => onSelectPlug(plug.id)}
                     >
                       Sign in to charge
+                    </button>
+                  )}
+                  {authed && onReportPlug && (
+                    <button
+                      type="button"
+                      className="btn btn-ghost btn-sm btn-full map-popup-report"
+                      onClick={() => onReportPlug(plug)}
+                    >
+                      <Flag size={14} aria-hidden="true" />
+                      Report a problem
                     </button>
                   )}
                   <button
