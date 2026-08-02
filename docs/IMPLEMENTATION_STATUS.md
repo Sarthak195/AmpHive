@@ -7,7 +7,49 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 
 ---
 
-## 0. Latest — 2026-07-22 Razorpay closed-loop "charging credit" reframe (PR #79)
+## 0. Latest — 2026-08-02 offline/unmetered-consumption detection (fw 2.4.0-direct)
+
+Real incident: an operator manually toggled a P110 on/off (physical button /
+Tapo app) while its gateway was fully unreachable, and the platform never
+caught the unbilled energy — the gateway's own session-relative `energy_kwh`
+integrator only advances while its driver is actually polling, so a
+gateway-offline gap is invisible to it entirely. Closed with a two-layer
+detector built on the P110's own `today_energy`/`month_energy` counters
+(maintained on the plug, independent of the gateway):
+
+- **Firmware (`firmware/main/tapo_protocol.c`
+  `tapo_plug_reconcile_idle_baseline`, fw ≥ 2.4.0-direct):** compares fresh
+  `today_energy`/`month_energy` readings against a per-plug idle baseline
+  persisted in NVS (`"bl_<plug_id>"`) whenever a plug has no active AmpHive
+  session; a day/month cross-check tells a calendar rollover/plug reset
+  (never reported) from real consumption (month preferred, resets far less
+  often). Publishes a one-shot `{"error":"UNMETERED_CONSUMPTION",...}` on
+  `/alarms`, idempotent/lossless across an offline gap (the baseline only
+  advances once the report is actually delivered). Every telemetry frame now
+  also carries `today_kwh`/`month_kwh` for continuous backend cross-checking.
+  `tools/p110_sim/` extended (today/month independent accumulators + a new
+  `--daily-reset-counter` flag) so this is bench-testable without hardware.
+- **Backend (`services/mqtt/telemetry.py` `_persist_telemetry` +
+  `services/mqtt/alarms.py`):** a continuous version of the same check on
+  every telemetry frame (`plugs.last_today_energy_kwh`/
+  `last_month_energy_kwh`, migration `0035_offline_consumption`) — catches
+  the first reconnect frame even if the firmware's own report is lost/
+  delayed. Both paths raise a `GatewayEvent` (`UNMETERED_CONSUMPTION`,
+  severity `warning`) and — new, unlike every other alarm type, which only
+  reach the passive `gateway_events` feed — bell-notify every CPO of the
+  tenant with the plug name and estimated kWh.
+
+See [MQTT_CONTRACT.md](MQTT_CONTRACT.md) and
+[FIRMWARE.md §4a](FIRMWARE.md#4a-offlineunmetered-consumption-reconciliation-fw--240-direct)
+for the full design (topic/payload shapes, the reset-vs-consumption decision
+rule, threshold constants). Firmware build-verified (ESP-IDF v5.3.3,
+`idf.py set-target esp32 && idf.py build`); not yet OTA'd to a fielded
+gateway. Backend: 12 new unit tests in `test_mqtt_manager.py` (DB-free,
+mocked sessions); the DB-gated migration/schema-drift test suite runs in CI.
+
+---
+
+## 0.02 — 2026-07-22 Razorpay closed-loop "charging credit" reframe (PR #79)
 
 Razorpay rejected onboarding as "wallet services." Rather than remove the
 prepaid balance, it was reframed as closed-loop **"charging credit"** —
@@ -160,7 +202,7 @@ the `cpo.py` god router + `MQTTManager` god object; a backend deps lockfile.
 | Role-based access control | ✅ | Enforced via `services/rbac.py` `require_role(...)` on all `/api/cpo/*` routes (checks the DB role, not just the token) |
 | MQTT command publish (ON/OFF) | ✅ | QoS 1, 3 s wait |
 | MQTT inbound telemetry/status handling | ✅ | Telemetry updates TelemetryStore and session DB (now incl. `voltage`/`relay`). Status updates gateway state in DB. |
-| MQTT inbound alarm handling + CPO events feed | ✅ | Subscribes `amphive/gateways/+/alarms` (2026-07-10): `_handle_gateway_alarm` maps `{"error"\|"event"}` → severity, persists a `gateway_events` row (tenant resolved from the gateway), and broadcasts a `gateway_alarm` Socket.io event. CPO reads via `GET /api/cpo/events` (filters: `unacknowledged_only`, `severity`) and clears with `POST /api/cpo/events/{id}/ack`. **Verified live in prod 2026-07-10** (synthetic `UNAUTHORIZED_ON` → persisted event id, retrieved + acked via API). |
+| MQTT inbound alarm handling + CPO events feed | ✅ | Subscribes `amphive/gateways/+/alarms` (2026-07-10): `_handle_gateway_alarm` maps `{"error"\|"event"}` → severity, persists a `gateway_events` row (tenant resolved from the gateway), and broadcasts a `gateway_alarm` Socket.io event. CPO reads via `GET /api/cpo/events` (filters: `unacknowledged_only`, `severity`) and clears with `POST /api/cpo/events/{id}/ack`. **Verified live in prod 2026-07-10** (synthetic `UNAUTHORIZED_ON` → persisted event id, retrieved + acked via API). **2026-08-02:** `UNMETERED_CONSUMPTION` (offline-consumption detection, above) additionally bell-notifies every CPO of the tenant directly (`notify()`) — the first alarm type to do so, on top of the passive feed every type gets. |
 | MQTT inbound firmware log-line diagnostics (TD#28) | ✅ | Subscribes `amphive/gateways/+/logs` (QoS 0, plain text — not JSON, matched before the JSON parse in `services/mqtt/router.py`). `services/mqtt/logs.py` `MQTTLogsMixin` parses the ESP-IDF level letter (E/W/I/D/V → error/warning/info, skipping a leading ANSI colour escape) and persists a `gateway_logs` row (tenant resolved from the gateway) — no notify/socket fan-out, a diagnostics feed distinct from the alarm/event feed above. CPO reads via `GET /api/cpo/gateways/{gateway_id}/logs`; admin cross-tenant via `GET /api/admin/gateway-logs`. Pruned after `GATEWAY_LOGS_RETENTION_DAYS` (default 14) by the session reaper's `reap_gateway_logs_once()`. |
 | Orphan-OFF operator alert | ✅ | `mqtt/status.py._republish_off_for_orphaned_plugs` (reconnect-time OFF republish for plugs with no ACTIVE session) now also notifies every CPO of the gateway's tenant — one `orphan_off` bell notification (`services/notifications.py notify()`) per (plug, CPO) pair, only when at least one plug was actually OFF'd. First CPO-targeted `notify()` call site (previously driver-only); delivered via the existing NotificationBell/Socket.io path, no frontend change needed. |
 | Plug maintenance workflow (fault console) | ✅ | **2026-07-12**: a THERMAL_CUTOFF/OVERCURRENT_CUTOFF alarm now auto-enters the plug into MAINTENANCE (`MQTTManager._auto_enter_maintenance`; excludes `UNAUTHORIZED_ON` and OTA events; env-gate `AUTO_MAINTENANCE_ON_CRITICAL_ALARM`, default on) — session-start already 409s any non-AVAILABLE plug, so this blocks new sessions until an operator clears it. Operators drive enter/clear via `POST /api/cpo/plugs/{id}/maintenance` (`clear` 409s while an ACTIVE session exists); both paths audit (`plug.maintenance_enter`/`plug.maintenance_clear`) and broadcast the status flip like any other plug-status change. |
@@ -226,6 +268,7 @@ the `cpo.py` god router + `MQTTManager` god object; a backend deps lockfile.
 |------------|:------:|-------|
 | **Direct MQTT transport (fw ≥ 1.3.0, default)** | ✅ | `AMPHIVE_DIRECT_MQTT=1`: outbound `mqtts://8.231.81.12:8883` right after Wi-Fi — no overlay, NAT/CGNAT-immune, esp-mqtt owns reconnects. **Verified on-device 2026-07-10** (~3.3 s power-on→connected through a symmetric-NAT router; telemetry at 10 s cadence). Binary shrank ~50% (microlink linked out; the component itself was deleted from the tree 2026-08-02). |
 | **Unauthorized physical-on guard (fw ≥ 1.5.0)** | ✅ | The relay ON with no active session (physical button / Tapo app / stale NVS resume) is forced OFF locally every poll and alarmed once per episode (`UNAUTHORIZED_ON`, rising-edge). Uses the plug's real `device_on` (previously read but discarded). **Live on the real gateway 2026-07-10** (OTA'd to `1.5.0-direct`); the backend ingests the alarm end-to-end (verified in prod). The remote out-of-band physical-press trigger itself is unit-tested + by-construction (no LAN path to press the button remotely). |
+| **Offline/unmetered-consumption reconciliation (fw ≥ 2.4.0-direct)** | ✅ | `tapo_plug_reconcile_idle_baseline()` cross-checks the plug's own `today_energy`/`month_energy` counters (independent of the gateway) against an NVS-persisted idle baseline whenever no AmpHive session is active, distinguishing a calendar rollover/plug reset from real consumption, and publishes a one-shot `UNMETERED_CONSUMPTION` alarm. Every telemetry frame also carries `today_kwh`/`month_kwh` for the backend's own continuous cross-check. See [FIRMWARE.md §4a](FIRMWARE.md#4a-offlineunmetered-consumption-reconciliation-fw--240-direct). **Build-verified** (ESP-IDF v5.3.3, `idf.py set-target esp32 && idf.py build`); bench-tested against `tools/p110_sim/` (extended with independent today/month counters + `--daily-reset-counter`); not yet OTA'd to a fielded gateway. |
 | **Richer telemetry: relay state + trapezoidal energy (fw ≥ 1.5.0)** | ✅ | Telemetry now carries the actual `relay` (device_on) state alongside derived `current`/nominal `voltage`; the driver-side kWh integrator switched from left-rectangle to the **trapezoidal rule** (averages consecutive power samples) for lower error on ramping loads at the 10 s cadence. **Verified on the wire 2026-07-10** (real gateway telemetry shows `"relay":false`). |
 | ~~`microlink` Tailscale client (Noise/ts2021, DERP, DISCO, STUN, WG)~~ | — | **Removed 2026-08-02.** Worked for full-cone NATs, but symmetric NAT defeated DISCO hole-punching (root-caused 2026-07-09) — the reason for the direct-MQTT pivot. Kept compilable-but-unused for rollback until the linker map confirmed zero objects were pulled from it under the shipped build, then deleted (see [FIRMWARE.md §5](FIRMWARE.md#5-historical-microlink-removed-2026-08-02)). |
 | MQTT control loop + topic contract | ✅ | Matches backend topics. **Multi-plug (TD#20), shipped fw 1.7.1-direct, verified on-device 2026-07-12**: `main.c` keeps a `plugs_mutex`-guarded per-plug slot table (each slot = DB `plug_id` + LAN IP + per-plug `tapo_plug_t` KLAP context + its own session/watchdog state) and `tapo_protocol.c` moved the KLAP session and energy integrator into that per-plug context, so a command for plug B can no longer actuate plug A and telemetry is published under each plug's own id. As of **fw 2.0.0-direct** the gateway learns each plug's IP from the backend's **retained plug roster** on `amphive/gateways/{gw}/config` (`handle_plug_roster` builds/reconciles the slot table on connect; the ON/OFF `local_ip` is now a refresh/fallback), so idle telemetry flows for every plug with no provisioned plug IP and no boot-time provisional slot (the removed slot's old job of keeping the liveness gate fresh — a 1.7.0 regression once fixed in 1.7.1 — is now the roster's). **Single-plug charging regression verified end-to-end on the real gateway** (OTA to 1.7.1, billed session: 0.014 kWh → 0.07 coins, ledger reconciled); the **2.0.0-direct roster path is verified live on the real gateway 2026-07-15** (OTA'd from 1.9.0; the plug is learned from `.../config` and idle telemetry flows — `last_seen` advancing), with **two-real-plug validation still pending** (single plug on the bench). (§3.50, §3.57, TD#20, SEC §8.5) |

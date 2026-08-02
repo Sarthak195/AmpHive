@@ -16,9 +16,23 @@ instead of a module-level import, so it always sees the live value.
 """
 import asyncio
 import logging
+import math
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger("amphive.mqtt")
+
+
+def _safe_float(v: Any) -> Optional[float]:
+    """Best-effort float() for an optional alarm-payload field; None on
+    missing/malformed/non-finite so a bad frame degrades to the static
+    fallback detail text instead of crashing the handler."""
+    if v is None:
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
 
 
 class MQTTAlarmMixin:
@@ -45,6 +59,11 @@ class MQTTAlarmMixin:
         "OTA_FAILED": "warning",
         "OTA_REFUSED_SESSION_ACTIVE": "info",
         "OTA_START_FAILED": "warning",
+        # [Unmetered consumption] Firmware's own one-shot offline-consumption
+        # report (tapo_plug_reconcile_idle_baseline, fw >= 2.4.0) — an
+        # accountability signal on an otherwise-healthy plug, same severity
+        # class as UNAUTHORIZED_ON (below), not a hardware fault.
+        "UNMETERED_CONSUMPTION": "warning",
     }
 
     _EVENT_DETAIL = {
@@ -53,6 +72,10 @@ class MQTTAlarmMixin:
         "OVERCURRENT_CUTOFF": "Plug reported over-current — session cut off locally.",
         "OVERCURRENT_CAP": "Plug drew more than its configured current cap — session stopped locally.",
         "LOCAL_LIMIT_CUTOFF": "Session hit its energy/duration limit — the gateway agent cut the plug off locally.",
+        # Overridden below with the actual estimate when the payload carries
+        # `kwh` (it always should, on fw >= 2.4.0) — kept as a fallback for a
+        # malformed/future payload that omits it.
+        "UNMETERED_CONSUMPTION": "Plug's energy counters advanced with no active session covering it — possible unmetered use while the gateway was unreachable.",
     }
 
     def _handle_gateway_alarm(self, gateway_id: str, payload: Dict[str, Any]):
@@ -62,6 +85,14 @@ class MQTTAlarmMixin:
           {"event": "OTA_STARTED"}                       # OTA lifecycle notice
         Persists a GatewayEvent (audit + CPO feed) and broadcasts it so a live
         client can react (e.g. warn the driver, flash the operator's alert feed).
+
+        [Unmetered consumption] `{"error":"UNMETERED_CONSUMPTION","plug_id":N,
+        "kwh":<estimate>,"today_kwh":<f>,"month_kwh":<f>}` is the firmware's
+        own one-shot offline-consumption report (tapo_plug_reconcile_idle_
+        baseline, fw >= 2.4.0, docs/MQTT_CONTRACT.md) — the `kwh` estimate is
+        folded into a human-readable `detail` string here (not a schema
+        change to _persist_gateway_event, which every other alarm type also
+        shares).
         """
         event_type = payload.get("error") or payload.get("event")
         if not event_type:
@@ -74,6 +105,15 @@ class MQTTAlarmMixin:
         event_type = str(event_type)[:48]
         severity = self._EVENT_SEVERITY.get(event_type, "warning")
         detail = self._EVENT_DETAIL.get(event_type)
+
+        if event_type == "UNMETERED_CONSUMPTION":
+            estimated_kwh = _safe_float(payload.get("kwh"))
+            if estimated_kwh is not None:
+                detail = (
+                    f"Plug consumed an estimated {estimated_kwh:.3f} kWh with no "
+                    f"billed session covering it — counters advanced while the "
+                    f"gateway couldn't report (possible unauthorized use)."
+                )
 
         plug_id = payload.get("plug_id")
         try:
@@ -117,8 +157,14 @@ class MQTTAlarmMixin:
                     )
                     return
 
+                # Captured now (not read off `gw` after the block closes) —
+                # an AsyncSession expires instance attributes on commit by
+                # default, so a post-commit `gw.tenant_id` read could need a
+                # lazy-load with no active session/greenlet to run it in.
+                tenant_id = gw.tenant_id
+
                 event = GatewayEvent(
-                    tenant_id=gw.tenant_id,
+                    tenant_id=tenant_id,
                     gateway_id=gateway_id,
                     plug_id=plug_id,
                     event_type=event_type,
@@ -154,6 +200,17 @@ class MQTTAlarmMixin:
                 "Failed to broadcast gateway alarm",
                 extra={"gateway_id": gateway_id, "plug_id": plug_id, "error": str(e)},
             )
+
+        # [Unmetered consumption] Bell-notify every CPO of the tenant — an
+        # accountability signal an operator should see promptly, not just in
+        # the passive gateway_events feed. Mirrors the orphan_off CPO-notify
+        # pattern in services/mqtt/status.py._republish_off_for_orphaned_plugs.
+        # Fires for BOTH sources of this event type: the firmware's own
+        # one-shot report (via _handle_gateway_alarm above) and the backend's
+        # continuous cross-check (services/mqtt/telemetry.py._persist_telemetry)
+        # — both funnel through this one function.
+        if event_type == "UNMETERED_CONSUMPTION" and plug_id is not None:
+            await self._notify_cpos_unmetered_consumption(tenant_id, gateway_id, plug_id, detail)
 
         # A finalize-worthy alarm means the firmware already forced the relay OFF
         # and cleared its local session — finalize the backend session to match
@@ -279,4 +336,43 @@ class MQTTAlarmMixin:
             logger.error(
                 "Failed to broadcast auto-maintenance plug_status",
                 extra={"plug_id": plug_id, "error": str(e)},
+            )
+
+    async def _notify_cpos_unmetered_consumption(self, tenant_id: Optional[int], gateway_id: str,
+                                                  plug_id: int, detail: Optional[str]):
+        """Bell-notify every CPO of the tenant about an UNMETERED_CONSUMPTION
+        event (called from _persist_gateway_event; see the call site there).
+        Best-effort: notify() itself never raises (backend/services/
+        notifications.py), and a gateway with no resolved tenant (unclaimed
+        inventory — shouldn't happen for a live/telemetry-producing gateway,
+        but guarded anyway) just skips."""
+        if tenant_id is None:
+            return
+
+        from sqlalchemy import select
+
+        from backend.database.models import Plug, User, UserRole
+
+        try:
+            async with self.db_session_factory() as session:
+                plug_name = (await session.execute(
+                    select(Plug.name).where(Plug.id == plug_id)
+                )).scalar_one_or_none()
+                cpo_ids = (await session.execute(
+                    select(User.id).where(User.tenant_id == tenant_id, User.role == UserRole.CPO)
+                )).scalars().all()
+        except Exception:
+            logger.exception(
+                f"Unmetered-consumption CPO lookup failed for plug {plug_id} (gateway {gateway_id})"
+            )
+            return
+
+        body = detail or (
+            f"{plug_name or plug_id} shows energy use with no billed session covering it."
+        )
+        from backend.services.notifications import notify
+        for cpo_id in cpo_ids:
+            await notify(
+                cpo_id, "unmetered_consumption", "Unmetered consumption detected",
+                body, severity="warning", plug_id=plug_id,
             )

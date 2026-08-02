@@ -67,6 +67,21 @@ def _parse_reset_specs(specs: list[str]) -> dict[int, tuple[float, float]]:
     return out
 
 
+def _parse_daily_reset_specs(specs: list[str]) -> dict[int, float]:
+    """--daily-reset-counter PLUGID@SECONDS -> {plug_id: after_s}. Distinct
+    from --reset-counter: resets ONLY today_energy (simulates the P110's own
+    midnight rollover), not month_energy/energy_wh -- see plug.py."""
+    out: dict[int, float] = {}
+    for spec in specs:
+        fields = spec.split("@")
+        if len(fields) != 2:
+            raise argparse.ArgumentTypeError(
+                f"--daily-reset-counter {spec!r}: expected PLUGID@SECONDS"
+            )
+        out[int(fields[0])] = float(fields[1])
+    return out
+
+
 def _parse_drop_rate_map(specs: list[str]) -> dict[int, float]:
     """--drop-rate-map PLUGID=RATE (repeatable, or comma-separated in one arg)."""
     out: dict[int, float] = {}
@@ -161,6 +176,18 @@ def build_parser() -> argparse.ArgumentParser:
         "on the backend.",
     )
     p.add_argument(
+        "--daily-reset-counter",
+        action="append",
+        default=[],
+        metavar="PLUGID@SECONDS",
+        help="Repeatable. After SECONDS of uptime, reset that plug's today_energy "
+        "counter to 0 -- simulates the P110's own midnight rollover -- WITHOUT "
+        "touching month_energy/energy_wh or the KLAP session (no power-cycle "
+        "implied). Distinct from --reset-counter. Exercises the day/month "
+        "cross-check in firmware/main/tapo_protocol.c's offline-consumption "
+        "reconciliation (tapo_plug_reconcile_idle_baseline).",
+    )
+    p.add_argument(
         "--drop-rate",
         type=float,
         default=0.0,
@@ -198,6 +225,7 @@ def build_configs(args: argparse.Namespace) -> list[PlugConfig]:
     watts = _parse_per_plug_floats(args.watts, count, 1500.0)
     start_kwh = _parse_per_plug_floats(args.start_kwh, count, 0.0)
     resets = _parse_reset_specs(args.reset_counter)
+    daily_resets = _parse_daily_reset_specs(args.daily_reset_counter)
     drop_map = _parse_drop_rate_map(args.drop_rate_map)
 
     configs = []
@@ -219,6 +247,7 @@ def build_configs(args: argparse.Namespace) -> list[PlugConfig]:
                 drop_rate=drop_map.get(plug_id, args.drop_rate),
                 reset_after_s=after_s,
                 reset_value_kwh=reset_val,
+                daily_reset_after_s=daily_resets.get(plug_id),
             )
         )
     return configs
@@ -253,9 +282,10 @@ def run(args: argparse.Namespace) -> int:
         # The reset callback needs to invalidate KLAP sessions on the server
         # (simulating a power-cycle), so it's wired after srv exists.
         plug.on_counter_reset = _make_reset_handler(srv, store)
+        plug.on_daily_reset = _make_daily_reset_handler(store)
         servers.append(srv)
         log.info(
-            "plug %-4d %s:%-6d  %5.0f W  start=%.3f kWh  drop_rate=%.2f%s",
+            "plug %-4d %s:%-6d  %5.0f W  start=%.3f kWh  drop_rate=%.2f%s%s",
             cfg.plug_id,
             cfg.host,
             cfg.port,
@@ -264,6 +294,9 @@ def run(args: argparse.Namespace) -> int:
             cfg.drop_rate,
             f"  reset-at=+{cfg.reset_after_s:.0f}s->{cfg.reset_value_kwh:.3f}kWh"
             if cfg.reset_after_s is not None
+            else "",
+            f"  daily-reset-at=+{cfg.daily_reset_after_s:.0f}s"
+            if cfg.daily_reset_after_s is not None
             else "",
         )
 
@@ -302,6 +335,18 @@ def _make_reset_handler(srv: PlugHTTPServer, store: StateStore):
             plug.cfg.reset_value_kwh,
         )
         srv.reset_sessions()
+        store.set(plug.cfg.plug_id, plug.snapshot())
+
+    return _cb
+
+
+def _make_daily_reset_handler(store: StateStore):
+    def _cb(plug: SimulatedPlug) -> None:
+        log.warning(
+            "plug %d: daily (today_energy) rollover fired -- month_energy/energy_wh "
+            "untouched, no KLAP session invalidation (not a power-cycle)",
+            plug.cfg.plug_id,
+        )
         store.set(plug.cfg.plug_id, plug.snapshot())
 
     return _cb

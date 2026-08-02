@@ -122,7 +122,8 @@ async def test_session_id_parsed_and_forwarded_to_persist(reported_sid, expected
     captured = {}
 
     async def fake_persist(gateway_id, plug_id, watts, kwh, session_id=None,
-                           sample=None, relay_on=False, is_offline=False):
+                           sample=None, relay_on=False, is_offline=False,
+                           today_kwh=None, month_kwh=None):
         captured.update(gateway_id=gateway_id, plug_id=plug_id, watts=watts,
                         kwh=kwh, session_id=session_id, is_offline=is_offline)
 
@@ -154,7 +155,8 @@ async def test_handler_forwards_is_offline_for_resync_frame():
     captured = {}
 
     async def fake_persist(gateway_id, plug_id, watts, kwh, session_id=None,
-                           sample=None, relay_on=False, is_offline=False):
+                           sample=None, relay_on=False, is_offline=False,
+                           today_kwh=None, month_kwh=None):
         captured.update(session_id=session_id, is_offline=is_offline)
 
     mgr._persist_telemetry = fake_persist
@@ -926,7 +928,8 @@ async def test_kwh_at_the_plausible_ceiling_is_not_dropped():
     persists = []
 
     async def fake_persist(gateway_id, plug_id, watts, kwh, session_id=None,
-                           sample=None, relay_on=False, is_offline=False):
+                           sample=None, relay_on=False, is_offline=False,
+                           today_kwh=None, month_kwh=None):
         persists.append(kwh)
 
     mgr._persist_telemetry = fake_persist
@@ -958,7 +961,8 @@ async def test_implausible_kwh_frame_does_not_block_a_following_normal_frame():
     persists = []
 
     async def fake_persist(gateway_id, plug_id, watts, kwh, session_id=None,
-                           sample=None, relay_on=False, is_offline=False):
+                           sample=None, relay_on=False, is_offline=False,
+                           today_kwh=None, month_kwh=None):
         persists.append(kwh)
 
     mgr._persist_telemetry = fake_persist
@@ -1850,6 +1854,367 @@ async def test_plug_connectivity_emitted_on_transition():
     assert emit_mock.await_count == 2
     emit_mock.assert_any_await(10, False)
     emit_mock.assert_any_await(11, False)
+    MQTTManager._instance = None
+
+
+# ---------------------------------------------------------------------------
+# [Unmetered consumption] Continuous today/month reconciliation
+# (services/mqtt/telemetry.py._persist_telemetry) — the backend-side half of
+# the offline-consumption detector; see firmware/main/tapo_protocol.c's
+# tapo_plug_reconcile_idle_baseline for the firmware's own one-shot report of
+# the same signal (tested separately below, under "firmware alarm parsing").
+# ---------------------------------------------------------------------------
+
+
+def _plug_with_baseline(prev_today, prev_month):
+    plug = _owned_plug()
+    plug.last_today_energy_kwh = prev_today
+    plug.last_month_energy_kwh = prev_month
+    return plug
+
+
+@pytest.mark.asyncio
+async def test_persist_telemetry_unmetered_consumption_detected_on_idle_frame():
+    """A jump in today/month energy with NO active session covering the plug
+    must raise an UNMETERED_CONSUMPTION GatewayEvent -- this is what catches
+    the owner-reported incident: the very first frame after a gateway that
+    was fully offline reconnects."""
+    MQTTManager._instance = None
+    plug = _plug_with_baseline(1.0, 10.0)
+    session = _FakeSession([
+        _FakeResult(scalar=plug),   # plug lookup
+        _FakeResult(scalar=None),   # no ACTIVE session on the plug
+    ])
+    mgr = MQTTManager(db_session_factory=lambda: session)
+    mgr._persist_gateway_event = AsyncMock()
+
+    await mgr._persist_telemetry(
+        "gw-1", 5, 0.0, 0.0, session_id=None, sample=None, relay_on=False,
+        today_kwh=1.05, month_kwh=10.05,
+    )
+
+    assert session.committed is True
+    assert plug.last_today_energy_kwh == 1.05
+    assert plug.last_month_energy_kwh == 10.05
+    mgr._persist_gateway_event.assert_awaited_once()
+    args = mgr._persist_gateway_event.await_args.args
+    assert args[0] == "gw-1"
+    assert args[1] == 5
+    assert args[2] == "UNMETERED_CONSUMPTION"
+    assert args[3] == "warning"
+    assert "0.050" in args[4]  # the ~0.05 kWh estimate, formatted into the detail text
+
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_persist_telemetry_unmetered_consumption_skipped_when_session_active():
+    """A jump in today/month energy IS expected when an ACTIVE session
+    already covers the plug -- billing already accounts for it, no alert."""
+    MQTTManager._instance = None
+    plug = _plug_with_baseline(1.0, 10.0)
+    active = MagicMock()
+    active.id = 10
+    active.user_id = 1
+    active.energy_kwh = 0.5
+    active.peak_power_w = 0.0
+    active.energy_counter_last_raw_kwh = None
+    active.energy_reset_offset_kwh = 0.0
+    session = _FakeSession([
+        _FakeResult(scalar=plug),
+        _FakeResult(scalar=active),
+    ])
+    mgr = MQTTManager(db_session_factory=lambda: session)
+    mgr._persist_gateway_event = AsyncMock()
+    mgr._maybe_auto_stop_on_exhaustion = AsyncMock()
+    mgr._maybe_auto_stop_on_limits = AsyncMock()
+
+    with patch("backend.services.pricing.reprice_session_if_due",
+               AsyncMock(return_value=None)):
+        await mgr._persist_telemetry(
+            "gw-1", 5, 100.0, 0.5, session_id=10, sample=None, relay_on=True,
+            today_kwh=1.5, month_kwh=10.5,
+        )
+
+    assert plug.last_today_energy_kwh == 1.5
+    assert plug.last_month_energy_kwh == 10.5
+    mgr._persist_gateway_event.assert_not_awaited()
+
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_persist_telemetry_unmetered_consumption_reset_not_flagged():
+    """Both counters regressing together (plug power-cycle / a full reset)
+    must NOT be treated as unmetered consumption -- the baseline just
+    re-seeds at the new (lower) reading, distinguishing a reset from real
+    consumption the same way the firmware's own reconciliation does."""
+    MQTTManager._instance = None
+    plug = _plug_with_baseline(5.0, 50.0)
+    session = _FakeSession([
+        _FakeResult(scalar=plug),
+        _FakeResult(scalar=None),
+    ])
+    mgr = MQTTManager(db_session_factory=lambda: session)
+    mgr._persist_gateway_event = AsyncMock()
+
+    await mgr._persist_telemetry(
+        "gw-1", 5, 0.0, 0.0, session_id=None, sample=None, relay_on=False,
+        today_kwh=0.1, month_kwh=0.2,
+    )
+
+    assert plug.last_today_energy_kwh == 0.1
+    assert plug.last_month_energy_kwh == 0.2
+    mgr._persist_gateway_event.assert_not_awaited()
+
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_persist_telemetry_unmetered_consumption_today_rollover_falls_back_to_month():
+    """today_energy alone regressing (midnight rollover mid-gap) must NOT
+    suppress detection -- month_energy is still climbing and is used as the
+    (slightly conservative) estimate, mirroring the firmware's fallback."""
+    MQTTManager._instance = None
+    plug = _plug_with_baseline(9.5, 10.0)  # today near its old max, month low
+    session = _FakeSession([
+        _FakeResult(scalar=plug),
+        _FakeResult(scalar=None),
+    ])
+    mgr = MQTTManager(db_session_factory=lambda: session)
+    mgr._persist_gateway_event = AsyncMock()
+
+    # today rolled over (9.5 -> 0.2, a regression) but month kept climbing (10.0 -> 10.3).
+    await mgr._persist_telemetry(
+        "gw-1", 5, 0.0, 0.0, session_id=None, sample=None, relay_on=False,
+        today_kwh=0.2, month_kwh=10.3,
+    )
+
+    mgr._persist_gateway_event.assert_awaited_once()
+    args = mgr._persist_gateway_event.await_args.args
+    assert args[2] == "UNMETERED_CONSUMPTION"
+    assert "0.300" in args[4]  # month's delta (10.3 - 10.0), not today's
+
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_persist_telemetry_unmetered_consumption_below_threshold_not_flagged():
+    """A tiny delta (P110 standby-draw noise) below
+    UNMETERED_CONSUMPTION_THRESHOLD_KWH must not alert."""
+    MQTTManager._instance = None
+    plug = _plug_with_baseline(1.0, 10.0)
+    session = _FakeSession([
+        _FakeResult(scalar=plug),
+        _FakeResult(scalar=None),
+    ])
+    mgr = MQTTManager(db_session_factory=lambda: session)
+    mgr._persist_gateway_event = AsyncMock()
+
+    await mgr._persist_telemetry(
+        "gw-1", 5, 0.0, 0.0, session_id=None, sample=None, relay_on=False,
+        today_kwh=1.002, month_kwh=10.002,  # +2 Wh, under the 10 Wh default threshold
+    )
+
+    mgr._persist_gateway_event.assert_not_awaited()
+    assert plug.last_today_energy_kwh == 1.002  # baseline still advances
+
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_persist_telemetry_unmetered_consumption_first_frame_seeds_baseline():
+    """No prior baseline (plug.last_*_energy_kwh both NULL, e.g. a freshly
+    provisioned plug) -- nothing to compare against yet, so the first frame
+    just seeds it and never alerts."""
+    MQTTManager._instance = None
+    plug = _plug_with_baseline(None, None)
+    session = _FakeSession([
+        _FakeResult(scalar=plug),
+        _FakeResult(scalar=None),
+    ])
+    mgr = MQTTManager(db_session_factory=lambda: session)
+    mgr._persist_gateway_event = AsyncMock()
+
+    await mgr._persist_telemetry(
+        "gw-1", 5, 0.0, 0.0, session_id=None, sample=None, relay_on=False,
+        today_kwh=3.0, month_kwh=30.0,
+    )
+
+    assert plug.last_today_energy_kwh == 3.0
+    assert plug.last_month_energy_kwh == 30.0
+    mgr._persist_gateway_event.assert_not_awaited()
+
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_persist_telemetry_unmetered_consumption_absent_fields_skip_reconciliation():
+    """A frame that carries neither today_kwh nor month_kwh (older firmware,
+    or a plug model that doesn't report them) must not touch the baseline or
+    alert at all -- not even a bogus 0.0 comparison."""
+    MQTTManager._instance = None
+    plug = _plug_with_baseline(1.0, 10.0)
+    session = _FakeSession([
+        _FakeResult(scalar=plug),
+        _FakeResult(scalar=None),
+    ])
+    mgr = MQTTManager(db_session_factory=lambda: session)
+    mgr._persist_gateway_event = AsyncMock()
+
+    await mgr._persist_telemetry(
+        "gw-1", 5, 0.0, 0.0, session_id=None, sample=None, relay_on=False,
+    )  # today_kwh/month_kwh both default to None
+
+    assert plug.last_today_energy_kwh == 1.0    # untouched
+    assert plug.last_month_energy_kwh == 10.0   # untouched
+    mgr._persist_gateway_event.assert_not_awaited()
+
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_persist_telemetry_unmetered_consumption_cooldown_suppresses_repeat_alert():
+    """A second discrepancy on the SAME plug within UNMETERED_ALERT_COOLDOWN_SEC
+    must not re-alert (avoids notification spam on an ongoing live drift); a
+    fresh episode still raises promptly once the cooldown lapses (not tested
+    here — would need monotonic-clock control — but the per-plug dict + a
+    real elapsed-time gate is exercised structurally by this single-window
+    check)."""
+    MQTTManager._instance = None
+    plug = _plug_with_baseline(1.0, 10.0)
+    session = _FakeSession([
+        _FakeResult(scalar=plug), _FakeResult(scalar=None),   # frame 1
+        _FakeResult(scalar=plug), _FakeResult(scalar=None),   # frame 2
+    ])
+    mgr = MQTTManager(db_session_factory=lambda: session)
+    mgr._persist_gateway_event = AsyncMock()
+
+    await mgr._persist_telemetry("gw-1", 5, 0.0, 0.0, today_kwh=1.05, month_kwh=10.05)
+    await mgr._persist_telemetry("gw-1", 5, 0.0, 0.0, today_kwh=1.10, month_kwh=10.10)
+
+    assert mgr._persist_gateway_event.await_count == 1
+    MQTTManager._instance = None
+
+
+# ---------------------------------------------------------------------------
+# [Unmetered consumption] Firmware's own one-shot offline report + the CPO
+# bell-notify fan-out (services/mqtt/alarms.py) — the other half of the
+# detector, and the delivery path shared by BOTH halves.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_unmetered_consumption_alarm_detail_carries_kwh_estimate():
+    """The firmware's UNMETERED_CONSUMPTION alarm carries a `kwh` estimate
+    (plus today_kwh/month_kwh) that _handle_gateway_alarm must fold into a
+    human-readable detail string (not just the static _EVENT_DETAIL fallback)."""
+    MQTTManager._instance = None
+    loop = asyncio.get_running_loop()
+    mgr = MQTTManager(db_session_factory=lambda: None, event_loop=loop)
+
+    captured = {}
+
+    async def fake_persist(gateway_id, plug_id, event_type, severity, detail):
+        captured.update(gateway_id=gateway_id, plug_id=plug_id,
+                        event_type=event_type, severity=severity, detail=detail)
+
+    mgr._persist_gateway_event = fake_persist
+
+    mgr._handle_gateway_alarm("gw-9", {
+        "error": "UNMETERED_CONSUMPTION", "plug_id": 5,
+        "kwh": 1.234, "today_kwh": 2.5, "month_kwh": 12.5,
+    })
+    await asyncio.sleep(0.05)
+
+    assert captured.get("event_type") == "UNMETERED_CONSUMPTION"
+    assert captured.get("severity") == "warning"
+    assert captured.get("plug_id") == 5
+    assert "1.234" in captured.get("detail", "")
+
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_unmetered_consumption_alarm_falls_back_to_static_detail_without_kwh():
+    """A malformed/future payload missing `kwh` still gets SOME detail text
+    (the static _EVENT_DETAIL fallback) rather than None."""
+    MQTTManager._instance = None
+    loop = asyncio.get_running_loop()
+    mgr = MQTTManager(db_session_factory=lambda: None, event_loop=loop)
+
+    captured = {}
+
+    async def fake_persist(gateway_id, plug_id, event_type, severity, detail):
+        captured.update(detail=detail)
+
+    mgr._persist_gateway_event = fake_persist
+    mgr._handle_gateway_alarm("gw-9", {"error": "UNMETERED_CONSUMPTION", "plug_id": 5})
+    await asyncio.sleep(0.05)
+
+    assert captured.get("detail")  # non-empty fallback text
+
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_persist_gateway_event_notifies_cpos_for_unmetered_consumption():
+    """_persist_gateway_event must bell-notify every CPO of the gateway's
+    tenant for UNMETERED_CONSUMPTION (mirrors the orphan_off CPO-notify
+    pattern in services/mqtt/status.py). Both call sites (the firmware's own
+    alarm AND the backend's continuous check) funnel through this one
+    function, so this single test covers the delivery path for both."""
+    MQTTManager._instance = None
+    gw = MagicMock()
+    gw.tenant_id = 7
+
+    plug_name_result = MagicMock()
+    plug_name_result.scalar_one_or_none.return_value = "Sim Plug 1"
+    cpo_ids_result = MagicMock()
+    cpo_ids_result.scalars.return_value.all.return_value = [101, 102]
+
+    session = _FakeSession([
+        _FakeResult(scalar=gw),   # gateway lookup (event persist)
+        plug_name_result,         # plug-name lookup (CPO notify)
+        cpo_ids_result,           # CPO id lookup (CPO notify)
+    ])
+    mgr = MQTTManager(db_session_factory=lambda: session)
+
+    notify_mock = AsyncMock()
+    with patch("backend.services.socketio_manager.emit_gateway_alarm", AsyncMock()), \
+         patch("backend.services.notifications.notify", notify_mock):
+        await mgr._persist_gateway_event(
+            "gw-9", 5, "UNMETERED_CONSUMPTION", "warning",
+            "Plug consumed an estimated 1.234 kWh with no billed session covering it.",
+        )
+
+    assert notify_mock.await_count == 2
+    notified_users = {c.args[0] for c in notify_mock.await_args_list}
+    assert notified_users == {101, 102}
+    for c in notify_mock.await_args_list:
+        assert c.args[1] == "unmetered_consumption"
+        assert c.kwargs.get("severity") == "warning"
+        assert c.kwargs.get("plug_id") == 5
+
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_persist_gateway_event_does_not_notify_cpos_for_other_event_types():
+    """Only UNMETERED_CONSUMPTION triggers the CPO bell-notify fan-out — a
+    routine safety alarm must not gain a second notification channel."""
+    MQTTManager._instance = None
+    db = _AlarmDB()
+    mgr = MQTTManager(db_session_factory=lambda: db)
+    mgr._finalize_session_after_cutoff = AsyncMock()
+    mgr._auto_enter_maintenance = AsyncMock()
+
+    notify_mock = AsyncMock()
+    with patch("backend.services.socketio_manager.emit_gateway_alarm", AsyncMock()), \
+         patch("backend.services.notifications.notify", notify_mock):
+        await mgr._persist_gateway_event("gw-9", 5, "THERMAL_CUTOFF", "critical", None)
+
+    notify_mock.assert_not_awaited()
     MQTTManager._instance = None
 
 

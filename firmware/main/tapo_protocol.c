@@ -30,6 +30,7 @@
 #include <strings.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <math.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -67,6 +68,12 @@ static uint8_t          s_auth_hash[32];
  * bounds NVS wear while capping the worst-case crash energy loss to <threshold. */
 #define ENERGY_PERSIST_THRESHOLD_WH  50.0
 
+/* ── offline/unmetered-consumption reconciliation (idle-baseline) ─────────── */
+#define BASELINE_UNSET                 -1.0f   /* sentinel: no baseline yet (fresh plug / NVS wipe) */
+#define UNMETERED_THRESHOLD_KWH        0.01f   /* 10 Wh -- ignore standby-draw / rounding noise */
+#define BASELINE_RESET_EPSILON_KWH     0.001f  /* 1 Wh -- rounding jitter on an essentially-flat reading */
+#define BASELINE_PERSIST_THRESHOLD_KWH 0.01f   /* throttle NVS writes (mirrors ENERGY_PERSIST_THRESHOLD_WH) */
+
 typedef struct {
     bool       valid;
     uint8_t    key[16];
@@ -94,6 +101,18 @@ struct tapo_plug_s {
     double     energy_persisted_wh;
     float      energy_last_power_w;   /* last power sample, for trapezoidal integration */
     char       nvs_key[16];           /* "wh_<plug_id>" */
+    /* Offline/unmetered-consumption idle baseline (see
+     * tapo_plug_reconcile_idle_baseline()): the plug's own today_energy/
+     * month_energy readings the last time we were confident nothing unbilled
+     * was happening (no active AmpHive session). BASELINE_UNSET (<0) until
+     * the first idle reading ever seeds it. Persisted to NVS (key
+     * "bl_<plug_id>", same namespace as the energy meter above) so it
+     * survives an ESP32 reboot -- baseline_persisted_month_kwh tracks what's
+     * actually flashed, throttling NVS writes the same way energy_wh does. */
+    float      baseline_today_kwh;
+    float      baseline_month_kwh;
+    float      baseline_persisted_month_kwh;
+    char       baseline_nvs_key[16];  /* "bl_<plug_id>" */
 };
 
 /* Restore the integrator from NVS (blob = the exact double, so no overflow or
@@ -117,6 +136,46 @@ static void energy_persist_nvs(tapo_plug_t *p) {
     if (nvs_set_blob(h, p->nvs_key, &p->energy_wh, sizeof(p->energy_wh)) == ESP_OK &&
         nvs_commit(h) == ESP_OK) {
         p->energy_persisted_wh = p->energy_wh;
+    }
+    nvs_close(h);
+}
+
+/* Blob shape persisted under baseline_nvs_key -- kept as a tiny local struct
+ * (not tapo_energy_reconcile_t) so growing the public result type later
+ * can't silently change the NVS wire layout. */
+typedef struct { float today_kwh; float month_kwh; } baseline_blob_t;
+
+/* Restore the idle-consumption baseline from NVS. No-op (leaves BASELINE_UNSET)
+ * when nothing is stored yet -- a fresh plug or a wiped NVS never reports on
+ * its very first idle reading (nothing to compare against). */
+static void baseline_load_nvs(tapo_plug_t *p) {
+    p->baseline_today_kwh = BASELINE_UNSET;
+    p->baseline_month_kwh = BASELINE_UNSET;
+    p->baseline_persisted_month_kwh = BASELINE_UNSET;
+    nvs_handle_t h;
+    if (nvs_open(ENERGY_NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) return;
+    baseline_blob_t blob;
+    size_t sz = sizeof(blob);
+    if (nvs_get_blob(h, p->baseline_nvs_key, &blob, &sz) == ESP_OK && sz == sizeof(blob)) {
+        p->baseline_today_kwh = blob.today_kwh;
+        p->baseline_month_kwh = blob.month_kwh;
+        p->baseline_persisted_month_kwh = blob.month_kwh;
+        ESP_LOGI(TAG, "plug %d: restored idle energy baseline from NVS (today=%.3f kWh, month=%.3f kWh)",
+                 p->plug_id, blob.today_kwh, blob.month_kwh);
+    }
+    nvs_close(h);
+}
+
+/* Unconditional flush (caller decides whether the drift crosses
+ * BASELINE_PERSIST_THRESHOLD_KWH -- same split as energy_persist_nvs, whose
+ * caller (tapo_plug_get_telemetry) does its own threshold check). */
+static void baseline_persist_nvs(tapo_plug_t *p) {
+    nvs_handle_t h;
+    if (nvs_open(ENERGY_NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) return;
+    baseline_blob_t blob = { p->baseline_today_kwh, p->baseline_month_kwh };
+    if (nvs_set_blob(h, p->baseline_nvs_key, &blob, sizeof(blob)) == ESP_OK &&
+        nvs_commit(h) == ESP_OK) {
+        p->baseline_persisted_month_kwh = p->baseline_month_kwh;
     }
     nvs_close(h);
 }
@@ -455,10 +514,12 @@ tapo_plug_t *tapo_plug_create(int plug_id, const char *local_ip) {
     p->plug_id = plug_id;
     strncpy(p->ip, local_ip, sizeof(p->ip) - 1);
     p->ip[sizeof(p->ip) - 1] = '\0';
-    /* NVS key max is 15 chars; "wh_" + plug_id digits fits realistic ids. */
+    /* NVS key max is 15 chars; "wh_"/"bl_" + plug_id digits fits realistic ids. */
     snprintf(p->nvs_key, sizeof(p->nvs_key), "wh_%d", plug_id);
+    snprintf(p->baseline_nvs_key, sizeof(p->baseline_nvs_key), "bl_%d", plug_id);
 
-    energy_load_nvs(p);  /* resume the cross-reboot integrator so the watchdog stays armed */
+    energy_load_nvs(p);    /* resume the cross-reboot integrator so the watchdog stays armed */
+    baseline_load_nvs(p);  /* resume the offline/unmetered-consumption idle baseline */
     ESP_LOGI(TAG, "Tapo plug context created (id=%d, ip=%s)", plug_id, p->ip);
     return p;
 }
@@ -468,6 +529,7 @@ void tapo_plug_destroy(tapo_plug_t *plug) {
     /* Flush the final meter so a plug re-added later resumes its total
        (energy_load_nvs keys on "wh_<plug_id>") rather than restarting from 0. */
     energy_persist_nvs(plug);
+    baseline_persist_nvs(plug);
     ESP_LOGI(TAG, "Tapo plug context destroyed (id=%d, ip=%s)", plug->plug_id, plug->ip);
     if (plug->mutex) vSemaphoreDelete(plug->mutex);
     free(plug);
@@ -490,14 +552,17 @@ void tapo_plug_reassign_id(tapo_plug_t *plug, int new_plug_id) {
     xSemaphoreTake(plug->mutex, portMAX_DELAY);
     plug->plug_id = new_plug_id;
     snprintf(plug->nvs_key, sizeof(plug->nvs_key), "wh_%d", new_plug_id);
-    /* Re-seat the energy integrator on the new plug's NVS key. Only ever called
-       on an idle provisional slot, so resetting the scale is safe — the next
-       session captures a fresh baseline at ON. */
+    snprintf(plug->baseline_nvs_key, sizeof(plug->baseline_nvs_key), "bl_%d", new_plug_id);
+    /* Re-seat the energy integrator AND the idle-consumption baseline on the
+       new plug's NVS keys. Only ever called on an idle provisional slot, so
+       resetting the scale is safe — the next session captures a fresh
+       baseline at ON, and the next idle poll reseeds the idle baseline. */
     plug->energy_wh = 0.0;
     plug->energy_persisted_wh = 0.0;
     plug->energy_last_tick = 0;
     plug->energy_last_power_w = 0.0f;
     energy_load_nvs(plug);
+    baseline_load_nvs(plug);
     xSemaphoreGive(plug->mutex);
     ESP_LOGI(TAG, "plug context reassigned to id %d (energy key %s)", new_plug_id, plug->nvs_key);
 }
@@ -542,6 +607,11 @@ esp_err_t tapo_plug_get_telemetry(tapo_plug_t *plug, tapo_telemetry_t *out) {
      * the derived current / configured nominal voltage below (older firmware). */
     float meas_current_a = -1.0f;   /* <0 → not reported, derive from power */
     float meas_voltage_v = -1.0f;   /* <0 → not reported, use nominal */
+    /* Plug-side calendar counters (also from get_energy_usage -- no extra KLAP
+     * round trip). Feed tapo_plug_reconcile_idle_baseline() below; -1 sentinel
+     * when the field is absent (see the tapo_telemetry_t doc comment). */
+    float meas_today_kwh = -1.0f;
+    float meas_month_kwh = -1.0f;
 
     xSemaphoreTake(plug->mutex, portMAX_DELAY);
 
@@ -555,6 +625,9 @@ esp_err_t tapo_plug_get_telemetry(tapo_plug_t *plug, tapo_telemetry_t *out) {
         if (json_int((const char *)plain, "\"current_ma\":", &cur_ma)) meas_current_a = (float)cur_ma / 1000.0f;
         long volt_mv = 0;  /* voltage_mv: real RMS voltage in millivolts */
         if (json_int((const char *)plain, "\"voltage_mv\":", &volt_mv)) meas_voltage_v = (float)volt_mv / 1000.0f;
+        long today_wh = 0, month_wh = 0;   /* today_energy/month_energy are plain Wh integers */
+        if (json_int((const char *)plain, "\"today_energy\":", &today_wh)) meas_today_kwh = (float)today_wh / 1000.0f;
+        if (json_int((const char *)plain, "\"month_energy\":", &month_wh)) meas_month_kwh = (float)month_wh / 1000.0f;
     }
 
     /* 2) state + safety statuses */
@@ -610,6 +683,75 @@ esp_err_t tapo_plug_get_telemetry(tapo_plug_t *plug, tapo_telemetry_t *out) {
         out->current_a = (out->voltage_v > 1.0f) ? power_w / out->voltage_v : 0.0f;
     }
     out->energy_kwh = (float)(energy_wh_snapshot / 1000.0);
+    out->today_energy_kwh = meas_today_kwh;
+    out->month_energy_kwh = meas_month_kwh;
 
+    return ESP_OK;
+}
+
+esp_err_t tapo_plug_reconcile_idle_baseline(tapo_plug_t *plug, float today_kwh, float month_kwh,
+                                             bool can_report, tapo_energy_reconcile_t *out) {
+    if (!plug || !out) return ESP_ERR_INVALID_ARG;
+    memset(out, 0, sizeof(*out));
+    if (today_kwh < 0.0f || month_kwh < 0.0f) return ESP_OK;  /* plug didn't report them this poll */
+
+    xSemaphoreTake(plug->mutex, portMAX_DELAY);
+
+    if (plug->baseline_today_kwh < 0.0f || plug->baseline_month_kwh < 0.0f) {
+        /* First-ever idle reading (fresh plug / NVS wipe) -- nothing to
+           compare against yet. Seed the baseline and move on; never report
+           on the very first look. */
+        plug->baseline_today_kwh = today_kwh;
+        plug->baseline_month_kwh = month_kwh;
+        baseline_persist_nvs(plug);
+        xSemaphoreGive(plug->mutex);
+        return ESP_OK;
+    }
+
+    float delta_today = today_kwh - plug->baseline_today_kwh;
+    float delta_month = month_kwh - plug->baseline_month_kwh;
+    bool  reset_today  = delta_today < -BASELINE_RESET_EPSILON_KWH;
+    bool  reset_month  = delta_month < -BASELINE_RESET_EPSILON_KWH;
+
+    bool  reset = reset_today && reset_month;   /* both regressed -> full reset, nothing to report */
+    float candidate = 0.0f;
+    if (!reset_today && !reset_month) {
+        /* Prefer whichever climbed more -- normally they move together;
+           month_energy is the tighter signal across a multi-day gap since it
+           resets far less often than today_energy (nightly). */
+        candidate = (delta_month > delta_today) ? delta_month : delta_today;
+    } else if (reset_today && !reset_month) {
+        /* today rolled over (midnight) mid-gap but month kept climbing --
+           month's delta alone is still a legitimate, if slightly
+           conservative (may itself have partly rolled), estimate. */
+        candidate = delta_month;
+    } else if (reset_month && !reset_today) {
+        /* month itself just rolled over (new billing month) or reset -- fall
+           back to today's delta as a lower-bound estimate. */
+        candidate = delta_today;
+    }
+
+    bool unmetered = !reset && candidate >= UNMETERED_THRESHOLD_KWH;
+
+    out->unmetered_detected = unmetered;
+    out->reset_detected     = reset;
+    out->estimated_kwh      = unmetered ? candidate : 0.0f;
+
+    /* Advance (and throttle-flush) the baseline whenever there is nothing
+       pending to report, OR the caller is about to actually deliver this
+       report (can_report). A detected-but-undelivered episode (MQTT down)
+       intentionally leaves the baseline untouched, so the NEXT poll
+       recomputes the same (or a larger) delta against the same pre-gap
+       reference instead of the report silently evaporating the instant
+       connectivity returns -- see the function's header-comment doc. */
+    if (reset || !unmetered || can_report) {
+        plug->baseline_today_kwh = today_kwh;
+        plug->baseline_month_kwh = month_kwh;
+        if (fabsf(plug->baseline_month_kwh - plug->baseline_persisted_month_kwh) >= BASELINE_PERSIST_THRESHOLD_KWH) {
+            baseline_persist_nvs(plug);
+        }
+    }
+
+    xSemaphoreGive(plug->mutex);
     return ESP_OK;
 }

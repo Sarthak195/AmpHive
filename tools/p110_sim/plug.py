@@ -11,11 +11,24 @@ REAL-vs-derived split (see its header comment and FIRMWARE.md §4):
   * device_on, overheat_status, overcurrent_status — from get_device_info.
   * energy_kwh on the firmware side is a DRIVER-SIDE monotonic integrator
     computed from current_power samples — the firmware never reads a
-    cumulative energy field from the plug. This simulator still models a
-    plug-side cumulative counter (today_energy/month_energy) for fidelity
-    against the real Tapo wire format and the `tapo` client library, but
-    AmpHive's current firmware does not consume it — see the --reset-counter
-    caveat in README.md.
+    cumulative energy field from the plug for BILLING.
+  * today_energy/month_energy (2026-08, offline-consumption bench work):
+    the plug's OWN calendar counters, tracked as independent accumulators
+    (not aliases of the lifetime meter) so a bench test can exercise
+    firmware/main/tapo_protocol.c's tapo_plug_reconcile_idle_baseline() day/
+    month cross-check: --reset-counter (PlugConfig.reset_after_s) simulates
+    a full power-cycle and clears all three counters together; the new
+    --daily-reset-counter (PlugConfig.daily_reset_after_s) simulates the
+    P110's own nightly midnight rollover and clears ONLY today_energy,
+    leaving month_energy (and the lifetime meter) climbing -- exactly the
+    "today rolled over mid-gap but month kept counting" case the firmware's
+    reconciliation logic falls back on. Because SimulatedPlug.tick() runs on
+    every inbound HTTP request (server.py), an independent KLAP client (e.g.
+    tools/klap_probe.py, or a human with the real Tapo app) toggling the
+    relay while the firmware/gateway simply isn't polling is enough to
+    reproduce the owner-reported incident on the bench -- no sim code needed
+    beyond keeping these counters advancing in real wall-clock time
+    regardless of who last called get_energy_usage.
 """
 
 from __future__ import annotations
@@ -53,6 +66,13 @@ class PlugConfig:
     drop_rate: float = 0.0        # probability [0,1) a request is dropped
     reset_after_s: Optional[float] = None    # seconds after plug creation
     reset_value_kwh: float = 0.0
+    # Independent "midnight rollover" simulation (2026-08 offline-consumption
+    # bench work): after this many seconds of uptime, reset ONLY
+    # today_energy to 0, leaving month_energy/energy_wh untouched -- a real
+    # P110 resets its calendar-day counter nightly on its own clock, distinct
+    # from reset_after_s's full power-cycle reset (which clears all three).
+    # See the module docstring.
+    daily_reset_after_s: Optional[float] = None
 
 
 @dataclass
@@ -60,6 +80,8 @@ class _PersistedState:
     energy_wh: float = 0.0
     device_on: bool = False
     on_time_s: float = 0.0
+    today_energy_wh: float = 0.0
+    month_energy_wh: float = 0.0
 
 
 class SimulatedPlug:
@@ -77,21 +99,35 @@ class SimulatedPlug:
             self._energy_wh = st.energy_wh
             self._device_on = st.device_on
             self._on_time_s = st.on_time_s
+            # Old state files predate today/month tracking (both default to
+            # 0.0 via the dataclass) -- fall back to the lifetime meter so a
+            # resumed run doesn't look like a bogus reset happened.
+            self._today_energy_wh = initial.get("today_energy_wh", self._energy_wh)
+            self._month_energy_wh = initial.get("month_energy_wh", self._energy_wh)
         else:
             self._energy_wh = cfg.start_kwh * 1000.0
             self._device_on = False
             self._on_time_s = 0.0
+            self._today_energy_wh = self._energy_wh
+            self._month_energy_wh = self._energy_wh
         self._last_tick = time.monotonic()
         self._created_at = time.time()
         self._reset_deadline = (
             self._created_at + cfg.reset_after_s if cfg.reset_after_s is not None else None
         )
         self._reset_fired = False
+        self._daily_reset_deadline = (
+            self._created_at + cfg.daily_reset_after_s
+            if cfg.daily_reset_after_s is not None
+            else None
+        )
+        self._daily_reset_fired = False
 
         self.device_id = uuid.uuid5(uuid.NAMESPACE_DNS, f"p110sim-{cfg.plug_id}").hex.upper()
         self.mac = _mac_from_id(cfg.plug_id)
         self.on_state_changed = None  # optional callback(plug) -> None
         self.on_counter_reset = None  # optional callback(plug) -> None, fires once at reset
+        self.on_daily_reset = None    # optional callback(plug) -> None, fires once at daily rollover
 
     # ---- persistence snapshot -------------------------------------------------
 
@@ -101,6 +137,8 @@ class SimulatedPlug:
                 "energy_wh": self._energy_wh,
                 "device_on": self._device_on,
                 "on_time_s": self._on_time_s,
+                "today_energy_wh": self._today_energy_wh,
+                "month_energy_wh": self._month_energy_wh,
             }
 
     # ---- physics: called on every inbound request to advance the clock --------
@@ -116,7 +154,10 @@ class SimulatedPlug:
             self._last_tick = now_mono
             if self._device_on and dt_h > 0:
                 watts = self._jittered_watts()
-                self._energy_wh += watts * dt_h
+                wh = watts * dt_h
+                self._energy_wh += wh
+                self._today_energy_wh += wh
+                self._month_energy_wh += wh
                 self._on_time_s += dt_h * 3600.0
 
             if (
@@ -126,11 +167,26 @@ class SimulatedPlug:
             ):
                 self._reset_fired = True
                 self._energy_wh = self.cfg.reset_value_kwh * 1000.0
+                self._today_energy_wh = self._energy_wh
+                self._month_energy_wh = self._energy_wh
                 cb = self.on_counter_reset
             else:
                 cb = None
+
+            if (
+                not self._daily_reset_fired
+                and self._daily_reset_deadline is not None
+                and time.time() >= self._daily_reset_deadline
+            ):
+                self._daily_reset_fired = True
+                self._today_energy_wh = 0.0
+                daily_cb = self.on_daily_reset
+            else:
+                daily_cb = None
         if cb:
             cb(self)
+        if daily_cb:
+            daily_cb(self)
 
     # ---- load model -------------------------------------------------------
 
@@ -210,12 +266,15 @@ class SimulatedPlug:
         voltage_mv = self._voltage_mv()
         current_ma = self._current_ma(power_mw, voltage_mv)
         with self._lock:
-            energy_wh = self._energy_wh
+            today_energy_wh = self._today_energy_wh
+            month_energy_wh = self._month_energy_wh
         return {
             "today_runtime": int(self._on_time_s // 60),
             "month_runtime": int(self._on_time_s // 60),
-            "today_energy": round(energy_wh),
-            "month_energy": round(energy_wh),
+            # Independent calendar counters (2026-08) -- see the module
+            # docstring for why these aren't just the lifetime meter.
+            "today_energy": round(today_energy_wh),
+            "month_energy": round(month_energy_wh),
             "local_time": time.strftime("%Y-%m-%d %H:%M:%S"),
             "electricity_charge": [0, 0, 0],
             "current_power": power_mw,
