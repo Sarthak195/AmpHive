@@ -89,6 +89,51 @@ UNMETERED_CONSUMPTION_RESET_EPS_KWH = float(os.getenv("UNMETERED_CONSUMPTION_RES
 # different plug is unaffected (the cooldown is per-plug).
 UNMETERED_ALERT_COOLDOWN_SEC = float(os.getenv("UNMETERED_ALERT_COOLDOWN_SEC", "300"))
 
+# [Opt-in charging limits] Charging limits (max_duration_seconds / max_kwh)
+# are opt-in: a session with no explicit limit charges until the driver (or a
+# real safety net) stops it — never a hidden default duration/energy. But the
+# firmware's local relay watchdog (firmware/main/main.c, the ON and
+# SET_LIMITS command handlers) has no concept of "no limit" today:
+#   - an ABSENT max_duration_seconds/max_kwh field in the command payload
+#     falls back to the firmware's OWN hard-coded default (14400 s / 30 kWh —
+#     the exact old behavior this feature removes), and
+#   - a PRESENT-but-zero value is read literally, which trips the watchdog
+#     on the very next poll (`elapsed_s >= 0` and `consumed_kwh >= 0` are
+#     always true) — an instant cutoff, not "unlimited".
+# So neither omitting the field nor sending 0 encodes "no limit" on
+# already-deployed firmware. These sentinels stand in for it instead: values
+# large enough that no real charging session could ever reach them (a
+# single-phase AC plug tops out at a few kW, and MAX_PLAUSIBLE_KWH already
+# bounds a telemetry frame's session energy at 1000 kWh, well under
+# UNLIMITED_MAX_KWH — see services/mqtt/telemetry.py), while staying safely
+# inside the firmware's uint32_t-seconds / float-kWh range. The REAL stop
+# conditions for an "unlimited" session are the backend-side safety nets
+# (balance exhaustion, gateway-offline/staleness reaping, overcurrent, plug
+# caps) — these sentinels only keep the on-device duration/energy watchdog
+# from tripping FIRST. Env-overridable for tests/exotic fleets.
+UNLIMITED_DURATION_SECONDS = int(
+    os.getenv("UNLIMITED_DURATION_SECONDS", str(10 * 365 * 24 * 3600))
+)  # ~10 years
+UNLIMITED_MAX_KWH = float(os.getenv("UNLIMITED_MAX_KWH", "999999.0"))  # ~1 GWh
+
+
+def firmware_duration(max_duration_seconds: Optional[int]) -> int:
+    """The value to publish as the gateway's `max_duration_seconds` watchdog
+    field: the driver's own explicit limit, or UNLIMITED_DURATION_SECONDS
+    when they set none (see the module comment above for why this can't be
+    0 or an omitted field)."""
+    return (
+        max_duration_seconds
+        if max_duration_seconds is not None
+        else UNLIMITED_DURATION_SECONDS
+    )
+
+
+def firmware_max_kwh(max_kwh: Optional[float]) -> float:
+    """The value to publish as the gateway's `max_kwh` watchdog field: the
+    driver's own explicit limit, or UNLIMITED_MAX_KWH when they set none."""
+    return max_kwh if max_kwh is not None else UNLIMITED_MAX_KWH
+
 
 class MQTTManager(
     MQTTConnectionMixin,

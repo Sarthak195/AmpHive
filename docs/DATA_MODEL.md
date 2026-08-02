@@ -101,13 +101,18 @@ attributed to the session; the reaper judges sessions by
 
 `max_kwh` float (nullable) · `max_duration_seconds` int (nullable) — added
 2026-07-12 (Alembic `0015_session_limits`): the stop conditions the session
-was started with (user-chosen or the request defaults, 30 kWh / 4 h),
-snapshotted from `SessionStartRequest`. Enforced backend-side by
+was started with, snapshotted verbatim from `SessionStartRequest`. **Opt-in
+since 2026-08-02** — `SessionStartRequest` defaults both to `None`/absent, so
+NULL is the *normal* value for a session with no driver-chosen limit (charge
+until stopped), not just a legacy-row artifact (before that date an omitted
+field defaulted to 30 kWh / 4 h here). Enforced backend-side by
 `MQTTManager._maybe_auto_stop_on_limits` on the telemetry path (env
-`AUTO_STOP_ON_LIMITS`) plus a reaper duration backstop; the firmware enforces
-the same values locally as relay watchdogs. NULL = legacy pre-limit session
-(never limit-auto-stopped). `max_kwh` is float, not NUMERIC — an energy
-threshold, not money.
+`AUTO_STOP_ON_LIMITS`) plus a reaper duration backstop when set; NULL is
+never limit-auto-stopped. The firmware/AmpHive-Agent gateway still enforces
+concrete watchdog values locally — the driver's own limit, or a large
+UNLIMITED sentinel (`services/mqtt_manager.py`) when this column is NULL,
+since the wire protocol has no way to encode "no limit" directly. `max_kwh`
+is float, not NUMERIC — an energy threshold, not money.
 
 ### `ledger_transactions`
 Double-entry-style wallet audit. `id` PK · `user_id` → users (CASCADE) ·

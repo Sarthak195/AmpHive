@@ -299,13 +299,13 @@ async def start_charging_session(
 
         if req.max_duration_seconds:
             # A duration-capped session can't run past its own cap, so it can
-            # only collide with a booking starting before then — use the cap as
-            # the horizon (it's the default 4 h since 2026-07-12 unless the
-            # driver set a shorter limit).
+            # only collide with a booking starting before then — use the cap
+            # as the horizon.
             horizon_min = req.max_duration_seconds / 60
         else:
-            # No cap (legacy / explicit null) — no known end, so fall back to
-            # the policy heuristic horizon.
+            # [Opt-in charging limits] No duration cap (the default — the
+            # driver set none, so this session runs until stopped) — no known
+            # end, so fall back to the policy heuristic horizon.
             horizon_min = reservation_policy.RESERVATION_WALKUP_WARN_LOOKAHEAD_MIN
         upcoming = await next_conflicting_reservation(
             db, plug.id, user.id,
@@ -515,18 +515,24 @@ async def update_session_limits(
     # avoided. Best-effort: the telemetry-path backend mirror already enforces
     # the new limit within ~1 s regardless, so a failed publish never fails this
     # request; a gateway that lacks SET_LIMITS (pre-1.x fw) simply ignores it.
-    # Legacy NULL-limit sessions never carried firmware limits — skip them.
-    if (
-        state.mqtt_manager is not None
-        and session.max_kwh is not None
-        and session.max_duration_seconds is not None
-    ):
+    #
+    # [Opt-in charging limits] Every session that reached ACTIVE went through
+    # begin_active_session's ON publish, which always sends the gateway a
+    # concrete numeric max_kwh/max_duration_seconds — the driver's own limit,
+    # or the UNLIMITED sentinel when they set none (services/mqtt_manager.py
+    # firmware_duration/firmware_max_kwh) — so the gateway always has SOME
+    # watchdog value in hand, never a bare "no limit". Resolve this session's
+    # (possibly still-None, i.e. still-unlimited) side the same way before
+    # pushing, so e.g. adding JUST a kWh cap to a duration-unlimited session
+    # still lands the right pair on-device instead of being skipped.
+    if state.mqtt_manager is not None:
         from backend.services.caps import effective_plug_cap
+        from backend.services.mqtt_manager import firmware_duration, firmware_max_kwh
         state.mqtt_manager.send_plug_limits(
             gateway_id=plug.gateway_id,
             plug_id=plug.id,
-            max_kwh=session.max_kwh,
-            max_duration_seconds=session.max_duration_seconds,
+            max_kwh=firmware_max_kwh(session.max_kwh),
+            max_duration_seconds=firmware_duration(session.max_duration_seconds),
             local_ip=plug.local_ip,
             # Re-arm the on-device OVERCURRENT_CAP at the plug's effective cap
             # (its own max_current_a, or DEFAULT_PLUG_CAP_A) — same resolution

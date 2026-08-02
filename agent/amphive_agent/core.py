@@ -32,7 +32,20 @@ log = logging.getLogger(__name__)
 _KWH_EPSILON = 1e-4
 
 # Local watchdog defaults, mirroring the firmware / backend ON contract
-# (send_plug_command defaults: max_kwh=30.0, max_duration=14400).
+# (send_plug_command's own keyword defaults: max_kwh=30.0, max_duration=14400).
+# [Opt-in charging limits, 2026-08-02] These are now a pure defense-in-depth
+# fallback for a genuinely ABSENT field: since that date the backend always
+# publishes a concrete numeric max_kwh/max_duration_seconds on ON/SET_LIMITS
+# — the driver's own limit, or an UNLIMITED sentinel
+# (backend/services/mqtt_manager.py UNLIMITED_MAX_KWH/UNLIMITED_DURATION_SECONDS,
+# ~1 GWh / ~10 years) when they set none — so `cmd.get(..., _DEFAULT_*)`
+# below should never actually hit these defaults in practice. They're kept
+# as a safety net for a malformed/older command, not as this agent's own
+# notion of "the normal limit". limit_exceeded() below treats a MISSING
+# max_kwh/max_duration_s (session key absent, which also shouldn't happen in
+# practice — ON always sets both) as "no limit" for that dimension, same as
+# the firmware; a caller must never store a literal 0 here, which — like the
+# firmware watchdog — would trip on the very next poll.
 _DEFAULT_MAX_KWH = 30.0
 _DEFAULT_MAX_DURATION_S = 14400
 

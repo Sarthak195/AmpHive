@@ -103,6 +103,16 @@ async def begin_active_session(
     MQTT ON -> roll the claim back if the publish fails -> start the telemetry
     stream. Returns the committed session.
 
+    [Opt-in charging limits] `max_kwh`/`max_duration_seconds` are None when
+    the driver set no explicit stop condition — the session then charges
+    until stopped (driver, or a safety net: balance exhaustion, gateway-
+    offline reaping, overcurrent, plug caps). None is persisted onto the
+    session verbatim (the DB/API meaning of "no limit"), but the gateway
+    ON command gets the firmware-safe UNLIMITED sentinels instead of None
+    (see services/mqtt_manager.py firmware_duration/firmware_max_kwh) — the
+    firmware's own JSON parsing has no way to represent "no limit" for these
+    fields.
+
     Raises the same typed failures the start path always did, so both entry
     points surface identically (the reaper maps them to EXPIRED/FAILED):
       - HTTPException(409) — circuit at capacity (check_circuit_admission).
@@ -162,7 +172,19 @@ async def begin_active_session(
     max_rate = await max_rate_over_window(
         db, plug, now, max_duration_seconds or 24 * 3600
     )
-    hold = to_money(min(available, energy_cost(max_kwh, max_rate)))
+    # [Opt-in charging limits] No energy cap (max_kwh is None, the new default)
+    # means there's no energy_cost() ceiling to size against — energy_cost(None,
+    # ...) would raise (services/money.py coerces via Decimal(str(value))). The
+    # worst case is then bounded only by what's actually available to spend, so
+    # the hold is simply the available balance — the exact behavior an
+    # "unlimited" session needs balance-exhaustion auto-stop to still work off
+    # of (services/mqtt/telemetry.py _maybe_auto_stop_on_exhaustion treats
+    # hold_coins as an opaque threshold either way).
+    hold = (
+        to_money(available)
+        if max_kwh is None
+        else to_money(min(available, energy_cost(max_kwh, max_rate)))
+    )
 
     session = ChargingSession(
         tenant_id=gateway.tenant_id,
@@ -204,12 +226,20 @@ async def begin_active_session(
     # Now command the gateway. If this fails, undo the claim so the plug doesn't
     # stay OCCUPIED with a live ACTIVE session nobody can drive.
     from backend.services.caps import effective_plug_cap
+    from backend.services.mqtt_manager import firmware_duration, firmware_max_kwh
+
+    # [Opt-in charging limits] Resolve None (no explicit limit) to the
+    # firmware-safe "unlimited" sentinels before publishing — see
+    # services/mqtt_manager.py firmware_duration/firmware_max_kwh for why
+    # neither omitting these fields nor sending 0 is safe to encode "no
+    # limit" on the gateway's local relay watchdog. An explicit limit passes
+    # through unchanged.
     success = await asyncio.to_thread(lambda: state.mqtt_manager.send_plug_command(
         gateway_id=plug.gateway_id,
         plug_id=plug.id,
         action="ON",
-        max_duration=max_duration_seconds,
-        max_kwh=max_kwh,
+        max_duration=firmware_duration(max_duration_seconds),
+        max_kwh=firmware_max_kwh(max_kwh),
         session_id=session.id,
         local_ip=plug.local_ip,
         # Plug's effective current cap for on-device enforcement (the plug

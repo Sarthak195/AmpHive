@@ -6,6 +6,22 @@
  * leak onto the shared .chip/.badge classes elsewhere in the app.
  */
 
+/* ---- Simple/Advanced mode tabs ------------------------------------------- */
+
+.pricing-mode-tabs {
+  margin-bottom: var(--sp-4);
+}
+
+/* ---- Simple mode ---------------------------------------------------------- */
+
+.pricing-simple {
+  max-width: 30rem;
+}
+
+.pricing-example {
+  color: var(--ink-2);
+}
+
 .pricing-section h2 {
   margin-bottom: var(--sp-2);
 }
