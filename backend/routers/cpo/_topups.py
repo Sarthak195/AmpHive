@@ -36,6 +36,10 @@ from backend.schemas import CpoTopupCreateRequest, CpoTopupResponse
 from backend.services import payouts as payout_service
 from backend.services.audit import try_record_audit
 from backend.services.money import ZERO_MONEY, to_money
+from backend.services.rate_limit import (
+    account_rate_limit_dependency,
+    cpo_topup_account_rate_limiter,
+)
 from backend.services.rbac import require_role
 from backend.services.wallet import credit_wallet
 
@@ -60,7 +64,11 @@ def _topup_response(
     )
 
 
-@router.post("/api/cpo/topups", response_model=CpoTopupResponse)
+@router.post(
+    "/api/cpo/topups",
+    response_model=CpoTopupResponse,
+    dependencies=[Depends(account_rate_limit_dependency(cpo_topup_account_rate_limiter, "offline top-up"))],
+)
 async def cpo_create_topup(
     req: CpoTopupCreateRequest,
     user: User = Depends(require_role("cpo", "admin")),
