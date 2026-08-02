@@ -8,7 +8,7 @@ nobody billing (observed on-device 2026-07-07). When a gateway reports
 "online", the backend must re-send OFF to each of its plugs that has no
 ACTIVE session, and leave plugs with a live session alone.
 """
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -49,13 +49,15 @@ def _manager_with_db(execute_results):
 @pytest.mark.asyncio
 async def test_online_republishes_off_only_to_plugs_without_active_session():
     mgr, db = _manager_with_db([
-        _result_scalar_one(MagicMock()),                      # gateway row lookup
-        _result_rows([(1, "10.0.0.11"), (2, "10.0.0.12")]),   # (plug_id, local_ip)
-        _result_scalars([2]),                                 # plug 2 has an ACTIVE session
-        _result_rows([]),                                     # [queued charge] no WAITING rows
+        _result_scalar_one(MagicMock()),                                    # gateway row lookup
+        _result_rows([(1, "10.0.0.11", "Bay 1"), (2, "10.0.0.12", "Bay 2")]),  # (plug_id, local_ip, name)
+        _result_scalars([2]),                                               # plug 2 has an ACTIVE session
+        _result_rows([]),                                                   # [queued charge] no WAITING rows
+        _result_scalars([]),                                                # [operator alert] no CPOs to notify
     ])
 
-    await mgr._persist_gateway_status("gw-1", "online")
+    with patch("backend.services.mqtt.status.notify", AsyncMock()):
+        await mgr._persist_gateway_status("gw-1", "online")
 
     # OFF carries the plug's local_ip so a rebooted multi-plug gateway can learn
     # and actuate the plug (TD#20).

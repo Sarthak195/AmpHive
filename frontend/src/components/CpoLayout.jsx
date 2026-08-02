@@ -21,6 +21,7 @@ import {
   CalendarClock,
   ExternalLink,
   FileText,
+  Flag,
   HeartPulse,
   LayoutDashboard,
   LogOut,
@@ -55,6 +56,7 @@ const NAV_GROUPS = [
       { to: '/cpo/gateways', label: 'Gateways', icon: Radio },
       { to: '/cpo/groups', label: 'Groups', icon: Users, badge: 'pendingCapacity' },
       { to: '/cpo/health', label: 'Health', icon: HeartPulse, badge: 'unackedEvents' },
+      { to: '/cpo/plug-reports', label: 'Plug reports', icon: Flag },
     ],
   },
   {

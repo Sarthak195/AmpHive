@@ -23,8 +23,9 @@ python-socketio>=5.11.0
 python-engineio>=4.9.0
 # Web Push delivery for driver notifications (VAPID; keys in .env)
 pywebpush>=2.0.0
-# [Direct Mode] TP-Link Tapo P110 smart plug control library (Rust-backed)
-# Used for development/testing to control the plug directly without ESP32
+# TP-Link Tapo P110 smart plug control library (Rust-backed). Used only by the
+# standalone tools/turn_on.py, turn_off.py, local_tapo_test.py bench scripts;
+# no longer imported by backend runtime (tapo_direct.py removed 2026-08-02).
 tapo<1.0  # upper-bounded pending a full lockfile (audit L6)
 # "Sign in with Google" (routers/auth.py google_login/google_callback):
 # verifies the Google-issued ID token (fetches + checks against Google's

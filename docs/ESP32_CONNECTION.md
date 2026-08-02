@@ -167,8 +167,8 @@ re-apply any board-specific settings afterward (or put them in `sdkconfig.defaul
   `CONFIG_SPIRAM_MODE_OCT` (octal, e.g. S3-N16R8) or `CONFIG_SPIRAM_MODE_QUAD`
   (quad, most WROVER/other S3 modules) added back. This matters much less than it
   once did: the only PSRAM-hungry code was the `microlink` overlay client's 32 KB
-  task, and `microlink` is **retired and compiled out by default** since the
-  2026-07-10 direct-MQTT pivot (see [FIRMWARE.md §5](FIRMWARE.md#5-microlink--the-tailscale-client--substantial-some-todos--retired)) —
+  task, and `microlink` was **retired by the 2026-07-10 direct-MQTT pivot and
+  removed 2026-08-02** (see [FIRMWARE.md §5](FIRMWARE.md#5-historical-microlink-removed-2026-08-02)) —
   so a no-PSRAM chip building the default direct-MQTT firmware is expected, not a
   degraded fallback. See AGENTS.md rule 3.
 - **Flash size:** set `CONFIG_ESPTOOLPY_FLASHSIZE_*` to match the module (the
@@ -179,10 +179,10 @@ re-apply any board-specific settings afterward (or put them in `sdkconfig.defaul
   and `rm -rf build sdkconfig` for a clean regeneration.
 
 > Practical note: the gateway just needs **Wi-Fi**; it no longer needs "enough RAM
-> for the overlay client" now that direct MQTT is the default and `microlink` is
-> compiled out. **ESP32-C3 (no PSRAM) is the intended, fielded target.** ESP32-S3
-> (with PSRAM) remains buildable and is only relevant if you deliberately flip back
-> to the legacy overlay build (`AMPHIVE_DIRECT_MQTT=0`) for rollback testing.
+> for the overlay client" now that direct MQTT is the only transport and
+> `microlink` has been removed. **ESP32-C3 (no PSRAM) is the intended, fielded
+> target.** ESP32-S3 (with PSRAM) remains buildable if you need a PSRAM-capable
+> dev board for other reasons, but there is no overlay build left to flip back to.
 
 ---
 
@@ -259,14 +259,22 @@ esptool.py -p COM3 -b 460800 --chip esp32c3 write_flash 0x0 build/flash_image.bi
 
 | v6 change | Symptom | Workaround if you must use v6 |
 |-----------|---------|-------------------------------|
-| `json` (cJSON) removed from core | `Failed to resolve component 'json' required by 'microlink'` | Vendored locally at `firmware/components/json/` (cJSON v1.7.18) — **already applied** |
+| `json` (cJSON) removed from core | `Failed to resolve component 'json' required by 'main'` | Vendored locally at `firmware/components/json/` (cJSON v1.7.18) — **already applied** |
 | `mqtt` (esp-mqtt) removed from core | `Failed to resolve component 'mqtt' required by 'main'` | Added `espressif/mqtt: "^1.0.0"` in `firmware/main/idf_component.yml` — **already applied** |
-| GCC 15 `-Werror` (new warnings) | `-Werror=unterminated-string-initialization` in `wireguard_lwip`/`microlink` | `-Wno-error` added to those two components' `CMakeLists.txt` — **already applied** |
-| **mbedTLS 3.x → 4.x** | `fatal error: mbedtls/entropy.h: No such file or directory` in `microlink_derp.c` | **Not resolved** — microlink uses mbedTLS 3.x entropy/DRBG/SSL APIs removed in 4.x. Requires porting microlink to the PSA crypto API (large) |
 
-**Bottom line:** use **ESP-IDF v5.3** to build this firmware. The v6 fixes above are
-committed (they're harmless on v5.3), but the mbedTLS-4 gap makes a full v6 build
-impractical without reworking `microlink`.
+The two rows below applied only to the retired `microlink`/`wireguard_lwip`
+components (removed 2026-08-02) and no longer apply — kept as historical
+reference for anyone reviving that transport from git history:
+
+| v6 change (historical, pre-removal) | Symptom | Workaround if you must use v6 |
+|-----------|---------|-------------------------------|
+| ~~GCC 15 `-Werror` (new warnings)~~ | `-Werror=unterminated-string-initialization` in `wireguard_lwip`/`microlink` | `-Wno-error` was added to those two components' `CMakeLists.txt` |
+| ~~mbedTLS 3.x → 4.x~~ | `fatal error: mbedtls/entropy.h: No such file or directory` in `microlink_derp.c` | Not resolved — microlink used mbedTLS 3.x entropy/DRBG/SSL APIs removed in 4.x |
+
+**Bottom line:** use **ESP-IDF v5.3** to build this firmware. The v6 fixes above
+(json/mqtt vendoring) are committed and harmless on v5.3; whether the remaining
+`main/`-only sources build cleanly on v6 is unverified — v5.3 remains the tested
+target.
 
 ---
 
@@ -290,15 +298,17 @@ impractical without reworking `microlink`.
 
 ## 10. Verifying the Implementation (NAT Traversal & Magicsock) — RETIRED
 
-> **RETIRED (2026-07-10 direct-MQTT pivot).** This whole verification procedure
-> is for the `microlink` Tailscale-overlay transport, which is defeated by
-> symmetric NAT (root-caused 2026-07-09) and **compiled out of the default
-> build** (`AMPHIVE_DIRECT_MQTT=1`; see [FIRMWARE.md §5](FIRMWARE.md#5-microlink--the-tailscale-client--substantial-some-todos--retired)).
+> **RETIRED (2026-07-10 direct-MQTT pivot; code removed 2026-08-02).** This
+> whole verification procedure is for the `microlink` Tailscale-overlay
+> transport, which was defeated by symmetric NAT (root-caused 2026-07-09) and
+> has been **removed from the tree** (`AMPHIVE_DIRECT_MQTT=1` is now the only
+> transport; see [FIRMWARE.md §5](FIRMWARE.md#5-historical-microlink-removed-2026-08-02)).
 > There is no GCP-VM Tailscale node or magicsock path to verify on a
 > direct-MQTT gateway anymore — the equivalent live check is confirming a TLS
 > session to the public broker (`mqtts://mqtt.amphive.app:8883`) in the
 > gateway's serial log and an `online` MQTT status. Kept below only as
-> historical reference for anyone reviving the `AMPHIVE_DIRECT_MQTT=0` build.
+> historical reference (see git history prior to 2026-08-02 for the removed
+> `microlink`/`wireguard_lwip` source).
 
 To verify that the unified port architecture (magicsock mode) is functioning correctly and a direct connection is established between the ESP32 and the GCP VM:
 

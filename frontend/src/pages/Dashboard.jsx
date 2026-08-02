@@ -13,7 +13,9 @@
  * 3. "Up next" strip — the driver's upcoming reservations and WAITING queued
  *    charges, each with a live countdown and a ConfirmDialog'd cancel.
  * 4. "Your chargers" — [Your groups | Public] segments, state + group
- *    filters, "See map" link, and the PlugCard grid (5-state machine).
+ *    filters plus [Discovery] search / power / price / connector /
+ *    favorites-only (all client-side, utils/plugSearch), "See map" link,
+ *    and the PlugCard grid (5-state machine + favorite star).
  * 5. Desktop rail — charging credit (₹-first) + "Add credit", and month stats
  *    from GET /api/me/stats (the stats block hides if that endpoint errors).
  *
@@ -25,7 +27,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
-import { CalendarClock, Hourglass, MapPin, PlugZap, Users } from 'lucide-react';
+import { CalendarClock, Hourglass, MapPin, PlugZap, Star, Users } from 'lucide-react';
 
 import api from '../api/client';
 import { useAuth } from '../contexts/AuthContext';
@@ -46,7 +48,16 @@ import {
 import PlugCard from '../components/PlugCard';
 import ChargeSetupModal from '../components/ChargeSetupModal';
 import ReserveModal from '../components/ReserveModal';
+import ReportProblemModal from '../components/ReportProblemModal';
 import { AVAILABILITY_STATES, getPlugAvailability } from '../utils/plugAvailability';
+import {
+  POWER_BUCKETS,
+  PRICE_BUCKETS,
+  distinctConnectors,
+  matchesPowerBucket,
+  matchesPriceBucket,
+  matchesQuery,
+} from '../utils/plugSearch';
 import { apiErrorCopy, plugStateHint, plugStateLabel } from '../utils/statusCopy';
 import { coinsToINR, formatKw, formatKwh } from '../utils/money';
 import { fmtTime, fmtWindow } from '../utils/reservationTime';
@@ -182,6 +193,13 @@ const Dashboard = () => {
   const [seg, setSeg] = useState(null); // null = auto
   const [stateFilter, setStateFilter] = useState('');
   const [groupFilter, setGroupFilter] = useState('');
+  // [Discovery] Free-text search + spec/price buckets + favorites-only. All
+  // client-side over the already-fetched list, like the two selects above.
+  const [searchText, setSearchText] = useState('');
+  const [powerFilter, setPowerFilter] = useState('');
+  const [priceFilter, setPriceFilter] = useState('');
+  const [connectorFilter, setConnectorFilter] = useState('');
+  const [favoritesOnly, setFavoritesOnly] = useState(false);
 
   /* ---- charge-now lookup ------------------------------------------------- */
   const [query, setQuery] = useState('');
@@ -257,6 +275,10 @@ const Dashboard = () => {
     return options;
   }, [loadedPlugs]);
 
+  // [Discovery] The connector filter renders only when the fetched fleet
+  // actually spans more than one connector type.
+  const connectorOptions = useMemo(() => distinctConnectors(loadedPlugs), [loadedPlugs]);
+
   const filteredPlugs = useMemo(
     () =>
       loadedPlugs.filter((p) => {
@@ -266,20 +288,29 @@ const Dashboard = () => {
         } else if (groupFilter && p.group_name !== groupFilter) {
           return false;
         }
+        if (!matchesQuery(p, searchText)) return false;
+        if (!matchesPowerBucket(p, powerFilter)) return false;
+        if (!matchesPriceBucket(p, priceFilter)) return false;
+        if (connectorFilter && p.connector_type !== connectorFilter) return false;
+        if (favoritesOnly && p.is_favorite !== true) return false;
         return true;
       }),
-    [loadedPlugs, stateFilter, groupFilter]
+    [loadedPlugs, stateFilter, groupFilter, searchText, powerFilter, priceFilter, connectorFilter, favoritesOnly]
   );
 
   const privatePlugs = useMemo(() => filteredPlugs.filter((p) => p.is_private), [filteredPlugs]);
   const publicPlugs = useMemo(() => filteredPlugs.filter((p) => !p.is_private), [filteredPlugs]);
   const segPlugs = effectiveSeg === 'yours' ? privatePlugs : publicPlugs;
-  const filtersActive = Boolean(stateFilter || groupFilter);
+  const filtersActive = Boolean(
+    stateFilter || groupFilter || searchText.trim() || powerFilter || priceFilter
+    || connectorFilter || favoritesOnly
+  );
 
   /* ---- charge / queue / reserve actions ---------------------------------- */
   const [setupPlug, setSetupPlug] = useState(null);
   const [setupMode, setSetupMode] = useState('start');
   const [reservePlug, setReservePlug] = useState(null);
+  const [reportPlug, setReportPlug] = useState(null);
 
   const openCharge = (plug) => {
     setSetupMode('start');
@@ -314,6 +345,21 @@ const Dashboard = () => {
     try {
       if (next) await api.post(`/api/plugs/${plug.id}/watch`);
       else await api.delete(`/api/plugs/${plug.id}/watch`);
+    } catch (err) {
+      setPlugs(patch(!next));
+      toast.error(apiErrorCopy(err));
+    }
+  };
+
+  /* ---- favorite star toggle (optimistic, same pattern) --------------------- */
+  const toggleFavorite = async (plug) => {
+    const next = !plug.is_favorite;
+    const patch = (is_favorite) => (prev) =>
+      prev ? prev.map((p) => (p.id === plug.id ? { ...p, is_favorite } : p)) : prev;
+    setPlugs(patch(next));
+    try {
+      if (next) await api.post(`/api/plugs/${plug.id}/favorite`);
+      else await api.delete(`/api/plugs/${plug.id}/favorite`);
     } catch (err) {
       setPlugs(patch(!next));
       toast.error(apiErrorCopy(err));
@@ -629,6 +675,62 @@ const Dashboard = () => {
                       </option>
                     ))}
                   </select>
+                  <input
+                    className="input"
+                    type="search"
+                    value={searchText}
+                    onChange={(e) => setSearchText(e.target.value)}
+                    placeholder="Name, ID, or group"
+                    aria-label="Search chargers"
+                  />
+                  <select
+                    className="select"
+                    value={powerFilter}
+                    onChange={(e) => setPowerFilter(e.target.value)}
+                    aria-label="Filter by power"
+                  >
+                    {POWER_BUCKETS.map((b) => (
+                      <option key={b.value} value={b.value}>
+                        {b.label}
+                      </option>
+                    ))}
+                  </select>
+                  <select
+                    className="select"
+                    value={priceFilter}
+                    onChange={(e) => setPriceFilter(e.target.value)}
+                    aria-label="Filter by price"
+                  >
+                    {PRICE_BUCKETS.map((b) => (
+                      <option key={b.value} value={b.value}>
+                        {b.label}
+                      </option>
+                    ))}
+                  </select>
+                  {connectorOptions.length > 1 && (
+                    <select
+                      className="select"
+                      value={connectorFilter}
+                      onChange={(e) => setConnectorFilter(e.target.value)}
+                      aria-label="Filter by connector"
+                    >
+                      <option value="">Any connector</option>
+                      {connectorOptions.map((c) => (
+                        <option key={c} value={c}>
+                          {c}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                  <button
+                    type="button"
+                    className={`btn btn-sm ${favoritesOnly ? 'btn-primary' : 'btn-ghost'}`}
+                    aria-pressed={favoritesOnly}
+                    onClick={() => setFavoritesOnly((v) => !v)}
+                  >
+                    <Star size={14} aria-hidden="true" />
+                    Favorites
+                  </button>
                   <span className="filter-count">
                     {segPlugs.length} charger{segPlugs.length !== 1 ? 's' : ''}
                   </span>
@@ -661,6 +763,8 @@ const Dashboard = () => {
                         onQueue={openQueue}
                         onReserve={setReservePlug}
                         onToggleWatch={toggleWatch}
+                        onReport={setReportPlug}
+                        onToggleFavorite={toggleFavorite}
                       />
                     ))}
                   </div>
@@ -721,6 +825,14 @@ const Dashboard = () => {
           fetchUpNext();
           fetchPlugs(); // reserved_now / next_reservation may have changed
         }}
+      />
+
+      {/* Report a problem */}
+      <ReportProblemModal
+        open={Boolean(reportPlug)}
+        onClose={() => setReportPlug(null)}
+        plugId={reportPlug?.id}
+        plugName={reportPlug?.name}
       />
 
       {/* Cancel confirmations */}

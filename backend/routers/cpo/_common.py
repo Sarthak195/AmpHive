@@ -12,8 +12,8 @@ from fastapi import HTTPException
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.database.models import Payout, SessionDispute, Tariff, TariffSlot, User
-from backend.schemas import DisputeResponse
+from backend.database.models import Payout, PlugReport, SessionDispute, Tariff, TariffSlot, User
+from backend.schemas import DisputeResponse, PlugReportResponse
 
 logger = logging.getLogger("amphive.api")
 
@@ -77,6 +77,22 @@ def _dispute_response(dispute: SessionDispute) -> DisputeResponse:
         created_at=dispute.created_at.isoformat() if dispute.created_at else None,
         resolved_at=dispute.resolved_at.isoformat() if dispute.resolved_at else None,
         resolved_by_user_id=dispute.resolved_by_user_id,
+    )
+
+
+def _plug_report_response(report: PlugReport) -> PlugReportResponse:
+    return PlugReportResponse(
+        id=report.id,
+        plug_id=report.plug_id,
+        tenant_id=report.tenant_id,
+        driver_user_id=report.driver_user_id,
+        category=report.category,
+        description=report.description,
+        status=report.status.value,
+        resolution_note=report.resolution_note,
+        created_at=report.created_at.isoformat() if report.created_at else None,
+        resolved_at=report.resolved_at.isoformat() if report.resolved_at else None,
+        resolved_by_user_id=report.resolved_by_user_id,
     )
 
 

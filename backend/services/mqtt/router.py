@@ -24,6 +24,15 @@ class MQTTRouterMixin:
             extra={"topic": msg.topic, "payload": payload_str},
         )
 
+        # Match the logs topic BEFORE the JSON parse below: firmware publishes
+        # plain-text log lines there (not JSON), so json.loads would always
+        # fail and the line would be dropped as "invalid JSON".
+        logs_match = self.logs_pattern.match(msg.topic)
+        if logs_match:
+            gateway_id = logs_match.group(1)
+            self._handle_gateway_log(gateway_id, payload_str)
+            return
+
         try:
             payload = json.loads(payload_str)
         except json.JSONDecodeError:

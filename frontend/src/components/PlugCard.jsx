@@ -12,14 +12,23 @@
  * - unpowered   → "Queue charge" ONLY when the payload advertises
  *                 queue_available (CPO feature flag), else the bell;
  *                 sublabel "No mains power right now".
- * - offline     → no actions; sublabel "Can't be reached right now".
- * - maintenance → no actions; "Under maintenance" badge.
+ * - offline     → no state actions; sublabel "Can't be reached right now".
+ * - maintenance → no state actions; "Under maintenance" badge.
+ *
+ * Every state ALSO gets a small ghost "Report" flag action (footer, own
+ * row) — deliberately outside the state machine above: a broken/offline
+ * plug is exactly the one most worth reporting, so it's never gated on
+ * availability the way Charge/Reserve/Queue/Notify are.
+ *
+ * Plus a state-independent favorite star in the head (when the page passes
+ * onToggleFavorite): a bookmark, so it stays available even for offline /
+ * maintenance chargers.
  *
  * No whole-card click — every action is a real button. Copy comes from
  * utils/statusCopy; colors from the --state-* tokens via StatusDot.
  */
 
-import { Bell, CalendarClock, Hourglass, Zap } from 'lucide-react';
+import { Bell, CalendarClock, Flag, Hourglass, Star, Zap } from 'lucide-react';
 import './PlugCard.css';
 import StatusDot from './ui/StatusDot';
 import Money from './ui/Money';
@@ -27,6 +36,7 @@ import { useConfig } from '../contexts/ConfigContext';
 import { getPlugAvailability } from '../utils/plugAvailability';
 import { plugStateHint } from '../utils/statusCopy';
 import { fmtTime } from '../utils/reservationTime';
+import { formatKw } from '../utils/money';
 
 // A rate-change ISO instant → the viewer's local HH:MM (blank if unparseable).
 const changeTime = (iso) => {
@@ -37,7 +47,7 @@ const changeTime = (iso) => {
     : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 };
 
-export default function PlugCard({ plug, onCharge, onReserve, onQueue, onToggleWatch }) {
+export default function PlugCard({ plug, onCharge, onReserve, onQueue, onToggleWatch, onToggleFavorite, onReport }) {
   const { coin_inr_rate } = useConfig();
   const state = getPlugAvailability(plug);
 
@@ -59,7 +69,28 @@ export default function PlugCard({ plug, onCharge, onReserve, onQueue, onToggleW
     <article className="card card-tight plug-card">
       <div className="plug-card-head">
         <h3 className="plug-card-name">{plug.name || `Charger ${plug.id}`}</h3>
-        <StatusDot state={state} live={state === 'in_use'} label />
+        <span className="plug-card-head-side">
+          {onToggleFavorite && (
+            <button
+              type="button"
+              className={`plug-card-fav${plug.is_favorite ? ' active' : ''}`}
+              aria-pressed={plug.is_favorite === true}
+              aria-label={
+                plug.is_favorite
+                  ? `Remove ${plug.name} from favorites`
+                  : `Add ${plug.name} to favorites`
+              }
+              onClick={() => onToggleFavorite(plug)}
+            >
+              <Star
+                size={16}
+                aria-hidden="true"
+                fill={plug.is_favorite ? 'currentColor' : 'none'}
+              />
+            </button>
+          )}
+          <StatusDot state={state} live={state === 'in_use'} label />
+        </span>
       </div>
 
       <div className="plug-card-meta">
@@ -77,6 +108,8 @@ export default function PlugCard({ plug, onCharge, onReserve, onQueue, onToggleW
           </span>
         )}
         {plug.group_name && <span className="chip">{plug.group_name}</span>}
+        {plug.rated_power_w != null && <span className="chip num">{formatKw(plug.rated_power_w)}</span>}
+        {plug.connector_type && <span className="chip">{plug.connector_type}</span>}
       </div>
 
       {(reservedForYou || reservedByOther || state === 'maintenance') && (
@@ -143,6 +176,17 @@ export default function PlugCard({ plug, onCharge, onReserve, onQueue, onToggleW
           )}
         </div>
       )}
+
+      <div className="plug-card-footer">
+        <button
+          type="button"
+          className="btn btn-ghost btn-sm plug-card-report"
+          onClick={() => onReport?.(plug)}
+        >
+          <Flag size={14} aria-hidden="true" />
+          Report
+        </button>
+      </div>
     </article>
   );
 }

@@ -1,0 +1,8 @@
+/**
+ * CpoPlugReports — layout only. Visual identity comes from primitives
+ * (.tabs, .badge, .field); this file just arranges the row actions.
+ */
+
+.plug-reports-row-actions {
+  flex-wrap: wrap;
+}

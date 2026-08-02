@@ -3,7 +3,8 @@
  * plug), gateway/group/tariff resolution and a best-effort "price now",
  * search/status/gateway/group filters (including the ?group= deep link from
  * Groups), Add/Edit charger, the per-row maintenance toggle, bulk actions
- * (assign to group, put in maintenance), and the QR deep-link modal.
+ * (assign to group, put in maintenance), the QR deep-link modal, and the
+ * live `plug_connectivity` socket push (faster-gateway-offline-detection).
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, within, waitFor } from '@testing-library/react';
@@ -29,6 +30,26 @@ vi.mock('../../components/CpoLayout', () => ({
 let mockConfig = { coin_inr_rate: 1 };
 vi.mock('../../contexts/ConfigContext', () => ({
   useConfig: () => mockConfig,
+}));
+
+// A minimal fake Socket.io client: on()/off() register/deregister a handler
+// per event name, and _trigger() simulates the server pushing that event —
+// mirrors how a real `socket.on('plug_connectivity', …)` handler fires.
+const { sessionState, fakeSocket } = vi.hoisted(() => {
+  const handlers = {};
+  const socket = {
+    on: (event, cb) => {
+      handlers[event] = cb;
+    },
+    off: (event) => {
+      delete handlers[event];
+    },
+    _trigger: (event, payload) => handlers[event]?.(payload),
+  };
+  return { sessionState: { socket }, fakeSocket: socket };
+});
+vi.mock('../../contexts/SessionContext', () => ({
+  useSession: () => sessionState,
 }));
 
 const PLUGS = [
@@ -377,5 +398,50 @@ describe('QR code', () => {
 
     expect(screen.getByRole('dialog', { name: 'Charger QR code' })).toBeInTheDocument();
     expect(screen.getByText(/Opens AmpHive with this charger prefilled/)).toBeInTheDocument();
+  });
+});
+
+describe('live connectivity (plug_connectivity socket push)', () => {
+  it('flips effective status in place, without an API refetch, when the gateway reconnects', async () => {
+    mockApi();
+    renderPage();
+    await screen.findByText('Bay 3');
+
+    // Bay 3 is on gw2, which the initial fetch reports offline.
+    const rowsBefore = screen.getAllByRole('row');
+    const row3Before = rowsBefore.find((r) => within(r).queryByText('Bay 3'));
+    expect(within(row3Before).getByText('Offline')).toBeInTheDocument();
+
+    const callsBefore = api.get.mock.calls.length;
+
+    fakeSocket._trigger('plug_connectivity', { plug_id: 3, gateway_online: true });
+
+    await waitFor(() => {
+      const rowsAfter = screen.getAllByRole('row');
+      const row3After = rowsAfter.find((r) => within(r).queryByText('Bay 3'));
+      expect(within(row3After).getByText('Available')).toBeInTheDocument();
+    });
+
+    // No refetch was triggered by the socket push — the patch is local state.
+    expect(api.get.mock.calls.length).toBe(callsBefore);
+  });
+
+  it('flips back offline on a gateway_online:false push', async () => {
+    mockApi();
+    renderPage();
+    await screen.findByText('Bay 1');
+
+    // Bay 1 is on gw1, online at the initial fetch.
+    const rowsBefore = screen.getAllByRole('row');
+    const row1Before = rowsBefore.find((r) => within(r).queryByText('Bay 1'));
+    expect(within(row1Before).getByText('Available')).toBeInTheDocument();
+
+    fakeSocket._trigger('plug_connectivity', { plug_id: 1, gateway_online: false });
+
+    await waitFor(() => {
+      const rowsAfter = screen.getAllByRole('row');
+      const row1After = rowsAfter.find((r) => within(r).queryByText('Bay 1'));
+      expect(within(row1After).getByText('Offline')).toBeInTheDocument();
+    });
   });
 });

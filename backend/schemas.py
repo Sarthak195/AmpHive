@@ -182,6 +182,16 @@ class PlugResponse(BaseModel):
     # /api/plugs/{id}/watch). Drives the Home card's bell toggle; cleared
     # server-side when the watch fires (services/plug_watch.py).
     watching: bool = False
+    # [Discovery] Advertised charger specs — 0030_plug_specs. NULL when the
+    # CPO hasn't set them. rated_power_w is the SPEC (what the driver is told
+    # the socket supports), deliberately distinct from any load-balancing cap.
+    rated_power_w: Optional[int] = Field(default=None, ge=0)
+    connector_type: Optional[str] = Field(default=None, max_length=32)
+    # [Favorites] True when the CURRENT user has starred this plug (POST/DELETE
+    # /api/plugs/{id}/favorite) — a standing preference, unlike `watching`
+    # (one-shot, self-clears). services/... none yet: plain CRUD on
+    # UserFavorite.
+    is_favorite: bool = False
 
 
 class PublicPlugResponse(BaseModel):
@@ -201,6 +211,10 @@ class PublicPlugResponse(BaseModel):
     # Whether the plug's gateway is reachable right now — lets the public map
     # color a marker offline (same meaning as PlugResponse.gateway_online).
     gateway_online: bool = True
+    # [Discovery] Advertised specs — safe to expose publicly (not per-user,
+    # not network detail). Same meaning as PlugResponse's fields.
+    rated_power_w: Optional[int] = Field(default=None, ge=0)
+    connector_type: Optional[str] = Field(default=None, max_length=32)
 
 
 class GatewayEventResponse(BaseModel):
@@ -212,6 +226,15 @@ class GatewayEventResponse(BaseModel):
     severity: str
     detail: Optional[str] = None
     acknowledged: bool
+    created_at: Optional[str] = None
+
+
+class GatewayLogResponse(BaseModel):
+    """One forwarded firmware log line (diagnostics feed — see GatewayLog)."""
+    id: int
+    gateway_id: str
+    level: str
+    message: str
     created_at: Optional[str] = None
 
 
@@ -305,14 +328,6 @@ class PushUnsubscribeRequest(BaseModel):
     endpoint: str = Field(min_length=1, max_length=1024)
 
 
-# --- Direct Mode Schemas ---
-
-class DirectPlugRequest(BaseModel):
-    """Optional request body for direct plug control. If plug_ip is not provided,
-    falls back to the TAPO_PLUG_IP environment variable."""
-    plug_ip: Optional[str] = None
-
-
 # --- CPO Schemas ---
 
 class CpoSetupRequest(BaseModel):
@@ -357,6 +372,10 @@ class CpoPlugCreateRequest(BaseModel):
     # Optional geolocation; when omitted the plug inherits its gateway's coords.
     latitude: Optional[float] = Field(default=None, ge=-90, le=90)
     longitude: Optional[float] = Field(default=None, ge=-180, le=180)
+    # [Discovery] Advertised specs shown to drivers (0030_plug_specs). Both
+    # optional — omit to leave unset.
+    rated_power_w: Optional[int] = Field(default=None, ge=0)
+    connector_type: Optional[str] = Field(default=None, max_length=32)
 
 
 class CpoPlugUpdateRequest(BaseModel):
@@ -380,6 +399,12 @@ class CpoPlugUpdateRequest(BaseModel):
     # debounce (minutes) — send 0 to clear it back to the tenant default (NULL).
     queued_charging_enabled: Optional[bool] = None
     auto_start_delay_min: Optional[int] = Field(default=None, ge=0, le=1440)
+    # [Discovery] Advertised specs shown to drivers (0030_plug_specs). Omit
+    # to leave unchanged; send rated_power_w=0 / connector_type="" to clear
+    # back to unset (NULL) — the same sentinel-clear convention as
+    # max_current_a above.
+    rated_power_w: Optional[int] = Field(default=None, ge=0)
+    connector_type: Optional[str] = Field(default=None, max_length=32)
 
 
 class CpoPlugMaintenanceRequest(BaseModel):
@@ -512,6 +537,58 @@ class DisputeResponse(BaseModel):
     status: str
     resolution_note: Optional[str] = None
     refund_coins: Optional[float] = None
+    created_at: Optional[str] = None
+    resolved_at: Optional[str] = None
+    resolved_by_user_id: Optional[int] = None
+
+
+# --- Plug Problem Reports ("report a problem with this charger") ---
+
+PLUG_REPORT_CATEGORIES = ("damaged", "wrong_info", "unsafe", "other")
+
+
+class PlugReportCreateRequest(BaseModel):
+    """Body for POST /api/plugs/{plug_id}/report. `category` is one of
+    PLUG_REPORT_CATEGORIES (validated below, same clean-400-in-router
+    convention as CpoPlugReportResolveRequest.action rather than a Literal
+    type, so an invalid value reads the same as the rest of this API).
+    `description` is length-bounded the same as DisputeCreateRequest.reason —
+    enough for the CPO to act on, without an unbounded blob."""
+    category: str
+    description: str = Field(min_length=10, max_length=1000)
+
+    @field_validator("category")
+    @classmethod
+    def _validate_category(cls, v: str) -> str:
+        if v not in PLUG_REPORT_CATEGORIES:
+            raise ValueError(
+                f"Invalid category '{v}'. Must be one of {list(PLUG_REPORT_CATEGORIES)}."
+            )
+        return v
+
+
+class CpoPlugReportResolveRequest(BaseModel):
+    """Body for POST /api/cpo/plug-reports/{id}/resolve.
+
+    ``action`` is validated in the router (matching CpoDisputeResolveRequest's
+    convention) rather than via a Literal type. "acknowledge" moves an open
+    report to ACKNOWLEDGED without closing it (mirrors acking a GatewayEvent —
+    "seen, working on it"); "resolve" closes it out (stamps resolved_at /
+    resolved_by_user_id). Both accept an optional note."""
+    action: str
+    note: Optional[str] = Field(default=None, max_length=1000)
+
+
+class PlugReportResponse(BaseModel):
+    """A driver-filed plug problem report."""
+    id: int
+    plug_id: int
+    tenant_id: int
+    driver_user_id: int
+    category: str
+    description: str
+    status: str
+    resolution_note: Optional[str] = None
     created_at: Optional[str] = None
     resolved_at: Optional[str] = None
     resolved_by_user_id: Optional[int] = None

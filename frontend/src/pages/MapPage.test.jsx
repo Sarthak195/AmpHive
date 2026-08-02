@@ -7,9 +7,13 @@
  * signed-in drivers to the home deep link. Marker/popup gating itself is
  * covered by MapComponent.test.jsx — MapComponent is mocked here so these
  * tests stay about the page's data + routing logic, not Leaflet.
+ *
+ * [Discovery] Also: the list search box (name/ID match, list-only — the map
+ * keeps everything), the power/connector filters, nearest-first sorting once
+ * geolocation resolves, and the per-row Navigate hand-off.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 
@@ -186,5 +190,125 @@ describe('MapPage — geolocation', () => {
     await screen.findByText('Alpha Charger');
     await userEvent.click(screen.getByRole('button', { name: /use my location/i }));
     expect(screen.getByTestId('map-component')).toHaveAttribute('data-user-location', '');
+  });
+});
+
+describe('MapPage — discovery search + filters', () => {
+  beforeEach(() => useAuth.mockReturnValue({ user: null }));
+
+  it('the search box narrows the list (name match) but never the map', async () => {
+    api.get.mockResolvedValue(PLUGS_FIXTURE);
+    renderPage();
+    await screen.findByText('Alpha Charger');
+
+    await userEvent.type(screen.getByRole('searchbox', { name: /search chargers/i }), 'beta');
+    expect(screen.queryByText('Alpha Charger')).not.toBeInTheDocument();
+    expect(screen.getByText('Beta Charger')).toBeInTheDocument();
+    // The map keeps plotting the full fetched array.
+    expect(screen.getByTestId('map-component')).toHaveAttribute('data-plug-count', '2');
+  });
+
+  it('searching by numeric charger ID matches too', async () => {
+    api.get.mockResolvedValue(PLUGS_FIXTURE);
+    renderPage();
+    await screen.findByText('Alpha Charger');
+
+    await userEvent.type(screen.getByRole('searchbox', { name: /search chargers/i }), '2');
+    expect(screen.getByText('Beta Charger')).toBeInTheDocument();
+    expect(screen.queryByText('Alpha Charger')).not.toBeInTheDocument();
+  });
+
+  it('a no-match query shows the filtered-empty note, not the zero-data EmptyState', async () => {
+    api.get.mockResolvedValue(PLUGS_FIXTURE);
+    renderPage();
+    await screen.findByText('Alpha Charger');
+
+    await userEvent.type(screen.getByRole('searchbox', { name: /search chargers/i }), 'zzz');
+    expect(screen.getByText(/no chargers match the current filters/i)).toBeInTheDocument();
+    expect(screen.queryByText(/no chargers to show/i)).not.toBeInTheDocument();
+  });
+
+  it('the power filter buckets on rated_power_w; unset specs only match "Any"', async () => {
+    api.get.mockResolvedValue([
+      { id: 1, name: 'Slow Charger', status: 'available', latitude: 1, longitude: 1, gateway_online: true, price_per_kwh: 6, rated_power_w: 2300 },
+      { id: 2, name: 'Fast Charger', status: 'available', latitude: 2, longitude: 2, gateway_online: true, price_per_kwh: 6, rated_power_w: 7400 },
+      { id: 3, name: 'Unspecced Charger', status: 'available', latitude: 3, longitude: 3, gateway_online: true, price_per_kwh: 6 },
+    ]);
+    renderPage();
+    await screen.findByText('Slow Charger');
+
+    await userEvent.selectOptions(screen.getByLabelText('Filter by power'), 'lte3300');
+    expect(screen.getByText('Slow Charger')).toBeInTheDocument();
+    expect(screen.queryByText('Fast Charger')).not.toBeInTheDocument();
+    expect(screen.queryByText('Unspecced Charger')).not.toBeInTheDocument();
+  });
+
+  it('the connector filter renders only when >1 distinct connector type exists', async () => {
+    api.get.mockResolvedValue([
+      { id: 1, name: 'A', status: 'available', latitude: 1, longitude: 1, gateway_online: true, connector_type: 'Type 2' },
+      { id: 2, name: 'B', status: 'available', latitude: 2, longitude: 2, gateway_online: true, connector_type: 'Type 2' },
+    ]);
+    renderPage();
+    await screen.findByText('A');
+    expect(screen.queryByLabelText('Filter by connector')).not.toBeInTheDocument();
+
+    api.get.mockResolvedValue([
+      { id: 1, name: 'A', status: 'available', latitude: 1, longitude: 1, gateway_online: true, connector_type: 'Type 2' },
+      { id: 2, name: 'B', status: 'available', latitude: 2, longitude: 2, gateway_online: true, connector_type: '3-pin 16A' },
+    ]);
+    await userEvent.click(screen.getByRole('button', { name: /refresh chargers/i }));
+    expect(await screen.findByLabelText('Filter by connector')).toBeInTheDocument();
+
+    await userEvent.selectOptions(screen.getByLabelText('Filter by connector'), '3-pin 16A');
+    expect(screen.getByText('B')).toBeInTheDocument();
+    expect(screen.queryByText('A')).not.toBeInTheDocument();
+  });
+});
+
+describe('MapPage — distance sort + navigate', () => {
+  beforeEach(() => useAuth.mockReturnValue({ user: null }));
+
+  const LOCATED = [
+    { id: 1, name: 'Far Charger', status: 'available', latitude: 20, longitude: 20, gateway_online: true, price_per_kwh: 6 },
+    { id: 2, name: 'Near Charger', status: 'available', latitude: 10.001, longitude: 10.001, gateway_online: true, price_per_kwh: 6 },
+  ];
+
+  const rowNames = () =>
+    screen.getAllByRole('listitem').map((li) => within(li).getByText(/Charger/).textContent);
+
+  it('keeps fetch order without a location, sorts nearest-first once located', async () => {
+    api.get.mockResolvedValue(LOCATED);
+    const getCurrentPosition = vi.fn((success) => success({ coords: { latitude: 10, longitude: 10 } }));
+    vi.stubGlobal('navigator', { ...navigator, geolocation: { getCurrentPosition } });
+    renderPage();
+    await screen.findByText('Far Charger');
+
+    expect(rowNames()).toEqual(['Far Charger', 'Near Charger']); // fetch order
+
+    await userEvent.click(screen.getByRole('button', { name: /use my location/i }));
+    expect(rowNames()).toEqual(['Near Charger', 'Far Charger']); // nearest first
+  });
+
+  it('a located row gets a Navigate button that opens the Google Maps hand-off', async () => {
+    api.get.mockResolvedValue(LOCATED);
+    const open = vi.fn();
+    vi.stubGlobal('open', open);
+    renderPage();
+    await screen.findByText('Far Charger');
+
+    await userEvent.click(screen.getByRole('button', { name: 'Navigate to Near Charger' }));
+    expect(open).toHaveBeenCalledWith(
+      'https://www.google.com/maps/dir/?api=1&destination=10.001,10.001',
+      '_blank',
+      'noopener'
+    );
+  });
+
+  it('rows without coordinates get no Navigate button', async () => {
+    api.get.mockResolvedValue(PLUGS_FIXTURE); // Beta Charger has no coords
+    renderPage();
+    await screen.findByText('Beta Charger');
+    expect(screen.getByRole('button', { name: 'Navigate to Alpha Charger' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Navigate to Beta Charger' })).not.toBeInTheDocument();
   });
 });

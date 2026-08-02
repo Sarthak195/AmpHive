@@ -16,6 +16,16 @@
  * POST /api/cpo/plugs/{id}/maintenance (per-row enter/clear — the dedicated,
  * audited maintenance workflow; refuses `clear` with an active session).
  * POST /api/cpo/plugs registers a new charger.
+ *
+ * Live updates (faster-gateway-offline-detection, lever 1+3): a 30s usePoll
+ * refetch is the catch-all backstop (mirrors CpoGateways), and a
+ * `plug_connectivity` socket listener (mirrors Dashboard.jsx's
+ * handlePlugConnectivity) patches the effective-status computation in place
+ * so a gateway going offline/online reflects immediately without waiting on
+ * the poll. Patched as a plug_id-keyed override on top of the polled
+ * gatewaysById status (cheaper than resolving plug_id -> gateway_id -> row
+ * patch) and reset on every fetchAll so the poll always wins as the source
+ * of truth between socket pushes.
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
@@ -44,6 +54,8 @@ import Money from '../../components/ui/Money';
 import { useToast } from '../../components/ui';
 import api from '../../api/client';
 import { useConfig } from '../../contexts/ConfigContext';
+import { useSession } from '../../contexts/SessionContext';
+import usePoll from '../../hooks/usePoll';
 import { getPlugAvailability, AVAILABILITY_STATES, AVAILABILITY_LABELS } from '../../utils/plugAvailability';
 import { apiErrorCopy } from '../../utils/statusCopy';
 import './CpoChargers.css';
@@ -53,6 +65,11 @@ const QUEUED_OPTIONS = [
   { value: 'true', label: 'Enabled' },
   { value: 'false', label: 'Disabled' },
 ];
+
+// [Discovery] Advertised connector types shown to drivers. A plain string on
+// the backend (VARCHAR, like plug_model) — this list is just the UI's menu
+// and can grow without a migration.
+const CONNECTOR_OPTIONS = ['3-pin 16A', '3-pin 6A', 'Type 2'];
 
 function Section({ title, children }) {
   return (
@@ -65,6 +82,7 @@ function Section({ title, children }) {
 
 export default function CpoChargers() {
   const { coin_inr_rate: rate = 1 } = useConfig();
+  const { socket } = useSession() || {};
   const toast = useToast();
   const [searchParams] = useSearchParams();
 
@@ -75,9 +93,12 @@ export default function CpoChargers() {
   const [priceByPlug, setPriceByPlug] = useState({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  // Live plug_connectivity pushes, keyed by plug_id — overrides the polled
+  // gatewaysById status until the next fetchAll (see the module doc comment
+  // above). Reset on every successful poll so the poll stays authoritative.
+  const [connectivityOverrides, setConnectivityOverrides] = useState({});
 
   const fetchAll = useCallback(async () => {
-    setLoading(true);
     setError(null);
     try {
       const [plugsRes, gatewaysRes, groupsRes, tariffsRes] = await Promise.all([
@@ -90,6 +111,7 @@ export default function CpoChargers() {
       setGateways(Array.isArray(gatewaysRes) ? gatewaysRes : gatewaysRes?.items || []);
       setGroups(Array.isArray(groupsRes) ? groupsRes : groupsRes?.items || []);
       setTariffs(Array.isArray(tariffsRes) ? tariffsRes : tariffsRes?.items || []);
+      setConnectivityOverrides({});
     } catch (err) {
       setError(err);
     } finally {
@@ -97,9 +119,7 @@ export default function CpoChargers() {
     }
   }, []);
 
-  useEffect(() => {
-    fetchAll();
-  }, [fetchAll]);
+  usePoll(fetchAll, 30_000);
 
   // Best-effort "price now" per charger. Non-blocking: a failed/slow preview
   // just leaves that row's price cell blank.
@@ -121,6 +141,19 @@ export default function CpoChargers() {
     };
   }, [plugs]);
 
+  // Gateway connectivity push (faster-gateway-offline-detection, lever 1) —
+  // patches the effective-status computation without waiting on the 30s poll.
+  useEffect(() => {
+    if (!socket) return undefined;
+    const handlePlugConnectivity = ({ plug_id, gateway_online }) => {
+      setConnectivityOverrides((prev) => ({ ...prev, [plug_id]: gateway_online }));
+    };
+    socket.on('plug_connectivity', handlePlugConnectivity);
+    return () => {
+      socket.off('plug_connectivity', handlePlugConnectivity);
+    };
+  }, [socket]);
+
   const gatewaysById = useMemo(
     () => Object.fromEntries(gateways.map((g) => [g.id, g])),
     [gateways]
@@ -128,12 +161,13 @@ export default function CpoChargers() {
   const tariffsById = useMemo(() => Object.fromEntries(tariffs.map((t) => [t.id, t])), [tariffs]);
 
   const effectiveState = useCallback(
-    (plug) =>
-      getPlugAvailability({
-        ...plug,
-        gateway_online: gatewaysById[plug.gateway_id]?.status === 'online',
-      }),
-    [gatewaysById]
+    (plug) => {
+      const override = connectivityOverrides[plug.id];
+      const gateway_online =
+        override !== undefined ? override : gatewaysById[plug.gateway_id]?.status === 'online';
+      return getPlugAvailability({ ...plug, gateway_online });
+    },
+    [gatewaysById, connectivityOverrides]
   );
 
   /* ---- filters ------------------------------------------------------------ */
@@ -247,12 +281,16 @@ export default function CpoChargers() {
 
   /* ---- add charger ---------------------------------------------------------- */
   const [addOpen, setAddOpen] = useState(false);
-  const [addForm, setAddForm] = useState({ gateway_id: '', name: '', local_ip: '', group_id: '' });
+  const [addForm, setAddForm] = useState({
+    gateway_id: '', name: '', local_ip: '', group_id: '', rated_power_w: '', connector_type: '',
+  });
   const [addError, setAddError] = useState('');
   const [addBusy, setAddBusy] = useState(false);
 
   const openAdd = () => {
-    setAddForm({ gateway_id: '', name: '', local_ip: '', group_id: '' });
+    setAddForm({
+      gateway_id: '', name: '', local_ip: '', group_id: '', rated_power_w: '', connector_type: '',
+    });
     setAddError('');
     setAddOpen(true);
   };
@@ -272,6 +310,9 @@ export default function CpoChargers() {
         local_ip: addForm.local_ip.trim(),
       };
       if (addForm.group_id) body.group_id = Number(addForm.group_id);
+      // [Discovery] Optional advertised specs — omitted when left blank.
+      if (addForm.rated_power_w !== '') body.rated_power_w = Number(addForm.rated_power_w);
+      if (addForm.connector_type) body.connector_type = addForm.connector_type;
       await api.post('/api/cpo/plugs', body);
       toast.ok(`${addForm.name.trim()} added.`);
       setAddOpen(false);
@@ -293,6 +334,8 @@ export default function CpoChargers() {
     queued_charging_enabled: '',
     auto_start_delay_min: '',
     tariff_id: '',
+    rated_power_w: '',
+    connector_type: '',
   });
   const [editError, setEditError] = useState('');
   const [editBusy, setEditBusy] = useState(false);
@@ -307,6 +350,8 @@ export default function CpoChargers() {
         plug.queued_charging_enabled == null ? '' : String(plug.queued_charging_enabled),
       auto_start_delay_min: plug.auto_start_delay_min ?? '',
       tariff_id: plug.tariff_id != null ? String(plug.tariff_id) : '',
+      rated_power_w: plug.rated_power_w ?? '',
+      connector_type: plug.connector_type ?? '',
     });
     setEditError('');
     setEditOpen(true);
@@ -343,6 +388,15 @@ export default function CpoChargers() {
       if (String(editForm.auto_start_delay_min) !== String(editingPlug.auto_start_delay_min ?? '')) {
         body.auto_start_delay_min =
           editForm.auto_start_delay_min === '' ? null : Number(editForm.auto_start_delay_min);
+      }
+
+      // [Discovery] Advertised specs — blank clears (0 / "" are the backend's
+      // sentinel-clear values, same convention as max_current_a).
+      if (String(editForm.rated_power_w) !== String(editingPlug.rated_power_w ?? '')) {
+        body.rated_power_w = editForm.rated_power_w === '' ? 0 : Number(editForm.rated_power_w);
+      }
+      if (editForm.connector_type !== (editingPlug.connector_type ?? '')) {
+        body.connector_type = editForm.connector_type;
       }
 
       if (Object.keys(body).length > 0) {
@@ -398,9 +452,11 @@ export default function CpoChargers() {
       label: 'Gateway',
       render: (row) => {
         const gw = gatewaysById[row.gateway_id];
+        const override = connectivityOverrides[row.id];
+        const online = override !== undefined ? override : gw?.status === 'online';
         return (
           <span className="cpo-chargers-gw-cell">
-            <StatusDot tone={gw?.status === 'online' ? 'ok' : 'danger'} />
+            <StatusDot tone={online ? 'ok' : 'danger'} />
             {gw?.name || row.gateway_id}
           </span>
         );
@@ -676,6 +732,43 @@ export default function CpoChargers() {
               ))}
             </select>
           </div>
+          <div className="field">
+            <label className="field-label" htmlFor="cpo-chargers-add-rated-power">
+              Rated power (W, optional)
+            </label>
+            <input
+              id="cpo-chargers-add-rated-power"
+              className="input"
+              type="number"
+              min="0"
+              step="100"
+              placeholder="e.g. 3300"
+              value={addForm.rated_power_w}
+              onChange={(e) => setAddForm({ ...addForm, rated_power_w: e.target.value })}
+            />
+            <p className="field-help">
+              What the socket supports, shown to drivers. Separate from the max-current
+              safety cap.
+            </p>
+          </div>
+          <div className="field">
+            <label className="field-label" htmlFor="cpo-chargers-add-connector">
+              Connector (optional)
+            </label>
+            <select
+              id="cpo-chargers-add-connector"
+              className="select"
+              value={addForm.connector_type}
+              onChange={(e) => setAddForm({ ...addForm, connector_type: e.target.value })}
+            >
+              <option value="">Not specified</option>
+              {CONNECTOR_OPTIONS.map((c) => (
+                <option key={c} value={c}>
+                  {c}
+                </option>
+              ))}
+            </select>
+          </div>
           {addError && <p className="field-error">{addError}</p>}
         </form>
       </Modal>
@@ -726,6 +819,52 @@ export default function CpoChargers() {
                   {groups.map((g) => (
                     <option key={g.id} value={g.id}>
                       {g.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </Section>
+
+            <Section title="Specs">
+              <div className="field">
+                <label className="field-label" htmlFor="cpo-chargers-edit-rated-power">
+                  Rated power (W)
+                </label>
+                <input
+                  id="cpo-chargers-edit-rated-power"
+                  className="input"
+                  type="number"
+                  min="0"
+                  step="100"
+                  placeholder="Not specified"
+                  value={editForm.rated_power_w}
+                  onChange={(e) => setEditForm({ ...editForm, rated_power_w: e.target.value })}
+                />
+                <p className="field-help">
+                  What the socket supports, shown to drivers (and their power filter).
+                  Separate from the max-current safety cap below. Blank = not specified.
+                </p>
+              </div>
+              <div className="field">
+                <label className="field-label" htmlFor="cpo-chargers-edit-connector">
+                  Connector
+                </label>
+                <select
+                  id="cpo-chargers-edit-connector"
+                  className="select"
+                  value={editForm.connector_type}
+                  onChange={(e) => setEditForm({ ...editForm, connector_type: e.target.value })}
+                >
+                  <option value="">Not specified</option>
+                  {/* Preserve a stored value outside today's preset list (the
+                      column is a plain VARCHAR) so opening the modal never
+                      silently reads as "Not specified" and clears it on save. */}
+                  {editForm.connector_type && !CONNECTOR_OPTIONS.includes(editForm.connector_type) && (
+                    <option value={editForm.connector_type}>{editForm.connector_type}</option>
+                  )}
+                  {CONNECTOR_OPTIONS.map((c) => (
+                    <option key={c} value={c}>
+                      {c}
                     </option>
                   ))}
                 </select>

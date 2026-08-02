@@ -71,6 +71,16 @@ FORCE_STOP_WALKUP_ON_RESERVATION = os.getenv(
 # walk-up route would have blocked.
 MAX_ACTIVE_SESSIONS_PER_USER = int(os.getenv("MAX_ACTIVE_SESSIONS_PER_USER", "2"))
 
+# [Ops] Retention for the forwarded firmware log-line diagnostics feed
+# (GatewayLog, services/mqtt/logs.py) — much shorter than telemetry/event
+# retention since these are high-volume, low-value-per-row lines. Pruned
+# every GATEWAY_LOGS_PRUNE_EVERY_N_TICKS reaper ticks (not every tick — this
+# is a cheap DELETE but there is no reason to run it as often as the
+# session sweeps above), mirroring telemetry_persistence.py's
+# PRUNE_EVERY_N_FLUSHES idiom.
+GATEWAY_LOGS_RETENTION_DAYS = int(os.getenv("GATEWAY_LOGS_RETENTION_DAYS", "14"))
+GATEWAY_LOGS_PRUNE_EVERY_N_TICKS = int(os.getenv("GATEWAY_LOGS_PRUNE_EVERY_N_TICKS", "60"))
+
 
 class SessionReaperService:
     """Owns a background task (started/stopped by the app lifespan) that
@@ -89,6 +99,17 @@ class SessionReaperService:
         self.stale_timeout_sec = stale_timeout_sec
         self._task: Optional[asyncio.Task] = None
         self._stop = asyncio.Event()
+        # [Ops] Incremented once per _run() iteration; gates the gateway-logs
+        # prune to every GATEWAY_LOGS_PRUNE_EVERY_N_TICKS ticks (see
+        # reap_gateway_logs_once).
+        self._tick_count = 0
+        # [Faster-offline lever 1, silence case] Gateway ids currently flagged
+        # offline by the silence sweep (see reap_gateway_silence_once) —
+        # bounded in-memory dedup so a still-stale gateway isn't re-emitted
+        # every tick, mirroring the _low_balance_warned idiom in
+        # services/mqtt_manager.py. Only touched on the event loop (this
+        # service's own _run() task), so no lock is needed.
+        self._silence_pushed: set = set()
 
     def start(self, loop: asyncio.AbstractEventLoop) -> None:
         self._task = loop.create_task(self._run())
@@ -135,6 +156,16 @@ class SessionReaperService:
                 await self.reap_reprice_once()
             except Exception:
                 logger.exception("Pricing-v2 reprice sweep failed")
+            try:
+                await self.reap_gateway_silence_once()
+            except Exception:
+                logger.exception("Gateway silence sweep failed")
+            self._tick_count += 1
+            if self._tick_count % GATEWAY_LOGS_PRUNE_EVERY_N_TICKS == 0:
+                try:
+                    await self.reap_gateway_logs_once()
+                except Exception:
+                    logger.exception("Gateway-logs prune failed")
 
     def _stale_session_ids_query(self, cutoff: datetime):
         from backend.database.models import ChargingSession, SessionStatus
@@ -757,3 +788,95 @@ class SessionReaperService:
             except Exception:
                 logger.exception(f"Failed to process queued charge {qc_id}")
         return started
+
+    async def reap_gateway_silence_once(self) -> int:
+        """
+        [Faster-offline lever 1, silence-case backstop] A gateway that stays
+        TCP-connected but goes quiet (telemetry wedged, no LWT) never emits
+        the reconnect/disconnect `plug_connectivity` push
+        (mqtt/status.py._broadcast_plug_connectivity fires only on a real
+        online<->offline *transition*) — the frontend would otherwise only
+        learn about it after up to GATEWAY_LIVENESS_WINDOW_SEC plus its next
+        poll. This sweep closes that gap: for every gateway the DB still
+        flags ONLINE, reuse the same liveness judgment the session-start gate
+        and reaper staleness checks use (session_lifecycle.gateway_is_live).
+
+        Bounded in-memory dedup via self._silence_pushed (mirrors the
+        _low_balance_warned idiom in services/mqtt_manager.py): a gateway
+        that goes silent is flagged (emit False per plug) exactly once, not
+        every tick, until either it recovers (emit True per plug, cleared) or
+        a real status transition supersedes it (mqtt/status.py's own
+        broadcast doesn't know about this set — a reconnect there fires its
+        own `online` push regardless, and this sweep simply stops finding the
+        gateway non-live on the next tick and clears it above). Restart-unsafe
+        like the other in-memory dedup sets in this codebase: a backend
+        restart mid-outage re-emits one duplicate False, which is harmless
+        (idempotent on the frontend). Returns the number of gateways whose
+        connectivity was pushed this sweep (not the number of plugs).
+        """
+        from backend.database.models import Gateway, GatewayStatus, Plug
+        from backend.services.session_lifecycle import gateway_is_live
+        from backend.services.socketio_manager import emit_plug_connectivity
+
+        now = datetime.now(timezone.utc)
+        pushed = 0
+        try:
+            async with self.db_session_factory() as db:
+                result = await db.execute(
+                    select(Gateway).where(Gateway.status == GatewayStatus.ONLINE)
+                )
+                gateways = list(result.scalars().all())
+
+                to_flag = []
+                to_clear = []
+                for gw in gateways:
+                    live = gateway_is_live(gw, now)
+                    if not live and gw.id not in self._silence_pushed:
+                        to_flag.append(gw.id)
+                    elif live and gw.id in self._silence_pushed:
+                        to_clear.append(gw.id)
+
+                for gateway_id in to_flag + to_clear:
+                    plug_ids = (await db.execute(
+                        select(Plug.id).where(Plug.gateway_id == gateway_id)
+                    )).scalars().all()
+                    online = gateway_id in to_clear
+                    for plug_id in plug_ids:
+                        await emit_plug_connectivity(plug_id, online)
+                    if online:
+                        self._silence_pushed.discard(gateway_id)
+                    else:
+                        self._silence_pushed.add(gateway_id)
+                    pushed += 1
+        except Exception:
+            logger.exception("Gateway silence sweep query failed")
+            return pushed
+
+        if pushed:
+            logger.info(f"Gateway silence sweep pushed connectivity for {pushed} gateway(s)")
+        return pushed
+
+    async def reap_gateway_logs_once(self) -> int:
+        """[Ops] Prune GatewayLog rows older than GATEWAY_LOGS_RETENTION_DAYS.
+        Mirrors telemetry_persistence.py's _prune_old shape — a plain
+        DELETE ... WHERE created_at < cutoff, called every
+        GATEWAY_LOGS_PRUNE_EVERY_N_TICKS reaper ticks (see _run) rather than
+        every tick, since this is cheap but doesn't need session-sweep
+        frequency. Returns the number of rows deleted."""
+        from sqlalchemy import delete
+
+        from backend.database.models import GatewayLog
+
+        cutoff = datetime.now(timezone.utc) - timedelta(days=GATEWAY_LOGS_RETENTION_DAYS)
+        try:
+            async with self.db_session_factory() as db:
+                result = await db.execute(
+                    delete(GatewayLog).where(GatewayLog.created_at < cutoff)
+                )
+                await db.commit()
+                deleted = result.rowcount or 0
+                logger.info(f"Pruned {deleted} gateway_logs rows older than {GATEWAY_LOGS_RETENTION_DAYS}d")
+                return deleted
+        except Exception:
+            logger.exception("Gateway-logs prune failed")
+            return 0

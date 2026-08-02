@@ -16,10 +16,10 @@ outbound MQTT/TLS** (`AMPHIVE_DIRECT_MQTT=1`, the default — NAT/CGNAT-immune, 
 overlay; see [MQTT_CONTRACT.md](MQTT_CONTRACT.md) and [SECURITY.md §3](SECURITY.md)),
 receives MQTT commands, drives **one or more** local Tapo plugs (each in its own
 per-plug slot — KLAP session + energy meter, TD#20), and enforces edge safety
-watchdogs. The legacy transport (`AMPHIVE_DIRECT_MQTT=0`) joins a Tailscale-style
-overlay via `microlink` — a substantial, near-complete **from-scratch
-Tailscale-protocol client written in C** — kept compilable for rollback, but
-defeated by symmetric NAT (root-caused 2026-07-09) and no longer the default.
+watchdogs. A legacy overlay transport (`microlink`, a from-scratch
+Tailscale-protocol client written in C) shipped alongside it as a rollback path,
+but was defeated by symmetric NAT (root-caused 2026-07-09), was never the
+default, and was **removed 2026-08-02** (see §5).
 
 ```
 firmware/
@@ -32,8 +32,7 @@ firmware/
 │   ├── offline_log.c/.h      # NVS ring buffer — cache telemetry during MQTT outages
 │   └── CMakeLists.txt
 └── components/
-    ├── microlink/            # RETIRED — custom Tailscale client (Noise/ts2021, DERP, DISCO, STUN, WG); compiled out by default (§5)
-    └── wireguard_lwip/       # RETIRED — vendored WireGuard-over-lwIP (BSD-3, ref-C crypto); only used by microlink
+    └── json/                 # vendored cJSON (ESP-IDF v6 removed it from core)
 ```
 
 ---
@@ -46,15 +45,11 @@ firmware/
    submits the setup form (which triggers `esp_restart()`).
 3. `tapo_init()` (also restores the persisted energy integrator from NVS).
 4. Create `telemetry_safety` task (stack 8192, prio 5).
-5. Direct build (default): `start_mqtt_client()` immediately (esp-mqtt owns
-   reconnects). Legacy overlay build: create `microlink_vpn` task (stack 32768,
-   prio 6) which starts MQTT lazily once the overlay is up.
+5. `start_mqtt_client()` immediately (esp-mqtt owns reconnects).
 
 | Task | Stack | Prio | Core |
 |------|-------|------|------|
 | `telemetry_safety` | 8192 | 5 | floating |
-| `microlink_vpn` (legacy build only) | 32768 | 6 | floating |
-| `ml_coord_poll` (inside microlink, legacy build only) | 8 KB | max-1 | pinned Core 1 |
 
 Broker endpoint (fw ≥ 2.3.0): `AMPHIVE_DIRECT_MQTT 1` → default `MQTT_BROKER_URL
 "mqtts://mqtt.amphive.app:8883"` — a **DNS name**, so the broker can move
@@ -71,10 +66,8 @@ default; the cert also keeps the legacy IP SANs so a raw-IP `broker_url` still
 validates). No `skip_cert_common_name_check` / `common_name` override is set,
 so default hostname verification applies. No date check
 (`MBEDTLS_HAVE_TIME_DATE` off — no clock). Fw ≤ 2.2.0 hard-coded
-`mqtts://8.231.81.12:8883` and validated the IP SAN. The legacy build
-(`AMPHIVE_DIRECT_MQTT 0`) keeps `SERVER_VPN_IP "100.87.241.70"` + plaintext
-`mqtt://100.87.241.70:1883` inside the WireGuard tunnel. SSID, WiFi password,
-auth key, device name, gateway id, and MQTT credentials all come from
+`mqtts://8.231.81.12:8883` and validated the IP SAN. SSID, WiFi password,
+device name, gateway id, and MQTT credentials all come from
 NVS (namespace `storage`) populated by the captive portal. DNS caveat: the
 gateway resolves `mqtt.amphive.app` via the DHCP-provided LAN DNS; if that
 resolver is down the connection fails (no compiled-in IP fallback — a raw-IP
@@ -122,8 +115,7 @@ are used by the KLAP driver's auth hash (see §4).
 
 ## 3. MQTT control loop & watchdogs
 
-- Direct build: MQTT starts right after Wi-Fi (TLS to the public broker). Legacy
-  build: lazy MQTT start once the overlay is up. Topics per
+- MQTT starts right after Wi-Fi (TLS to the public broker). Topics per
   [MQTT_CONTRACT.md](MQTT_CONTRACT.md).
 - **Per-plug slots (multi-plug, TD#20).** A gateway can drive several plugs. Each
   plug the backend addresses gets a slot in a `MAX_PLUGS`-wide table (guarded by
@@ -272,44 +264,19 @@ Because there is no real temperature, the thermal watchdog now trips on the plug
 > **Credentials caveat:** the Tapo email/password are stored in NVS in plaintext
 > (acceptable for the prototype; a future hardening item).
 
-## 5. `microlink` — the Tailscale client (✅ substantial, some TODOs) — **RETIRED**
+## 5. Historical: microlink (removed 2026-08-02)
 
-> **RETIRED (2026-07-10 direct-MQTT pivot).** This entire section describes the
-> legacy overlay transport, which is **compiled out of the default build**
-> (`#if AMPHIVE_DIRECT_MQTT ... #else start microlink_vpn ... #endif` in
-> `app_main`, `main.c` — see §1). It is defeated by symmetric NAT
-> (root-caused 2026-07-09) and superseded by direct outbound MQTT/TLS; kept
-> compilable only for emergency rollback (`AMPHIVE_DIRECT_MQTT=0`), not as an
-> active code path. The rest of §5 is historical reference.
-
-A genuine ts2021 client in C (~13.5k LOC). Public API in
-`components/microlink/include/microlink.h`. Subsystems:
-
-| Subsystem | File | Role |
-|-----------|------|------|
-| coordination | `microlink_coordination.c` (~5k LOC) | Control-plane client: Noise ts2021 handshake, HTTP/2-over-Noise, `/machine/register` + MapRequest/MapResponse long-poll. Fetches server key from `/key` → works against **Headscale/Ionscale**, not just Tailscale. Dedicated Core-1 poll task w/ PSRAM buffer. |
-| connection | `microlink_connection.c` | State machine: `IDLE → REGISTERING → FETCHING_PEERS → CONFIGURING_WG → CONNECTED → MONITORING` (heartbeats, reconnect/backoff, key rotation). |
-| derp | `microlink_derp.c` | DERP relay over mbedTLS (defaults to `derp9d.tailscale.com` region 9; dynamic DERPMap supported). |
-| disco | `microlink_disco.c` | Path discovery: ping/pong, CallMeMaybe, direct↔DERP upgrade. Bound to Tailscale's standard **port 41641** as a unified "magicsock" shared socket (exposing `ml->disco.sock_fd`). |
-| stun | `microlink_stun.c` | Public IP/port discovery before advertising endpoints. Runs probes **through the shared DISCO socket** so that the discovered NAT mapping matches the port where traffic is received. Uses `select()` for non-blocking timeout polling. |
-| wireguard | `microlink_wireguard.c` | Wraps the vendored `wireguard_lwip` netif. **Has TODOs:** payload send relies on lwIP routing (does not push bytes itself), pubkey extraction is a TODO, IPv6 WG endpoints unsupported. |
-| udp | `microlink_udp.c` | Overlay UDP socket abstraction ("nc -u over Tailscale"). |
-| peer_registry | `microlink_peer_registry.c` | NVS-backed registry (up to 1024 peers). **Compiled but never referenced** — currently dead/aspirational. |
-
-**Unified Magicsock Port (NAT Traversal Fix):**
-Previously, STUN used an ephemeral socket, DISCO bound to `51821`, and MapRequest advertised `51820`. This port mismatch caused the VM to send direct traffic to ports where the ESP32 wasn't listening, failing NAT traversal. The unified architecture uses the DISCO socket (port `41641`) for all UDP communication:
-1. STUN probes are sent/received through the DISCO socket (`ml->disco.sock_fd`).
-2. The discovered STUN public port is advertised via MapRequest.
-3. The local endpoint port is advertised as `ml->disco.local_port` (`41641`).
-4. Incoming WireGuard packets arriving on port `41641` are intercepted by the DISCO task and injected into the WireGuard handler via `microlink_wireguard_inject_packet`.
-
-Vendored crypto: `nacl_box.c`, `x25519.c` (in microlink) and the full
-`wireguard_lwip` ref-C crypto (BLAKE2S, ChaCha20-Poly1305, Poly1305, X25519).
-
-**Headscale caveat:** the default host constants point at Tailscale's public
-servers (`controlplane.tailscale.com`, `derp9d.tailscale.com`). To use
-self-hosted Headscale, those constants must be overridden — the portal collects
-an auth key but not a control-plane host.
+> This section used to document `microlink` — a from-scratch Tailscale-protocol
+> client in C (~13.5k LOC, Noise ts2021 handshake, DERP relay, DISCO/STUN NAT
+> traversal, a unified magicsock UDP port) plus the vendored `wireguard_lwip`
+> WireGuard-over-lwIP component it wrapped. It was the gateway's original
+> transport: an overlay VPN to a self-hosted Headscale control plane. It was
+> retired by the 2026-07-10 direct-MQTT pivot (defeated by symmetric NAT,
+> root-caused 2026-07-09) and kept compilable-but-unused for rollback until
+> `firmware/components/microlink/` and `firmware/components/wireguard_lwip/`
+> were deleted outright on 2026-08-02 — the linker map showed zero objects
+> pulled from either archive under the shipped `AMPHIVE_DIRECT_MQTT=1` build.
+> See git history from before that date for the implementation.
 
 ## 6. Build config (`sdkconfig.defaults`)
 
@@ -318,16 +285,14 @@ an auth key but not a control-plane host.
   real fielded gateways have no PSRAM to configure. (An earlier revision of
   this doc described an ESP32-S3-N16R8 target with octal PSRAM and 16 MB
   flash; that was never what's in `sdkconfig.defaults` and has been corrected
-  here. `microlink`'s PSRAM buffer allocation, §5, falls back to plain heap
-  when PSRAM is absent — moot anyway since that transport is compiled out by
-  default.)
+  here.)
 - **Partition table:** `CONFIG_PARTITION_TABLE_CUSTOM` → `partitions_ota.csv`
   (2026-07-07) — **dual OTA app slots** (`ota_0`/`ota_1`, 1920 KB each) +
   `otadata`, with `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`. NVS keeps its
   pre-OTA offset (`0x9000`) so provisioning survives the one-time migration
   reflash. The ~1.1 MB image uses ~55% of a slot. (Was
   `SINGLE_APP_LARGE` — no OTA — before this.)
-- mbedTLS TLS 1.2 + full cert bundle (for DERP/coordination TLS). lwIP IPv4-only.
+- mbedTLS TLS 1.2 + full cert bundle (for MQTT-broker TLS and HTTPS OTA). lwIP IPv4-only.
 - **Signed OTA (2026-07-10):** `CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT` +
   ECDSA scheme (v1) + `CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT` — every
   OTA image must carry a valid ECDSA signature or `esp_https_ota_finish`
@@ -338,7 +303,7 @@ an auth key but not a control-plane host.
   it means devices only accept a USB reflash. Plain-http OTA is gone
   (`CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP` removed; `ota_update_start` also refuses
   non-`https://` URLs).
-- Main task stack 32768. `CONFIG_MICROLINK_DISCO_PORT=51821` (cosmetic, actual port is hardcoded to `41641` to match standard magicsock).
+- Main task stack 32768.
 
 ## 7. Build & flash
 
@@ -376,8 +341,8 @@ runbook (including the one-time bucket setup that was run 2026-07-10):
 
 A working **demo/prototype**, not production firmware: `microlink` was deep and
 mostly functional (with unified magicsock NAT traversal fully operational) before
-being **retired and compiled out by the 2026-07-10 direct-MQTT pivot** (see §5),
-the captive portal and watchdogs work,
+being **retired by the 2026-07-10 direct-MQTT pivot and removed from the tree
+2026-08-02** (see §5), the captive portal and watchdogs work,
 **session state is persisted in NVS with offline telemetry buffering**, and the
 **Tapo driver is now a real KLAP v2 implementation** (protocol-validated against a
 real P110 via `tools/klap_probe.py`; builds on **ESP-IDF v5.3**, not v6).

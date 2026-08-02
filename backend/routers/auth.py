@@ -44,6 +44,8 @@ from backend.services.auth import (
 )
 from backend.services.rate_limit import (
     forgot_password_rate_limiter,
+    login_account_rate_limit_dependency,
+    login_account_rate_limiter,
     login_rate_limiter,
     rate_limit_dependency,
     register_rate_limiter,
@@ -120,14 +122,19 @@ async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
 @router.post(
     "/api/auth/login",
     response_model=AuthResponse,
-    dependencies=[Depends(rate_limit_dependency(login_rate_limiter, "login"))],
+    dependencies=[
+        Depends(rate_limit_dependency(login_rate_limiter, "login")),
+        Depends(login_account_rate_limit_dependency(login_account_rate_limiter)),
+    ],
 )
 async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
     """
     Authenticate a user with email and password.
     Returns a JWT token on success.
-    Rate-limited per client IP (LOGIN_RATE_LIMIT) against brute force;
-    attempts count regardless of outcome.
+    Rate-limited per client IP (LOGIN_RATE_LIMIT) against brute force, layered
+    with a per-account limit keyed on the normalized email
+    (LOGIN_ACCOUNT_RATE_LIMIT) so rotating IPs against one account doesn't
+    bypass the limit; attempts count regardless of outcome.
     Email lookup is case-insensitive (canonicalized to lowercase — see
     normalize_email) so an account registered as `Driver@x.com` still
     matches a login attempt for `driver@x.com`.

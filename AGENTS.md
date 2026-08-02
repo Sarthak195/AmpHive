@@ -15,8 +15,9 @@ outbound to `mqtts://mqtt.amphive.app:8883` (public), authenticated by TLS plus
 per-gateway username/password and topic ACLs. Firmware builds with
 `AMPHIVE_DIRECT_MQTT=1`; there is no VPN/overlay hop. (A Headscale/WireGuard
 overlay and a separate "Direct Mode" WireGuard-relay path both existed earlier
-in the project and are retired; the `tapo_direct` / `/direct/*` backend code
-remains but is dormant.) See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+in the project and are retired; the overlay's `microlink` firmware component
+and the `tapo_direct` / `/direct/*` backend code were **removed 2026-08-02**.)
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Where things live
 
@@ -27,7 +28,7 @@ remains but is dormant.) See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 | Firmware (ESP-IDF, ESP32-C3) | `firmware/` | [FIRMWARE](docs/FIRMWARE.md) |
 | Deploy (compose, K8s, configs, runbooks) | `deploy/` | [DEPLOYMENT](docs/DEPLOYMENT.md) |
 | Ops helper scripts (VM start/stop, remote logs) | `scripts/` | [DEPLOYMENT](docs/DEPLOYMENT.md#helper-scripts-scripts) |
-| Direct-Mode Tapo helpers (run on home PC) | `tools/` | [DEPLOYMENT](docs/DEPLOYMENT.md) |
+| Standalone Tapo bench scripts (manual on/off, KLAP probe) | `tools/` | [DEPLOYMENT](docs/DEPLOYMENT.md) |
 | Import graphs / high-impact files | — | [DEPENDENCIES](docs/DEPENDENCIES.md) |
 
 ## Hard rules
@@ -43,13 +44,7 @@ remains but is dormant.) See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 2. **Deploy via the script.** Backend/frontend changes ship through
    `deploy/scripts/deploy.ps1`, which uploads code and rebuilds containers on the
    VM. See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
-3. *(Historical, no longer applies)* ESP32 stack sizing for the `microlink` VPN
-   task's large PSRAM-backed stack — that overlay client is retired and
-   compiled out (the esp32c3 target has no external PSRAM anyway).
-4. *(Historical, no longer applies)* Headscale config validation — the
-   Headscale/WireGuard overlay is retired; there is no Headscale config left
-   to validate.
-5. **Secrets.** Do not commit new secrets; several already-committed ones need
+3. **Secrets.** Do not commit new secrets; several already-committed ones need
    rotation — see [docs/SECURITY.md](docs/SECURITY.md). App `.env` files are
    gitignored.
 

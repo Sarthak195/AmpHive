@@ -15,14 +15,20 @@ from backend.database.models import (
     CapacityRequest,
     ChargerGroup,
     Gateway,
+    GatewayEvent,
     GroupMembership,
     Plug,
+    PlugReport,
+    PlugReportStatus,
     PlugStatus,
     PlugWatch,
     Tenant,
     User,
+    UserFavorite,
 )
 from backend.schemas import (
+    PlugReportCreateRequest,
+    PlugReportResponse,
     PlugResponse,
     PublicPlugResponse,
 )
@@ -190,6 +196,14 @@ async def get_available_plugs(
         )).scalars().all()
     )
 
+    # [Favorites] Same shape as watched_plug_ids above — ONE extra query for
+    # the whole list, keeping this endpoint N+1-free.
+    favorited_plug_ids = set(
+        (await db.execute(
+            select(UserFavorite.plug_id).where(UserFavorite.user_id == user.id)
+        )).scalars().all()
+    )
+
     now = datetime.now(timezone.utc)
     all_rows = rows.all()
 
@@ -240,6 +254,9 @@ async def get_available_plugs(
                 # only an explicit False marks a private group.
                 is_private=group_is_public is False,
                 watching=plug.id in watched_plug_ids,
+                rated_power_w=plug.rated_power_w,
+                connector_type=plug.connector_type,
+                is_favorite=plug.id in favorited_plug_ids,
                 **reservation_fields.get(plug.id, {}),
             )
         )
@@ -315,6 +332,8 @@ async def get_public_plugs(db: AsyncSession = Depends(get_db)):
                 longitude=lon,
                 price_per_kwh=float(rate),
                 gateway_online=gateway_is_live(gateway, now),
+                rated_power_w=plug.rated_power_w,
+                connector_type=plug.connector_type,
             )
         )
     return out
@@ -375,6 +394,14 @@ async def get_plug(
         )
     )).scalar_one_or_none() is not None
 
+    # [Favorites] Whether THIS user has starred the plug — same shape as the
+    # watching lookup just above.
+    is_favorite = (await db.execute(
+        select(UserFavorite.id).where(
+            and_(UserFavorite.user_id == user.id, UserFavorite.plug_id == plug.id)
+        )
+    )).scalar_one_or_none() is not None
+
     gw_online = gateway_is_live(gateway) if gateway else False
     powered = plug_is_powered(plug, now)
     return PlugResponse(
@@ -397,6 +424,9 @@ async def get_plug(
         price_changes_at=changes_at.isoformat() if changes_at is not None else None,
         is_private=is_private,
         watching=watching,
+        rated_power_w=plug.rated_power_w,
+        connector_type=plug.connector_type,
+        is_favorite=is_favorite,
         **reservation_fields.get(plug.id, {}),
     )
 
@@ -480,6 +510,69 @@ async def unwatch_plug(
     )
     await db.commit()
     return {"status": "not_watching", "plug_id": plug_id, "watching": False}
+
+
+# ===========================================================================
+# Favorites — a standing "star this charger" preference
+# ===========================================================================
+
+@router.post("/api/plugs/{plug_id}/favorite")
+async def favorite_plug(
+    plug_id: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Star a plug as a favorite (a STANDING preference — unlike watch_plug's
+    one-shot arm, nothing clears this automatically). Idempotent — starring
+    an already-favorited plug returns the same 200. Access follows
+    GET /api/plugs/{id}: 403 for a private-group plug the user hasn't
+    joined. Unlike watch_plug, there is no state-based rejection — starring
+    an available-right-now plug is perfectly normal (it's a bookmark, not a
+    "notify me" arm).
+    """
+    result = await db.execute(select(Plug).where(Plug.id == plug_id))
+    plug = result.scalar_one_or_none()
+    if not plug:
+        raise HTTPException(status_code=404, detail=f"Plug with ID {plug_id} not found.")
+
+    await ensure_plug_group_access(db, plug, user)
+
+    existing = (await db.execute(
+        select(UserFavorite).where(
+            and_(UserFavorite.user_id == user.id, UserFavorite.plug_id == plug_id)
+        )
+    )).scalar_one_or_none()
+    if not existing:
+        db.add(UserFavorite(user_id=user.id, plug_id=plug_id))
+        try:
+            await db.commit()
+        except IntegrityError:
+            # Double-tap race: the UNIQUE(user_id, plug_id) row landed between
+            # the check and this insert — already favorited, same outcome.
+            await db.rollback()
+
+    return {"status": "favorited", "plug_id": plug_id, "is_favorite": True}
+
+
+@router.delete("/api/plugs/{plug_id}/favorite")
+async def unfavorite_plug(
+    plug_id: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Un-star a favorite. Idempotent — deleting a favorite that doesn't exist
+    (never starred, or the plug is gone) is a no-op 200. No access check on
+    purpose, same rationale as unwatch_plug: the row is the user's own.
+    """
+    await db.execute(
+        delete(UserFavorite).where(
+            and_(UserFavorite.user_id == user.id, UserFavorite.plug_id == plug_id)
+        )
+    )
+    await db.commit()
+    return {"status": "unfavorited", "plug_id": plug_id, "is_favorite": False}
 
 
 # ===========================================================================
@@ -620,6 +713,162 @@ async def get_plug_tariff_preview(
             }
             for s in sorted(slots, key=lambda s: (int(s.start_min), int(s.end_min)))
         ],
+    }
+
+
+# ===========================================================================
+# "Report a problem with this charger" (database/models.py PlugReport)
+# ===========================================================================
+
+def _plug_report_response(report: PlugReport) -> PlugReportResponse:
+    return PlugReportResponse(
+        id=report.id,
+        plug_id=report.plug_id,
+        tenant_id=report.tenant_id,
+        driver_user_id=report.driver_user_id,
+        category=report.category,
+        description=report.description,
+        status=report.status.value,
+        resolution_note=report.resolution_note,
+        created_at=report.created_at.isoformat() if report.created_at else None,
+        resolved_at=report.resolved_at.isoformat() if report.resolved_at else None,
+        resolved_by_user_id=report.resolved_by_user_id,
+    )
+
+
+@router.post("/api/plugs/{plug_id}/report", response_model=PlugReportResponse)
+async def report_plug_problem(
+    plug_id: int,
+    req: PlugReportCreateRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    "Report a problem with this charger" — any authenticated driver who can
+    SEE the plug (ensure_plug_group_access — same 403 rule as watch_plug)
+    may flag it, whether or not they've ever charged there. No session, no
+    money: a hardware/data-quality signal for the CPO, distinct from
+    SessionDispute (POST /api/sessions/{id}/dispute — session-FK'd, coins-
+    only refund remedy). Reviewed via GET /api/cpo/plug-reports + POST
+    /api/cpo/plug-reports/{id}/resolve.
+
+    Deliberately permissive about plug state — unlike watch_plug (which
+    rejects a plug with nothing to wait for), there is no state gate here:
+    broken/offline/maintenance plugs are exactly the ones most worth
+    reporting.
+
+    Also writes a GatewayEvent (event_type="DRIVER_PROBLEM_REPORT",
+    severity="warning") so the EXISTING CPO alert strip
+    (components/CpoAlerts.jsx) and Health nav badge pick this up on their
+    normal poll/broadcast path — no new alert pipeline. Acknowledging that
+    GatewayEvent (the existing per-event ack endpoint) is independent of
+    resolving this PlugReport.
+    """
+    result = await db.execute(select(Plug).where(Plug.id == plug_id))
+    plug = result.scalar_one_or_none()
+    if not plug:
+        raise HTTPException(status_code=404, detail=f"Plug with ID {plug_id} not found.")
+
+    await ensure_plug_group_access(db, plug, user)
+
+    gw_row = await db.execute(select(Gateway).where(Gateway.id == plug.gateway_id))
+    gateway = gw_row.scalar_one_or_none()
+    if not gateway:
+        # plug.gateway_id is a NOT NULL FK — this should never happen in
+        # practice, but fail closed rather than write a tenant-less report.
+        raise HTTPException(status_code=404, detail="This charger's gateway no longer exists.")
+
+    report = PlugReport(
+        plug_id=plug.id,
+        tenant_id=gateway.tenant_id,
+        driver_user_id=user.id,
+        category=req.category,
+        description=req.description,
+        status=PlugReportStatus.OPEN,
+    )
+    db.add(report)
+
+    event = GatewayEvent(
+        tenant_id=gateway.tenant_id,
+        gateway_id=gateway.id,
+        plug_id=plug.id,
+        event_type="DRIVER_PROBLEM_REPORT",
+        severity="warning",
+        detail=f"{req.category}: {req.description[:200]}",
+    )
+    db.add(event)
+
+    await db.commit()
+    await db.refresh(report)
+    await db.refresh(event)
+
+    logger.info(
+        "Plug problem reported",
+        extra={
+            "plug_id": plug.id, "report_id": report.id,
+            "user_id": user.id, "email": user.email,
+        },
+    )
+
+    # Best-effort live broadcast (same shape MQTTAlarmMixin._persist_gateway_event
+    # uses for hardware alarms) so the alert strip reacts immediately instead
+    # of waiting on its 60s poll. Never blocks or fails the report itself.
+    try:
+        from backend.services.socketio_manager import emit_gateway_alarm
+        await emit_gateway_alarm({
+            "id": event.id,
+            "gateway_id": gateway.id,
+            "plug_id": plug.id,
+            "event_type": event.event_type,
+            "severity": event.severity,
+            "detail": event.detail,
+            "created_at": event.created_at.isoformat() if event.created_at else None,
+        })
+    except Exception:
+        logger.exception(
+            "Failed to broadcast plug report alarm", extra={"plug_id": plug.id},
+        )
+
+    return _plug_report_response(report)
+
+
+# ===========================================================================
+# Reliability / uptime — services/reliability.py plug_uptime_7d
+# ===========================================================================
+
+@router.get("/api/plugs/{plug_id}/reliability")
+async def get_plug_reliability(
+    plug_id: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    The plug's 7-day REACHABILITY — gateway+mains power, NOT
+    availability-to-charge (services/reliability.py plug_uptime_7d has the
+    full definition). ``{uptime_pct, sample_window_days, last_seen_at}``;
+    uptime_pct is null for a plug too young to have a meaningful reading.
+
+    Any authenticated role; visibility follows GET /api/plugs/{id} exactly
+    (ensure_plug_group_access), same lazy single-plug pattern as
+    GET /api/plugs/{id}/tariff-preview. Deliberately NOT folded into the
+    polled bulk list endpoints (GET /api/plugs/available, /public) — each
+    call is a grouped-but-real telemetry_readings scan, too costly to run
+    for every plug on every 30s poll.
+    """
+    from backend.services.reliability import plug_uptime_7d
+
+    result = await db.execute(select(Plug).where(Plug.id == plug_id))
+    plug = result.scalar_one_or_none()
+    if not plug:
+        raise HTTPException(status_code=404, detail=f"Plug with ID {plug_id} not found.")
+
+    await ensure_plug_group_access(db, plug, user)
+
+    data = await plug_uptime_7d(db, plug)
+    return {
+        "uptime_pct": data["uptime_pct"],
+        "sample_window_days": data["sample_window_days"],
+        "last_seen_at": data["last_seen_at"].isoformat() if data["last_seen_at"] else None,
     }
 
 

@@ -10,6 +10,7 @@ from backend.services.mqtt.alarms import MQTTAlarmMixin
 from backend.services.mqtt.commands import MQTTCommandMixin
 from backend.services.mqtt.connection import MQTTConnectionMixin
 from backend.services.mqtt.discovery import MQTTDiscoveryMixin
+from backend.services.mqtt.logs import MQTTLogsMixin
 from backend.services.mqtt.router import MQTTRouterMixin
 from backend.services.mqtt.status import MQTTStatusMixin
 from backend.services.mqtt.telemetry import MQTTTelemetryMixin
@@ -73,6 +74,7 @@ class MQTTManager(
     MQTTAlarmMixin,
     MQTTStatusMixin,
     MQTTDiscoveryMixin,
+    MQTTLogsMixin,
 ):
     """
     Facade over the broker connection/lifecycle, inbound topic routing,
@@ -148,3 +150,6 @@ class MQTTManager(
         self.discovery_pattern = re.compile(r"^amphive/gateways/([^/]+)/discovery$")
         # gateways/{gateway_id}/alarms  (firmware safety alarms + OTA lifecycle)
         self.alarm_pattern = re.compile(r"^amphive/gateways/([^/]+)/alarms$")
+        # gateways/{gateway_id}/logs  (firmware WARN/ERROR log lines, plain
+        # text — TD#28, fw >= 2.1.0-direct)
+        self.logs_pattern = re.compile(r"^amphive/gateways/([^/]+)/logs$")

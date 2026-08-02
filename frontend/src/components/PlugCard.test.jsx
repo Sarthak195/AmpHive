@@ -3,7 +3,9 @@
  * available → Charge + Reserve (with reserved-for-you / reserved-by-other
  * variants), in_use → Notify-me bell + Reserve, unpowered → Queue charge only
  * when the payload advertises queue_available (else the bell) with its
- * sublabel, offline / maintenance → no actions. Plus price + next-price meta.
+ * sublabel, offline / maintenance → no state actions. Plus price + next-price
+ * meta, and the "Report" flag action present in every state (including
+ * offline/maintenance — those are exactly the plugs most worth reporting).
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen } from '@testing-library/react';
@@ -30,6 +32,8 @@ const handlers = {
   onReserve: vi.fn(),
   onQueue: vi.fn(),
   onToggleWatch: vi.fn(),
+  onReport: vi.fn(),
+  onToggleFavorite: vi.fn(),
 };
 
 const renderCard = (plug) => render(<PlugCard plug={plug} {...handlers} />);
@@ -122,15 +126,61 @@ describe('PlugCard — unpowered', () => {
 });
 
 describe('PlugCard — offline and maintenance', () => {
-  it('offline: no action buttons, "Can\'t be reached" sublabel', () => {
+  it(`offline: only the bookmark star and Report remain, "Can't be reached" sublabel`, () => {
     renderCard({ ...BASE, gateway_online: false });
     expect(screen.getByText("Can't be reached right now")).toBeInTheDocument();
-    expect(screen.queryAllByRole('button')).toHaveLength(0);
+    // The favorite star is a bookmark and Report must work on broken
+    // chargers -- both stay available in every state. No state actions render.
+    const buttons = screen.queryAllByRole('button');
+    expect(buttons).toHaveLength(2);
+    expect(screen.getByRole('button', { name: /favorites/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /report/i })).toBeInTheDocument();
   });
 
-  it('maintenance: no action buttons, "Under maintenance" badge', () => {
+  it('maintenance: only the bookmark star and Report remain, "Under maintenance" badge', () => {
     renderCard({ ...BASE, status: 'maintenance' });
     expect(screen.getAllByText('Under maintenance').length).toBeGreaterThan(0);
-    expect(screen.queryAllByRole('button')).toHaveLength(0);
+    const buttons = screen.queryAllByRole('button');
+    expect(buttons).toHaveLength(2);
+    expect(screen.getByRole('button', { name: /favorites/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /report/i })).toBeInTheDocument();
+  });
+});
+
+describe('PlugCard — Report action', () => {
+  it('renders a Report action in every state and wires onReport', async () => {
+    renderCard(BASE);
+    const reportBtn = screen.getByRole('button', { name: /report/i });
+    expect(reportBtn).toBeInTheDocument();
+    await userEvent.click(reportBtn);
+    expect(handlers.onReport).toHaveBeenCalledWith(BASE);
+  });
+});
+
+describe('PlugCard — favorite star', () => {
+  it('renders unfilled with aria-pressed=false and calls onToggleFavorite', async () => {
+    renderCard(BASE);
+    const star = screen.getByRole('button', { name: 'Add Lobby Plug to favorites' });
+    expect(star).toHaveAttribute('aria-pressed', 'false');
+    await userEvent.click(star);
+    expect(handlers.onToggleFavorite).toHaveBeenCalledWith(BASE);
+  });
+
+  it('a favorited plug renders the star pressed with remove copy', () => {
+    renderCard({ ...BASE, is_favorite: true });
+    const star = screen.getByRole('button', { name: 'Remove Lobby Plug from favorites' });
+    expect(star).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('omits the star when no onToggleFavorite handler is given (Report still renders)', () => {
+    render(<PlugCard plug={{ ...BASE, gateway_online: false }} />);
+    expect(screen.queryByRole('button', { name: /favorites/i })).not.toBeInTheDocument();
+    expect(screen.queryAllByRole('button')).toHaveLength(1);
+  });
+
+  it('shows rated power and connector chips when the specs are set', () => {
+    renderCard({ ...BASE, rated_power_w: 3300, connector_type: 'Type 2' });
+    expect(screen.getByText('3.3 kW')).toBeInTheDocument();
+    expect(screen.getByText('Type 2')).toBeInTheDocument();
   });
 });
