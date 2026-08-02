@@ -6,9 +6,15 @@
  * useTheme('volt') and the admin layout useTheme('volt', 'admin').
  * Previous values are restored on unmount so navigating between surfaces
  * on the unsplit host never leaves a stale theme behind.
+ *
+ * Also syncs <meta name="theme-color"> to the surface's --bg so the
+ * browser chrome (Android status bar / task switcher) matches the volt
+ * console instead of index.html's hardcoded day-theme cream.
  */
 
 import { useEffect } from 'react';
+
+const THEME_COLOR = { day: '#FAF7EF', volt: '#11110D' };
 
 export function useTheme(theme, accent) {
   useEffect(() => {
@@ -23,6 +29,12 @@ export function useTheme(theme, accent) {
       delete el.dataset.accent;
     }
 
+    const meta = document.querySelector('meta[name="theme-color"]');
+    const prevColor = meta?.getAttribute('content') ?? null;
+    if (meta && THEME_COLOR[theme]) {
+      meta.setAttribute('content', THEME_COLOR[theme]);
+    }
+
     return () => {
       if (prevTheme !== undefined) {
         el.dataset.theme = prevTheme;
@@ -33,6 +45,9 @@ export function useTheme(theme, accent) {
         el.dataset.accent = prevAccent;
       } else {
         delete el.dataset.accent;
+      }
+      if (meta && prevColor !== null) {
+        meta.setAttribute('content', prevColor);
       }
     };
   }, [theme, accent]);

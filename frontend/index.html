@@ -3,11 +3,19 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- viewport-fit=cover lets the app draw edge-to-edge on notch/home-indicator
+         devices; layouts.css relies on env(safe-area-inset-*) to pad around it —
+         without this the env() vars just resolve to 0. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>AmpHive — Shared EV charging</title>
     <meta name="description" content="AmpHive is a shared EV charging platform. Find a charger nearby, plug in, and pay from your wallet — or host your own chargers and earn." />
     <meta name="theme-color" content="#FAF7EF" />
     <link rel="manifest" href="/manifest.webmanifest" />
+    <!-- iOS "Add to Home Screen" reads these instead of the manifest. -->
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="AmpHive" />
     <!-- Fonts are self-hosted via @fontsource imports in src/main.jsx; their
          woff2 URLs are content-hashed by Vite at build time, so static
          <link rel="preload"> tags here would 404 — deliberately omitted. -->
