@@ -339,6 +339,23 @@ class Plug(Base):
     rated_power_w: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     connector_type: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
 
+    # [Unmetered consumption] Continuous reconciliation state: the plug's OWN
+    # today_energy/month_energy readings (get_energy_usage, kWh) the last
+    # time we saw them, so the NEXT frame can detect a jump with no ACTIVE
+    # session covering it -- energy delivered while the gateway (or the whole
+    # site) was unreachable, e.g. a plug manually toggled during an outage.
+    # NULL until the first frame carrying these fields arrives (older
+    # firmware, or a plug model that doesn't report them, leaves both NULL
+    # forever -- reconciliation is skipped for that plug, never falsely
+    # tripped on a bogus comparison). Updated by
+    # services/mqtt/telemetry.py._persist_telemetry on every frame; see also
+    # firmware/main/tapo_protocol.c's tapo_plug_reconcile_idle_baseline, the
+    # firmware's own one-shot offline-consumption report (this is the
+    # backend-side continuous half of the same detector). Alembic revision
+    # 0035_offline_consumption.
+    last_today_energy_kwh: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    last_month_energy_kwh: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
     # Relationships
     gateway: Mapped[Gateway] = relationship("Gateway", back_populates="plugs")
     sessions: Mapped[List["ChargingSession"]] = relationship("ChargingSession", back_populates="plug", cascade="all, delete-orphan")

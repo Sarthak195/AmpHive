@@ -1061,6 +1061,28 @@ static void publish_alarm(const char *error, int plug_id) {
     esp_mqtt_client_publish(mqtt_client, topic, payload, 0, 1, 0);
 }
 
+// ─── Offline-consumption report → alarms topic ──────────────────────────────
+// Reports the plug's own today/month energy counters (get_energy_usage) when
+// tapo_plug_reconcile_idle_baseline() (see tapo_protocol.c) found them
+// advanced with NO AmpHive session covering the gap -- e.g. the plug was
+// manually toggled while this gateway was fully unreachable. Carries the
+// estimate plus both raw counters so the backend's own continuous
+// reconciliation (services/mqtt/telemetry.py) can cross-check. Same
+// fire-and-forget QoS-1 shape as publish_alarm(); silently dropped while
+// offline is fine here because reconcile_idle_baseline() only advances its
+// NVS baseline once a report is actually delivered (can_report), so the
+// NEXT (still-pending) poll just recomputes and retries -- nothing is lost.
+static void publish_unmetered_alarm(int plug_id, float estimated_kwh, float today_kwh, float month_kwh) {
+    if (!mqtt_connected || mqtt_client == NULL) return;
+    char topic[128];
+    char payload[192];
+    snprintf(topic, sizeof(topic), "amphive/gateways/%s/alarms", gateway_id);
+    snprintf(payload, sizeof(payload),
+             "{\"error\":\"UNMETERED_CONSUMPTION\",\"plug_id\":%d,\"kwh\":%.3f,\"today_kwh\":%.3f,\"month_kwh\":%.3f}",
+             plug_id, estimated_kwh, today_kwh, month_kwh);
+    esp_mqtt_client_publish(mqtt_client, topic, payload, 0, 1, 0);
+}
+
 // ─── Firmware log → MQTT (TD#28 firmware half) ───────────────────────────────
 // Forward WARN/ERROR log lines to amphive/gateways/{gw}/logs so a deployed
 // gateway can be diagnosed without a serial cable. Constraints that shape this:
@@ -1603,12 +1625,37 @@ static void telemetry_task(void *pvParameters) {
             }
             xSemaphoreGive(plugs_mutex);
 
+            /* Offline/unmetered-consumption reconciliation (only meaningful with
+               no active AmpHive session -- a running session already accounts for
+               whatever energy the plug delivers). Read-only decision here; any
+               NVS/baseline mutation happens inside tapo_plug_reconcile_idle_baseline
+               itself, which is careful about locking its own plug->mutex, so this
+               must run OUTSIDE plugs_mutex (already released above). */
+            bool  unmetered_alarm = false;
+            float unmetered_kwh = 0.0f, unmetered_today_kwh = 0.0f, unmetered_month_kwh = 0.0f;
+            if (!sess_active) {
+                tapo_energy_reconcile_t recon;
+                if (tapo_plug_reconcile_idle_baseline(t, telemetry.today_energy_kwh, telemetry.month_energy_kwh,
+                                                       mqtt_connected, &recon) == ESP_OK &&
+                    recon.unmetered_detected) {
+                    unmetered_alarm = true;
+                    unmetered_kwh = recon.estimated_kwh;
+                    unmetered_today_kwh = telemetry.today_energy_kwh;
+                    unmetered_month_kwh = telemetry.month_energy_kwh;
+                }
+            }
+
             /* Build + ship the telemetry payload (reflecting the pre-watchdog
                session state, as the single-plug loop did). "relay" is the plug's
-               ACTUAL device_on, distinct from "status" (our session state). */
-            char payload[320];
+               ACTUAL device_on, distinct from "status" (our session state).
+               today_kwh/month_kwh (fw >= 2.4.0) are the plug's OWN calendar
+               counters, included on every frame (idle or not) so the backend can
+               reconcile them continuously, not just on the one-shot alarm below;
+               unavailable on a plug that doesn't report them (0.0, harmless --
+               a flat 0-vs-0 delta never trips the backend's own check). */
+            char payload[384];
             snprintf(payload, sizeof(payload),
-                     "{\"plug_id\":%d,\"watts\":%.1f,\"kwh\":%.4f,\"voltage\":%.1f,\"current\":%.2f,\"relay\":%s,\"status\":\"%s\",\"session_id\":\"%s\"}",
+                     "{\"plug_id\":%d,\"watts\":%.1f,\"kwh\":%.4f,\"voltage\":%.1f,\"current\":%.2f,\"relay\":%s,\"status\":\"%s\",\"session_id\":\"%s\",\"today_kwh\":%.3f,\"month_kwh\":%.3f}",
                      plug_id,
                      telemetry.power_w,
                      session_kwh,
@@ -1616,7 +1663,9 @@ static void telemetry_task(void *pvParameters) {
                      telemetry.current_a,
                      telemetry.device_on ? "true" : "false",
                      sess_active ? "occupied" : "available",
-                     sess_active ? sid : "");
+                     sess_active ? sid : "",
+                     telemetry.today_energy_kwh >= 0.0f ? telemetry.today_energy_kwh : 0.0f,
+                     telemetry.month_energy_kwh >= 0.0f ? telemetry.month_energy_kwh : 0.0f);
 
             if (mqtt_connected) {
                 esp_mqtt_client_publish(mqtt_client, telemetry_topic, payload, 0, 0, 0);
@@ -1648,6 +1697,7 @@ static void telemetry_task(void *pvParameters) {
             }
             if (cutoff_alarm) publish_alarm(cutoff_alarm, plug_id);
             if (unauth_alarm) publish_alarm("UNAUTHORIZED_ON", plug_id);
+            if (unmetered_alarm) publish_unmetered_alarm(plug_id, unmetered_kwh, unmetered_today_kwh, unmetered_month_kwh);
         }
 
         /* Throttled re-persist so elapsed session time survives an unclean reboot

@@ -65,6 +65,30 @@ AUTO_MAINTENANCE_ON_CRITICAL_ALARM = os.getenv("AUTO_MAINTENANCE_ON_CRITICAL_ALA
 # few missed frames without flapping. Env-overridable.
 PLUG_POWER_STALE_SEC = int(os.getenv("PLUG_POWER_STALE_SEC", "90"))
 
+# [Unmetered consumption] Backend-side continuous cross-check of the P110's
+# own today/month energy counters against what we last saw (see
+# services/mqtt/telemetry.py _persist_telemetry and firmware/main/
+# tapo_protocol.c tapo_plug_reconcile_idle_baseline, the firmware's own
+# one-shot report of the same signal). A jump of at least this many kWh with
+# no ACTIVE session covering the plug is treated as unmetered/unauthorized
+# consumption -- small enough to catch a real manual session, large enough to
+# ignore P110 standby-draw noise across a long idle gap. Mirrors the
+# firmware's own UNMETERED_THRESHOLD_KWH constant (tapo_protocol.c) so both
+# layers agree on what counts as "real".
+UNMETERED_CONSUMPTION_THRESHOLD_KWH = float(os.getenv("UNMETERED_CONSUMPTION_THRESHOLD_KWH", "0.01"))
+
+# A day/month counter reading BELOW the last-seen value by at least this much
+# is a genuine reset (calendar rollover on the plug, or a plug-side reboot),
+# not rounding jitter on an essentially-flat reading -- same rationale as
+# ENERGY_COUNTER_RESET_DROP_KWH above, applied to the plug-side counters.
+UNMETERED_CONSUMPTION_RESET_EPS_KWH = float(os.getenv("UNMETERED_CONSUMPTION_RESET_EPS_KWH", "0.001"))
+
+# Rate-limit: don't re-raise a GatewayEvent/notify for the same plug more
+# often than this while a discrepancy keeps being seen (e.g. a slow ongoing
+# live drift) -- avoids notification spam. A genuinely new episode on a
+# different plug is unaffected (the cooldown is per-plug).
+UNMETERED_ALERT_COOLDOWN_SEC = float(os.getenv("UNMETERED_ALERT_COOLDOWN_SEC", "300"))
+
 
 class MQTTManager(
     MQTTConnectionMixin,
@@ -131,6 +155,13 @@ class MQTTManager(
         # the advisory nudge repeats — so a persisted dedupe query isn't worth
         # a column/migration here.
         self._low_balance_warned: set = set()
+        # [Unmetered consumption] Per-plug monotonic timestamp of the last
+        # UNMETERED_CONSUMPTION alert (see UNMETERED_ALERT_COOLDOWN_SEC).
+        # Only touched on the event loop -- same in-memory/best-effort
+        # tolerance as _low_balance_warned above (a mid-session restart can
+        # re-fire one alert; the underlying GatewayEvent audit trail and the
+        # persisted plug.last_*_energy_kwh baseline stay exact either way).
+        self._unmetered_alert_cooldown: Dict[int, float] = {}
 
         self.client = mqtt.Client(client_id="amphive_backend_server", callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
 
