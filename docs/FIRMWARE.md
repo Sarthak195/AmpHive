@@ -1,6 +1,14 @@
 # AmpHive — ESP32-C3 Gateway Firmware
 
 > Quick setup? See [ESP32_CONNECTION.md](ESP32_CONNECTION.md) for build/flash/monitor commands and common connection issues.
+>
+> Flashing a gateway with no dev toolchain? See
+> [`tools/flasher/README.md`](../tools/flasher/README.md) — a one-click
+> Windows EXE (`AmpHiveFlasher.exe`) that detects a plugged-in board and
+> writes a prebuilt image with `esptool`. It never compiles firmware itself
+> (see that doc for why); a maintainer still needs `idf.py merge-bin`
+> (`tools/flasher/scripts/build-merged-image.ps1`) to produce the images it
+> flashes.
 
 *Verified against `firmware/` on 2026-07-26 (well past the 2026-07-10
 direct-MQTT pivot; current shipped fw is **2.3.0-direct**, per

@@ -194,6 +194,7 @@ historical reference (its keys were rotated dead long ago — see
 | `local_tapo_test.py` | LAN Tapo connection self-test (info → on → 3 s → off). |
 | `turn_on.py` / `turn_off.py` | Minimal manual on/off against a LAN plug. |
 | `klap_probe.py` / `read_serial.py` | Tapo KLAP protocol probe / ESP32 serial monitor. |
+| `flasher/` | Standalone packaged tool (not a bench script) — a onefile Windows EXE that detects a plugged-in gateway board and flashes a prebuilt firmware image, for non-technical users. See [`tools/flasher/README.md`](../tools/flasher/README.md) and [FIRMWARE.md](FIRMWARE.md). Own `requirements.txt`, deliberately not part of the backend's dependency set. |
 
 Tapo credentials come from `TAPO_EMAIL`/`TAPO_PASSWORD` env vars — never
 hardcoded.
