@@ -511,12 +511,19 @@ async def test_patch_pushes_set_limits_to_firmware(factory, monkeypatch):
 
 @db_gated
 @pytest.mark.asyncio
-async def test_patch_legacy_null_limit_session_skips_firmware_push(factory, monkeypatch):
-    """A legacy session with NULL limits never carried firmware limits — a PATCH
-    that leaves one side NULL doesn't push SET_LIMITS."""
+async def test_patch_on_unlimited_session_pushes_sentinel_for_the_unset_side(factory, monkeypatch):
+    """[Opt-in charging limits] A PATCH that adds ONE limit to an otherwise
+    unlimited (NULL/NULL) session still pushes SET_LIMITS — with the UNLIMITED
+    sentinel standing in for the side the driver left unset, never 0 and never
+    an omitted pair. (Pre-2026-08-02 this case skipped the push entirely,
+    because a NULL side could only mean a legacy pre-limit session; now
+    NULL/NULL is the default and every ACTIVE session's gateway already holds
+    sentinel watchdogs from the ON publish, so the push must keep both sides
+    consistent on-device.)"""
     from unittest.mock import MagicMock
 
     from backend import state as state_module
+    from backend.services.mqtt_manager import UNLIMITED_MAX_KWH
 
     tenant_id = await _seed_tenant(factory)
     gw = await _seed_gateway(factory, tenant_id, "gw-patch-legacy")
@@ -530,9 +537,15 @@ async def test_patch_legacy_null_limit_session_skips_firmware_push(factory, monk
     fake_mgr = MagicMock()
     monkeypatch.setattr(state_module, "mqtt_manager", fake_mgr)
 
-    # Set only duration — max_kwh stays NULL, so the firmware push is skipped.
+    # Set only duration — max_kwh stays NULL (unlimited) and rides along as
+    # the sentinel, so the on-device pair stays consistent.
     await _patch_limits(factory, session_id=sid, user_id=uid, max_duration=3600)
-    fake_mgr.send_plug_limits.assert_not_called()
+
+    fake_mgr.send_plug_limits.assert_called_once()
+    kwargs = fake_mgr.send_plug_limits.call_args.kwargs
+    assert kwargs["max_duration_seconds"] == 3600
+    assert kwargs["max_kwh"] == UNLIMITED_MAX_KWH
+    assert kwargs["max_kwh"] != 0
 
 
 @db_gated
