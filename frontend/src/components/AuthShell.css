@@ -45,6 +45,11 @@
 }
 
 .auth-footer a {
+  display: inline-block;
+  /* Padding grows the tap target toward 44px without shifting the visible
+     text — offsetting negative margin keeps the row's footprint unchanged. */
+  padding: var(--sp-2) var(--sp-1);
+  margin: calc(-1 * var(--sp-2)) calc(-1 * var(--sp-1));
   font-weight: 600;
   color: var(--brand);
 }
@@ -64,7 +69,13 @@
   font-size: var(--text-sm);
 }
 
-.auth-forgot-link a { font-weight: 600; color: var(--brand); }
+.auth-forgot-link a {
+  display: inline-block;
+  padding: var(--sp-2) var(--sp-1);
+  margin: calc(-1 * var(--sp-2)) calc(-1 * var(--sp-1));
+  font-weight: 600;
+  color: var(--brand);
+}
 
 .auth-hint {
   font-size: var(--text-xs);

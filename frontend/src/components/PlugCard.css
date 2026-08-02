@@ -31,12 +31,13 @@
   flex-shrink: 0;
 }
 
-/* Favorite star — a quiet icon toggle, warm-colored when armed. */
+/* Favorite star — a quiet icon toggle, warm-colored when armed. Padding
+   widens the tap target — the bare 16px glyph was only ~20px square. */
 .plug-card-fav {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 2px;
+  padding: var(--sp-2);
   background: none;
   border: none;
   border-radius: var(--r-sm);
