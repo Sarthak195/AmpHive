@@ -1,5 +1,14 @@
 # Provisioning a new AmpHive gateway (direct-MQTT)
 
+> **Preparing a batch of preflashed units for retail/self-serve buyers
+> instead of a single custom site install?** See
+> [preflashed_unit_runbook.md](preflashed_unit_runbook.md) (claim-code
+> onboarding, 2026-08-02) — same captive portal and `gateways` table, but the
+> operator mints an unclaimed inventory row + claim code instead of doing
+> step A below, and the buyer binds it to their own tenant later via the CPO
+> portal. This doc (custom site install, operator does every step) is still
+> the right flow for a one-off/lab gateway.
+
 How to bring a new gateway online for a client site. Applies to the **ESP32
 gateway** (firmware ≥ 1.3.2) and, with the credential steps only, to the
 **AmpHive Agent** software gateway.

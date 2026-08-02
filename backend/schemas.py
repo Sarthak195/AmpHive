@@ -342,10 +342,31 @@ class CpoGatewayCreateRequest(BaseModel):
     firmware derives it from the hardware and shows it in the setup portal,
     so the operator just copies it here. ``vpn_ip`` is legacy/overlay-only
     (direct-MQTT devices don't use it); optional and defaults to empty.
+
+    This is the "manual registration" path — still supported for lab/legacy
+    use, but the preflashed-unit flow (POST /api/cpo/gateways/claim below)
+    is now the primary way a CPO adds a gateway.
     """
     gateway_id: str   # device MAC (matches the firmware-derived gateway_id)
     name: str
     vpn_ip: str = ""
+
+
+class CpoGatewayClaimRequest(BaseModel):
+    """Body for POST /api/cpo/gateways/claim — bind a preflashed, admin-minted
+    unclaimed gateway (POST /api/admin/gateways/inventory) to the caller's
+    tenant. ``claim_code`` is whatever the buyer typed off the unit's label
+    (the router normalizes case/whitespace/dashes before lookup); ``name`` is
+    optional — omit it to keep the inventory row's placeholder name, or set
+    it to something the CPO's team will recognize.
+
+    Deliberately NOT validated with a strict length/charset pattern here: a
+    malformed code should fail exactly like a wrong-but-well-formed one (the
+    router returns the same generic 404 either way — no enumeration oracle
+    on code format).
+    """
+    claim_code: str = Field(min_length=1, max_length=64)
+    name: Optional[str] = Field(default=None, max_length=100)
 
 
 class CpoGatewayOtaRequest(BaseModel):
@@ -697,3 +718,16 @@ class AdminAdjustBalanceRequest(BaseModel):
     description and the audit row)."""
     amount_coins: float
     reason: str = Field(min_length=3, max_length=200)
+
+
+class AdminGatewayMintRequest(BaseModel):
+    """Body for POST /api/admin/gateways/inventory — pre-register a preflashed
+    gateway as UNCLAIMED inventory (tenant_id NULL) with a fresh claim code,
+    for the "print claim code + label" step of the manufacturing runbook
+    (deploy/docs/preflashed_unit_runbook.md). ``gateway_id`` is the device's
+    real MAC (same format as CpoGatewayCreateRequest.gateway_id — no regex
+    enforced here either, since not every gateway_id in this system is a MAC,
+    e.g. the fake-plug simulator's `fakeplug-gw-01`). ``name`` is optional —
+    unset defaults to a placeholder the CPO can rename on claim."""
+    gateway_id: str = Field(min_length=1, max_length=50)
+    name: Optional[str] = Field(default=None, max_length=100)

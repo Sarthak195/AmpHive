@@ -6,19 +6,32 @@
  * an online/offline filter and a firmware-spread summary showing how many
  * gateways run each version.
  *
+ * Also mints preflashed-unit inventory (claim-code onboarding,
+ * feat/easy-provisioning): "Mint inventory gateway" POSTs
+ * /api/admin/gateways/inventory with the device's MAC, then shows the
+ * freshly generated claim code once so the operator can copy it onto the
+ * unit's label (see deploy/docs/preflashed_unit_runbook.md — this is the
+ * "mint inventory row" step, done after flashing + before creating the
+ * broker account). This fleet table only ever shows CLAIMED gateways
+ * (GET /api/admin/gateways inner-joins Tenant); unclaimed inventory has no
+ * tenant to join and doesn't belong in a tenant fleet view.
+ *
  * Data source: GET /api/admin/gateways?online=&limit=&offset=
  */
 
 import { useState, useCallback } from 'react';
-import { Server } from 'lucide-react';
+import { Server, Plus } from 'lucide-react';
 import {
   DataTable,
   ErrorState,
+  Modal,
   PageHeader,
   StatusDot,
+  useToast,
 } from '../../components/ui';
 import api from '../../api/client';
 import usePoll from '../../hooks/usePoll';
+import { apiErrorCopy } from '../../utils/statusCopy';
 
 const DEFAULT_LIMIT = 25;
 
@@ -75,6 +88,7 @@ function relativeTime(iso) {
 }
 
 export default function AdminGateways() {
+  const toast = useToast();
   const [data, setData] = useState({
     items: [],
     total: 0,
@@ -85,6 +99,58 @@ export default function AdminGateways() {
   // Filters
   const [onlineFilter, setOnlineFilter] = useState('all'); // 'all' | 'online' | 'offline'
   const [offset, setOffset] = useState(0);
+
+  // ---- Mint inventory gateway (preflashed-unit claim-code onboarding) --
+  const [mintOpen, setMintOpen] = useState(false);
+  const [mintGatewayId, setMintGatewayId] = useState('');
+  const [mintName, setMintName] = useState('');
+  const [mintBusy, setMintBusy] = useState(false);
+  const [mintError, setMintError] = useState('');
+  const [mintResult, setMintResult] = useState(null); // { gateway_id, claim_code } once minted
+  const [codeCopied, setCodeCopied] = useState(false);
+
+  const openMint = () => {
+    setMintGatewayId('');
+    setMintName('');
+    setMintError('');
+    setMintResult(null);
+    setCodeCopied(false);
+    setMintOpen(true);
+  };
+
+  const closeMint = () => {
+    if (mintBusy) return;
+    setMintOpen(false);
+  };
+
+  const submitMint = async (e) => {
+    e.preventDefault();
+    setMintBusy(true);
+    setMintError('');
+    try {
+      const res = await api.post('/api/admin/gateways/inventory', {
+        gateway_id: mintGatewayId.trim(),
+        name: mintName.trim() || undefined,
+      });
+      setMintResult(res);
+    } catch (err) {
+      setMintError(apiErrorCopy(err));
+    } finally {
+      setMintBusy(false);
+    }
+  };
+
+  const copyClaimCode = async () => {
+    if (!mintResult?.claim_code) return;
+    try {
+      await navigator.clipboard.writeText(mintResult.claim_code);
+      setCodeCopied(true);
+      toast.ok('Claim code copied.');
+      setTimeout(() => setCodeCopied(false), 2000);
+    } catch {
+      toast.error('Could not copy — copy the code manually.');
+    }
+  };
 
   const fetchGateways = useCallback(async () => {
     setLoading(true);
@@ -162,11 +228,89 @@ export default function AdminGateways() {
     ),
   }));
 
+  const mintAction = (
+    <button type="button" className="btn btn-primary" onClick={openMint}>
+      <Plus size={16} aria-hidden="true" />
+      Mint inventory gateway
+    </button>
+  );
+
+  const mintModal = (
+    <Modal open={mintOpen} onClose={closeMint} title="Mint inventory gateway">
+      {mintResult ? (
+        <div className="stack">
+          <p className="text-2 text-sm">
+            Gateway <code>{mintResult.gateway_id}</code> is now unclaimed inventory. Copy this
+            claim code onto the unit&apos;s label — it&apos;s shown here once.
+          </p>
+          <div className="field">
+            <label className="field-label" htmlFor="mint-claim-code">
+              Claim code
+            </label>
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <input id="mint-claim-code" className="input" value={mintResult.claim_code} readOnly />
+              <button type="button" className="btn btn-quiet" onClick={copyClaimCode}>
+                {codeCopied ? 'Copied!' : 'Copy'}
+              </button>
+            </div>
+          </div>
+          <div className="modal-actions">
+            <button type="button" className="btn btn-primary" onClick={closeMint}>
+              Done
+            </button>
+          </div>
+        </div>
+      ) : (
+        <form className="stack" onSubmit={submitMint}>
+          <p className="text-2 text-sm">
+            Pre-register a preflashed unit as unclaimed inventory with a fresh claim code (deploy/docs/preflashed_unit_runbook.md).
+            The gateway ID is the device&apos;s MAC, read off it during flashing.
+          </p>
+          <div className="field">
+            <label className="field-label" htmlFor="mint-gateway-id">
+              Gateway ID (device MAC)
+            </label>
+            <input
+              id="mint-gateway-id"
+              className="input"
+              value={mintGatewayId}
+              onChange={(e) => setMintGatewayId(e.target.value)}
+              placeholder="a1b2c3d4e5f6"
+              required
+            />
+          </div>
+          <div className="field">
+            <label className="field-label" htmlFor="mint-name">
+              Name <span className="text-2 text-sm">(optional)</span>
+            </label>
+            <input
+              id="mint-name"
+              className="input"
+              value={mintName}
+              onChange={(e) => setMintName(e.target.value)}
+              placeholder="Batch 2026-08 unit 014"
+            />
+          </div>
+          {mintError && <p className="field-error">{mintError}</p>}
+          <div className="modal-actions">
+            <button type="button" className="btn btn-quiet" onClick={closeMint} disabled={mintBusy}>
+              Cancel
+            </button>
+            <button type="submit" className="btn btn-primary" disabled={mintBusy}>
+              {mintBusy ? 'Minting…' : 'Mint gateway'}
+            </button>
+          </div>
+        </form>
+      )}
+    </Modal>
+  );
+
   if (error) {
     return (
       <>
-        <PageHeader title="Gateways" sub="Fleet overview and status" />
+        <PageHeader title="Gateways" sub="Fleet overview and status" actions={mintAction} />
         <ErrorState error={error} onRetry={fetchGateways} title="Couldn't load gateways" />
+        {mintModal}
       </>
     );
   }
@@ -176,6 +320,7 @@ export default function AdminGateways() {
       <PageHeader
         title="Gateways"
         sub={`${total} gateway${total !== 1 ? 's' : ''} across the network`}
+        actions={mintAction}
       />
 
       {/* Firmware spread summary */}
@@ -237,6 +382,7 @@ export default function AdminGateways() {
           }}
         />
       </div>
+      {mintModal}
     </>
   );
 }

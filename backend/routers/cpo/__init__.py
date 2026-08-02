@@ -61,7 +61,12 @@ from ._events import (
     cpo_list_audit_log,
     cpo_list_events,
 )
-from ._gateways import cpo_create_gateway, cpo_gateway_ota, cpo_list_gateways
+from ._gateways import (
+    cpo_claim_gateway,
+    cpo_create_gateway,
+    cpo_gateway_ota,
+    cpo_list_gateways,
+)
 from ._groups import (
     cpo_create_group,
     cpo_delete_group,
@@ -117,7 +122,7 @@ __all__ = [
     "cpo_list_disputes", "cpo_resolve_dispute",
     "cpo_list_plug_reports", "cpo_resolve_plug_report",
     "cpo_acknowledge_event", "cpo_gateway_logs", "cpo_list_audit_log", "cpo_list_events",
-    "cpo_create_gateway", "cpo_gateway_ota", "cpo_list_gateways",
+    "cpo_claim_gateway", "cpo_create_gateway", "cpo_gateway_ota", "cpo_list_gateways",
     "cpo_create_group", "cpo_delete_group", "cpo_list_group_members", "cpo_list_groups",
     "cpo_remove_group_member", "cpo_update_group", "generate_unique_access_code",
     "cpo_export_invoices_csv", "cpo_list_invoices",

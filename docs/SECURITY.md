@@ -496,6 +496,42 @@ guardrail below was honored — recorded here so the invariants are auditable:
   bcrypt truncation boundary). Login is intentionally unvalidated so accounts
   created before the rule can still sign in (`backend/schemas.py`; TD#30).
 
+### 8.7 Claim-code onboarding attack surface (2026-08-02, feat/easy-provisioning) — considered, mitigated
+
+`POST /api/cpo/gateways/claim` lets any authenticated cpo/admin account bind
+an admin-minted gateway to their tenant given only a short code — a new
+"guess a secret, get something" surface, mitigated the same way the auth
+endpoints above are:
+- **Keyspace:** 10 characters from a 32-symbol unambiguous alphabet
+  (`23456789ABCDEFGHJKMNPQRSTUVWXYZ`) — 32^10 ≈ 1.1 × 10^15 possibilities.
+- **No enumeration oracle:** an unknown code, an already-claimed code, and a
+  malformed code all return the identical `404
+  {"detail":"Claim code not found or already used."}` — a caller can never
+  learn which case they hit (same reasoning as `forgot_password`'s generic
+  200). The DB lookup always runs (even for an empty/malformed input) so the
+  three cases aren't trivially distinguishable by response timing either.
+- **Rate-limited:** `account_rate_limit_dependency` with
+  `cpo_gateway_claim_account_rate_limiter` (default 10/60s per account,
+  `CPO_GATEWAY_CLAIM_ACCOUNT_RATE_LIMIT`) bounds brute-force attempts from
+  any single authenticated account — the endpoint requires auth in the first
+  place (`require_role("cpo", "admin")`), so it's not open to anonymous
+  scanning at all.
+- **Blast radius on a successful guess:** binds one gateway's `tenant_id` to
+  the guesser's own tenant — no money movement, no credential exposure (the
+  MQTT broker password is never touched by this flow, see
+  `deploy/docs/preflashed_unit_runbook.md`'s "Out of scope"). An operator can
+  detect/undo a wrongly-claimed unit via `GET
+  /api/admin/gateways/inventory` (admin-only) and re-assign it manually if
+  needed — no self-service "release a claim" endpoint exists yet.
+- **On the firmware side**, `GET /scan` (the captive-portal Wi-Fi network
+  list) is unauthenticated but adds no exposure beyond joining the WPA2
+  setup AP itself already grants (§8.1) — it's reachable exclusively via
+  that AP, same as `GET /`.
+
+Tests: `backend/tests/test_gateway_claim.py` (mint/claim/double-claim/
+foreign-tenant/bad-code, mocked-DB + DB-gated), `backend/tests/test_rate_limiting.py`
+(wiring).
+
 ---
 
 ## Quick remediation checklist

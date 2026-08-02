@@ -83,21 +83,71 @@ resolver is down the connection fails (no compiled-in IP fallback — a raw-IP
 stored on-device (fw ≥ 2.0.0-direct) — they arrive from the backend's retained
 roster (§3).
 
-## 2. Captive portal (✅ implemented; locked down fw 1.6.0)
+## 2. Captive portal (✅ implemented; locked down fw 1.6.0; mobile-first wizard 2026-08-02)
 
 If WiFi config is missing or the STA connection fails, the device starts SoftAP
 `AmpHive_Setup_XXXX` — **WPA2-protected since fw 1.6.0** (passphrase = the
 per-device **setup code**, see below) — and runs `esp_http_server` on
 `192.168.4.1` in **AP-only mode** (no STA interface, so the portal is reachable
-exclusively via the setup AP). The form collects the setup code plus **5 config
-fields** (WiFi SSID/password, **Tapo account email + password**, per-gateway MQTT
-password); `gateway_id`, `device_name`, and `mqtt_user` are derived from the STA
-MAC, not typed, and plug IPs come from the backend's retained roster (§3), not
-the portal. POST `/save` verifies the setup code
+exclusively via the setup AP).
+
+**Portal UX (2026-08-02 preflashed-unit onboarding rework).** `GET /` serves a
+single self-contained page (inline CSS/JS, no external resources — the phone
+has no internet on the setup AP) styled as a two-step, mobile-first wizard
+(`firmware/main/main.c` `portal_html`, sent via `httpd_resp_send_chunk` so the
+one dynamic value — the device's auto-detected ID — is substituted at request
+time without re-parsing the rest as a printf format string):
+- **Step 1 of 2 — Wi-Fi.** The setup code field, then a **tappable scanned
+  network list** (`GET /scan`, see below) with a manual-entry text field as
+  the fallback/always-available option (typing directly is never blocked —
+  the scan is a convenience, not a requirement). Fields get
+  `autocapitalize="none"` — the setup code's alphabet is lowercase and the
+  match is case-sensitive, so a phone keyboard's default auto-capitalization
+  was a latent "your code is right but it still says wrong" trap this closes.
+- **Step 2 of 2 — smart plug.** Tapo account email/password. The per-gateway
+  **MQTT password field is optional**, tucked behind an "Installer options"
+  toggle — see the preflashed-unit note below.
+- Every response (wrong code, Wi-Fi association failure, success) renders
+  through a shared `send_status_page()` helper: a big colored heading (green
+  for success, red for failure) plus plain-language copy — a visible
+  pass/fail state without needing icon glyphs (this file stays pure ASCII;
+  see the code comment on why `\u`-escapes in a narrow C string literal
+  aren't worth the toolchain gamble).
+
+**Wi-Fi network scan (`GET /scan`, 2026-08-02).** Briefly hops to **AP+STA**
+— the same single-radio trade-off as the pre-check below (the AP may drop the
+installer's phone for a couple of seconds while the radio visits other
+channels) — runs one blocking `esp_wifi_scan_start`, and returns up to 20
+networks as JSON (`{"networks":[{"ssid","rssi","secure"}]}`), strongest-first
+and deduped by SSID (mesh APs broadcast the same name on multiple BSSIDs). No
+STA connection is attempted, so nothing needs tearing down beyond restoring
+AP-only mode. Not gated by the setup code: only a client already on the
+(WPA2) setup AP can reach it at all, so it adds no exposure beyond joining
+the AP already grants (SECURITY.md §8.1).
+
+**Preflashed-unit onboarding (claim-code flow, see docs/API_REFERENCE.md +
+deploy/docs/preflashed_unit_runbook.md).** The portal's job stays "get this
+device onto Wi-Fi and talking to its smart plug" — binding the gateway to a
+CPO's tenant now happens on the backend via a short claim code the CPO types
+into the CPO portal (`POST /api/cpo/gateways/claim`), not by an operator
+hand-registering the device before shipping. The one field this changes on
+the device side is **MQTT password**: a preflashed unit can have its
+per-gateway broker password written into NVS at manufacturing time (part of
+the runbook's "flash → mint inventory row → create broker account" sequence),
+so the portal no longer *requires* it — `save_config_to_nvs` only overwrites
+the stored `mqtt_pwd` when the submitted value is non-empty, so an ordinary
+buyer who never opens "Installer options" doesn't blank out the
+pre-provisioned password.
+
+The form still submits the setup code plus the same 5 config fields as
+before (WiFi SSID/password, Tapo account email + password, per-gateway MQTT
+password — now optional); `gateway_id`, `device_name`, and `mqtt_user` are
+derived from the STA MAC, not typed, and plug IPs come from the backend's
+retained roster (§3), not the portal. POST `/save` verifies the setup code
 (constant-time compare; wrong code → 1 s throttle + 403, nothing written),
-URL-decodes the fields, **pre-checks the Wi-Fi credentials** (see below), writes
-them to NVS, and reboots. The Tapo credentials
-are used by the KLAP driver's auth hash (see §4).
+URL-decodes the fields, **pre-checks the Wi-Fi credentials** (see below),
+writes them to NVS, and reboots. The Tapo credentials are used by the KLAP
+driver's auth hash (see §4).
 
 - **Setup code:** 10 chars from an unambiguous alphabet, generated via
   `esp_random()` the first time the portal runs, persisted in NVS

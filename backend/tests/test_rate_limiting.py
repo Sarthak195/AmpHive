@@ -371,6 +371,7 @@ def test_login_route_also_carries_the_account_rate_limit_dependency():
         ("backend.routers.sessions", "/api/sessions/stop", "POST"),
         ("backend.routers.payments", "/api/payments/create-order", "POST"),
         ("backend.routers.cpo._topups", "/api/cpo/topups", "POST"),
+        ("backend.routers.cpo._gateways", "/api/cpo/gateways/claim", "POST"),
     ],
 )
 def test_account_scoped_routes_carry_the_account_rate_limit_dependency(module_path, route_path, method):

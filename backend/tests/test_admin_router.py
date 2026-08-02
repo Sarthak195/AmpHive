@@ -120,7 +120,9 @@ def _allowed_roles(checker):
 
 def test_every_admin_route_is_admin_only():
     routes = [r for r in admin_router.routes if isinstance(r, APIRoute)]
-    assert len(routes) == 11  # contract §4 + GET /api/admin/gateway-logs (TD#28)
+    # contract §4 + GET /api/admin/gateway-logs (TD#28) + POST/GET
+    # /api/admin/gateways/inventory (feat/easy-provisioning claim-code onboarding)
+    assert len(routes) == 13
     for route in routes:
         assert route.path.startswith("/api/admin/")
         gates = [
