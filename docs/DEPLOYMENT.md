@@ -190,7 +190,7 @@ historical reference (its keys were rotated dead long ago — see
 
 | Script | Purpose |
 |--------|---------|
-| `fake_plug.py` | Hardware-free gateway+plug simulator speaking the real MQTT contract (runs as the `fakeplug` container on the VM). |
+| `fake_plug.py` | Hardware-free ESP32-gateway simulator (v2) speaking the full current MQTT contract — retained multi-plug roster (`.../config`), ON/OFF/SET_INTERVAL/SET_LIMITS, `/logs` WARN+ forwarding, configurable ramp/jitter load per plug (runs as the `fakeplug` container on the VM). |
 | `p110_sim/` | P110 **network-protocol** emulator (KLAP v2, real crypto) — emulates N plugs so a **real** ESP32 gateway can be multi-plug bench-tested without owning that many P110s. Different layer than `fake_plug.py` (which fakes the whole gateway over MQTT and never touches real firmware); see `tools/p110_sim/README.md`. |
 | `local_tapo_test.py` | LAN Tapo connection self-test (info → on → 3 s → off). |
 | `turn_on.py` / `turn_off.py` | Minimal manual on/off against a LAN plug. |
