@@ -8,6 +8,9 @@ account rotating source IPs is invisible to a limiter keyed on IP alone):
 account_rate_limit_dependency (keyed by user id) on sessions start/stop,
 payments create-order, and CPO offline top-up create; and
 login_account_rate_limit_dependency (keyed by normalized email) on login.
+
+And the blanket per-IP /api middleware (api_rate_limit_middleware) — the
+defense-in-depth floor under all of the above.
 """
 import re
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -17,9 +20,11 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from backend.schemas import LoginRequest
+from backend.services import rate_limit
 from backend.services.rate_limit import (
     SlidingWindowRateLimiter,
     account_rate_limit_dependency,
+    api_rate_limit_middleware,
     client_ip,
     login_account_rate_limit_dependency,
     rate_limit_dependency,
@@ -381,3 +386,126 @@ def test_account_scoped_routes_carry_the_account_rate_limit_dependency(module_pa
     route = _route(router, route_path, method)
     dep_names = [d.call.__qualname__ for d in route.dependant.dependencies]
     assert any("account_rate_limit_dependency" in name for name in dep_names), dep_names
+
+
+# ------------------------------------------------- blanket /api middleware ---
+
+def _blanket_app():
+    """Minimal app with only the blanket middleware mounted — the real
+    backend.main registration is asserted separately below."""
+    from fastapi import FastAPI
+
+    app = FastAPI()
+    app.middleware("http")(api_rate_limit_middleware)
+
+    @app.get("/api/things")
+    def things():
+        return {"ok": True}
+
+    @app.get("/api/health")
+    def health():
+        return {"status": "healthy"}
+
+    @app.get("/socket.io/")
+    def socketio_ish():
+        return {"ok": True}
+
+    return app
+
+
+def _patched_blanket(limiter):
+    """The middleware looks `api_rate_limiter` up per-call precisely so tests
+    can swap in a FakeClock-driven (or None) limiter."""
+    return patch.object(rate_limit, "api_rate_limiter", limiter)
+
+
+def test_blanket_middleware_429s_over_the_limit_with_retry_after():
+    client = TestClient(_blanket_app())
+    with _patched_blanket(SlidingWindowRateLimiter(2, 60, clock=FakeClock())):
+        assert client.get("/api/things").status_code == 200
+        assert client.get("/api/things").status_code == 200
+        resp = client.get("/api/things")
+
+    assert resp.status_code == 429
+    assert re.match(
+        r"^Too many requests\. Try again in \d+ s\.$", resp.json()["detail"]
+    ), resp.text
+    assert int(resp.headers["Retry-After"]) >= 1
+
+
+def test_blanket_middleware_keys_by_forwarded_client_not_proxy_hop():
+    client = TestClient(_blanket_app())
+    with _patched_blanket(SlidingWindowRateLimiter(1, 60, clock=FakeClock())):
+        a = {"X-Forwarded-For": "203.0.113.1, 172.18.0.4"}
+        b = {"X-Forwarded-For": "203.0.113.2, 172.18.0.4"}
+        assert client.get("/api/things", headers=a).status_code == 200
+        assert client.get("/api/things", headers=b).status_code == 200  # own bucket
+        assert client.get("/api/things", headers=a).status_code == 429
+
+
+def test_blanket_middleware_exempts_health_and_non_api_paths():
+    client = TestClient(_blanket_app())
+    with _patched_blanket(SlidingWindowRateLimiter(1, 60, clock=FakeClock())):
+        assert client.get("/api/things").status_code == 200  # bucket now full
+        for _ in range(3):
+            assert client.get("/api/health").status_code == 200
+            assert client.get("/socket.io/").status_code == 200
+        assert client.get("/api/things").status_code == 429
+
+
+def test_blanket_middleware_spends_budget_on_unmatched_api_probes():
+    """Runs before routing: a 404 probe flood over /api/* consumes the same
+    bucket as real routes (a dependency-based limiter would never see it)."""
+    client = TestClient(_blanket_app())
+    with _patched_blanket(SlidingWindowRateLimiter(2, 60, clock=FakeClock())):
+        assert client.get("/api/no-such-route").status_code == 404
+        assert client.get("/api/no-such-route").status_code == 404
+        assert client.get("/api/no-such-route").status_code == 429
+        assert client.get("/api/things").status_code == 429  # same bucket
+
+
+def test_blanket_middleware_none_limiter_disables_the_layer():
+    client = TestClient(_blanket_app())
+    with _patched_blanket(None):
+        for _ in range(5):
+            assert client.get("/api/things").status_code == 200
+
+
+def test_optional_limiter_off_and_rule_parsing(monkeypatch):
+    monkeypatch.setenv("API_RATE_LIMIT", "off")
+    assert rate_limit._optional_limiter("API_RATE_LIMIT", "300/60") is None
+    monkeypatch.setenv("API_RATE_LIMIT", "0")
+    assert rate_limit._optional_limiter("API_RATE_LIMIT", "300/60") is None
+    monkeypatch.setenv("API_RATE_LIMIT", "20/60")
+    limiter = rate_limit._optional_limiter("API_RATE_LIMIT", "300/60")
+    assert limiter.max_attempts == 20 and limiter.window_sec == 60
+
+
+def _mw_kwargs(m):
+    # Starlette's Middleware carried .options before 0.35 and .kwargs after.
+    return getattr(m, "kwargs", None) or getattr(m, "options", {})
+
+
+def test_app_registers_the_blanket_middleware_inside_cors():
+    """backend.main must mount the blanket limiter with CORSMiddleware
+    OUTSIDE it (user_middleware[0] is the outermost — add_middleware inserts
+    at 0 and Starlette builds the stack reversed): preflight OPTIONS then
+    never spend budget, and a 429 passes back through CORS and gets its
+    headers, so a cross-origin page can read the error."""
+    from fastapi.middleware.cors import CORSMiddleware
+
+    from backend.main import app
+
+    # backend.main's exported `app` is the socketio.ASGIApp wrapper (which is
+    # also why /socket.io traffic never reaches this limiter); the FastAPI
+    # instance with the middleware stack is its other_asgi_app.
+    fastapi_app = app.other_asgi_app
+
+    idx_limit = next(
+        i for i, m in enumerate(fastapi_app.user_middleware)
+        if _mw_kwargs(m).get("dispatch") is api_rate_limit_middleware
+    )
+    idx_cors = next(
+        i for i, m in enumerate(fastapi_app.user_middleware) if m.cls is CORSMiddleware
+    )
+    assert idx_cors < idx_limit

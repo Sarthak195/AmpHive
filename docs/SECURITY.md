@@ -491,6 +491,18 @@ guardrail below was honored — recorded here so the invariants are auditable:
   byte-identical to the per-IP login limiter's so it adds no
   account-enumeration oracle. Env-tunable via `*_ACCOUNT_RATE_LIMIT`
   (`backend/services/rate_limit.py`, `deploy/config/.env.template`).
+- ~~**No blanket rate limit on the rest of the API**~~ **Resolved
+  2026-08-02**: the dedicated rules above only cover auth and the money
+  paths — every other endpoint could be hammered freely (scraping, probing,
+  DB exhaustion). `api_rate_limit_middleware` now applies a per-IP sliding
+  window to EVERY `/api` route (default 300/60 s, env `API_RATE_LIMIT`,
+  `off` disables) as a floor UNDER the per-route limiters — a request that
+  passes it still hits its route's own tighter rule. Exempts only
+  `/api/health` (uptime probes must never 429). Middleware rather than a
+  dependency, so it runs before routing (404 probe floods spend budget too)
+  and is registered inside `CORSMiddleware` (preflights never spend budget;
+  a 429 still carries CORS headers). Same 429 + `Retry-After` shape as the
+  per-route rules. Tests: `backend/tests/test_rate_limiting.py`.
 - ~~**Registration input isn't validated**~~ **Resolved 2026-07-11**:
   `RegisterRequest` uses `EmailStr` and an 8-72 char password rule (72 =
   bcrypt truncation boundary). Login is intentionally unvalidated so accounts

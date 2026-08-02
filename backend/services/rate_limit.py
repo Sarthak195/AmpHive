@@ -12,6 +12,11 @@ Rules are env-configurable as "<attempts>/<window seconds>":
   FORGOT_PASSWORD_RATE_LIMIT (default 5/3600  — 5 reset emails per hour per IP)
   RESET_PASSWORD_RATE_LIMIT  (default 10/3600 — 10 token submissions per hour per IP)
 
+A blanket per-IP window additionally covers EVERY /api route (middleware, not a
+per-route dependency) as the defense-in-depth floor under the dedicated rules:
+  API_RATE_LIMIT             (default 300/60 — 300 requests per minute per IP;
+                              "off"/"0" disables the blanket layer entirely)
+
 Per-account limits (below) close the gap the per-IP limiters above leave open:
 a single account rotating source IPs (e.g. a residential proxy pool, or just a
 mobile client hopping cell towers) is invisible to a limiter keyed on IP alone.
@@ -29,6 +34,7 @@ import time
 from collections import deque
 
 from fastapi import Depends, HTTPException, Request
+from fastapi.responses import JSONResponse
 
 from backend.database.models import User
 from backend.schemas import LoginRequest
@@ -101,6 +107,17 @@ def client_ip(request: Request) -> str:
     if first:
         return first
     return request.client.host if request.client else "unknown"
+
+
+def _optional_limiter(env_name: str, default: str):
+    """A SlidingWindowRateLimiter from env, or None when explicitly disabled
+    ("off"/"0"/"none"/"disabled") — for layers that are safe to switch off,
+    unlike the per-route rules above which fall back to their defaults."""
+    raw = os.getenv(env_name, default).strip().lower()
+    if raw in {"off", "0", "none", "disabled"}:
+        logger.warning("%s=%r — blanket per-IP API rate limit DISABLED", env_name, raw)
+        return None
+    return SlidingWindowRateLimiter(*_rule_from_env(env_name, default))
 
 
 def _rule_from_env(env_name: str, default: str):
@@ -198,6 +215,45 @@ def login_account_rate_limit_dependency(limiter: SlidingWindowRateLimiter):
     return dependency
 
 
+# Health probes (Docker healthcheck, uptime monitors, the deploy smoke) must
+# never 429 — an exhausted attacker bucket shading a monitor's IP would read
+# as a fake outage.
+API_RATE_LIMIT_EXEMPT_PATHS = frozenset({"/api/health"})
+
+
+async def api_rate_limit_middleware(request: Request, call_next):
+    """Blanket per-IP sliding window over every /api route — the
+    defense-in-depth floor under the per-route dependencies above, so an
+    endpoint without a dedicated rule can't be hammered freely (scraping,
+    guessing, DB exhaustion). Layered UNDER those rules: a request that
+    passes this floor still hits its route's own tighter limiter.
+
+    Starlette HTTP middleware, not a dependency — it runs before routing, so
+    unmatched /api/* probes (404 floods) spend budget too, and it must build
+    its own JSONResponse (an HTTPException raised here would not reach
+    FastAPI's exception handlers). Keyed by client_ip() like the per-IP
+    dependencies. Non-/api paths (the Socket.io mount) pass through
+    untouched. `api_rate_limiter` is looked up per-call so tests can patch
+    it; None (API_RATE_LIMIT=off) disables the layer.
+    """
+    path = request.url.path
+    if (
+        api_rate_limiter is None
+        or not path.startswith("/api/")
+        or path in API_RATE_LIMIT_EXEMPT_PATHS
+    ):
+        return await call_next(request)
+    retry_after = api_rate_limiter.check(client_ip(request))
+    if retry_after is not None:
+        seconds = int(retry_after) + 1
+        return JSONResponse(
+            status_code=429,
+            content={"detail": f"Too many requests. Try again in {seconds} s."},
+            headers={"Retry-After": str(seconds)},
+        )
+    return await call_next(request)
+
+
 login_rate_limiter = SlidingWindowRateLimiter(*_rule_from_env("LOGIN_RATE_LIMIT", "10/60"))
 register_rate_limiter = SlidingWindowRateLimiter(*_rule_from_env("REGISTER_RATE_LIMIT", "10/3600"))
 # Password reset: forgot-password is tighter than login (each allowed call can
@@ -234,3 +290,10 @@ login_account_rate_limiter = SlidingWindowRateLimiter(
 cpo_gateway_claim_account_rate_limiter = SlidingWindowRateLimiter(
     *_rule_from_env("CPO_GATEWAY_CLAIM_ACCOUNT_RATE_LIMIT", "10/60")
 )
+
+# Blanket /api floor (api_rate_limit_middleware above). 300/60 ≈ 5 req/s
+# sustained per IP — far above what the SPA generates (a page-load fan-out is
+# ~10-15 calls, the dashboard's usePoll backstop is one call per 30 s), with
+# headroom for several drivers sharing one NAT'd hub Wi-Fi, while still
+# bounding a single-IP scrape/flood. None when API_RATE_LIMIT=off.
+api_rate_limiter = _optional_limiter("API_RATE_LIMIT", "300/60")
