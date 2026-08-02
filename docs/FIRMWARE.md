@@ -199,8 +199,25 @@ driver's auth hash (see §4).
 - Commands parsed with **cJSON** (`"action":"ON"`/`"OFF"`/`"SET_INTERVAL"`, optional
   `max_duration_seconds` / `max_kwh` / `session_id` / `local_ip`, `interval_ms`);
   topic/data buffers 256/512 B with an oversized/fragmented-payload guard.
-  Defaults: 14400 s, 30.0 kWh, 10000 ms. `SET_INTERVAL` is gateway-wide (one poll
+  Defaults (used ONLY when a field is genuinely absent from the payload —
+  which the backend never sends on `ON`/`SET_LIMITS` since 2026-08-02, see
+  below): 14400 s, 30.0 kWh, 10000 ms. `SET_INTERVAL` is gateway-wide (one poll
   cadence for all plugs); `OTA` is refused if **any** plug is mid-session.
+  **The firmware has no wire representation for "no limit"** — a present
+  `max_duration_seconds`/`max_kwh` of `0` is read literally and trips the
+  duration/energy watchdog below on the very next `telemetry_safety` poll
+  (`elapsed_s >= 0` and `consumed_kwh >= 0` are always true), and an absent
+  field falls back to the 14400 s/30.0 kWh defaults just above — neither is
+  "unlimited". Since [Opt-in charging limits, 2026-08-02] made backend
+  session limits opt-in (`SessionStartRequest.max_kwh`/`max_duration_seconds`
+  default to `None`), the backend resolves a driver's unset limit to a large
+  sentinel (`services/mqtt_manager.py UNLIMITED_DURATION_SECONDS` ≈ 10 years /
+  `UNLIMITED_MAX_KWH` ≈ 1 GWh) before publishing `ON`/`SET_LIMITS`, so this
+  firmware watchdog always receives a concrete, safe numeric pair — never
+  `0` and never an omitted field. The actual stop conditions for such a
+  session are backend-side (balance exhaustion, gateway-offline reaping,
+  overcurrent, plug caps); these sentinels only keep this on-device watchdog
+  from tripping first.
 - `telemetry_safety` runs at a **configurable interval** (`telemetry_interval_ms`, default **10 s** / 10000 ms) and, each sweep, **polls every known plug regardless of MQTT connectivity** (with many plugs at a fast session cadence the sweep may exceed one interval, which just stretches the effective cadence — safety still runs every sweep):
   - If a `"SET_INTERVAL"` command with `"interval_ms"` is received, the interval is updated (clamped between 500 ms and 60000 ms).
   - The published telemetry `kwh` is **session-relative** (`meter − start_energy_kwh`,
@@ -316,6 +333,7 @@ current, or temperature. So the `tapo_telemetry_t` fields map as:
 | `voltage_v` | **nominal** (configured, default 230 V) |
 | `current_a` | **derived** — `power_w / voltage_v` |
 | `temperature_c` | **nominal** — the P110 has no temperature sensor |
+| `today_energy_kwh` / `month_energy_kwh` | **real** (fw ≥ 2.4.0-direct) — `today_energy`/`month_energy` (Wh) ÷ 1000, from the SAME `get_energy_usage` response as `power_w`/`current_a`/`voltage_v` above (no extra KLAP round trip). Unlike `energy_kwh`, these are the plug's OWN calendar counters — see below. -1.0 if the field wasn't in the response. |
 
 > **Lifetime meter vs billed energy:** `tapo_telemetry_t.energy_kwh` is the
 > *lifetime* integrator. `main.c` subtracts the session baseline before publishing,
@@ -326,6 +344,68 @@ current, or temperature. So the `tapo_telemetry_t` fields map as:
 
 Because there is no real temperature, the thermal watchdog now trips on the plug's
 `overheat_status` flag rather than a 75 °C compare (see §3).
+
+### 4a. Offline/unmetered-consumption reconciliation (fw ≥ 2.4.0-direct)
+
+Real incident this closes: an operator manually toggled a P110 on then off
+(physical button / Tapo app) while its ESP32 gateway was fully unreachable.
+The gateway's own `energy_kwh` integrator only advances while its driver is
+actually polling, so it never saw that energy at all — no session, no bill,
+no alarm. `today_energy`/`month_energy` are calendar counters maintained **on
+the plug itself** (independent of the gateway) that keep counting regardless
+of connectivity, so cross-checking them against a last-known "definitely
+idle" baseline exposes the gap.
+
+`tapo_plug_reconcile_idle_baseline(plug, today_kwh, month_kwh, can_report,
+out)` — called from `main.c`'s `telemetry_task` once per sweep for a plug
+with **no active AmpHive session** (the case where any energy delivered is,
+by definition, unbilled):
+
+- Compares the fresh reading against a per-plug idle baseline persisted in
+  NVS (namespace `"energy"`, key `"bl_<plug_id>"` — same idiom as the energy
+  meter's `"wh_<plug_id>"`), restored in `tapo_plug_create`/reseated in
+  `tapo_plug_reassign_id`, flushed unconditionally in `tapo_plug_destroy`.
+- **Reset vs. consumption:** either counter regressing beyond a ~1 Wh
+  rounding epsilon is a calendar rollover (`today_energy` resets nightly on
+  the plug's own clock, `month_energy` far less often) or a plug-side reset —
+  never reported as consumption. Otherwise the **larger** of the two deltas
+  is the estimate, preferring `month_energy` when both are valid (it resets
+  far less often, so it's the tighter signal across a multi-hour/day gateway
+  outage); if only one counter rolled over, the other's delta is used as a
+  fallback estimate.
+- Reported past a 10 Wh (`UNMETERED_THRESHOLD_KWH`) floor so P110
+  standby-draw noise across a long idle gap never false-alarms.
+- **Idempotent/lossless across an offline gap:** the baseline is advanced
+  (and NVS-flushed, itself throttled to ≥10 Wh of drift) only when there is
+  nothing to report, OR the caller is about to actually deliver the report
+  (`can_report` = `mqtt_connected`). A detected-but-undelivered episode
+  leaves the baseline untouched, so the next poll recomputes the same (or a
+  larger) delta against the same pre-gap reference — the report waits for
+  connectivity instead of silently evaporating the moment MQTT reconnects.
+
+`main.c`'s `telemetry_task` calls this once per idle plug per sweep and, on
+`unmetered_detected`, publishes `publish_unmetered_alarm()` →
+`{"error":"UNMETERED_CONSUMPTION","plug_id":N,"kwh":<estimate>,
+"today_kwh":<f>,"month_kwh":<f>}` on `/alarms` (see
+[MQTT_CONTRACT.md](MQTT_CONTRACT.md)). Independently, every telemetry frame
+(idle or not) now also carries `today_kwh`/`month_kwh` so the backend can run
+its own **continuous** version of the same cross-check
+(`services/mqtt/telemetry.py` `_persist_telemetry`) — the backend has
+wall-clock time and the session/billing history the firmware doesn't, so it
+also naturally catches the very first reconnect frame even if the firmware's
+own one-shot report is lost or delayed. Both paths funnel into the same
+`GatewayEvent` (`UNMETERED_CONSUMPTION`, severity `warning`) + CPO bell-notify
+(`services/mqtt/alarms.py`).
+
+**Bench-testable without hardware:** `tools/p110_sim/`'s emulator already
+models `today_energy`/`month_energy` as independent accumulators (not
+aliases of the lifetime meter) and advances them off wall-clock time
+regardless of who's polling — an independent KLAP client (`tools/klap_probe.py`,
+or a human with the real Tapo app) toggling the simulated plug while the
+firmware/gateway simply isn't polling reproduces the incident exactly. See
+`tools/p110_sim/README.md`'s bench-procedure scenario 7 and
+`tools/p110_sim/tests/test_plug.py`'s
+`test_manual_toggle_during_a_polling_gap_is_reflected_on_reconnect`.
 
 > **Credentials caveat:** the Tapo email/password are stored in NVS in plaintext
 > (acceptable for the prototype; a future hardening item).
@@ -478,12 +558,20 @@ the wire). Three changes:
 - **Telemetry `relay` field** — telemetry now includes `"relay":<bool>` (the
   actual `device_on`), distinct from `"status"` (session state). See §3.
 
-**Current: fw `2.3.0-direct`** (`firmware/CMakeLists.txt` `PROJECT_VER`). Fw has
+**Current: fw `2.4.0-direct`** (`firmware/CMakeLists.txt` `PROJECT_VER`). Fw has
 advanced well past 1.5.0 through many small, individually-verified jumps — DNS-based
 broker addressing with legacy-IP self-migration (§1), the multi-plug refactor
 (TD#20) with a backend-pushed retained plug roster replacing captive-portal plug
 IPs, per-plug current caps (REC-03) persisted across crash recovery, a Wi-Fi
-pre-check at provisioning (TD#31), and WARN/ERROR log forwarding over MQTT
-(TD#28) — none of which change the overall shape described in §§1–4 above. See
+pre-check at provisioning (TD#31), WARN/ERROR log forwarding over MQTT
+(TD#28), and offline/unmetered-consumption reconciliation via the plug's own
+day/month energy counters (§4a) — none of which change the overall shape
+described in §§1–4 above. `2.4.0-direct` was build-verified with ESP-IDF
+v5.3.3 (`idf.py set-target esp32 && idf.py build`, per operator instruction
+for this change — note this targets classic ESP32, not the ESP32-C3
+documented as the fielded hardware elsewhere in this file; the source
+doesn't reference chip-specific peripherals, so both targets build clean off
+the same `main/` sources, but confirm the right `set-target` before
+flashing/OTA-ing a real unit); not yet OTA'd to a fielded gateway. See
 [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for the version-by-version
 matrix and on-device verification history.

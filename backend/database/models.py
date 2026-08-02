@@ -339,6 +339,23 @@ class Plug(Base):
     rated_power_w: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     connector_type: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
 
+    # [Unmetered consumption] Continuous reconciliation state: the plug's OWN
+    # today_energy/month_energy readings (get_energy_usage, kWh) the last
+    # time we saw them, so the NEXT frame can detect a jump with no ACTIVE
+    # session covering it -- energy delivered while the gateway (or the whole
+    # site) was unreachable, e.g. a plug manually toggled during an outage.
+    # NULL until the first frame carrying these fields arrives (older
+    # firmware, or a plug model that doesn't report them, leaves both NULL
+    # forever -- reconciliation is skipped for that plug, never falsely
+    # tripped on a bogus comparison). Updated by
+    # services/mqtt/telemetry.py._persist_telemetry on every frame; see also
+    # firmware/main/tapo_protocol.c's tapo_plug_reconcile_idle_baseline, the
+    # firmware's own one-shot offline-consumption report (this is the
+    # backend-side continuous half of the same detector). Alembic revision
+    # 0035_offline_consumption.
+    last_today_energy_kwh: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    last_month_energy_kwh: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
     # Relationships
     gateway: Mapped[Gateway] = relationship("Gateway", back_populates="plugs")
     sessions: Mapped[List["ChargingSession"]] = relationship("ChargingSession", back_populates="plug", cascade="all, delete-orphan")
@@ -410,21 +427,29 @@ class ChargingSession(Base):
 
     # [Session limits] The stop conditions this session was STARTED with,
     # snapshotted verbatim from SessionStartRequest (max_kwh /
-    # max_duration_seconds — the same values forwarded to the gateway in the
-    # MQTT ON payload, where the firmware enforces them locally as watchdogs).
-    # Persisted so the BACKEND can mirror that enforcement on the telemetry
-    # path (the firmware cuts the relay but publishes no alarm on these
-    # cutoffs, so without this mirror the session would linger ACTIVE until
-    # the reaper): MQTTManager._maybe_auto_stop_on_limits finalizes with
-    # "auto-stopped: energy limit reached" / "auto-stopped: time limit
-    # reached" (env toggle AUTO_STOP_ON_LIMITS), and the session reaper
-    # sweeps a duration backstop. Always set at start (including the schema
-    # defaults, 30 kWh / 4 h) since 2026-07-12; NULL only for legacy sessions
-    # predating the columns — those are never limit-auto-stopped (staleness
-    # reaping and balance exhaustion still apply). max_kwh is Float, not
-    # Numeric: it's an energy measurement threshold, not money (matches
-    # energy_kwh). Alembic revision 0015_session_limits. Appended at the
-    # class tail (after the relationships) to ease parallel-branch merges.
+    # max_duration_seconds — resolved to firmware-safe UNLIMITED sentinels,
+    # never left None/omitted/0, in the MQTT ON payload the gateway actually
+    # receives — see services/mqtt_manager.py firmware_duration/
+    # firmware_max_kwh). Persisted so the BACKEND can mirror the firmware's
+    # local watchdog enforcement on the telemetry path (the firmware cuts the
+    # relay but publishes no alarm on those cutoffs, so without this mirror a
+    # LIMITED session would linger ACTIVE until the reaper):
+    # MQTTManager._maybe_auto_stop_on_limits finalizes with "auto-stopped:
+    # energy limit reached" / "auto-stopped: time limit reached" (env toggle
+    # AUTO_STOP_ON_LIMITS), and the session reaper sweeps a duration backstop.
+    #
+    # [Opt-in charging limits, 2026-08-02] NULL is not a legacy edge case —
+    # it's the default: a driver who sets no explicit limit gets NULL/NULL
+    # here (charge until stopped), and NULL is never limit-auto-stopped
+    # (staleness reaping and balance exhaustion still apply — see
+    # services/session_start.py begin_active_session for how the auth hold
+    # is sized when max_kwh is NULL). Before 2026-08-02 every session always
+    # persisted a value here, including the schema defaults (30 kWh / 4 h);
+    # a NULL row from before that date is the same "no limit" case, just
+    # never chosen deliberately. max_kwh is Float, not Numeric: it's an
+    # energy measurement threshold, not money (matches energy_kwh). Alembic
+    # revision 0015_session_limits. Appended at the class tail (after the
+    # relationships) to ease parallel-branch merges.
     max_kwh: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     max_duration_seconds: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 

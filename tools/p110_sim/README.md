@@ -209,8 +209,10 @@ the firmware side.
 Key flags (`--help` for the full list): `--jitter` (load noise, default
 2%), `--voltage`/`--power-factor` (default 230V / 0.95), `--drop-rate` /
 `--drop-rate-map PLUGID=RATE` (flaky-plug simulation), `--reset-counter
-PLUGID@SECONDS[@VALUE_KWH]` (scheduled counter reset). Ctrl-C stops all
-plugs cleanly.
+PLUGID@SECONDS[@VALUE_KWH]` (scheduled full-counter/power-cycle reset),
+`--daily-reset-counter PLUGID@SECONDS` (scheduled `today_energy`-only
+rollover, simulating the P110's own midnight reset — see scenario 7 below).
+Ctrl-C stops all plugs cleanly.
 
 ## Bench procedure (real gateway + emulator)
 
@@ -264,25 +266,51 @@ plugs cleanly.
    resets its energy counter to 0.5 kWh 120 s after the emulator starts,
    and its KLAP session is invalidated — forcing the gateway to
    re-handshake, exactly like a real power-cycle). **Caveat:** AmpHive's
-   firmware computes `energy_kwh` as its **own** driver-side monotonic
-   integrator from `current_power` samples (`tapo_protocol.c`) — it never
-   reads a cumulative counter *from* the plug. So this scenario does **not**
-   by itself reproduce the backend's `ENERGY_COUNTER_RESET_DROP_KWH`
-   detection path (`backend/services/mqtt/telemetry.py`), which triggers on
-   the *gateway's* session-relative `kwh` regressing — that needs a
-   **gateway** reboot/NVS-recovery gap, not a plug-side event. What this
-   scenario *does* exercise faithfully: a forced KLAP re-handshake
-   mid-session (transient `get_telemetry` failure → that plug's telemetry
-   sweep is skipped for one cycle, per `firmware/main/main.c`'s
-   `telemetry_task`, then resumes normally) — i.e. genuine plug-power-cycle
-   resilience, not the billing-offset code path. Watch the gateway's serial
-   log or MQTT `/logs` topic for the re-handshake.
-7. **Flaky-plug scenario:** add `--drop-rate 0.2` (or `--drop-rate-map
+   firmware computes **billed** `energy_kwh` as its **own** driver-side
+   monotonic integrator from `current_power` samples (`tapo_protocol.c`) —
+   it never reads a cumulative counter *from* the plug for billing. So this
+   scenario does **not** by itself reproduce the backend's
+   `ENERGY_COUNTER_RESET_DROP_KWH` detection path
+   (`backend/services/mqtt/telemetry.py`), which triggers on the *gateway's*
+   session-relative `kwh` regressing — that needs a **gateway**
+   reboot/NVS-recovery gap, not a plug-side event. What this scenario *does*
+   exercise faithfully: a forced KLAP re-handshake mid-session (transient
+   `get_telemetry` failure → that plug's telemetry sweep is skipped for one
+   cycle, per `firmware/main/main.c`'s `telemetry_task`, then resumes
+   normally) — i.e. genuine plug-power-cycle resilience, not the
+   billing-offset code path — **and** (fw ≥ 2.4.0) the plug's
+   `today_energy`/`month_energy` counters both dropping together, which
+   `tapo_plug_reconcile_idle_baseline()` reads as a full reset (never an
+   `UNMETERED_CONSUMPTION` report) rather than consumption. Watch the
+   gateway's serial log or MQTT `/logs` topic for the re-handshake.
+7. **Offline/unmetered-consumption scenario** (fw ≥ 2.4.0 — the owner-
+   reported incident this feature closes: someone manually toggles the plug
+   while the gateway is fully unreachable and it goes unbilled): with the
+   emulator and a real bench gateway both running and idle (no session on
+   plug 1), **kill the gateway's WiFi or power it off** for at least one
+   `telemetry_interval_ms` (default 10 s), then, while it's down, point
+   `tools/klap_probe.py` at the emulator (`python tools/klap_probe.py
+   <bench-ip>:9440 bench@example.com bench-pw`) and toggle the plug ON, wait
+   a few seconds, then OFF again — standing in for a physical button / Tapo
+   app session with nobody watching. Bring the gateway back up. Expect: the
+   first telemetry frame after reconnect carries non-zero `today_kwh`/
+   `month_kwh` deltas versus what it last saw, and — because the SAME KLAP
+   session `tapo_plug_reconcile_idle_baseline()` uses to detect this survived
+   the outage on the plug side (the emulator doesn't reset sessions unless
+   `--reset-counter` fires) — an `{"error":"UNMETERED_CONSUMPTION",...}`
+   alarm on `amphive/gateways/<gw>/alarms` with an `estimated_kwh` close to
+   what `klap_probe.py`'s toggle actually drew. `--daily-reset-counter
+   1@<seconds>` additionally exercises the "today rolled over mid-gap, month
+   kept counting" fallback branch of the same reconciliation. No firmware or
+   sim code is needed purely at the **simulator** layer to prove the
+   counters behave this way — see `tools/p110_sim/tests/test_plug.py`'s
+   `test_manual_toggle_during_a_polling_gap_is_reflected_on_reconnect`.
+8. **Flaky-plug scenario:** add `--drop-rate 0.2` (or `--drop-rate-map
    2=0.5` for just plug 2) and confirm the gateway's telemetry for that
    plug becomes intermittent (missing sweeps) rather than the gateway
    crashing or wedging, and that it recovers cleanly once a request finally
    lands.
-8. **State persistence check:** stop the emulator (Ctrl-C) mid-session,
+9. **State persistence check:** stop the emulator (Ctrl-C) mid-session,
    restart it with the same `--state-file`, and confirm the resumed energy
    counter and relay state match what was last persisted (write-through on
    every relay change and, while a plug is drawing power, on the polling
@@ -294,13 +322,14 @@ plugs cleanly.
 C:\Users\Sarthak\Documents\AmpHive\.venv\Scripts\python.exe -m pytest tools/p110_sim/tests -q
 ```
 
-33 tests: pure crypto unit tests (`test_crypto.py`, no network), pure
+37 tests: pure crypto unit tests (`test_crypto.py`, no network), pure
 plug-state-machine unit tests (`test_plug.py`, no network, clocks
-monkeypatched), a hand-rolled-client-vs-live-server integration suite
-(`test_server_klap.py` — handshake, on/off/energy, wrong credentials → hash
-mismatch, missing session → 403, drop-rate, the `/app` AES-probe-decline
-path, and the scheduled counter reset), and the real `tapo` library
-integration suite (`test_tapo_lib.py` — see "What's verified" above).
+monkeypatched — including the 2026-08 today/month independent-counter and
+manual-toggle-during-a-gap fidelity tests), a hand-rolled-client-vs-live-server
+integration suite (`test_server_klap.py` — handshake, on/off/energy, wrong
+credentials → hash mismatch, missing session → 403, drop-rate, the `/app`
+AES-probe-decline path, and the scheduled counter reset), and the real `tapo`
+library integration suite (`test_tapo_lib.py` — see "What's verified" above).
 `tools/` isn't in this repo's `ruff`/`mypy` CI scope (checked
 `pyproject.toml`/`.github/workflows/ci.yml` — only `backend/` is), so these
 tests don't run in CI; run them locally as above after touching this

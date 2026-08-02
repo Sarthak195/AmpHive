@@ -65,6 +65,75 @@ AUTO_MAINTENANCE_ON_CRITICAL_ALARM = os.getenv("AUTO_MAINTENANCE_ON_CRITICAL_ALA
 # few missed frames without flapping. Env-overridable.
 PLUG_POWER_STALE_SEC = int(os.getenv("PLUG_POWER_STALE_SEC", "90"))
 
+# [Unmetered consumption] Backend-side continuous cross-check of the P110's
+# own today/month energy counters against what we last saw (see
+# services/mqtt/telemetry.py _persist_telemetry and firmware/main/
+# tapo_protocol.c tapo_plug_reconcile_idle_baseline, the firmware's own
+# one-shot report of the same signal). A jump of at least this many kWh with
+# no ACTIVE session covering the plug is treated as unmetered/unauthorized
+# consumption -- small enough to catch a real manual session, large enough to
+# ignore P110 standby-draw noise across a long idle gap. Mirrors the
+# firmware's own UNMETERED_THRESHOLD_KWH constant (tapo_protocol.c) so both
+# layers agree on what counts as "real".
+UNMETERED_CONSUMPTION_THRESHOLD_KWH = float(os.getenv("UNMETERED_CONSUMPTION_THRESHOLD_KWH", "0.01"))
+
+# A day/month counter reading BELOW the last-seen value by at least this much
+# is a genuine reset (calendar rollover on the plug, or a plug-side reboot),
+# not rounding jitter on an essentially-flat reading -- same rationale as
+# ENERGY_COUNTER_RESET_DROP_KWH above, applied to the plug-side counters.
+UNMETERED_CONSUMPTION_RESET_EPS_KWH = float(os.getenv("UNMETERED_CONSUMPTION_RESET_EPS_KWH", "0.001"))
+
+# Rate-limit: don't re-raise a GatewayEvent/notify for the same plug more
+# often than this while a discrepancy keeps being seen (e.g. a slow ongoing
+# live drift) -- avoids notification spam. A genuinely new episode on a
+# different plug is unaffected (the cooldown is per-plug).
+UNMETERED_ALERT_COOLDOWN_SEC = float(os.getenv("UNMETERED_ALERT_COOLDOWN_SEC", "300"))
+
+# [Opt-in charging limits] Charging limits (max_duration_seconds / max_kwh)
+# are opt-in: a session with no explicit limit charges until the driver (or a
+# real safety net) stops it — never a hidden default duration/energy. But the
+# firmware's local relay watchdog (firmware/main/main.c, the ON and
+# SET_LIMITS command handlers) has no concept of "no limit" today:
+#   - an ABSENT max_duration_seconds/max_kwh field in the command payload
+#     falls back to the firmware's OWN hard-coded default (14400 s / 30 kWh —
+#     the exact old behavior this feature removes), and
+#   - a PRESENT-but-zero value is read literally, which trips the watchdog
+#     on the very next poll (`elapsed_s >= 0` and `consumed_kwh >= 0` are
+#     always true) — an instant cutoff, not "unlimited".
+# So neither omitting the field nor sending 0 encodes "no limit" on
+# already-deployed firmware. These sentinels stand in for it instead: values
+# large enough that no real charging session could ever reach them (a
+# single-phase AC plug tops out at a few kW, and MAX_PLAUSIBLE_KWH already
+# bounds a telemetry frame's session energy at 1000 kWh, well under
+# UNLIMITED_MAX_KWH — see services/mqtt/telemetry.py), while staying safely
+# inside the firmware's uint32_t-seconds / float-kWh range. The REAL stop
+# conditions for an "unlimited" session are the backend-side safety nets
+# (balance exhaustion, gateway-offline/staleness reaping, overcurrent, plug
+# caps) — these sentinels only keep the on-device duration/energy watchdog
+# from tripping FIRST. Env-overridable for tests/exotic fleets.
+UNLIMITED_DURATION_SECONDS = int(
+    os.getenv("UNLIMITED_DURATION_SECONDS", str(10 * 365 * 24 * 3600))
+)  # ~10 years
+UNLIMITED_MAX_KWH = float(os.getenv("UNLIMITED_MAX_KWH", "999999.0"))  # ~1 GWh
+
+
+def firmware_duration(max_duration_seconds: Optional[int]) -> int:
+    """The value to publish as the gateway's `max_duration_seconds` watchdog
+    field: the driver's own explicit limit, or UNLIMITED_DURATION_SECONDS
+    when they set none (see the module comment above for why this can't be
+    0 or an omitted field)."""
+    return (
+        max_duration_seconds
+        if max_duration_seconds is not None
+        else UNLIMITED_DURATION_SECONDS
+    )
+
+
+def firmware_max_kwh(max_kwh: Optional[float]) -> float:
+    """The value to publish as the gateway's `max_kwh` watchdog field: the
+    driver's own explicit limit, or UNLIMITED_MAX_KWH when they set none."""
+    return max_kwh if max_kwh is not None else UNLIMITED_MAX_KWH
+
 
 class MQTTManager(
     MQTTConnectionMixin,
@@ -131,6 +200,13 @@ class MQTTManager(
         # the advisory nudge repeats — so a persisted dedupe query isn't worth
         # a column/migration here.
         self._low_balance_warned: set = set()
+        # [Unmetered consumption] Per-plug monotonic timestamp of the last
+        # UNMETERED_CONSUMPTION alert (see UNMETERED_ALERT_COOLDOWN_SEC).
+        # Only touched on the event loop -- same in-memory/best-effort
+        # tolerance as _low_balance_warned above (a mid-session restart can
+        # re-fire one alert; the underlying GatewayEvent audit trail and the
+        # persisted plug.last_*_energy_kwh baseline stay exact either way).
+        self._unmetered_alert_cooldown: Dict[int, float] = {}
 
         self.client = mqtt.Client(client_id="amphive_backend_server", callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
 

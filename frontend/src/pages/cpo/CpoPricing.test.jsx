@@ -2,11 +2,20 @@
  * CpoPricing tests: loading/error states, the tariffs list (rate/slot-count/
  * assigned-count), create/edit/delete tariff, the per-tariff slot editor
  * (add slot incl. midnight-crossing auto-split, remove slot), the tenant
- * default select, and the group/charger assignment table.
+ * default select, the group/charger assignment table, and the Simple/
+ * Advanced mode split (smart detection + the Simple-mode "broadcast" save —
+ * see also CpoPricingSimple.test.jsx for the Simple view in isolation).
  *
  * Note: tariff names ("Standard", "Peak Site") also appear as <option> text
  * in the assignment selects (tenant default + every group/charger row), so
  * row lookups are scoped to the tariffs table specifically via `tariffRow`.
+ *
+ * The shared TARIFFS fixture below has two tariffs, so it's always "custom"
+ * per the smart-detection rule (utils/pricingUniformity) — every test that
+ * reuses it lands in Advanced automatically, exactly like before this split
+ * existed. The dedicated "Simple/Advanced smart detection" describe block
+ * below swaps in single-/zero-tariff fixtures to exercise the Simple-default
+ * path.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, within, fireEvent } from '@testing-library/react';
@@ -27,7 +36,7 @@ vi.mock('../../components/CpoLayout', () => ({
 }));
 
 vi.mock('../../contexts/ConfigContext', () => ({
-  useConfig: () => ({ coin_inr_rate: 1 }),
+  useConfig: () => ({ coin_inr_rate: 1, coins_per_kwh: 5 }),
 }));
 
 const TARIFFS = [
@@ -250,6 +259,153 @@ describe('assignment', () => {
     await userEvent.selectOptions(plugSelect, '2');
     await waitFor(() =>
       expect(api.put).toHaveBeenCalledWith('/api/cpo/plugs/100/tariff', { tariff_id: 2 })
+    );
+  });
+});
+
+/* ---- Simple/Advanced mode ------------------------------------------------- */
+
+// Builds a routeGet function for an arbitrary tariffs/groups/plugs/profile/
+// slots fixture, same shape as the shared `routeGet` above.
+const routeGetWith = (tariffs, groups, plugs, profile, slotsByTariff) => (url) => {
+  if (url === '/api/cpo/tariffs') return Promise.resolve(tariffs);
+  if (url === '/api/cpo/groups') return Promise.resolve(groups);
+  if (url === '/api/cpo/plugs') return Promise.resolve(plugs);
+  if (url === '/api/cpo/profile') return Promise.resolve(profile);
+  const m = url.match(/\/api\/cpo\/tariffs\/(\d+)\/slots$/);
+  if (m) return Promise.resolve((slotsByTariff && slotsByTariff[Number(m[1])]) || []);
+  return Promise.reject(new Error(`unexpected GET ${url}`));
+};
+
+describe('Simple/Advanced smart detection', () => {
+  it('opens in Advanced by default for a non-uniform tenant (two tariffs)', async () => {
+    renderPage();
+    await tariffsTable();
+
+    expect(screen.getByRole('tab', { name: 'Advanced' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByRole('tab', { name: 'Simple' })).toHaveAttribute('aria-selected', 'false');
+  });
+
+  it('shows a "custom schedule active" summary when switched to Simple manually', async () => {
+    renderPage();
+    await tariffsTable();
+
+    await userEvent.click(screen.getByRole('tab', { name: 'Simple' }));
+    expect(await screen.findByText('Custom schedule active.')).toBeInTheDocument();
+    // Prefilled from the tenant default tariff ("Standard", ₹5) as a sane
+    // starting point for "replace the custom schedule with…".
+    expect(screen.getByLabelText('Price per kWh (₹)')).toHaveValue(5);
+  });
+
+  it('opens in Simple, prefilled at the platform default rate, when the tenant has no tariff at all', async () => {
+    api.get.mockImplementation(
+      routeGetWith(
+        [],
+        [{ id: 20, name: 'Only Group', tariff_id: null }],
+        [],
+        { tenant: { name: 'Solo CPO', timezone: '', default_tariff_id: null } },
+        {}
+      )
+    );
+    renderPage();
+
+    expect(await screen.findByLabelText('Price per kWh (₹)')).toHaveValue(5);
+    expect(screen.getByRole('tab', { name: 'Simple' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.queryByText('Custom schedule active.')).not.toBeInTheDocument();
+  });
+
+  it('opens in Simple, prefilled at its rate, for a single default tariff with no slots/overrides', async () => {
+    api.get.mockImplementation(
+      routeGetWith(
+        [{ id: 5, name: 'Standard', price_per_kwh: 6 }],
+        [{ id: 30, name: 'Only Group', tariff_id: null }],
+        [{ id: 300, name: 'Only Plug', tariff_id: null }],
+        { tenant: { name: 'Solo CPO', timezone: 'Asia/Kolkata', default_tariff_id: 5 } },
+        { 5: [] }
+      )
+    );
+    renderPage();
+
+    expect(await screen.findByLabelText('Price per kWh (₹)')).toHaveValue(6);
+    expect(screen.getByRole('tab', { name: 'Simple' })).toHaveAttribute('aria-selected', 'true');
+  });
+});
+
+describe('Simple mode save (broadcast)', () => {
+  it('flattens the default tariff: updates its price and strips its time-of-day slots', async () => {
+    renderPage(); // shared 2-tariff fixture: Standard(1, ₹5, 1 slot) is the tenant default
+    await tariffsTable();
+    await userEvent.click(screen.getByRole('tab', { name: 'Simple' }));
+    await screen.findByText('Custom schedule active.');
+
+    await userEvent.clear(screen.getByLabelText('Price per kWh (₹)'));
+    await userEvent.type(screen.getByLabelText('Price per kWh (₹)'), '9');
+    await userEvent.click(screen.getByRole('button', { name: 'Save price' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Replace with flat rate' }));
+
+    await waitFor(() =>
+      expect(api.put).toHaveBeenCalledWith('/api/cpo/tariffs/1', {
+        name: 'Standard',
+        price_per_kwh: 9,
+      })
+    );
+    await waitFor(() => expect(api.delete).toHaveBeenCalledWith('/api/cpo/tariffs/1/slots/500'));
+    expect(api.put).toHaveBeenCalledWith('/api/cpo/tenant/default-tariff', { tariff_id: 1 });
+    // Group 10 already resolves to tariff 1 and plug 100 already inherits —
+    // neither is an "override" pinned to a different tariff, so no calls.
+    expect(api.put).not.toHaveBeenCalledWith('/api/cpo/groups/10/tariff', expect.anything());
+    expect(api.put).not.toHaveBeenCalledWith('/api/cpo/plugs/100/tariff', expect.anything());
+    expect(toast.ok).toHaveBeenCalledWith('Price updated — applied to every charger.');
+  });
+
+  it('clears group/charger overrides pinned to a different tariff so the flat rate applies everywhere', async () => {
+    api.get.mockImplementation(
+      routeGetWith(
+        [
+          { id: 1, name: 'Standard', price_per_kwh: 5 },
+          { id: 2, name: 'Peak Site', price_per_kwh: 8 },
+        ],
+        [{ id: 10, name: 'Sunrise Society', tariff_id: 2 }],
+        [{ id: 100, name: 'Bay A1', tariff_id: 2 }],
+        { tenant: { name: 'Volt Yard', timezone: 'Asia/Kolkata', default_tariff_id: 1 } },
+        { 1: [], 2: [] }
+      )
+    );
+    renderPage();
+    await tariffsTable();
+    await userEvent.click(screen.getByRole('tab', { name: 'Simple' }));
+    await screen.findByText('Custom schedule active.');
+
+    await userEvent.click(screen.getByRole('button', { name: 'Save price' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Replace with flat rate' }));
+
+    await waitFor(() =>
+      expect(api.put).toHaveBeenCalledWith('/api/cpo/groups/10/tariff', { tariff_id: null })
+    );
+    expect(api.put).toHaveBeenCalledWith('/api/cpo/plugs/100/tariff', { tariff_id: null });
+    expect(api.put).toHaveBeenCalledWith('/api/cpo/tenant/default-tariff', { tariff_id: 1 });
+  });
+
+  it('creates a tariff when saving Simple for a tenant with none yet', async () => {
+    api.get.mockImplementation(
+      routeGetWith([], [], [], { tenant: { name: 'Solo CPO', timezone: '', default_tariff_id: null } }, {})
+    );
+    api.post.mockResolvedValue({ status: 'created', tariff_id: 42, name: 'Standard rate', price_per_kwh: 7 });
+    renderPage();
+    await screen.findByLabelText('Price per kWh (₹)');
+
+    await userEvent.clear(screen.getByLabelText('Price per kWh (₹)'));
+    await userEvent.type(screen.getByLabelText('Price per kWh (₹)'), '7');
+    await userEvent.click(screen.getByRole('button', { name: 'Save price' }));
+
+    await waitFor(() =>
+      expect(api.post).toHaveBeenCalledWith('/api/cpo/tariffs', {
+        name: 'Standard rate',
+        price_per_kwh: 7,
+      })
+    );
+    await waitFor(() =>
+      expect(api.put).toHaveBeenCalledWith('/api/cpo/tenant/default-tariff', { tariff_id: 42 })
     );
   });
 });

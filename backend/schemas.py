@@ -59,21 +59,31 @@ class UserResponse(BaseModel):
 
 class SessionStartRequest(BaseModel):
     plug_id: int
-    # Bounded so a client can't disable the firmware safety watchdog by sending
-    # an absurd limit. 1 s .. 24 h, and 0.1 .. 100 kWh.
-    max_duration_seconds: int = Field(default=14400, gt=0, le=86400)  # 4 h default, 24 h cap
-    max_kwh: float = Field(default=30.0, gt=0, le=100.0)              # 30 kWh default, 100 kWh cap
+    # [Opt-in charging limits] Charging limits are OPT-IN: omitted (None)
+    # means "charge until I stop it" — no hidden default duration/energy
+    # (2026-08-02; previously defaulted to 14400 s / 30.0 kWh here, which
+    # silently capped every session that didn't ask for a limit). When a
+    # limit IS given it's still bounded so a client can't disable the
+    # firmware safety watchdog with an absurd value: 1 s .. 24 h, and
+    # 0.1 .. 100 kWh. An unlimited session still stops on the real safety
+    # nets — balance exhaustion, gateway-offline/staleness reaping,
+    # overcurrent, plug caps (see services/mqtt_manager.py
+    # firmware_duration/firmware_max_kwh for what's actually sent to the
+    # gateway when these are None — NOT 0 and NOT an omitted field, both of
+    # which the firmware reads unsafely).
+    max_duration_seconds: Optional[int] = Field(default=None, gt=0, le=86400)
+    max_kwh: Optional[float] = Field(default=None, gt=0, le=100.0)
 
 
 class QueueChargeRequest(BaseModel):
     """[Queued charge] Body for POST /api/sessions/queue — queue an auto-start
     on a plug whose gateway is online but line power is out. Same stop-condition
-    bounds/defaults as SessionStartRequest (snapshotted onto the QueuedCharge so
-    the eventual auto-start bills like a walk-up); both limits optional so a
-    driver can queue with just a plug_id."""
+    bounds as SessionStartRequest (snapshotted onto the QueuedCharge so the
+    eventual auto-start bills like a walk-up) — both optional, default None
+    (no limit; the eventual auto-start charges until stopped)."""
     plug_id: int
-    max_duration_seconds: int = Field(default=14400, gt=0, le=86400)  # 4 h default, 24 h cap
-    max_kwh: float = Field(default=30.0, gt=0, le=100.0)              # 30 kWh default, 100 kWh cap
+    max_duration_seconds: Optional[int] = Field(default=None, gt=0, le=86400)
+    max_kwh: Optional[float] = Field(default=None, gt=0, le=100.0)
 
 
 class SessionLimitsUpdateRequest(BaseModel):

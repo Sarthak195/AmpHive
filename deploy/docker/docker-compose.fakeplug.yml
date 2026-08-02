@@ -1,27 +1,53 @@
 # =============================================================================
 # AmpHive — Fake Plug (test-only, OPTIONAL)
 # =============================================================================
-# Runs the software ESP32 + P110 stand-in (tools/fake_plug.py) as an always-on
-# container, so the app can be tested end-to-end WITHOUT hardware. It is NOT part
-# of the production stack and is NOT shipped by deploy.ps1 — deploy it manually.
+# Runs the software ESP32-gateway stand-in (tools/fake_plug.py, v2 — full
+# current MQTT contract + multi-plug roster support) as an always-on
+# container, so the app can be tested end-to-end WITHOUT hardware. It is NOT
+# part of the production stack and is NOT shipped by deploy/scripts/deploy.ps1
+# — deploy it manually, onto the current prod host (amphive-relay).
 #
-# It reuses the already-built `amphive_backend` image (which has python +
-# paho-mqtt), mounts the sim script, joins the running stack's Docker network,
-# and reaches the broker as `mqtt:1883`. Broker credentials come from
-# ~/amphive/.env (MQTT_GW_*), read by the script from the environment.
+# It reuses the already-built `amphive_backend` image (python + paho-mqtt —
+# see backend/requirements.txt), mounts the sim script, joins the running
+# stack's Docker network, and reaches the broker as `mqtt:1883` (plaintext,
+# internal-only — the public mqtts://mqtt.amphive.app:8883 listener is for
+# real fielded gateways). Broker credentials come from ~/amphive-relay/.env
+# (MQTT_FAKEPLUG_PASSWORD), read by the script from the environment.
 #
 # The plug row must already exist (created once via the CPO API):
 #   python tools/fake_plug.py --register-only --cpo-email cpo@amphive.test --cpo-password '<pw>'
 #   -> gateway=fakeplug-gw-01  plug_id=2  (public group)
+# (This registration already happened historically — this step is only
+# needed again if the gateway/plug row is ever deleted.)
 #
-# Deploy (from repo root; a separate compose PROJECT so redeploys never touch it):
+# The broker account for this gateway (username MUST equal the gateway_id —
+# see docs/MQTT_CONTRACT.md's ACL note) is created the same way any real
+# gateway's is; add_gateway_user.ps1's own defaults still point at the
+# decommissioned amphive-vm-in box (out of scope for this file — see
+# deploy/scripts/add_gateway_user.ps1), so override them explicitly:
+#   .\deploy\scripts\add_gateway_user.ps1 -GatewayId fakeplug-gw-01 -Password '<pw>' `
+#       -VmName amphive-relay -VmZone us-west1-a -RemoteDir ~/amphive-relay
+# Then set MQTT_FAKEPLUG_PASSWORD=<pw> in ~/amphive-relay/.env on the VM.
+#
+# Deploy (from repo root; a separate compose PROJECT so redeploys of the main
+# stack never touch it):
 #   gcloud compute scp tools/fake_plug.py deploy/docker/docker-compose.fakeplug.yml \
-#       amphive-vm-in:/home/Sarthak/amphive/ --zone=asia-south1-a
-#   gcloud compute ssh amphive-vm-in --zone=asia-south1-a --command \
-#       "cd ~/amphive && sudo docker-compose -p fakeplug -f docker-compose.fakeplug.yml up -d"
+#       amphive-relay:~/amphive-relay/ --zone=us-west1-a
+#   gcloud compute ssh amphive-relay --zone=us-west1-a --command \
+#       "cd ~/amphive-relay && sudo docker-compose -p fakeplug -f docker-compose.fakeplug.yml up -d"
 #
 # Tail logs:  sudo docker logs -f amphive-fake-plug
-# Stop:       cd ~/amphive && sudo docker-compose -p fakeplug -f docker-compose.fakeplug.yml down
+# Stop:       cd ~/amphive-relay && sudo docker-compose -p fakeplug -f docker-compose.fakeplug.yml down
+#
+# v2 capabilities available here without any compose change (see
+# tools/fake_plug.py's docstring / --help for the full flag list): the fake
+# gateway now builds its plug set from the backend's retained multi-plug
+# roster on .../config (so adding a 2nd/3rd plug to fakeplug-gw-01 via the
+# CPO UI/API "just works" — no redeploy of this file needed), handles
+# SET_LIMITS, and forwards a few realistic WARN/ERROR lines to .../logs. The
+# explicit --plug-id=2 below is now just a bootstrap seed (kept for backward
+# compatibility with the existing prod registration), not the only plug it
+# can drive.
 # =============================================================================
 version: '3.7'
 
@@ -35,7 +61,7 @@ services:
       - ./fake_plug.py:/fake_plug.py:ro
     environment:
       # Per-gateway broker account (username == gateway_id, ACL-scoped to
-      # amphive/gateways/fakeplug-gw-01/#). Password from ~/amphive/.env
+      # amphive/gateways/fakeplug-gw-01/#). Password from ~/amphive-relay/.env
       # (MQTT_FAKEPLUG_PASSWORD), created via deploy/scripts/add_gateway_user.ps1.
       # fake_plug.py reads MQTT_GW_USERNAME/PASSWORD for --broker-user/pass.
       - MQTT_GW_USERNAME=fakeplug-gw-01
@@ -44,16 +70,22 @@ services:
       - python
       - /fake_plug.py
       - --run-only
-      - --plug-id=2
+      - --plug-id=2                   # bootstrap seed; the retained roster (if any) takes over from here
       - --gateway-id=fakeplug-gw-01
       - --broker-host=mqtt
       - --broker-port=1883
-      - --watts=10000                 # constant 10 kW load
+      - --watts=10000                 # constant-target 10 kW load (ramps up over --ramp-seconds)
+      - --ramp-seconds=8              # soft-start realism; 0 = instant like the old v1 behavior
+      - --jitter=0.02                 # +/-2% load noise
       - --interval=5                  # telemetry every 5 s
 
-# Attach to the already-running stack's network (created by the prod compose as
-# `<project>_default`, i.e. amphive_default) so `mqtt` resolves.
+# Attach to the already-running stack's network. `docker compose` derives the
+# project name from $WORKDIR's basename with no COMPOSE_PROJECT_NAME override
+# (see deploy/relay/deploy-relay.sh) — the relay stack runs from ~/amphive-relay,
+# so its network is `amphive-relay_default`, not the old `amphive_default`
+# (pre-consolidation directory name). Verify with `docker network ls | grep amphive`
+# on the VM before relying on this if the directory is ever renamed again.
 networks:
   default:
     external:
-      name: amphive_default
+      name: amphive-relay_default

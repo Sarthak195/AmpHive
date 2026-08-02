@@ -44,7 +44,7 @@
 |-----------|-------|-----|----------|---------|
 | backend → gateway | `amphive/gateways/{gateway_id}/plugs/{plug_id}/commands` | 1 | no | `{"action":"ON"\|"OFF","max_duration_seconds":<int>,"max_kwh":<float>,"max_current_a":<float>,"session_id":"<str>","local_ip":"<str>"}` OR `{"action":"SET_LIMITS","max_kwh":<float>,"max_duration_seconds":<int>,"max_current_a":<float>,"local_ip":"<str>"}` OR `{"action":"SET_INTERVAL","interval_ms":<int>}` OR `{"action":"OTA","url":"<http(s)>"}` |
 | backend → gateway | `amphive/gateways/{gateway_id}/config` | 1 | yes | `{"v":1,"plugs":[{"plug_id":<int>,"local_ip":"<str>","max_current_a":<float\|null>}, ...]}` — the gateway's full plug roster (fw ≥ 2.0.0-direct) |
-| gateway → backend | `amphive/gateways/{gateway_id}/telemetry` | 0 | no | `{"plug_id":<int>,"watts":<f>,"kwh":<f>,"voltage":<f>,"current":<f>,"relay":<bool>,"status":"occupied"\|"available","session_id":"<str>"}` |
+| gateway → backend | `amphive/gateways/{gateway_id}/telemetry` | 0 | no | `{"plug_id":<int>,"watts":<f>,"kwh":<f>,"voltage":<f>,"current":<f>,"relay":<bool>,"status":"occupied"\|"available","session_id":"<str>","today_kwh":<f>,"month_kwh":<f>}` (`today_kwh`/`month_kwh` fw ≥ 2.4.0-direct) |
 
 > `voltage`/`current` are the plug's **measured** volts/amps (a Tapo P110 exposes
 > both, ~2 dp). Because active power factor is < 1, `current` is **not**
@@ -58,7 +58,7 @@
 > 2.2.0-direct, persists it in the session NVS blob so crash recovery re-arms
 > the session's own cap rather than the gateway default. Older firmware ignores it.
 | gateway → backend | `amphive/gateways/{gateway_id}/status` | 1 | yes | `{"status":"online","fw":"<ver>"}` (on connect) / `{"status":"offline"}` (LWT) |
-| gateway → backend | `amphive/gateways/{gateway_id}/alarms` | 1 | no | `{"error":"THERMAL_CUTOFF"\|"OVERCURRENT_CUTOFF"\|"OVERCURRENT_CAP"\|"UNAUTHORIZED_ON","plug_id":<int>}` or `{"event":"OTA_STARTED"\|"OTA_OK_REBOOTING"\|"OTA_FAILED"\|"OTA_REFUSED_SESSION_ACTIVE"\|...}` or (software agent) `{"event":"LOCAL_LIMIT_CUTOFF","reason":"ENERGY_LIMIT"\|"DURATION_LIMIT","plug_id":<int>}` |
+| gateway → backend | `amphive/gateways/{gateway_id}/alarms` | 1 | no | `{"error":"THERMAL_CUTOFF"\|"OVERCURRENT_CUTOFF"\|"OVERCURRENT_CAP"\|"UNAUTHORIZED_ON"\|"UNMETERED_CONSUMPTION","plug_id":<int>}` (UNMETERED_CONSUMPTION additionally carries `"kwh":<f>,"today_kwh":<f>,"month_kwh":<f>`, fw ≥ 2.4.0-direct) or `{"event":"OTA_STARTED"\|"OTA_OK_REBOOTING"\|"OTA_FAILED"\|"OTA_REFUSED_SESSION_ACTIVE"\|...}` or (software agent) `{"event":"LOCAL_LIMIT_CUTOFF","reason":"ENERGY_LIMIT"\|"DURATION_LIMIT","plug_id":<int>}` |
 | gateway → backend | `amphive/gateways/{gateway_id}/logs` | 0 | no | raw WARN/ERROR log line as plain text (fw ≥ 2.1.0-direct). Field diagnostics — persisted as `gateway_logs` rows (see `services/mqtt/logs.py`), no notify/socket fan-out. Covered by the `amphive/gateways/%u/#` ACL. |
 | agent → backend | `amphive/gateways/{gateway_id}/discovery` | 1 | no | `{"unique_id":"<str>","provider":"<str>","model":"<str>","alias":"<str>","capabilities":["switch","power","energy"]}` |
 | backend → agent | `amphive/gateways/{gateway_id}/assign` | 1 | yes | `{"<unique_id>":<plug_id:int>, ...}` (full map for the gateway) |
@@ -83,6 +83,54 @@ state (`device_on`), distinct from `status` (the gateway's own session state).
 It lets the backend/UI show the physical relay and underpins the firmware's
 `UNAUTHORIZED_ON` guard: a relay ON with no active session (physical button /
 Tapo app / stale NVS resume) is forced OFF locally and alarmed.
+
+> **`today_kwh`/`month_kwh` + `UNMETERED_CONSUMPTION` (offline-consumption
+> detection, fw ≥ 2.4.0-direct).** A P110's `get_energy_usage` response also
+> carries `today_energy`/`month_energy` — calendar counters maintained **on
+> the plug itself**, independent of the ESP32 gateway, that keep advancing
+> even while the gateway is fully unreachable. This closes a real gap: a plug
+> manually toggled on/off (physical button, Tapo app) while its gateway was
+> offline delivered energy the gateway's own session-relative `kwh`
+> integrator never saw at all, so it went completely unbilled/unflagged.
+> Two complementary mechanisms use these counters:
+> 1. **Continuous telemetry fields** — every telemetry frame (idle or not)
+>    now carries `today_kwh`/`month_kwh` (kWh, converted from the plug's raw
+>    Wh integers) so the backend can cross-check them against billed sessions
+>    on an ongoing basis (`services/mqtt/telemetry.py` `_persist_telemetry`):
+>    a jump on either counter with **no ACTIVE session** covering the plug —
+>    most notably the very first frame after a gateway reconnects from an
+>    outage — raises the alarm below. `plugs.last_today_energy_kwh` /
+>    `last_month_energy_kwh` persist the last-seen reading per plug so the
+>    check survives a backend restart.
+> 2. **The firmware's own one-shot report** — `firmware/main/tapo_protocol.c`
+>    `tapo_plug_reconcile_idle_baseline()` runs the same day/month
+>    cross-check on-device against an NVS-persisted idle baseline (namespace
+>    `"energy"`, key `"bl_<plug_id>"`) and publishes
+>    `{"error":"UNMETERED_CONSUMPTION","plug_id":<int>,"kwh":<estimate>,
+>    "today_kwh":<f>,"month_kwh":<f>}` on `/alarms` once per detected episode.
+>    Idempotent/lossless across an offline gap: the on-device baseline only
+>    advances once the report is actually delivered (MQTT connected), so an
+>    undelivered report keeps re-computing against the same pre-gap reference
+>    on every poll instead of silently evaporating.
+>
+> **Reset vs. real consumption.** Either counter regressing (beyond a small
+> rounding epsilon) is a calendar rollover — `today_energy` resets nightly on
+> the plug's own clock, `month_energy` far less often — or a plug-side
+> reset, **not** consumption, so it never alarms; `month_energy` is preferred
+> as the more reliable signal across a multi-hour/day gateway outage (it
+> resets far less often than `today_energy`), with a same-logic fallback to
+> the other counter when just one of the two has rolled over. Both the
+> firmware (`tapo_plug_reconcile_idle_baseline`) and the backend
+> (`_persist_telemetry`) apply this exact rule independently. This is
+> distinct from the existing `ENERGY_COUNTER_RESET_DROP_KWH` logic
+> (`services/mqtt/telemetry.py`), which detects the **gateway's own**
+> session-relative `kwh` counter resetting (an ESP32 reboot/NVS loss) — that
+> mechanism can't see a plug-side-only event at all, which is exactly the gap
+> this one closes. `GatewayEvent.event_type = "UNMETERED_CONSUMPTION"`
+> (severity `warning`) additionally bell-notifies every CPO of the tenant
+> (`services/mqtt/alarms.py` `_notify_cpos_unmetered_consumption`), on top of
+> the usual passive `gateway_events`/`gateway_alarm` feed every alarm type
+> gets.
 
 > **`/discovery` + `/assign` (software gateways only).** These two topics belong
 > to the **AmpHive Agent** ([AMPHIVE_AGENT.md](AMPHIVE_AGENT.md)) — a software
@@ -189,11 +237,30 @@ Tapo app / stale NVS resume) is forced OFF locally and alarmed.
 
 ## Command publishing (backend)
 
+> **Opt-in charging limits (2026-08-02).** `max_kwh`/`max_duration_seconds` are
+> now opt-in at the API layer (`SessionStartRequest`/`QueueChargeRequest`
+> default to `None` — "charge until stopped"), but the firmware's local relay
+> watchdog has no wire representation for "no limit": an **omitted** field
+> falls back to the firmware's OWN old hard default (14400 s / 30 kWh), and a
+> **present-but-zero** value trips the watchdog on the very next poll
+> (`elapsed_s >= 0` / `consumed_kwh >= 0` are always true — an instant
+> cutoff). So every caller that publishes `ON`/`SET_LIMITS` resolves `None` to
+> a large "practically unlimited" sentinel first
+> (`services/mqtt_manager.py UNLIMITED_DURATION_SECONDS` / `UNLIMITED_MAX_KWH`,
+> via `firmware_duration()`/`firmware_max_kwh()`) — the gateway always
+> receives a concrete numeric watchdog pair, never `null`/omitted/`0`. The
+> REAL stop conditions for an unlimited session are backend-side (balance
+> exhaustion, gateway-offline reaping, overcurrent, plug caps); the sentinels
+> only keep the on-device watchdog from tripping first.
+
 - `MQTTManager.send_plug_command(gateway_id, plug_id, action, max_duration=14400, max_kwh=30.0, session_id=None, local_ip=None, max_current_a=None, wait=True)`
   publishes to the command topic at QoS 1 and `wait_for_publish(timeout=3.0)`,
   returning `is_published()`. `/api/sessions/start` passes `session_id=session.id`,
   `local_ip=plug.local_ip` and `max_current_a=effective_plug_cap(plug)` on `ON`
-  and returns HTTP 500 if the publish fails;
+  and returns HTTP 500 if the publish fails; `max_duration`/`max_kwh` are
+  always the resolved (never-`None`) values from `firmware_duration()`/
+  `firmware_max_kwh()` above — the function's own `14400`/`30.0` keyword
+  defaults are an inert fallback no real caller relies on.
   `/api/sessions/stop` (via `finalize_charging_session`) omits `session_id`,
   passes `local_ip=plug.local_ip`, and ignores the result (best-effort OFF).
   `wait=False` (event-loop callers, e.g. the reconnect OFF republish) skips the
@@ -206,12 +273,13 @@ Tapo app / stale NVS resume) is forced OFF locally and alarmed.
   watchdog thresholds without re-baselining (see the `SET_LIMITS` note above).
   **Wired best-effort into `PATCH /api/sessions/{id}/limits` (2026-07-14):** after
   the limit change commits, the route pushes the session's current `max_kwh` +
-  `max_duration_seconds` (both, always) plus `max_current_a=effective_plug_cap(plug)`
-  (so an operator's mid-session cap change lands on-device too) so RAISING a limit above the value baked
-  into the original `ON` takes effect on-device; a failed publish never fails the
-  request (the telemetry-path backend mirror still enforces within ~1 s), and
-  legacy NULL-limit sessions are skipped. On-device effect awaits an OTA to
-  firmware that handles `SET_LIMITS`.
+  `max_duration_seconds` (both, always, resolved through `firmware_max_kwh()`/
+  `firmware_duration()` so a still-unlimited side is sent as the sentinel, not
+  omitted) plus `max_current_a=effective_plug_cap(plug)` (so an operator's
+  mid-session cap change lands on-device too) so RAISING a limit above the
+  value baked into the original `ON` takes effect on-device; a failed publish
+  never fails the request (the telemetry-path backend mirror still enforces
+  within ~1 s).
 - `MQTTManager.send_gateway_ota(gateway_id, plug_id, firmware_url)`
   publishes an `OTA` command at QoS 1. Triggered by
   `POST /api/cpo/gateways/{id}/ota` (RBAC + tenant-scoped; requires the
@@ -268,6 +336,12 @@ messages (`/alarms`) are ingested by `_handle_gateway_alarm` → persisted as
 > `UNAUTHORIZED_ON` neither finalizes nor maintenances (accountability
 > signal). The finalize vs. maintenance decision uses two distinct sets
 > (`_FINALIZE_ALARM_REASONS` ⊇ `_MAINTENANCE_ALARM_REASONS`) in `mqtt_manager.py`.
+> `UNMETERED_CONSUMPTION` (severity `warning`) is likewise an accountability
+> signal only — no session to finalize (none was ever started) and no
+> maintenance flip (the plug itself is healthy) — but it additionally
+> bell-notifies every CPO of the tenant (unlike every other alarm type here,
+> which only reach the passive `gateway_events` feed); see the dedicated note
+> above.
 
 There is **no Last Will & Testament configured on the backend client**; the
 LWT/`offline` message is published by the *gateway* firmware.

@@ -11,13 +11,15 @@ collaborator object.
 
 The three module-level env-flag constants read below (AUTO_STOP_ON_BALANCE_
 EXHAUSTED, LOW_BALANCE_WARN_FRACTION, AUTO_STOP_ON_LIMITS) — and
-GATEWAY_SEEN_BUMP_INTERVAL_SEC / PLUG_POWER_STALE_SEC — live in
-services/mqtt_manager.py (the facade module), not here: tests monkeypatch them
-there (e.g. `monkeypatch.setattr(mqtt_manager_module, "AUTO_STOP_ON_LIMITS",
-False)`), so each read below is a fresh `from backend.services.mqtt_manager
-import NAME` done at call time (matching this codebase's existing "import
-here to avoid circular imports" convention) rather than a module-level import,
-so it always sees the live value instead of a copy captured at import time.
+GATEWAY_SEEN_BUMP_INTERVAL_SEC / PLUG_POWER_STALE_SEC /
+UNMETERED_CONSUMPTION_THRESHOLD_KWH / UNMETERED_CONSUMPTION_RESET_EPS_KWH /
+UNMETERED_ALERT_COOLDOWN_SEC — live in services/mqtt_manager.py (the facade
+module), not here: tests monkeypatch them there (e.g.
+`monkeypatch.setattr(mqtt_manager_module, "AUTO_STOP_ON_LIMITS", False)`), so
+each read below is a fresh `from backend.services.mqtt_manager import NAME`
+done at call time (matching this codebase's existing "import here to avoid
+circular imports" convention) rather than a module-level import, so it always
+sees the live value instead of a copy captured at import time.
 """
 import asyncio
 import functools
@@ -50,6 +52,23 @@ MAX_PLAUSIBLE_KWH = float(os.getenv("MAX_PLAUSIBLE_KWH", "1000.0"))
 # Only ever compared against energy_counter_last_raw_kwh, which itself is only
 # ever written from a LIVE frame — see _persist_telemetry.
 ENERGY_COUNTER_RESET_DROP_KWH = float(os.getenv("ENERGY_COUNTER_RESET_DROP_KWH", "0.005"))
+
+
+def _parse_optional_nonneg_float(v: Any) -> Optional[float]:
+    """Best-effort float() for an OPTIONAL numeric field (fw >= 2.4.0's
+    telemetry `today_kwh`/`month_kwh`): missing/malformed/non-finite/negative
+    all collapse to None rather than a bogus 0.0 -- a real 0.0 (fresh plug,
+    or read right after a calendar rollover) must stay distinguishable from
+    "this frame/firmware doesn't report it at all" so the unmetered-
+    consumption reconciliation below never compares against a fabricated
+    baseline (see _persist_telemetry's [Unmetered consumption] block)."""
+    if v is None:
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) and f >= 0 else None
 
 
 class MQTTTelemetryMixin:
@@ -158,6 +177,15 @@ class MQTTTelemetryMixin:
         # actuation (REC-02) — see _persist_telemetry.
         is_offline = bool(payload.get("offline", False))
 
+        # [Unmetered consumption] Optional plug-side calendar counters
+        # (fw >= 2.4.0, kWh) riding alongside every telemetry frame — see
+        # firmware/main/main.c's telemetry_task and MQTT_CONTRACT.md. None on
+        # older firmware or a plug model that doesn't report them, in which
+        # case _persist_telemetry simply skips the reconciliation for this
+        # frame (never compares against a fabricated 0.0).
+        today_kwh = _parse_optional_nonneg_float(payload.get("today_kwh"))
+        month_kwh = _parse_optional_nonneg_float(payload.get("month_kwh"))
+
         # Map firmware status to telemetry store status
         telem_status = "charging" if status == "occupied" else "idle"
 
@@ -228,7 +256,8 @@ class MQTTTelemetryMixin:
         # --- 3. Persist authoritative session totals (async, fire-and-forget) ---
         if self.db_session_factory and self.event_loop:
             asyncio.run_coroutine_threadsafe(
-                self._persist_telemetry(gateway_id, plug_id, watts, kwh, session_id, sample, relay_on, is_offline),
+                self._persist_telemetry(gateway_id, plug_id, watts, kwh, session_id, sample, relay_on, is_offline,
+                                        today_kwh=today_kwh, month_kwh=month_kwh),
                 self.event_loop,
             )
             # Telemetry proves the gateway is alive — refresh its liveness
@@ -251,6 +280,21 @@ class MQTTTelemetryMixin:
         if last is not None and (now - last) < GATEWAY_SEEN_BUMP_INTERVAL_SEC:
             return False
         self._gateway_seen_bumped[gateway_id] = now
+        return True
+
+    def _should_alert_unmetered(self, plug_id: int) -> bool:
+        """Rate-limit UNMETERED_CONSUMPTION events to one per plug per
+        UNMETERED_ALERT_COOLDOWN_SEC (avoids re-notifying every frame during
+        a slow ongoing drift). Runs on the event loop, inside
+        _persist_telemetry's transaction — mirrors _should_bump_gateway_seen's
+        cooldown idiom above."""
+        from backend.services.mqtt_manager import UNMETERED_ALERT_COOLDOWN_SEC
+
+        now = time.monotonic()
+        last = self._unmetered_alert_cooldown.get(plug_id)
+        if last is not None and (now - last) < UNMETERED_ALERT_COOLDOWN_SEC:
+            return False
+        self._unmetered_alert_cooldown[plug_id] = now
         return True
 
     async def _persist_gateway_seen(self, gateway_id: str):
@@ -280,7 +324,9 @@ class MQTTTelemetryMixin:
                                  session_id: Optional[int] = None,
                                  sample: Optional[Dict[str, Any]] = None,
                                  relay_on: bool = False,
-                                 is_offline: bool = False):
+                                 is_offline: bool = False,
+                                 today_kwh: Optional[float] = None,
+                                 month_kwh: Optional[float] = None):
         """
         Persist the latest telemetry snapshot to the database:
         - Verify the claimed plug actually belongs to the publishing gateway
@@ -293,6 +339,11 @@ class MQTTTelemetryMixin:
         - Update the target `charging_sessions` row with cumulative energy and
           peak power, so that even if the server crashes, the last-known values
           are saved.
+        - [Unmetered consumption] Reconcile the plug's OWN today/month energy
+          counters (`today_kwh`/`month_kwh`, fw >= 2.4.0) against what we last
+          saw (`plugs.last_today_energy_kwh`/`last_month_energy_kwh`) to catch
+          energy delivered with no ACTIVE session covering it — see the
+          dedicated block below.
 
         Session selection: prefer the firmware-reported `session_id` (guarded so
         it must be ACTIVE and on this plug — never mutate a finalized, already
@@ -304,6 +355,13 @@ class MQTTTelemetryMixin:
         # Import here to avoid circular imports at module level
         from backend.database.models import ChargingSession, Plug, SessionStatus
         from backend.services.mqtt_manager import PLUG_POWER_STALE_SEC
+
+        # [Unmetered consumption] Captured inside the transaction below (needs
+        # the loaded `plug` row) and consumed AFTER commit, same deferred-
+        # action shape as the REC-02 OFF-republish and the exhaustion/limits
+        # checks further down — _persist_gateway_event opens its own
+        # transaction and must not nest inside this one.
+        unmetered_report: Optional[str] = None
 
         # Captured for the post-commit balance/limit checks (see below).
         updated_session_id: Optional[int] = None
@@ -499,6 +557,79 @@ class MQTTTelemetryMixin:
                             extra={"gateway_id": gateway_id, "plug_id": plug_id},
                         )
 
+                # [Unmetered consumption] Continuous cross-check: the P110's OWN
+                # today/month energy counters (get_energy_usage.today_energy/
+                # month_energy — see firmware/main/tapo_protocol.c) advance
+                # regardless of gateway connectivity. Comparing them against the
+                # last value WE saw exposes energy delivered with no billed
+                # session covering it — most notably the very FIRST frame after
+                # a gateway that was fully offline reconnects (the owner-reported
+                # incident this closes: a plug manually toggled on/off while the
+                # gateway itself was unreachable). Complements (does not replace)
+                # the firmware's own one-shot UNMETERED_CONSUMPTION report
+                # (tapo_plug_reconcile_idle_baseline in services/mqtt/alarms.py)
+                # — this runs on every frame so it also catches a slow live
+                # drift or a lost/delayed firmware report.
+                #
+                # Gate: `active_session is not None` means SOME session (found
+                # via the id-scoped-or-plug-id-fallback lookup above) already
+                # covers this reading, whether or not this particular frame was
+                # attributed to it (frame_is_idle) — that energy is already
+                # accounted for by that session's own billing. Deliberately NOT
+                # using the REC-02-style plug-scoped re-check: this is a
+                # best-effort secondary safety net, not an actuation path, so
+                # the rare race window (worth at most one redundant warning, not
+                # a billing error) isn't worth another query on every frame.
+                if today_kwh is not None or month_kwh is not None:
+                    prev_today = plug.last_today_energy_kwh
+                    prev_month = plug.last_month_energy_kwh
+                    has_session = active_session is not None
+                    if today_kwh is not None:
+                        plug.last_today_energy_kwh = today_kwh
+                    if month_kwh is not None:
+                        plug.last_month_energy_kwh = month_kwh
+
+                    if (
+                        not has_session
+                        and prev_today is not None and prev_month is not None
+                        and today_kwh is not None and month_kwh is not None
+                    ):
+                        from backend.services.mqtt_manager import (
+                            UNMETERED_CONSUMPTION_RESET_EPS_KWH,
+                            UNMETERED_CONSUMPTION_THRESHOLD_KWH,
+                        )
+                        delta_today = today_kwh - prev_today
+                        delta_month = month_kwh - prev_month
+                        reset_today = delta_today < -UNMETERED_CONSUMPTION_RESET_EPS_KWH
+                        reset_month = delta_month < -UNMETERED_CONSUMPTION_RESET_EPS_KWH
+
+                        # Mirrors the firmware's own decision rule exactly (see
+                        # tapo_plug_reconcile_idle_baseline's doc comment): a
+                        # regression on EITHER counter alone is a calendar
+                        # rollover (today resets nightly, month resets monthly)
+                        # or a plug reset, not consumption; month is preferred
+                        # when both are valid since it resets far less often.
+                        candidate: Optional[float] = None
+                        if not reset_today and not reset_month:
+                            candidate = max(delta_today, delta_month)
+                        elif reset_today and not reset_month:
+                            candidate = delta_month
+                        elif reset_month and not reset_today:
+                            candidate = delta_today
+                        # both reset -> candidate stays None (full reset, nothing to report)
+
+                        if (
+                            candidate is not None
+                            and candidate >= UNMETERED_CONSUMPTION_THRESHOLD_KWH
+                            and self._should_alert_unmetered(plug_id)
+                        ):
+                            unmetered_report = (
+                                f"Plug's own energy counters advanced by an "
+                                f"estimated {candidate:.3f} kWh with no billed "
+                                f"session covering it (today +{delta_today:.3f} "
+                                f"kWh, month +{delta_month:.3f} kWh)."
+                            )
+
                 await session.commit()
         except Exception as e:
             logger.error(
@@ -506,6 +637,15 @@ class MQTTTelemetryMixin:
                 extra={"gateway_id": gateway_id, "plug_id": plug_id, "error": str(e)},
             )
             return
+
+        # [Unmetered consumption] Raise the GatewayEvent (+ CPO bell notify —
+        # see MQTTAlarmMixin._persist_gateway_event) in its own transaction,
+        # after the telemetry commit above — same deferred-action shape as
+        # the exhaustion/limits checks below.
+        if unmetered_report is not None:
+            await self._persist_gateway_event(
+                gateway_id, plug_id, "UNMETERED_CONSUMPTION", "warning", unmetered_report,
+            )
 
         # Prepaid protection: if the accrued energy cost has reached the driver's
         # wallet balance, auto-stop so they can't keep charging for free past a

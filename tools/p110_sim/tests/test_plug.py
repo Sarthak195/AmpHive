@@ -122,3 +122,122 @@ def test_state_survives_restart_via_snapshot():
     p2 = _plug(initial=snap)
     assert p2.get_device_info()["device_on"] is True
     assert p2.get_energy_usage()["today_energy"] == pytest.approx(1000, abs=1)
+
+
+# ---------------------------------------------------------------------------
+# 2026-08 offline-consumption bench work: today_energy/month_energy are now
+# independent accumulators (not aliases of the lifetime meter), so a bench
+# test can exercise firmware/main/tapo_protocol.c's
+# tapo_plug_reconcile_idle_baseline() day/month cross-check.
+# ---------------------------------------------------------------------------
+
+
+def test_today_and_month_energy_track_independently_of_lifetime_meter(monkeypatch):
+    """Both calendar counters accrue in lockstep with the lifetime meter
+    under normal operation (no reset fired) -- basic fidelity check."""
+    t = {"v": 1000.0}
+    monkeypatch.setattr(time, "monotonic", lambda: t["v"])
+    p = _plug(watts=3600.0)  # 3600 W = exactly 1 Wh per second
+
+    p.set_device_on(True)
+    p.tick()
+    t["v"] += 20.0
+    p.tick()
+
+    energy = p.get_energy_usage()
+    assert energy["today_energy"] == pytest.approx(20, abs=0.5)
+    assert energy["month_energy"] == pytest.approx(20, abs=0.5)
+
+
+def test_scheduled_reset_clears_today_and_month_together(monkeypatch):
+    """--reset-counter simulates a full power-cycle: today_energy AND
+    month_energy (and the lifetime meter) all clear together."""
+    real_time = {"v": 1000.0}
+    monkeypatch.setattr(time, "time", lambda: real_time["v"])
+    monkeypatch.setattr(time, "monotonic", lambda: real_time["v"])
+
+    p = _plug(start_kwh=5.0, reset_after_s=10.0, reset_value_kwh=0.5)
+    real_time["v"] += 15.0  # past the 10s deadline
+    p.tick()
+
+    energy = p.get_energy_usage()
+    assert energy["today_energy"] == pytest.approx(500, abs=1)   # 0.5 kWh -> 500 Wh
+    assert energy["month_energy"] == pytest.approx(500, abs=1)
+
+
+def test_daily_reset_clears_only_today_leaves_month_climbing(monkeypatch):
+    """--daily-reset-counter simulates the P110's own nightly midnight
+    rollover: ONLY today_energy clears. month_energy (and the lifetime
+    meter) must keep climbing right through it -- this is exactly the
+    "today rolled over mid-gap but month kept counting" case
+    tapo_plug_reconcile_idle_baseline() falls back on."""
+    real_time = {"v": 1000.0}
+    monkeypatch.setattr(time, "time", lambda: real_time["v"])
+    monkeypatch.setattr(time, "monotonic", lambda: real_time["v"])
+
+    p = _plug(start_kwh=2.0, watts=3600.0, daily_reset_after_s=10.0)
+    fired = []
+    p.on_daily_reset = lambda plug: fired.append(True)
+
+    p.set_device_on(True)
+    p.tick()  # seeds _last_tick
+
+    real_time["v"] += 5.0  # 5 Wh accrued, before the deadline
+    p.tick()
+    assert fired == []
+    energy = p.get_energy_usage()
+    assert energy["today_energy"] == pytest.approx(2005, abs=1)
+    assert energy["month_energy"] == pytest.approx(2005, abs=1)
+
+    real_time["v"] += 10.0  # now past the 10s daily-reset deadline (+10 more Wh accrued first)
+    p.tick()
+    assert fired == [True]
+    energy = p.get_energy_usage()
+    assert energy["today_energy"] == 0            # rolled over
+    assert energy["month_energy"] == pytest.approx(2015, abs=1)  # untouched, kept climbing
+
+    real_time["v"] += 5.0  # continues accruing normally after the rollover
+    p.tick()
+    energy = p.get_energy_usage()
+    assert energy["today_energy"] == pytest.approx(5, abs=1)
+    assert energy["month_energy"] == pytest.approx(2020, abs=1)
+    assert fired == [True]  # fires only once
+
+
+def test_manual_toggle_during_a_polling_gap_is_reflected_on_reconnect(monkeypatch):
+    """Bench-fidelity check for the owner-reported incident this emulator
+    extension exists to reproduce: energy consumed while nobody is calling
+    get_energy_usage (the "gateway was offline" window) must still show up
+    in the very next reading once polling resumes -- exactly what a real
+    P110's onboard MCU does (it measures continuously, independent of who's
+    asking). SimulatedPlug.tick() runs off wall-clock time, so directly
+    driving set_device_on() (standing in for an independent KLAP client --
+    tools/klap_probe.py, or a human with the real Tapo app -- toggling the
+    plug while the firmware/gateway simply isn't polling) is sufficient; no
+    HTTP server or firmware involvement is needed to prove this at the
+    simulator layer."""
+    t = {"v": 1000.0}
+    monkeypatch.setattr(time, "monotonic", lambda: t["v"])
+    p = _plug(watts=3600.0)  # 3600 W = exactly 1 Wh per second
+
+    # Establish an idle baseline (mirrors the firmware polling while nothing
+    # is happening, before "the gateway goes offline").
+    p.tick()
+    baseline = p.get_energy_usage()
+    assert baseline["today_energy"] == 0
+    assert baseline["month_energy"] == 0
+
+    # "Gateway offline": a manual session happens with nobody polling --
+    # simulate it by driving the plug object directly (no get_energy_usage
+    # call in between), then advancing wall-clock time.
+    p.set_device_on(True)
+    t["v"] += 30.0  # 30 s manual charge
+    p.tick()
+    p.set_device_on(False)
+
+    # "Gateway reconnects": the very next read must show the full gap, even
+    # though get_energy_usage was never called during it.
+    after = p.get_energy_usage()
+    assert after["today_energy"] == pytest.approx(30, abs=1)
+    assert after["month_energy"] == pytest.approx(30, abs=1)
+    assert after["current_power"] == 0  # relay is off again by the time we look

@@ -19,6 +19,15 @@
  *   current_a    REAL     get_energy_usage.current_ma (milliamps) / 1000
  *                         (falls back to derived power_w / voltage_v if not reported)
  *   temperature_c NOMINAL the P110 has no temperature sensor (use `overheated` instead)
+ *   today_energy_kwh REAL get_energy_usage.today_energy (Wh) / 1000 -- maintained ON
+ *                         THE PLUG itself (calendar-day counter, resets at local
+ *                         midnight on the plug's own clock); -1.0 if the field
+ *                         wasn't in the response (older/other plug firmware).
+ *   month_energy_kwh REAL get_energy_usage.month_energy (Wh) / 1000 -- same, but the
+ *                         calendar-MONTH counter (resets far less often). Both keep
+ *                         advancing regardless of whether THIS gateway is polling —
+ *                         see tapo_plug_reconcile_idle_baseline() below, the
+ *                         offline/unmetered-consumption detector that reads them.
  */
 typedef struct {
     float voltage_v;
@@ -29,7 +38,27 @@ typedef struct {
     bool  overheated;    /**< true if the plug reports a non-normal overheat_status */
     bool  overcurrent;   /**< true if the plug reports a non-normal overcurrent_status */
     bool  device_on;     /**< current relay state as reported by the plug */
+    float today_energy_kwh;  /**< plug-side calendar-day counter (kWh); <0 = not reported */
+    float month_energy_kwh;  /**< plug-side calendar-month counter (kWh); <0 = not reported */
 } tapo_telemetry_t;
+
+/*
+ * Offline/unmetered-consumption reconciliation (owner-reported incident: a
+ * P110 manually toggled ON then OFF while the ESP32 gateway itself was fully
+ * unreachable delivers energy nobody bills, because the firmware's own
+ * session-relative `kwh` integrator only advances while ITS driver is
+ * actually polling). today_energy/month_energy are maintained ON THE PLUG
+ * and keep counting regardless of gateway connectivity, so comparing a fresh
+ * reading against the last-known "definitely idle, nothing to hide" baseline
+ * exposes that gap. See tapo_plug_reconcile_idle_baseline()'s doc comment for
+ * the exact decision rule (day/month cross-check to tell a real reset from
+ * real consumption) and main.c's telemetry_task for how it's wired in.
+ */
+typedef struct {
+    bool  unmetered_detected;  /**< energy advanced with no AmpHive session covering it */
+    bool  reset_detected;      /**< today/month regressed (calendar rollover or plug reset) */
+    float estimated_kwh;       /**< best-effort unbilled estimate (month delta preferred) */
+} tapo_energy_reconcile_t;
 
 /*
  * Multi-plug model (TD#20): one ESP32 gateway can drive several P110s. The Tapo
@@ -113,5 +142,43 @@ esp_err_t tapo_plug_set_power(tapo_plug_t *plug, bool turn_on);
  * @return ESP_OK on success
  */
 esp_err_t tapo_plug_get_telemetry(tapo_plug_t *plug, tapo_telemetry_t *out_telemetry);
+
+/**
+ * @brief Reconcile a plug's today/month energy counters against the
+ *        last-known "idle, nothing to hide" baseline (offline/unmetered-
+ *        consumption detection).
+ *
+ * Call once per telemetry sweep for a plug with NO active AmpHive session
+ * (main.c's telemetry_task idle branch). Compares `today_kwh`/`month_kwh`
+ * (from the SAME get_energy_usage response tapo_plug_get_telemetry already
+ * fetched — no extra KLAP round trip) against the baseline persisted in NVS
+ * (key "bl_<plug_id>", namespace "energy" — same idiom as the per-plug
+ * energy meter):
+ *   - A regression on either counter (bigger than rounding jitter) is a
+ *     calendar rollover (today resets nightly, month resets monthly) or a
+ *     full plug reset — `reset_detected`, never `unmetered_detected`.
+ *   - Otherwise, the LARGER of the two deltas (month preferred when both are
+ *     valid — it resets far less often, so it's the tighter signal across a
+ *     multi-hour/day gateway outage) is the unbilled estimate. Reported only
+ *     past a small threshold so P110 standby-draw noise never alarms.
+ *
+ * Idempotent/lossless across an offline gap: the baseline is advanced (and
+ * flushed to NVS) only when there is nothing pending to report, OR
+ * `can_report` is true (the caller is about to actually publish — pass
+ * whether MQTT is connected). A detected-but-undelivered episode leaves the
+ * baseline untouched, so the NEXT poll recomputes the same (or a larger)
+ * delta against the same pre-gap reference instead of the report silently
+ * evaporating the moment connectivity returns.
+ *
+ * @param plug        Per-plug driver context
+ * @param today_kwh   Plug's current today_energy reading (kWh); <0 = not reported, no-op
+ * @param month_kwh   Plug's current month_energy reading (kWh); <0 = not reported, no-op
+ * @param can_report  Whether the caller will actually be able to publish a
+ *                     report this cycle (i.e. MQTT is connected)
+ * @param out         Result (always written on ESP_OK, even when nothing detected)
+ * @return ESP_OK on success
+ */
+esp_err_t tapo_plug_reconcile_idle_baseline(tapo_plug_t *plug, float today_kwh, float month_kwh,
+                                             bool can_report, tapo_energy_reconcile_t *out);
 
 #endif // TAPO_PROTOCOL_H

@@ -9,11 +9,16 @@
  *   automatically when the circuit has room.
  *
  * Time limit is preset chips (No limit / 30m / 1h / 2h / 4h / 8h / Custom
- * hh:mm) — no fractional-hours input. Energy limit is a plain kWh field.
- * The coverage line uses the plug's OWN resolved price. `onConfirm(plugId,
- * limits)` may throw: the error surfaces inline via apiErrorCopy, and a
- * `circuit_full` rejection additionally offers "Ask for capacity"
- * (POST /api/plugs/{id}/request-capacity) instead of a dead end.
+ * hh:mm), defaulting to "No limit" — no fractional-hours input. Energy limit
+ * is a plain kWh field, blank by default. [Opt-in charging limits] Neither
+ * field is sent to the backend unless the driver actually picks one — a
+ * "no limit" charge persists no duration/energy cap at all and runs until
+ * stopped (see backend/schemas.py SessionStartRequest); this modal never
+ * fills in a hidden default. The coverage line uses the plug's OWN resolved
+ * price. `onConfirm(plugId, limits)` may throw: the error surfaces inline
+ * via apiErrorCopy, and a `circuit_full` rejection additionally offers
+ * "Ask for capacity" (POST /api/plugs/{id}/request-capacity) instead of a
+ * dead end.
  */
 
 import { useEffect, useState } from 'react';
@@ -197,7 +202,7 @@ export default function ChargeSetupModal({ open, onClose, plug, mode = 'start', 
           </div>
           {timePreset === 'none' && (
             <p className="field-hint text-sm">
-              Defaults to 30 kWh / 4 h if no limit set
+              Charges until you stop it — no time limit
             </p>
           )}
           {timePreset === 'custom' && (
@@ -243,7 +248,7 @@ export default function ChargeSetupModal({ open, onClose, plug, mode = 'start', 
           )}
           {kwh === '' && (
             <p className="field-hint text-sm">
-              Defaults to 30 kWh if no limit set
+              Charges until you stop it — no energy limit
             </p>
           )}
         </div>
