@@ -154,7 +154,14 @@ Tapo app / stale NVS resume) is forced OFF locally and alarmed.
 > (`routers/cpo.py _publish_gateway_roster`), and after an agent discovery upsert
 > (`MQTTManager.publish_plug_roster` / `_publish_roster_for_gateway`). The topic
 > is inside the existing `amphive/gateways/%u/#` ACL — no ACL change, no DB
-> migration (SECURITY.md §8.5).
+> migration (SECURITY.md §8.5). `local_ip` is normally a bare IP (the firmware
+> builds `http://<local_ip>/app/...` with a plain substitution, so a real
+> P110 — always on port 80 — just works); as of the change adding
+> `PLUG_IP_MAX_LEN` (`firmware/main/session_nvs.h`, built but not yet
+> OTA'd/deployed) it MAY also carry a `":port"` suffix (e.g.
+> `"192.168.1.50:9441"`), letting several simulated plugs share one LAN IP on
+> a bench rig (`tools/p110_sim/`) without any backend change — `plugs.local_ip`
+> was always an unvalidated `String(45)`. Bare-IP entries are unaffected.
 
 > **`local_ip` targets the plug (multi-plug, TD#20).** One ESP32 gateway can
 > drive several P110s, so ON/OFF carry the target plug's LAN IP (the backend

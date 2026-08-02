@@ -246,6 +246,14 @@ never be reused to act on plug B.
   `overheat_status`, `overcurrent_status`).
 - **`tapo_plug_set_ip(plug, ip)`** rebinds a plug's IP (new DHCP lease) and
   invalidates its session so the next call re-handshakes.
+- **Addressing:** `ip` is normally a bare IPv4 (a real P110 only listens on
+  port 80, and the driver's URL builders do a plain `"http://%s/..."`
+  substitution). `PLUG_IP_MAX_LEN` (`session_nvs.h`, 22 bytes) also fits an
+  optional `":port"` suffix — added purely so `tools/p110_sim/` (a P110
+  emulator for multi-plug bench testing without owning N physical plugs) can
+  run several simulated plugs on one LAN IP; no other code change was
+  needed since the URL substitution already accepts `host:port`. Built and
+  verified with ESP-IDF v5.3.3 but not yet OTA'd to a fielded gateway.
 
 **P110 telemetry reality** — the plug exposes power and energy, *not* voltage,
 current, or temperature. So the `tapo_telemetry_t` fields map as:
