@@ -41,6 +41,11 @@ from backend.services.auth import (
 from backend.services.billing import session_cost
 from backend.services.money import energy_cost, to_money
 from backend.services.pricing import max_rate_over_window
+from backend.services.rate_limit import (
+    account_rate_limit_dependency,
+    session_start_account_rate_limiter,
+    session_stop_account_rate_limiter,
+)
 from backend.services.session_lifecycle import (
     finalize_charging_session,
     gateway_is_live,
@@ -80,7 +85,10 @@ MAX_QUEUED_CHARGES_PER_USER = int(os.getenv("MAX_QUEUED_CHARGES_PER_USER", "2"))
 # Charging Session Endpoints
 # ===========================================================================
 
-@router.post("/api/sessions/start")
+@router.post(
+    "/api/sessions/start",
+    dependencies=[Depends(account_rate_limit_dependency(session_start_account_rate_limiter, "session start"))],
+)
 async def start_charging_session(
     req: SessionStartRequest,
     user: User = Depends(get_current_user),
@@ -335,7 +343,10 @@ async def start_charging_session(
     }
 
 
-@router.post("/api/sessions/stop")
+@router.post(
+    "/api/sessions/stop",
+    dependencies=[Depends(account_rate_limit_dependency(session_stop_account_rate_limiter, "session stop"))],
+)
 async def stop_charging_session(
     req: SessionStopRequest,
     user: User = Depends(get_current_user),

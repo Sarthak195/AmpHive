@@ -12,9 +12,11 @@
     Outbound-only traversal — works behind symmetric NAT/CGNAT with no
     overlay, STUN, or port-forwards. The legacy IP `8.231.81.12:8883` remains
     valid (retained IP SAN) for gateways on fw < 2.3.0 that still hard-code it.
-  - **`mqtt://100.87.241.70:1883` — overlay-only, legacy/transition**: reachable
-    only over the WireGuard overlay; also the backend's path (internal Docker
-    network). Retire per-device once migrated to 8883.
+  - **`mqtt://100.87.241.70:1883` — overlay-only, legacy/transition (historical)**:
+    reachable only over the WireGuard overlay, which was retired by the
+    2026-07-10 direct-MQTT pivot; the on-device overlay client (`microlink`)
+    was removed 2026-08-02, so no fielded gateway can reach this listener
+    anymore. Kept as the backend's path over the internal Docker network only.
 - **Auth is enforced** on both listeners: `allow_anonymous false` + passwd file,
   plus **topic ACLs** (2026-07-10): every device has its **own** account
   (username == gateway_id, added via `deploy/scripts/add_gateway_user.ps1`),
@@ -23,14 +25,15 @@
   broad grant were **retired 2026-07-10**. The firmware authenticates with NVS
   `mqtt_user`/`mqtt_pwd` — see [SECURITY.md §3](SECURITY.md).
 - **Backend client id:** `amphive_backend_server` (paho-mqtt v2, `VERSION2`).
-- **Gateway broker URL (firmware):** `AMPHIVE_DIRECT_MQTT=1` (default, fw ≥
-  1.3.0) connects to the public broker, started right after Wi-Fi. As of fw
-  2.3.0 the default is the DNS name `mqtts://mqtt.amphive.app:8883` (un-pinned
-  from the IP, with NVS self-migration for devices upgrading from the old
-  hard-coded `mqtts://8.231.81.12:8883`); fw 1.3.0–2.2.x hard-code the IP form.
-  The legacy overlay build (`AMPHIVE_DIRECT_MQTT=0`) uses
-  `mqtt://100.87.241.70:1883`, started lazily once the overlay reaches
-  `CONNECTED`/`MONITORING`.
+- **Gateway broker URL (firmware):** `AMPHIVE_DIRECT_MQTT=1` (the only build,
+  fw ≥ 1.3.0) connects to the public broker, started right after Wi-Fi. As of
+  fw 2.3.0 the default is the DNS name `mqtts://mqtt.amphive.app:8883`
+  (un-pinned from the IP, with NVS self-migration for devices upgrading from
+  the old hard-coded `mqtts://8.231.81.12:8883`); fw 1.3.0–2.2.x hard-code the
+  IP form. A legacy overlay build (`AMPHIVE_DIRECT_MQTT=0`) once used
+  `mqtt://100.87.241.70:1883`, started lazily once the overlay reached
+  `CONNECTED`/`MONITORING` — that branch and the `microlink` component it
+  depended on were **removed 2026-08-02**.
 - **Namespace prefix:** `amphive/`.
 
 ---

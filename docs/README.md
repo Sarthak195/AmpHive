@@ -19,12 +19,12 @@ This folder is the **technical reference** for the AmpHive platform, and the
 
 | Doc | What it covers |
 |-----|----------------|
-| [ARCHITECTURE.md](ARCHITECTURE.md) | End-to-end system architecture, the two operating modes (ESP32/MQTT vs Direct Mode), and how a charging session flows through the stack. |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | End-to-end system architecture, the retired overlay/Direct-Mode paths, and how a charging session flows through the stack. |
 | [API_REFERENCE.md](API_REFERENCE.md) | Every backend REST endpoint (see that doc for the current count), request/response shapes, and auth requirements. |
 | [DATA_MODEL.md](DATA_MODEL.md) | PostgreSQL tables, SQLAlchemy models, enums, relationships, and the schema-vs-ORM drift. |
 | [DEPENDENCIES.md](DEPENDENCIES.md) | Backend/frontend/firmware import graphs, package dependencies, high-impact files, and known dead code. |
 | [MQTT_CONTRACT.md](MQTT_CONTRACT.md) | The exact MQTT topic/payload contract between the backend and the ESP32 gateway. |
-| [FIRMWARE.md](FIRMWARE.md) | ESP32-S3 firmware: boot flow, tasks, watchdogs, the Tapo KLAP v2 driver, and the `microlink` Tailscale-protocol client. |
+| [FIRMWARE.md](FIRMWARE.md) | ESP32-C3 firmware: boot flow, tasks, watchdogs, and the Tapo KLAP v2 driver (transport is direct MQTT/TLS; the retired `microlink` Tailscale-protocol client is documented as history only). |
 | [ESP32_CONNECTION.md](ESP32_CONNECTION.md) | Build, flash, and monitor guide for the ESP32 gateway firmware, including toolchain version pins and other-board notes. |
 | [PLUG_CONNECTIVITY_OPTIONS.md](PLUG_CONNECTIVITY_OPTIONS.md) | Survey of every viable plug-to-server connectivity path versus today's ESP32 gateway, and a recommendation for a plug-and-play client. |
 | [AMPHIVE_AGENT.md](AMPHIVE_AGENT.md) | A Home-Assistant-style local hub that discovers multi-brand smart plugs on a client's LAN and bridges them into the existing MQTT contract. |
@@ -42,8 +42,8 @@ This folder is the **technical reference** for the AmpHive platform, and the
 
 ## Project map (one-liner per component)
 
-- **`backend/`** — FastAPI app (REST routes across 9 routers in `routers/`, schemas in `schemas.py`, assembly-only `main.py` — see [API_REFERENCE](API_REFERENCE.md) for the current route count), SQLAlchemy 2.0 + async PostgreSQL with Alembic migrations, authenticated MQTT bridge, Razorpay payments, Socket.io live telemetry with time-series persistence (90-day retention), and a dormant "Direct Mode" Tapo driver. See [API_REFERENCE](API_REFERENCE.md) / [DATA_MODEL](DATA_MODEL.md).
+- **`backend/`** — FastAPI app (REST routes across 9 routers in `routers/`, schemas in `schemas.py`, assembly-only `main.py` — see [API_REFERENCE](API_REFERENCE.md) for the current route count), SQLAlchemy 2.0 + async PostgreSQL with Alembic migrations, authenticated MQTT bridge, Razorpay payments, and Socket.io live telemetry with time-series persistence (90-day retention). See [API_REFERENCE](API_REFERENCE.md) / [DATA_MODEL](DATA_MODEL.md).
 - **`frontend/`** — React 19 + Vite SPA (driver web app). Login/register, plug-ID charging, live Socket.io session monitor, Razorpay top-up, charger groups. See [ARCHITECTURE](ARCHITECTURE.md#frontend).
-- **`firmware/`** — ESP32-S3 (ESP-IDF) gateway. A near-complete from-scratch Tailscale client (`microlink`) + MQTT control loop + safety watchdogs, with a **real KLAP v2** Tapo plug driver. See [FIRMWARE](FIRMWARE.md).
-- **`deploy/`** — Docker Compose (dev/prod), GCP deploy scripts, K8s manifests, Mosquitto/WireGuard configs, and runbooks. See [DEPLOYMENT](DEPLOYMENT.md).
-- **`tools/`** — Standalone Python helpers for the Direct-Mode Tapo relay and manual on/off testing.
+- **`firmware/`** — ESP32-C3 (ESP-IDF) gateway. Direct MQTT/TLS transport + control loop + safety watchdogs, with a **real KLAP v2** Tapo plug driver (the retired `microlink` Tailscale client was removed 2026-08-02). See [FIRMWARE](FIRMWARE.md).
+- **`deploy/`** — Docker Compose (dev/prod), GCP deploy scripts, K8s manifests, Mosquitto configs, and runbooks. See [DEPLOYMENT](DEPLOYMENT.md).
+- **`tools/`** — Standalone Python helpers for manual Tapo plug on/off testing (`turn_on.py`, `turn_off.py`, `local_tapo_test.py`, `klap_probe.py`).

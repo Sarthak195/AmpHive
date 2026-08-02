@@ -25,14 +25,9 @@ MQTT_BROKER_PORT=1883
 
 ---
 
-## 2. Setting Up the Local Codebase & Submodules
+## 2. Clone the Repository
 
-1. **Clone the repository** from GitHub.
-2. **Initialize and update submodules**:
-   The ESP32 firmware relies on external submodules for WireGuard and the Tailscale client (`microlink`). You must pull these submodules before compiling:
-   ```bash
-   git submodule update --init --recursive
-   ```
+**Clone the repository** from GitHub to your workstation.
 
 ---
 

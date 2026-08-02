@@ -4,8 +4,8 @@
 > outbound MQTT/TLS already SHIPPED** — the direct-MQTT pivot landed 2026-07-10
 > (`AMPHIVE_DIRECT_MQTT=1`, the default; see [FIRMWARE.md](FIRMWARE.md) and
 > [MQTT_CONTRACT.md](MQTT_CONTRACT.md)). The Tailscale/WireGuard overlay
-> (`microlink`) referenced throughout this doc is retired and compiled out of
-> the default build. The rest of this document — the Tuya/Shelly/Matter/Kasa
+> (`microlink`) referenced throughout this doc is retired and was removed
+> from the firmware tree 2026-08-02. The rest of this document — the Tuya/Shelly/Matter/Kasa
 > comparison research and the option catalog — remains useful reference for
 > future connectivity/plug-brand decisions; only the "current state" framing
 > below (§ context, §4, §recommendation) is now historical.

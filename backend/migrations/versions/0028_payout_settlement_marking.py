@@ -67,7 +67,7 @@ Create Date: 2026-08-02
 from alembic import op
 
 revision = "0028_payout_settlement_marking"
-down_revision = "0026_offline_topups"
+down_revision = "0027_energy_counter_reset"
 branch_labels = None
 depends_on = None
 
