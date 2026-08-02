@@ -8,7 +8,7 @@ driver and CPO plug routes).
 from datetime import datetime, timezone
 from typing import Optional
 
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
 
 # --- Auth Schemas ---
 
@@ -372,15 +372,34 @@ class CpoGatewayClaimRequest(BaseModel):
 class CpoGatewayOtaRequest(BaseModel):
     """Trigger an OTA firmware update on a gateway.
 
-    `firmware_url` must be an **https** URL the *gateway* can reach (the
-    public OTA image bucket — see docs/FIRMWARE.md) — not a URL relative to
-    the backend. Plain http is rejected: direct-MQTT gateways fetch images
-    across the public internet, and firmware ≥ 1.4.0 refuses non-TLS
-    downloads anyway (and verifies the image's ECDSA app signature before
-    installing). The firmware downloads the image into its passive OTA slot
+    Two ways to pick the image, exactly one required:
+    - `release_id` (preferred): an id from GET /api/cpo/firmware-releases —
+      the version-picker flow (feat/ota-version-picker) that replaced
+      hand-pasting a URL. The router resolves it to that release's `url`.
+    - `firmware_url`: a raw **https** URL, kept as an admin-only escape
+      hatch for a one-off/unregistered image — the router (not this schema,
+      which doesn't see the caller's role) rejects it with 403 for a
+      non-admin caller. Must be an https URL the *gateway* can reach (the
+      public OTA image bucket — see docs/FIRMWARE.md), not a URL relative to
+      the backend. Plain http is rejected: direct-MQTT gateways fetch images
+      across the public internet, and firmware ≥ 1.4.0 refuses non-TLS
+      downloads anyway (and verifies the image's ECDSA app signature before
+      installing).
+
+    Either way, the firmware downloads the image into its passive OTA slot
     and reboots.
     """
-    firmware_url: str = Field(pattern=r"^https://", max_length=512)
+    release_id: Optional[int] = None
+    firmware_url: Optional[str] = Field(default=None, pattern=r"^https://", max_length=512)
+
+    @model_validator(mode="after")
+    def _exactly_one_target(self):
+        if bool(self.release_id) == bool(self.firmware_url):
+            raise ValueError(
+                "Provide exactly one of release_id (pick a registered firmware "
+                "release) or firmware_url (admin-only custom URL)."
+            )
+        return self
 
 
 class CpoPlugCreateRequest(BaseModel):
@@ -731,3 +750,20 @@ class AdminGatewayMintRequest(BaseModel):
     unset defaults to a placeholder the CPO can rename on claim."""
     gateway_id: str = Field(min_length=1, max_length=50)
     name: Optional[str] = Field(default=None, max_length=100)
+
+
+class AdminFirmwareReleaseCreateRequest(BaseModel):
+    """Body for POST /api/admin/firmware-releases — register a firmware
+    build that's already been published (see docs/FIRMWARE.md §7
+    "Publishing an OTA image") so it shows up in the CPO OTA version picker
+    instead of a hand-pasted URL. This endpoint does not upload/store the
+    binary — `url` must already point at a reachable, publicly-fetchable
+    image (today: the `gs://amphive-fw` bucket); registering-without-hosting
+    is on the caller.
+
+    `version` mirrors `firmware/CMakeLists.txt`'s PROJECT_VER format (e.g.
+    "2.3.0-direct") and must be unique — the router returns 400 on a repeat.
+    """
+    version: str = Field(min_length=1, max_length=32, pattern=r"^\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$")
+    url: str = Field(pattern=r"^https://", max_length=512)
+    notes: Optional[str] = Field(default=None, max_length=500)

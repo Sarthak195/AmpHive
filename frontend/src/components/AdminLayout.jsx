@@ -18,6 +18,7 @@ import {
   Users,
   Banknote,
   Radio,
+  UploadCloud,
   Scale,
   ScrollText,
   Zap,
@@ -35,6 +36,7 @@ const NAV_ITEMS = [
   { path: '/admin/users', label: 'Users', icon: Users },
   { path: '/admin/payouts', label: 'Payouts', icon: Banknote },
   { path: '/admin/gateways', label: 'Gateways', icon: Radio },
+  { path: '/admin/firmware-releases', label: 'Firmware', icon: UploadCloud },
   { path: '/admin/disputes', label: 'Disputes', icon: Scale },
   { path: '/admin/audit', label: 'Audit', icon: ScrollText },
 ];

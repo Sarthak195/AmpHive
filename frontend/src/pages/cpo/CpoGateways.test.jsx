@@ -1,9 +1,11 @@
 /**
- * CpoGateways tests (redesign v3, D3): the fleet table (status + relative
- * last-seen, firmware chip with the fleet "behind" badge, plug count),
- * skeleton/ErrorState/EmptyState via DataTable, registering a new gateway,
- * and the two-step OTA flow (URL entry → named ConfirmDialog → POST), gated
- * to online gateways with at least one plug.
+ * CpoGateways tests (redesign v3, D3; OTA version picker added
+ * feat/ota-version-picker): the fleet table (status + relative last-seen,
+ * firmware chip with the fleet "behind" badge, plug count), skeleton/
+ * ErrorState/EmptyState via DataTable, registering a new gateway, and the
+ * OTA flow — version dropdown (descending, "newer" marked) → named
+ * ConfirmDialog → POST { release_id } — gated to online gateways with at
+ * least one plug, plus the admin-only custom-URL escape hatch.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, within } from '@testing-library/react';
@@ -26,6 +28,9 @@ vi.mock('../../components/ui', async (importOriginal) => {
   return { ...actual, useToast: () => toast };
 });
 
+const mockUseAuth = vi.fn();
+vi.mock('../../contexts/AuthContext', () => ({ useAuth: () => mockUseAuth() }));
+
 const GATEWAYS = [
   {
     id: 'aa11bb22cc33',
@@ -45,10 +50,16 @@ const GATEWAYS = [
   },
 ];
 
-const mockApiRoutes = ({ gateways = GATEWAYS } = {}) => {
+const RELEASES = [
+  { id: 3, version: '2.4.0-direct', url: 'https://storage.googleapis.com/amphive-fw/2.4.0.bin', notes: 'adds sub-16A cap enforcement' },
+  { id: 2, version: '2.3.0', url: 'https://storage.googleapis.com/amphive-fw/2.3.0.bin', notes: null },
+  { id: 1, version: '2.0.0', url: 'https://storage.googleapis.com/amphive-fw/2.0.0.bin', notes: null },
+];
+
+const mockApiRoutes = ({ gateways = GATEWAYS, releases = RELEASES } = {}) => {
   api.get.mockImplementation((url) => {
     if (url === '/api/cpo/gateways') return Promise.resolve(gateways);
-    if (url.startsWith('/api/cpo/audit')) return Promise.resolve([]);
+    if (url === '/api/cpo/firmware-releases') return Promise.resolve(releases);
     return Promise.reject(new Error(`unhandled url ${url}`));
   });
 };
@@ -57,6 +68,7 @@ const renderPage = () => render(<CpoGateways />);
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockUseAuth.mockReturnValue({ user: { email: 'cpo@amphive.test', role: 'cpo' } });
   mockApiRoutes();
 });
 
@@ -193,7 +205,9 @@ describe('CpoGateways', () => {
     expect(await screen.findByText("Gateway 'x' already exists.")).toBeInTheDocument();
   });
 
-  it('runs the OTA flow: URL entry → named confirm → POST', async () => {
+  // --- OTA: version picker ---------------------------------------------------
+
+  it('runs the OTA flow: version dropdown (descending, newest default) → named confirm → POST release_id', async () => {
     api.post.mockResolvedValue({ status: 'ota_triggered' });
     const user = userEvent.setup();
     renderPage();
@@ -201,18 +215,43 @@ describe('CpoGateways', () => {
 
     await user.click(screen.getAllByRole('button', { name: 'Update firmware' })[0]);
     const urlModal = (await screen.findByText(/Push an update to/)).closest('.modal');
-    await user.type(within(urlModal).getByLabelText('Firmware image URL (https)'), 'https://fw.example.com/2.4.0.bin');
+
+    const select = within(urlModal).getByLabelText('Firmware version');
+    // Newest release (2.4.0-direct) is selected by default.
+    expect(select).toHaveValue('3');
+    const optionTexts = within(select).getAllByRole('option').map((o) => o.textContent);
+    expect(optionTexts).toEqual(['2.4.0-direct — newer', '2.3.0', '2.0.0']);
+
     await user.click(within(urlModal).getByRole('button', { name: 'Continue' }));
 
     const confirmTitle = await screen.findByText('Push firmware update?');
     const confirmModal = confirmTitle.closest('.modal');
     expect(within(confirmModal).getByText(/Basement gateway/)).toBeInTheDocument();
+    expect(within(confirmModal).getByText(/2\.4\.0-direct/)).toBeInTheDocument();
     await user.click(within(confirmModal).getByRole('button', { name: 'Push update' }));
 
     expect(api.post).toHaveBeenCalledWith('/api/cpo/gateways/aa11bb22cc33/ota', {
-      firmware_url: 'https://fw.example.com/2.4.0.bin',
+      release_id: 3,
     });
     expect(toast.ok).toHaveBeenCalledWith(expect.stringContaining('Basement gateway'));
+  });
+
+  it('lets the CPO pick an older release from the dropdown', async () => {
+    api.post.mockResolvedValue({ status: 'ota_triggered' });
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText('Basement gateway');
+
+    await user.click(screen.getAllByRole('button', { name: 'Update firmware' })[0]);
+    const urlModal = (await screen.findByText(/Push an update to/)).closest('.modal');
+    await user.selectOptions(within(urlModal).getByLabelText('Firmware version'), '1');
+    await user.click(within(urlModal).getByRole('button', { name: 'Continue' }));
+    const confirmModal = (await screen.findByText('Push firmware update?')).closest('.modal');
+    await user.click(within(confirmModal).getByRole('button', { name: 'Push update' }));
+
+    expect(api.post).toHaveBeenCalledWith('/api/cpo/gateways/aa11bb22cc33/ota', {
+      release_id: 1,
+    });
   });
 
   it('surfaces an OTA failure as a toast and keeps the gateway list intact', async () => {
@@ -223,12 +262,56 @@ describe('CpoGateways', () => {
 
     await user.click(screen.getAllByRole('button', { name: 'Update firmware' })[0]);
     const urlModal = (await screen.findByText(/Push an update to/)).closest('.modal');
-    await user.type(within(urlModal).getByLabelText('Firmware image URL (https)'), 'https://fw.example.com/2.4.0.bin');
     await user.click(within(urlModal).getByRole('button', { name: 'Continue' }));
 
     const confirmModal = (await screen.findByText('Push firmware update?')).closest('.modal');
     await user.click(within(confirmModal).getByRole('button', { name: 'Push update' }));
 
     expect(toast.error).toHaveBeenCalledWith('Gateway is offline.');
+  });
+
+  it('shows a message instead of a dropdown when no releases are registered', async () => {
+    mockApiRoutes({ releases: [] });
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText('Basement gateway');
+
+    await user.click(screen.getAllByRole('button', { name: 'Update firmware' })[0]);
+    await screen.findByText(/Push an update to/);
+    expect(await screen.findByText(/No firmware releases registered yet/)).toBeInTheDocument();
+    expect(screen.queryByLabelText('Firmware version')).not.toBeInTheDocument();
+  });
+
+  it('does not show the custom-URL escape hatch to a non-admin CPO', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText('Basement gateway');
+
+    await user.click(screen.getAllByRole('button', { name: 'Update firmware' })[0]);
+    await screen.findByText(/Push an update to/);
+    expect(screen.queryByText(/Use a custom URL instead/)).not.toBeInTheDocument();
+  });
+
+  it('lets an admin switch to a custom URL and POSTs firmware_url instead of release_id', async () => {
+    mockUseAuth.mockReturnValue({ user: { email: 'admin@amphive.test', role: 'admin' } });
+    api.post.mockResolvedValue({ status: 'ota_triggered' });
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText('Basement gateway');
+
+    await user.click(screen.getAllByRole('button', { name: 'Update firmware' })[0]);
+    const urlModal = (await screen.findByText(/Push an update to/)).closest('.modal');
+    await user.click(within(urlModal).getByRole('button', { name: /Use a custom URL instead/ }));
+
+    expect(within(urlModal).queryByLabelText('Firmware version')).not.toBeInTheDocument();
+    await user.type(within(urlModal).getByLabelText('Firmware image URL (https)'), 'https://fw.example.com/2.5.0.bin');
+    await user.click(within(urlModal).getByRole('button', { name: 'Continue' }));
+
+    const confirmModal = (await screen.findByText('Push firmware update?')).closest('.modal');
+    await user.click(within(confirmModal).getByRole('button', { name: 'Push update' }));
+
+    expect(api.post).toHaveBeenCalledWith('/api/cpo/gateways/aa11bb22cc33/ota', {
+      firmware_url: 'https://fw.example.com/2.5.0.bin',
+    });
   });
 });

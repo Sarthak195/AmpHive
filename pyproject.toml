@@ -50,8 +50,9 @@ follow_imports = "silent"
 # SQLAlchemy Result.rowcount/mixin-attribute access from the MQTTManager
 # split, Decimal/float/Optional[int] mismatches in pricing/tariffs) that need
 # actual type-design work, not config tweaks, so this is scoped down to just
-# the 39 files that pass today with zero errors — CI stays green, and the
-# scope only grows as files are fixed and added below.
+# the files that pass today with zero errors (41 as of 2026-08-02, adding
+# backend/services/versioning.py — feat/ota-version-picker) — CI stays
+# green, and the scope only grows as files are fixed and added below.
 files = [
     "backend/routers/__init__.py",
     "backend/routers/cpo/__init__.py",
@@ -92,6 +93,7 @@ files = [
     "backend/services/session_reaper.py",
     "backend/services/socketio_manager.py",
     "backend/services/telemetry_persistence.py",
+    "backend/services/versioning.py",
     "backend/services/wallet.py",
 ]
 # TODO(mypy-scope): these 17 files (148 errors total, measured 2026-07-21;

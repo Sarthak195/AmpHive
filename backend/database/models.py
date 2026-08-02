@@ -740,6 +740,50 @@ class GatewayLog(Base):
     )
 
 
+class FirmwareRelease(Base):
+    """
+    Admin-registered firmware release catalog (feat/ota-version-picker) —
+    replaces "hand-paste a firmware URL" with a version picker on the CPO
+    OTA flow (GET /api/cpo/firmware-releases lists the active ones).
+
+    Images are NOT stored/uploaded here — `url` just points at wherever the
+    image already lives (today: the public-read GCS bucket `gs://amphive-fw`,
+    see docs/FIRMWARE.md §7 "Publishing an OTA image"). An admin registers a
+    version + its already-published URL via POST /api/admin/firmware-releases
+    after running the existing publish runbook; binary upload/storage through
+    this table is a deliberate follow-up, not part of this cut.
+
+    - `version` is UNIQUE — one row per firmware version string (e.g.
+      "2.3.0-direct", matching `firmware/CMakeLists.txt`'s PROJECT_VER
+      format). Free-text, not a PG enum: new versions ship constantly.
+    - `url` mirrors CpoGatewayOtaRequest.firmware_url's contract — must be
+      `https://`, since direct-MQTT gateways fetch images across the public
+      internet and fw >= 1.4.0 refuses plain http anyway.
+    - `is_active` is a soft flag (DELETE would break any past-OTA audit
+      trail/detail string referencing the release); deactivated releases
+      drop out of the CPO picker but stay visible to admins.
+    - No chip/target column: the fleet is single-hardware (ESP32-C3, see
+      docs/FIRMWARE.md §6) today, so a column with exactly one possible
+      value would be pure speculation — add it if/when a second target
+      ships.
+    - Ordering (both admin and CPO list endpoints) is done in Python via
+      services/versioning.version_sort_key — a semver-aware key, not a raw
+      string sort, so "2.10.0" correctly ranks above "2.9.0".
+    """
+    __tablename__ = "firmware_releases"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    version: Mapped[str] = mapped_column(String(32), unique=True, nullable=False)
+    url: Mapped[str] = mapped_column(String(512), nullable=False)
+    notes: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+
+    __table_args__ = (
+        Index("idx_firmware_releases_active", "is_active"),
+    )
+
+
 # --- CPO Admin Audit Trail ---
 
 class AuditLog(Base):

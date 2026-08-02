@@ -4,7 +4,10 @@
 # Uploads firmware/build/amphive-gateway.bin to gs://amphive-fw under a
 # versioned name (version read from PROJECT_VER in firmware/CMakeLists.txt),
 # verifies the object is fetchable anonymously over HTTPS, and prints the
-# OTA-trigger call. It does NOT trigger the OTA itself.
+# firmware-release registration call (feat/ota-version-picker, 2026-08-02) so
+# the version shows up in the CPO portal's OTA dropdown, plus the raw
+# admin-only OTA-trigger call for a direct/unregistered push. It does NOT
+# register the release or trigger the OTA itself.
 #
 # The image must be the SIGNED build output (the default amphive-gateway.bin;
 # never amphive-gateway-unsigned.bin) — firmware >= 1.4.0 rejects unsigned
@@ -63,9 +66,17 @@ try {
 }
 
 Write-Host ""
-Write-Host "Trigger the OTA with:" -ForegroundColor Cyan
+Write-Host "Register it so the CPO portal's OTA dropdown offers this version:" -ForegroundColor Cyan
+Write-Host @"
+curl -X POST "http://<backend>/api/admin/firmware-releases" \
+    -H "Authorization: Bearer <admin JWT>" -H "Content-Type: application/json" \
+    -d '{"version":"$version","url":"$url"}'
+"@
+Write-Host ""
+Write-Host "...then push it from the CPO portal (Gateways -> Update firmware -> pick $version)," -ForegroundColor Cyan
+Write-Host "or trigger it directly (bypasses the registry, admin role only):" -ForegroundColor Cyan
 Write-Host @"
 curl -X POST "http://<backend>/api/cpo/gateways/<gateway_id>/ota" \
-    -H "Authorization: Bearer <CPO JWT>" -H "Content-Type: application/json" \
+    -H "Authorization: Bearer <admin JWT>" -H "Content-Type: application/json" \
     -d '{"firmware_url":"$url"}'
 "@

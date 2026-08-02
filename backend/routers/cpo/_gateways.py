@@ -10,7 +10,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend import state
 from backend.database.db import get_db
-from backend.database.models import Gateway, GatewayStatus, Plug, User
+from backend.database.models import (
+    FirmwareRelease,
+    Gateway,
+    GatewayStatus,
+    Plug,
+    User,
+    UserRole,
+)
 from backend.schemas import (
     CpoGatewayClaimRequest,
     CpoGatewayCreateRequest,
@@ -22,6 +29,7 @@ from backend.services.rate_limit import (
     cpo_gateway_claim_account_rate_limiter,
 )
 from backend.services.rbac import require_role
+from backend.services.versioning import version_sort_key
 
 from ._common import logger
 
@@ -194,6 +202,38 @@ async def cpo_claim_gateway(
     }
 
 
+@router.get("/api/cpo/firmware-releases")
+async def cpo_list_firmware_releases(
+    user: User = Depends(require_role("cpo", "admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Active firmware releases for the OTA version picker (feat/ota-version-
+    picker), newest-version-first. The release catalog is global (not
+    tenant-scoped — one firmware fleet, see FirmwareRelease), so this is the
+    same list for every CPO; only `is_active` rows are returned (deactivated
+    releases are admin-only, see GET /api/admin/firmware-releases).
+
+    Ordering is semver-aware (services/versioning.version_sort_key), not a
+    string sort: "2.10.0" must rank above "2.9.0".
+    """
+    rows = (
+        await db.execute(select(FirmwareRelease).where(FirmwareRelease.is_active.is_(True)))
+    ).scalars().all()
+    rows = sorted(rows, key=lambda r: version_sort_key(r.version), reverse=True)
+
+    return [
+        {
+            "id": r.id,
+            "version": r.version,
+            "url": r.url,
+            "notes": r.notes,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+        }
+        for r in rows
+    ]
+
+
 @router.post("/api/cpo/gateways/{gateway_id}/ota")
 async def cpo_gateway_ota(
     gateway_id: str,
@@ -204,7 +244,11 @@ async def cpo_gateway_ota(
     """
     Trigger an OTA firmware update on one of the CPO's gateways.
 
-    The firmware downloads `firmware_url` into its passive OTA slot and
+    The image URL comes from either `req.release_id` (a registered firmware
+    release — the version-picker flow, GET /api/cpo/firmware-releases) or
+    `req.firmware_url` (a raw https URL, admin-only — see
+    CpoGatewayOtaRequest's docstring; a non-admin caller gets 403 here).
+    Either way the firmware downloads it into its passive OTA slot and
     reboots (rollback-protected: an image that fails to reach the broker is
     reverted on the next boot). The gateway must be live, and it refuses the
     update on its side if a charging session is active on it.
@@ -231,6 +275,31 @@ async def cpo_gateway_ota(
             detail="Gateway is offline; it must be connected to receive an OTA command.",
         )
 
+    release_version = None
+    if req.firmware_url:
+        # Custom-URL escape hatch — admin only (CpoGatewayOtaRequest can't
+        # see the caller's role, so the restriction lives here).
+        if user.role != UserRole.ADMIN:
+            raise HTTPException(
+                status_code=403,
+                detail="Custom firmware URLs are restricted to admin users — pick a registered release instead.",
+            )
+        firmware_url = req.firmware_url
+    else:
+        release_result = await db.execute(
+            select(FirmwareRelease).where(
+                and_(FirmwareRelease.id == req.release_id, FirmwareRelease.is_active.is_(True))
+            )
+        )
+        release = release_result.scalar_one_or_none()
+        if release is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Firmware release not found or no longer active.",
+            )
+        firmware_url = release.url
+        release_version = release.version
+
     # The firmware only subscribes to the per-plug command topic, so the OTA
     # command rides one of the gateway's plugs (the firmware ignores plug_id
     # for OTA). Any registered plug works; there must be at least one.
@@ -244,7 +313,7 @@ async def cpo_gateway_ota(
             detail="Gateway has no registered plugs to route the OTA command through.",
         )
 
-    published = state.mqtt_manager.send_gateway_ota(gateway_id, plug_id, req.firmware_url)
+    published = state.mqtt_manager.send_gateway_ota(gateway_id, plug_id, firmware_url)
     if not published:
         raise HTTPException(
             status_code=502,
@@ -253,11 +322,12 @@ async def cpo_gateway_ota(
 
     logger.info(
         f"OTA command published for gateway {gateway_id} "
-        f"(url={req.firmware_url}) by {user.email}"
+        f"(url={firmware_url}, release={release_version}) by {user.email}"
     )
     return {
         "status": "ota_triggered",
         "gateway_id": gateway_id,
-        "firmware_url": req.firmware_url,
+        "firmware_url": firmware_url,
+        "release_version": release_version,
         "message": "OTA command published. Watch the gateway's alarms topic / status fw version.",
     }
