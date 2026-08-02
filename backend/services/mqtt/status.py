@@ -9,10 +9,19 @@ republish for orphaned plugs (a lost/failed OFF while the gateway was still
 connected, or the NVS crash-recovery resume path). Mixed into MQTTManager;
 see services/mqtt/__init__.py for why this is a mixin rather than a delegating
 collaborator object.
+
+`notify` is imported at module level (not late-imported inside a method like
+most other mqtt/*.py handlers) specifically so tests can patch it at
+`backend.services.mqtt.status.notify` — the operator (CPO) orphan-OFF alert
+in `_republish_off_for_orphaned_plugs` is this module's only notify() call
+site and there is no circular-import hazard to dodge (backend.services.
+notifications imports only backend.database.* at module load).
 """
 import asyncio
 import logging
 from typing import Any, Dict, Optional
+
+from backend.services.notifications import notify
 
 logger = logging.getLogger("amphive.mqtt")
 
@@ -195,18 +204,34 @@ class MQTTStatusMixin:
         energize — a proper start with a hold, caps, and a fresh session_id once
         the debounce elapses. Plugs with no queued charge (and eligible/past-
         debounce ones the sweep is about to start) keep the existing orphan-OFF.
+
+        [Operator alert] Genuinely orphan-OFF'd plugs (an actual force-OFF, not
+        a skipped mid-debounce one) are worth a CPO's attention — it means the
+        plug was left OCCUPIED-looking with no session backing it. After every
+        plug's OFF publishes, every CPO of the gateway's tenant gets one
+        `orphan_off` bell notification per (plug, CPO) pair via notify(). This
+        fires AFTER the `async with` session block closes (notify() opens its
+        own transaction via async_session_factory — it must not nest inside
+        this one), and the CPO-lookup query itself runs *inside* the session
+        but only after the REC-06 publish loop below, never between the ACTIVE
+        snapshot and the publishes (see the REC-06 note there for why).
         """
         from backend.database.models import (
             ChargingSession,
+            Gateway,
             Plug,
             QueuedCharge,
             QueuedChargeStatus,
             SessionStatus,
             Tenant,
+            User,
+            UserRole,
         )
         from backend.services.session_lifecycle import plug_is_powered
         from backend.services.session_start import auto_start_delay
 
+        off_plugs: list = []  # [(plug_id, plug_name), ...] actually OFF'd this call
+        cpo_user_ids: list = []
         try:
             async with self.db_session_factory() as session:
                 from datetime import datetime, timedelta, timezone
@@ -214,13 +239,15 @@ class MQTTStatusMixin:
                 from sqlalchemy import select
 
                 plug_result = await session.execute(
-                    select(Plug.id, Plug.local_ip).where(Plug.gateway_id == gateway_id)
+                    select(Plug.id, Plug.local_ip, Plug.name).where(Plug.gateway_id == gateway_id)
                 )
+                plug_rows = plug_result.all()
+                if not plug_rows:
+                    return
                 # {plug_id: local_ip} — the OFF carries local_ip so a rebooted
                 # multi-plug gateway can learn the plug and actuate it (TD#20).
-                plug_ips = {pid: ip for pid, ip in plug_result.all()}
-                if not plug_ips:
-                    return
+                plug_ips = {pid: ip for pid, ip, _name in plug_rows}
+                plug_names = {pid: name for pid, _ip, name in plug_rows}
 
                 active_result = await session.execute(
                     select(ChargingSession.plug_id).where(
@@ -263,18 +290,50 @@ class MQTTStatusMixin:
                 # publishes: that leaves no yield point for a session started in
                 # the gap to commit and then be wrongly killed. (Previously the
                 # snapshot was taken, the session closed — an await boundary —
-                # and only then were OFFs published, racing a fresh start.)
+                # and only then were OFFs published, racing a fresh start.) The
+                # [Operator alert] CPO lookup below runs AFTER this loop for the
+                # exact same reason — it's an await, so it must not sit between
+                # the snapshot and these synchronous publishes either.
                 for plug_id, local_ip in plug_ips.items():
                     if plug_id not in active_plug_ids and plug_id not in queued_hold_plug_ids:
                         # wait=False: we're on the event loop — don't block it on
                         # the broker ack for a best-effort cleanup publish.
                         self.send_plug_command(gateway_id, plug_id, "OFF", local_ip=local_ip, wait=False)
+                        off_plugs.append((plug_id, plug_names.get(plug_id)))
                         logger.info(
                             "Republished OFF on reconnect (no ACTIVE session)",
                             extra={"gateway_id": gateway_id, "plug_id": plug_id},
                         )
+
+                # [Operator alert] Only look up CPOs to notify when something
+                # was actually OFF'd — the common case (a clean reconnect with
+                # no orphans) skips this query entirely.
+                if off_plugs:
+                    cpo_result = await session.execute(
+                        select(User.id)
+                        .join(Gateway, Gateway.tenant_id == User.tenant_id)
+                        .where(Gateway.id == gateway_id, User.role == UserRole.CPO)
+                    )
+                    cpo_user_ids = list(cpo_result.scalars().all())
         except Exception as e:
             logger.error(
                 "OFF republish on reconnect failed",
                 extra={"gateway_id": gateway_id, "error": str(e)},
             )
+            return
+
+        # [Operator alert] Fired after the session block above closes — notify()
+        # persists its own Notification row + Socket.io push per call and never
+        # raises, so one CPO's failed delivery can't affect another's.
+        for plug_id, plug_name in off_plugs:
+            for cpo_id in cpo_user_ids:
+                await notify(
+                    cpo_id,
+                    "orphan_off",
+                    "Plug auto-recovered",
+                    f"{plug_name or plug_id} on gateway {gateway_id} had no "
+                    f"active session when it reconnected — force-OFF "
+                    f"republished to prevent an orphaned charge.",
+                    severity="warning",
+                    plug_id=plug_id,
+                )

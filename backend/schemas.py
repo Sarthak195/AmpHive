@@ -215,6 +215,15 @@ class GatewayEventResponse(BaseModel):
     created_at: Optional[str] = None
 
 
+class GatewayLogResponse(BaseModel):
+    """One forwarded firmware log line (diagnostics feed — see GatewayLog)."""
+    id: int
+    gateway_id: str
+    level: str
+    message: str
+    created_at: Optional[str] = None
+
+
 # --- Payment Schemas ---
 
 class LedgerEntryResponse(BaseModel):

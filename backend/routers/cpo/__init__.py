@@ -53,7 +53,12 @@ from ._common import (
     logger,
 )
 from ._disputes import cpo_list_disputes, cpo_resolve_dispute
-from ._events import cpo_acknowledge_event, cpo_list_audit_log, cpo_list_events
+from ._events import (
+    cpo_acknowledge_event,
+    cpo_gateway_logs,
+    cpo_list_audit_log,
+    cpo_list_events,
+)
 from ._gateways import cpo_create_gateway, cpo_gateway_ota, cpo_list_gateways
 from ._groups import (
     cpo_create_group,
@@ -106,7 +111,7 @@ __all__ = [
     "_dispute_response", "_fmt_min", "_load_tenant_tariff", "_payout_response",
     "_require_tenant_id", "_slot_dict", "logger",
     "cpo_list_disputes", "cpo_resolve_dispute",
-    "cpo_acknowledge_event", "cpo_list_audit_log", "cpo_list_events",
+    "cpo_acknowledge_event", "cpo_gateway_logs", "cpo_list_audit_log", "cpo_list_events",
     "cpo_create_gateway", "cpo_gateway_ota", "cpo_list_gateways",
     "cpo_create_group", "cpo_delete_group", "cpo_list_group_members", "cpo_list_groups",
     "cpo_remove_group_member", "cpo_update_group", "generate_unique_access_code",

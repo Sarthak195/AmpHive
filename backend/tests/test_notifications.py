@@ -226,6 +226,65 @@ async def test_gateway_offline_notifies_each_active_driver():
     MQTTManager._instance = None
 
 
+# --------------------------------------------- CPO-targeted notify (orphan-off) ---
+
+class _SeqRowsDB:
+    """Async-context DB session that returns each item of `results` in order,
+    one per execute() call — a generalization of _RowsDB/_SeqDB above for a
+    handler (mqtt/status.py._republish_off_for_orphaned_plugs) that issues
+    more than one distinct query per call."""
+    def __init__(self, results):
+        self._results = list(results)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    async def execute(self, *_a, **_k):
+        return self._results.pop(0)
+
+
+@pytest.mark.asyncio
+async def test_orphan_off_notifies_tenant_cpos():
+    """The orphan-OFF operator alert (mqtt/status.py
+    _republish_off_for_orphaned_plugs) is the first CPO-targeted notify()
+    call site: notify()'s user_id there is a CPO's, not a driver's, and it
+    works exactly the same way (persist + Socket.io emit) — see the
+    Notification model docstring update."""
+    MQTTManager._instance = None
+
+    plug_rows_result = MagicMock()
+    plug_rows_result.all.return_value = [(1, "10.0.0.11", "Bay 1")]
+
+    active_result = MagicMock()
+    active_result.scalars.return_value.all.return_value = []   # no ACTIVE session
+
+    queued_result = MagicMock()
+    queued_result.all.return_value = []   # no queued charges
+
+    cpo_result = MagicMock()
+    cpo_result.scalars.return_value.all.return_value = [201]   # one CPO for the tenant
+
+    db = _SeqRowsDB([plug_rows_result, active_result, queued_result, cpo_result])
+    mgr = MQTTManager(db_session_factory=lambda: db)
+    mgr.send_plug_command = MagicMock(return_value=True)
+
+    notify_mock = AsyncMock()
+    with patch("backend.services.mqtt.status.notify", notify_mock):
+        await mgr._republish_off_for_orphaned_plugs("gw-1")
+
+    mgr.send_plug_command.assert_called_once_with(
+        "gw-1", 1, "OFF", local_ip="10.0.0.11", wait=False
+    )
+    notify_mock.assert_awaited_once()
+    assert notify_mock.await_args.args[0] == 201
+    assert notify_mock.await_args.args[1] == "orphan_off"
+    assert notify_mock.await_args.kwargs.get("plug_id") == 1
+    MQTTManager._instance = None
+
+
 # ------------------------------------------------ safety-cutoff finalize ----
 
 @pytest.mark.asyncio
