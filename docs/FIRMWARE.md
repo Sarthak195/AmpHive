@@ -475,13 +475,30 @@ host the firmware's Mozilla bundle validates. Upload + trigger:
 ```bash
 gcloud storage cp firmware/build/amphive-gateway.bin \
     gs://amphive-fw/amphive-gateway-<version>.bin
-# then POST /api/cpo/gateways/{gateway_id}/ota with that https URL
+# then POST /api/admin/firmware-releases {version, url} to register it —
+# see below — and trigger from the CPO portal's version picker
 ```
 
 or run `deploy/scripts/publish_firmware.ps1`, which reads the version from
-`firmware/CMakeLists.txt`, uploads, and prints the OTA-trigger call. Full
-runbook (including the one-time bucket setup that was run 2026-07-10):
+`firmware/CMakeLists.txt`, uploads, and prints the registration + trigger
+calls. Full runbook (including the one-time bucket setup that was run
+2026-07-10):
 [deploy/docs/ota_image_publishing.md](../deploy/docs/ota_image_publishing.md).
+
+**Version registry + picker (feat/ota-version-picker, 2026-08-02).** Updating
+a gateway used to mean hand-pasting this URL into the CPO portal. Now an
+admin registers `{version, url}` once (`POST /api/admin/firmware-releases` —
+does not upload/store the binary, just points at the already-published image
+above) and the CPO "Update firmware" flow (`CpoGateways.jsx`) offers a
+dropdown of active releases, newest first (semver-aware ordering —
+`backend/services/versioning.py` / `frontend/src/utils/version.js`, not a
+string sort, so "2.10.0" ranks above "2.9.0"), marking options newer than the
+gateway's current `firmware_version`. `POST
+/api/cpo/gateways/{id}/ota` takes `{release_id}` resolved server-side to the
+release's URL; the old raw `{firmware_url}` field still exists as an
+admin-only escape hatch (403 for a `cpo`-role caller) for a one-off or
+unregistered image. See [API_REFERENCE.md](API_REFERENCE.md) and
+[DATA_MODEL.md](DATA_MODEL.md) (`firmware_releases` table).
 
 ## 8. Maturity summary
 

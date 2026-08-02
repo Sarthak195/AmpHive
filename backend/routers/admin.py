@@ -28,6 +28,7 @@ from backend.database.models import (
     AuditLog,
     ChargingSession,
     DisputeStatus,
+    FirmwareRelease,
     Gateway,
     GatewayLog,
     GatewayStatus,
@@ -44,12 +45,14 @@ from backend.database.models import (
 )
 from backend.schemas import (
     AdminAdjustBalanceRequest,
+    AdminFirmwareReleaseCreateRequest,
     AdminGatewayMintRequest,
     AdminUserUpdateRequest,
 )
 from backend.services.audit import try_record_audit
 from backend.services.money import ZERO_MONEY, to_money
 from backend.services.rbac import require_role
+from backend.services.versioning import version_sort_key
 
 logger = logging.getLogger("amphive.api")
 router = APIRouter()
@@ -859,6 +862,134 @@ async def admin_list_inventory_gateways(
             for gw in rows.scalars().all()
         ],
     }
+
+
+@router.post("/api/admin/firmware-releases")
+async def admin_create_firmware_release(
+    req: AdminFirmwareReleaseCreateRequest,
+    user: User = Depends(require_role("admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Register a firmware release for the CPO OTA version picker
+    (feat/ota-version-picker — replaces hand-pasting a firmware URL).
+
+    This does NOT upload/host the binary — `req.url` must already be a
+    reachable published image (today: `gs://amphive-fw`, see
+    docs/FIRMWARE.md §7 "Publishing an OTA image" /
+    deploy/scripts/publish_firmware.ps1). Binary upload through this
+    endpoint is a deliberate follow-up, not part of this cut.
+    """
+    existing = await db.execute(
+        select(FirmwareRelease).where(FirmwareRelease.version == req.version)
+    )
+    if existing.scalar_one_or_none():
+        raise HTTPException(
+            status_code=400,
+            detail=f"Firmware release '{req.version}' is already registered.",
+        )
+
+    release = FirmwareRelease(version=req.version, url=req.url, notes=req.notes, is_active=True)
+    db.add(release)
+    await db.commit()
+    await db.refresh(release)
+
+    rel_id = release.id  # snapshot before the audit write (see try_record_audit's docstring)
+
+    logger.info(f"Admin registered firmware release {req.version} (id={rel_id}) by {user.email}")
+
+    await try_record_audit(
+        db,
+        tenant_id=None,
+        actor_user_id=user.id,
+        action="firmware_release.create",
+        target_type="firmware_release",
+        target_id=str(rel_id),
+        detail=f"version={req.version}, url={req.url}",
+    )
+
+    return {
+        "id": rel_id,
+        "version": release.version,
+        "url": release.url,
+        "notes": release.notes,
+        "is_active": release.is_active,
+        "created_at": _iso(release.created_at),
+    }
+
+
+@router.get("/api/admin/firmware-releases")
+async def admin_list_firmware_releases(
+    user: User = Depends(require_role("admin")),
+    db: AsyncSession = Depends(get_db),
+    active: Optional[bool] = None,
+):
+    """
+    Every registered firmware release (active or not — deactivated ones
+    stay visible here for admin audit; only GET /api/cpo/firmware-releases
+    hides them from CPOs), newest-version-first. Ordering is semver-aware
+    (services/versioning.version_sort_key), not a string sort — "2.10.0"
+    must rank above "2.9.0". `active` optionally filters to just one bucket.
+    """
+    conditions = []
+    if active is not None:
+        conditions.append(FirmwareRelease.is_active.is_(active))
+
+    rows = (
+        await db.execute(select(FirmwareRelease).where(*conditions))
+    ).scalars().all()
+    rows = sorted(rows, key=lambda r: version_sort_key(r.version), reverse=True)
+
+    return {
+        "total": len(rows),
+        "items": [
+            {
+                "id": r.id,
+                "version": r.version,
+                "url": r.url,
+                "notes": r.notes,
+                "is_active": r.is_active,
+                "created_at": _iso(r.created_at),
+            }
+            for r in rows
+        ],
+    }
+
+
+@router.post("/api/admin/firmware-releases/{release_id}/deactivate")
+async def admin_deactivate_firmware_release(
+    release_id: int,
+    user: User = Depends(require_role("admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Soft-deactivate a firmware release: it drops out of the CPO version
+    picker (GET /api/cpo/firmware-releases) immediately but the row (and any
+    past OTA that referenced it) is kept, not deleted. Idempotent —
+    deactivating an already-inactive release just confirms the state rather
+    than erroring.
+    """
+    result = await db.execute(select(FirmwareRelease).where(FirmwareRelease.id == release_id))
+    release = result.scalar_one_or_none()
+    if release is None:
+        raise HTTPException(status_code=404, detail="Firmware release not found.")
+
+    release.is_active = False
+    await db.commit()
+
+    logger.info(f"Admin deactivated firmware release {release.version} (id={release_id}) by {user.email}")
+
+    await try_record_audit(
+        db,
+        tenant_id=None,
+        actor_user_id=user.id,
+        action="firmware_release.deactivate",
+        target_type="firmware_release",
+        target_id=str(release_id),
+        detail=f"version={release.version}",
+    )
+
+    return {"status": "deactivated", "id": release_id, "version": release.version}
 
 
 @router.get("/api/admin/gateway-logs")

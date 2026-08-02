@@ -1,7 +1,8 @@
 /**
- * CpoGateways (redesign v3, D3; claim-code onboarding added 2026-08-02) —
- * fleet view of the CPO's ESP32 gateways: online/offline state + last-seen,
- * the firmware version each one last reported (flagged "behind" against the
+ * CpoGateways (redesign v3, D3; claim-code onboarding added 2026-08-02;
+ * OTA version picker added 2026-08-02, feat/ota-version-picker) — fleet
+ * view of the CPO's ESP32 gateways: online/offline state + last-seen, the
+ * firmware version each one last reported (flagged "behind" against the
  * fleet's newest reporting version), plug count, and a one-click OTA push.
  *
  * Adding a gateway: the primary "Add gateway" flow is now the claim-code
@@ -11,13 +12,19 @@
  * units that were never minted as claim-code inventory, tucked behind a
  * "Register a gateway manually" link inside the claim modal.
  *
+ * Update firmware: replaces hand-pasting a firmware URL with a dropdown of
+ * registered releases (GET /api/cpo/firmware-releases), newest first,
+ * options newer than the gateway's current version marked "— newer". Only
+ * the admin role sees a "custom URL" escape hatch (POST .../ota rejects a
+ * raw firmware_url from a non-admin with 403 — this toggle is a UX nicety,
+ * not the enforcement).
+ *
  * CpoLayout/TenantContext already own the org name and nav badges — this
  * page fetches only its own gateway list.
  *
  * Data: GET /api/cpo/gateways, POST /api/cpo/gateways/claim (primary add),
- * POST /api/cpo/gateways (manual add), POST /api/cpo/gateways/{id}/ota,
- * GET /api/cpo/audit (best-effort OTA URL prefill only — degrades to an
- * empty field if nothing OTA-shaped turns up, never a fake default).
+ * POST /api/cpo/gateways (manual add), GET /api/cpo/firmware-releases
+ * (version picker), POST /api/cpo/gateways/{id}/ota.
  */
 
 import { useCallback, useState } from 'react';
@@ -25,8 +32,10 @@ import { Plus, Radio, UploadCloud } from 'lucide-react';
 import CpoLayout from '../../components/CpoLayout';
 import { PageHeader, DataTable, Modal, ConfirmDialog, StatusDot, useToast } from '../../components/ui';
 import api from '../../api/client';
+import { useAuth } from '../../contexts/AuthContext';
 import usePoll from '../../hooks/usePoll';
 import { apiErrorCopy } from '../../utils/statusCopy';
+import { compareVersions, isNewerVersion } from '../../utils/version';
 
 const POLL_MS = 30_000;
 
@@ -40,46 +49,16 @@ const timeAgo = (iso) => {
   return `${Math.floor(secs / 86400)}d ago`;
 };
 
-/** Loose numeric-part comparison for firmware strings like "2.3.0" or
-    "1.9.0-direct" — non-numeric suffixes count as 0, which is enough to
-    rank a fleet's reporting versions without a real semver dependency. */
-const versionParts = (v) =>
-  String(v || '')
-    .split(/[.-]/)
-    .map((p) => parseInt(p, 10))
-    .map((n) => (Number.isNaN(n) ? 0 : n));
-
-const compareVersions = (a, b) => {
-  const pa = versionParts(a);
-  const pb = versionParts(b);
-  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-    const diff = (pa[i] || 0) - (pb[i] || 0);
-    if (diff !== 0) return diff;
-  }
-  return 0;
-};
-
 const fleetMaxVersion = (gateways) => {
   const versions = gateways.map((g) => g.firmware_version).filter(Boolean);
   if (versions.length === 0) return null;
   return versions.reduce((max, v) => (compareVersions(v, max) > 0 ? v : max));
 };
 
-/** Best-effort OTA URL prefill: scan the audit log for the most recent
-    entry whose action looks OTA-shaped and pull an https URL out of its
-    detail string. Nothing today records this, so this quietly resolves to
-    '' until the backend starts logging it — never invents a default. */
-const extractLastOtaUrl = (auditItems) => {
-  for (const item of auditItems) {
-    if (!/ota/i.test(item.action || '')) continue;
-    const match = /https:\/\/\S+/.exec(item.detail || '');
-    if (match) return match[0];
-  }
-  return '';
-};
-
 export default function CpoGateways() {
   const toast = useToast();
+  const { user } = useAuth();
+  const isAdmin = user?.role === 'admin';
   const [gateways, setGateways] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -175,24 +154,38 @@ export default function CpoGateways() {
     }
   };
 
-  // ---- OTA: URL entry, then a named confirm step -----------------------
+  // ---- OTA: version picker, then a named confirm step -------------------
   const [otaTarget, setOtaTarget] = useState(null);
-  const [otaUrl, setOtaUrl] = useState('');
+  const [releases, setReleases] = useState([]);
+  const [releasesLoading, setReleasesLoading] = useState(false);
+  const [releasesError, setReleasesError] = useState('');
+  const [selectedReleaseId, setSelectedReleaseId] = useState('');
+  const [useCustomUrl, setUseCustomUrl] = useState(false);
+  const [customUrl, setCustomUrl] = useState('');
   const [otaConfirming, setOtaConfirming] = useState(false);
   const [otaBusy, setOtaBusy] = useState(false);
   const [otaError, setOtaError] = useState('');
 
   const openOta = async (gw) => {
     setOtaTarget(gw);
-    setOtaUrl('');
-    setOtaError('');
     setOtaConfirming(false);
+    setOtaError('');
+    setUseCustomUrl(false);
+    setCustomUrl('');
+    setSelectedReleaseId('');
+    setReleases([]);
+    setReleasesError('');
+    setReleasesLoading(true);
     try {
-      const audit = await api.get('/api/cpo/audit?limit=100');
-      const items = Array.isArray(audit) ? audit : audit?.items || [];
-      setOtaUrl(extractLastOtaUrl(items));
-    } catch {
-      // Prefill is best-effort only — an empty field is a fine fallback.
+      const res = await api.get('/api/cpo/firmware-releases');
+      const items = Array.isArray(res) ? res : res?.items || [];
+      setReleases(items);
+      // Default to the newest release — the common case is "push the latest".
+      if (items.length > 0) setSelectedReleaseId(String(items[0].id));
+    } catch (err) {
+      setReleasesError(apiErrorCopy(err));
+    } finally {
+      setReleasesLoading(false);
     }
   };
 
@@ -202,17 +195,22 @@ export default function CpoGateways() {
     setOtaConfirming(false);
   };
 
-  const submitOtaUrl = (e) => {
+  const submitOta = (e) => {
     e.preventDefault();
     setOtaConfirming(true);
   };
+
+  const selectedRelease = releases.find((r) => String(r.id) === selectedReleaseId);
 
   const confirmOta = async () => {
     if (!otaTarget) return;
     setOtaBusy(true);
     setOtaError('');
     try {
-      await api.post(`/api/cpo/gateways/${otaTarget.id}/ota`, { firmware_url: otaUrl.trim() });
+      const body = useCustomUrl
+        ? { firmware_url: customUrl.trim() }
+        : { release_id: Number(selectedReleaseId) };
+      await api.post(`/api/cpo/gateways/${otaTarget.id}/ota`, body);
       toast.ok(`Update pushed to ${otaTarget.name}.`);
       setOtaTarget(null);
       setOtaConfirming(false);
@@ -404,48 +402,102 @@ export default function CpoGateways() {
         </form>
       </Modal>
 
-      {/* OTA: URL entry */}
+      {/* OTA: version picker (dropdown of registered releases, descending) */}
       <Modal
         open={Boolean(otaTarget) && !otaConfirming}
         onClose={closeOta}
         title="Update firmware"
       >
         {otaTarget && (
-          <form className="stack" onSubmit={submitOtaUrl}>
+          <form className="stack" onSubmit={submitOta}>
             <p className="text-2 text-sm">
               Push an update to <strong>{otaTarget.name}</strong>, currently on{' '}
               <strong>{otaTarget.firmware_version || 'unknown'}</strong>. It downloads
               the image, reboots, and rolls back automatically if it fails to
               reconnect — it refuses the update while a session is active.
             </p>
-            <div className="field">
-              <label className="field-label" htmlFor="gw-ota-url">
-                Firmware image URL (https)
-              </label>
-              <input
-                id="gw-ota-url"
-                type="url"
-                className="input"
-                value={otaUrl}
-                onChange={(e) => setOtaUrl(e.target.value)}
-                placeholder="https://storage.googleapis.com/…/amphive-gateway-<version>.bin"
-                pattern="https://.*"
-                required
-              />
-              <span className="field-help">
-                Must be https and signed — firmware ≥ 1.4.0 verifies the signature and
-                rejects plain http.
-              </span>
-            </div>
+
+            {!useCustomUrl && (
+              <div className="field">
+                <label className="field-label" htmlFor="gw-ota-release">
+                  Firmware version
+                </label>
+                {releasesLoading ? (
+                  <p className="text-2 text-sm">Loading available versions…</p>
+                ) : releasesError ? (
+                  <p className="field-error">{releasesError}</p>
+                ) : releases.length === 0 ? (
+                  <p className="text-2 text-sm">
+                    No firmware releases registered yet. Ask an admin to register one.
+                  </p>
+                ) : (
+                  <select
+                    id="gw-ota-release"
+                    className="select"
+                    value={selectedReleaseId}
+                    onChange={(e) => setSelectedReleaseId(e.target.value)}
+                    required
+                  >
+                    {releases.map((r) => (
+                      <option key={r.id} value={r.id}>
+                        {r.version}
+                        {isNewerVersion(r.version, otaTarget.firmware_version) ? ' — newer' : ''}
+                      </option>
+                    ))}
+                  </select>
+                )}
+                {selectedRelease?.notes && (
+                  <span className="field-help">{selectedRelease.notes}</span>
+                )}
+              </div>
+            )}
+
+            {useCustomUrl && (
+              <div className="field">
+                <label className="field-label" htmlFor="gw-ota-url">
+                  Firmware image URL (https)
+                </label>
+                <input
+                  id="gw-ota-url"
+                  type="url"
+                  className="input"
+                  value={customUrl}
+                  onChange={(e) => setCustomUrl(e.target.value)}
+                  placeholder="https://storage.googleapis.com/…/amphive-gateway-<version>.bin"
+                  pattern="https://.*"
+                  required
+                />
+                <span className="field-help">
+                  Must be https and signed — firmware ≥ 1.4.0 verifies the signature and
+                  rejects plain http.
+                </span>
+              </div>
+            )}
+
             {otaError && <p className="field-error">{otaError}</p>}
+
             <div className="modal-actions">
               <button type="button" className="btn btn-quiet" onClick={closeOta}>
                 Cancel
               </button>
-              <button type="submit" className="btn btn-primary">
+              <button
+                type="submit"
+                className="btn btn-primary"
+                disabled={!useCustomUrl && (releasesLoading || releases.length === 0)}
+              >
                 Continue
               </button>
             </div>
+
+            {isAdmin && (
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm btn-full"
+                onClick={() => setUseCustomUrl((v) => !v)}
+              >
+                {useCustomUrl ? 'Pick a registered version instead' : 'Use a custom URL instead (admin)'}
+              </button>
+            )}
           </form>
         )}
       </Modal>
@@ -456,7 +508,11 @@ export default function CpoGateways() {
         onClose={() => setOtaConfirming(false)}
         onConfirm={confirmOta}
         title="Push firmware update?"
-        body={`${otaTarget?.name || 'This gateway'} will download and install the new firmware now. This can't be undone once it starts.`}
+        body={
+          useCustomUrl
+            ? `${otaTarget?.name || 'This gateway'} will download and install the custom firmware image now. This can't be undone once it starts.`
+            : `${otaTarget?.name || 'This gateway'} will download and install ${selectedRelease?.version || 'the selected version'} now. This can't be undone once it starts.`
+        }
         confirmLabel="Push update"
         tone="primary"
         busy={otaBusy}

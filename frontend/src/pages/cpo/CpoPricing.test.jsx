@@ -309,7 +309,10 @@ describe('Simple/Advanced smart detection', () => {
     );
     renderPage();
 
-    expect(await screen.findByLabelText('Price per kWh (₹)')).toHaveValue(5);
+    const defaultRateInput = await screen.findByLabelText('Price per kWh (₹)');
+    // The prefill lands a render after the slot-count fetch settles — wait for
+    // the value rather than racing it (was a CI-flaky assertion).
+    await waitFor(() => expect(defaultRateInput).toHaveValue(5));
     expect(screen.getByRole('tab', { name: 'Simple' })).toHaveAttribute('aria-selected', 'true');
     expect(screen.queryByText('Custom schedule active.')).not.toBeInTheDocument();
   });
@@ -326,7 +329,9 @@ describe('Simple/Advanced smart detection', () => {
     );
     renderPage();
 
-    expect(await screen.findByLabelText('Price per kWh (₹)')).toHaveValue(6);
+    const tariffRateInput = await screen.findByLabelText('Price per kWh (₹)');
+    // Same slot-fetch race as above — wait for the prefill instead of racing it.
+    await waitFor(() => expect(tariffRateInput).toHaveValue(6));
     expect(screen.getByRole('tab', { name: 'Simple' })).toHaveAttribute('aria-selected', 'true');
   });
 });

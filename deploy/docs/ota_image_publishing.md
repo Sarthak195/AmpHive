@@ -46,20 +46,41 @@ so a reader gains nothing and a forger is rejected.
    `online` status — it's how you confirm the OTA took).
 2. `idf.py build` (IDF v5.3.3). Ship `build/amphive-gateway.bin` — already
    signed. **Never ship `amphive-gateway-unsigned.bin`.**
-3. Publish + trigger — either run
+3. Publish — either run
    [`deploy/scripts/publish_firmware.ps1`](../scripts/publish_firmware.ps1)
-   (uploads, prints the URL + trigger call), or by hand:
+   (uploads, prints the registration + trigger calls below), or by hand:
 
    ```bash
    gcloud storage cp firmware/build/amphive-gateway.bin \
        gs://amphive-fw/amphive-gateway-<version>.bin
+   ```
 
+4. **Register the release** (feat/ota-version-picker, 2026-08-02) so it shows
+   up in the CPO portal's OTA dropdown instead of anyone hand-pasting the URL:
+
+   ```bash
+   curl -X POST "http://<backend>/api/admin/firmware-releases" \
+       -H "Authorization: Bearer <admin JWT>" -H "Content-Type: application/json" \
+       -d '{"version":"<version>","url":"https://storage.googleapis.com/amphive-fw/amphive-gateway-<version>.bin"}'
+   ```
+
+   This only registers a URL pointer — it does not upload/store a binary
+   (step 3 already did the actual publish). See `GET`/`POST
+   /api/admin/firmware-releases` in
+   [docs/API_REFERENCE.md](../../docs/API_REFERENCE.md).
+
+5. Trigger — from the CPO portal (Gateways → **Update firmware** → pick the
+   version from the dropdown), or by hand (bypasses the registry; the raw
+   `firmware_url` field is admin-only — a `cpo`-role caller gets 403 and must
+   use `release_id` instead):
+
+   ```bash
    curl -X POST "http://<backend>/api/cpo/gateways/<gateway_id>/ota" \
-       -H "Authorization: Bearer <CPO JWT>" -H "Content-Type: application/json" \
+       -H "Authorization: Bearer <admin JWT>" -H "Content-Type: application/json" \
        -d '{"firmware_url":"https://storage.googleapis.com/amphive-fw/amphive-gateway-<version>.bin"}'
    ```
 
-4. Watch the gateway's status topic / CPO dashboard: it goes offline, reboots,
+6. Watch the gateway's status topic / CPO dashboard: it goes offline, reboots,
    and reports the new `fw` version in its `online` status; the image commits
    (`marking image valid`) only once it re-reaches the broker, else the
    bootloader rolls back to the previous slot.
