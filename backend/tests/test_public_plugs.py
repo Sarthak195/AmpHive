@@ -21,9 +21,12 @@ import pytest
 from backend.database.models import PlugStatus
 
 
-def _plug(id, name, status, lat=None, lon=None):
+def _plug(id, name, status, lat=None, lon=None, rated_power_w=None, connector_type=None):
     # `name` is a reserved Mock ctor kwarg, so set it after construction.
-    p = MagicMock(id=id, status=status, latitude=lat, longitude=lon)
+    p = MagicMock(
+        id=id, status=status, latitude=lat, longitude=lon,
+        rated_power_w=rated_power_w, connector_type=connector_type,
+    )
     p.name = name
     return p
 
@@ -34,7 +37,11 @@ async def test_get_public_plugs_projects_skips_no_coords_and_falls_back_to_gatew
 
     # p1: own coords; p2: no plug coords -> inherits its gateway's; p3: no coords
     # anywhere -> skipped (not mappable).
-    p1, g1 = _plug(1, "Pub A", PlugStatus.AVAILABLE, 12.9, 77.6), MagicMock(latitude=None, longitude=None)
+    p1, g1 = (
+        _plug(1, "Pub A", PlugStatus.AVAILABLE, 12.9, 77.6,
+              rated_power_w=3300, connector_type="Type 2"),
+        MagicMock(latitude=None, longitude=None),
+    )
     p2, g2 = _plug(2, "Pub B", PlugStatus.OCCUPIED), MagicMock(latitude=13.0, longitude=77.5)
     p3, g3 = _plug(3, "No Loc", PlugStatus.AVAILABLE), MagicMock(latitude=None, longitude=None)
 
@@ -62,6 +69,9 @@ async def test_get_public_plugs_projects_skips_no_coords_and_falls_back_to_gatew
     assert out[0].status == "available" and out[1].status == "occupied"
     assert out[0].price_per_kwh == 5.0
     assert out[0].gateway_online is True
+    # [Discovery] Advertised specs pass through when set; unset stays None.
+    assert out[0].rated_power_w == 3300 and out[0].connector_type == "Type 2"
+    assert out[1].rated_power_w is None and out[1].connector_type is None
 
 
 @pytest.mark.asyncio

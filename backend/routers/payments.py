@@ -29,6 +29,10 @@ from backend.services.auth import (
     get_current_user,
 )
 from backend.services.money import to_money
+from backend.services.rate_limit import (
+    account_rate_limit_dependency,
+    payments_create_order_account_rate_limiter,
+)
 from backend.services.wallet import available_balance, credit_wallet, debit_wallet_clamped
 
 logger = logging.getLogger("amphive.api")
@@ -241,7 +245,13 @@ async def get_wallet_ledger(
     ]
 
 
-@router.post("/api/payments/create-order", response_model=CreateOrderResponse)
+@router.post(
+    "/api/payments/create-order",
+    response_model=CreateOrderResponse,
+    dependencies=[
+        Depends(account_rate_limit_dependency(payments_create_order_account_rate_limiter, "payment order"))
+    ],
+)
 async def create_payment_order(
     req: CreateOrderRequest,
     user: User = Depends(get_current_user),

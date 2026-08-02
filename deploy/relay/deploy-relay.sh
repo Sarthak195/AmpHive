@@ -281,6 +281,27 @@ log "expect the first run to take a few minutes on an e2-micro)..."
 ( cd "$WORKDIR" && sudo docker compose -f docker-compose.relay.yml up -d --build )
 
 # -----------------------------------------------------------------------------
+# 6a. Install log rotation for the durable mosquitto.log file (TD#28 follow-up)
+# -----------------------------------------------------------------------------
+# `docker compose` (run from $WORKDIR above, with no COMPOSE_PROJECT_NAME set)
+# derives its project name from $WORKDIR's basename — the same derivation the
+# `mosquitto_log` named volume's actual on-disk name follows
+# ("<project>_mosquitto_log"). Best-effort: the stack is already up at this
+# point, so a missing/failed logrotate install must not fail the deploy —
+# see deploy/docs/mosquitto_log_rotation.md for the manual fallback command.
+log "Installing logrotate for the mosquitto_log volume..."
+MOSQUITTO_LOG_VOL="$(basename "$WORKDIR" | tr 'A-Z' 'a-z')_mosquitto_log"
+if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/../scripts/setup_mosquitto_logrotate.sh" ]; then
+  bash "$SCRIPT_DIR/../scripts/setup_mosquitto_logrotate.sh" "$MOSQUITTO_LOG_VOL" \
+    || log "logrotate install failed (non-fatal, see output above) — the stack is still up."
+else
+  log "setup_mosquitto_logrotate.sh not found alongside this script (only"
+  log "deploy/relay/ was staged, not deploy/scripts/) — install it manually:"
+  log "  gcloud compute scp deploy/scripts/setup_mosquitto_logrotate.sh amphive-relay:~/ --zone=$ZONE_HINT"
+  log "  gcloud compute ssh amphive-relay --zone=$ZONE_HINT --command=\"bash ~/setup_mosquitto_logrotate.sh $MOSQUITTO_LOG_VOL\""
+fi
+
+# -----------------------------------------------------------------------------
 # 7. Poll backend health
 # -----------------------------------------------------------------------------
 command -v curl >/dev/null 2>&1 || { sudo apt-get update -y && sudo apt-get install -y curl; }

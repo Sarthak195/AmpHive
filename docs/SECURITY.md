@@ -479,6 +479,18 @@ guardrail below was honored — recorded here so the invariants are auditable:
   design (one uvicorn container); counters reset on restart. Distributed
   (multi-IP) attacks are out of scope for this tier. Tests:
   `backend/tests/test_rate_limiting.py`.
+- ~~**No per-account rate limiting**~~ **Resolved 2026-08-02**: the per-IP
+  limiters above leave one gap — a single account rotating source IPs is
+  invisible to a limiter keyed on IP alone. `account_rate_limit_dependency`
+  (keyed by `user.id`, via `get_current_user`) and
+  `login_account_rate_limit_dependency` (keyed by normalized email, since
+  `/login` has no authenticated user yet) layer a second, account-scoped
+  limiter ON TOP of the existing per-IP ones — neither replaces it — on
+  session start/stop, payment order creation, CPO offline top-up creation,
+  and login. Same 429 + `Retry-After` shape; the login variant's copy is
+  byte-identical to the per-IP login limiter's so it adds no
+  account-enumeration oracle. Env-tunable via `*_ACCOUNT_RATE_LIMIT`
+  (`backend/services/rate_limit.py`, `deploy/config/.env.template`).
 - ~~**Registration input isn't validated**~~ **Resolved 2026-07-11**:
   `RegisterRequest` uses `EmailStr` and an 8-72 char password rule (72 =
   bcrypt truncation boundary). Login is intentionally unvalidated so accounts

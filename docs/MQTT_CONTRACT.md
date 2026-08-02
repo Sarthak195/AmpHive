@@ -12,9 +12,11 @@
     Outbound-only traversal — works behind symmetric NAT/CGNAT with no
     overlay, STUN, or port-forwards. The legacy IP `8.231.81.12:8883` remains
     valid (retained IP SAN) for gateways on fw < 2.3.0 that still hard-code it.
-  - **`mqtt://100.87.241.70:1883` — overlay-only, legacy/transition**: reachable
-    only over the WireGuard overlay; also the backend's path (internal Docker
-    network). Retire per-device once migrated to 8883.
+  - **`mqtt://100.87.241.70:1883` — overlay-only, legacy/transition (historical)**:
+    reachable only over the WireGuard overlay, which was retired by the
+    2026-07-10 direct-MQTT pivot; the on-device overlay client (`microlink`)
+    was removed 2026-08-02, so no fielded gateway can reach this listener
+    anymore. Kept as the backend's path over the internal Docker network only.
 - **Auth is enforced** on both listeners: `allow_anonymous false` + passwd file,
   plus **topic ACLs** (2026-07-10): every device has its **own** account
   (username == gateway_id, added via `deploy/scripts/add_gateway_user.ps1`),
@@ -23,14 +25,15 @@
   broad grant were **retired 2026-07-10**. The firmware authenticates with NVS
   `mqtt_user`/`mqtt_pwd` — see [SECURITY.md §3](SECURITY.md).
 - **Backend client id:** `amphive_backend_server` (paho-mqtt v2, `VERSION2`).
-- **Gateway broker URL (firmware):** `AMPHIVE_DIRECT_MQTT=1` (default, fw ≥
-  1.3.0) connects to the public broker, started right after Wi-Fi. As of fw
-  2.3.0 the default is the DNS name `mqtts://mqtt.amphive.app:8883` (un-pinned
-  from the IP, with NVS self-migration for devices upgrading from the old
-  hard-coded `mqtts://8.231.81.12:8883`); fw 1.3.0–2.2.x hard-code the IP form.
-  The legacy overlay build (`AMPHIVE_DIRECT_MQTT=0`) uses
-  `mqtt://100.87.241.70:1883`, started lazily once the overlay reaches
-  `CONNECTED`/`MONITORING`.
+- **Gateway broker URL (firmware):** `AMPHIVE_DIRECT_MQTT=1` (the only build,
+  fw ≥ 1.3.0) connects to the public broker, started right after Wi-Fi. As of
+  fw 2.3.0 the default is the DNS name `mqtts://mqtt.amphive.app:8883`
+  (un-pinned from the IP, with NVS self-migration for devices upgrading from
+  the old hard-coded `mqtts://8.231.81.12:8883`); fw 1.3.0–2.2.x hard-code the
+  IP form. A legacy overlay build (`AMPHIVE_DIRECT_MQTT=0`) once used
+  `mqtt://100.87.241.70:1883`, started lazily once the overlay reached
+  `CONNECTED`/`MONITORING` — that branch and the `microlink` component it
+  depended on were **removed 2026-08-02**.
 - **Namespace prefix:** `amphive/`.
 
 ---
@@ -56,16 +59,24 @@
 > the session's own cap rather than the gateway default. Older firmware ignores it.
 | gateway → backend | `amphive/gateways/{gateway_id}/status` | 1 | yes | `{"status":"online","fw":"<ver>"}` (on connect) / `{"status":"offline"}` (LWT) |
 | gateway → backend | `amphive/gateways/{gateway_id}/alarms` | 1 | no | `{"error":"THERMAL_CUTOFF"\|"OVERCURRENT_CUTOFF"\|"OVERCURRENT_CAP"\|"UNAUTHORIZED_ON","plug_id":<int>}` or `{"event":"OTA_STARTED"\|"OTA_OK_REBOOTING"\|"OTA_FAILED"\|"OTA_REFUSED_SESSION_ACTIVE"\|...}` or (software agent) `{"event":"LOCAL_LIMIT_CUTOFF","reason":"ENERGY_LIMIT"\|"DURATION_LIMIT","plug_id":<int>}` |
-| gateway → backend | `amphive/gateways/{gateway_id}/logs` | 0 | no | raw WARN/ERROR log line as plain text (fw ≥ 2.1.0-direct). Field diagnostics; the backend does **not** subscribe yet (`mosquitto_sub` ad hoc). Covered by the `amphive/gateways/%u/#` ACL. |
+| gateway → backend | `amphive/gateways/{gateway_id}/logs` | 0 | no | raw WARN/ERROR log line as plain text (fw ≥ 2.1.0-direct). Field diagnostics — persisted as `gateway_logs` rows (see `services/mqtt/logs.py`), no notify/socket fan-out. Covered by the `amphive/gateways/%u/#` ACL. |
 | agent → backend | `amphive/gateways/{gateway_id}/discovery` | 1 | no | `{"unique_id":"<str>","provider":"<str>","model":"<str>","alias":"<str>","capabilities":["switch","power","energy"]}` |
 | backend → agent | `amphive/gateways/{gateway_id}/assign` | 1 | yes | `{"<unique_id>":<plug_id:int>, ...}` (full map for the gateway) |
 
 The backend subscribes with wildcards: `amphive/gateways/+/telemetry` (QoS 0),
 `amphive/gateways/+/status` (QoS 1), `amphive/gateways/+/discovery` (QoS 1),
-and `amphive/gateways/+/alarms` (QoS 1). Alarm/event messages are persisted as
-`gateway_events` rows (tenant resolved from the gateway) and broadcast to
-clients via the `gateway_alarm` Socket.io event; a CPO reads them through
-`GET /api/cpo/events` and clears them with `POST /api/cpo/events/{id}/ack`.
+`amphive/gateways/+/alarms` (QoS 1), and `amphive/gateways/+/logs` (QoS 0).
+Alarm/event messages are persisted as `gateway_events` rows (tenant resolved
+from the gateway) and broadcast to clients via the `gateway_alarm` Socket.io
+event; a CPO reads them through `GET /api/cpo/events` and clears them with
+`POST /api/cpo/events/{id}/ack`. Log lines are persisted as `gateway_logs`
+rows (plain-text payload, matched and dispatched *before* the JSON parse in
+`services/mqtt/router.py` — see `services/mqtt/logs.py`) with **no**
+notify/socket fan-out (a diagnostics feed, not an alert); a CPO reads them
+through `GET /api/cpo/gateways/{gateway_id}/logs`, an admin cross-tenant
+through `GET /api/admin/gateway-logs`, and they are pruned after
+`GATEWAY_LOGS_RETENTION_DAYS` (default 14) by the session reaper's
+`reap_gateway_logs_once()`.
 
 The `relay` field (firmware ≥ 1.5.0) is the plug's **actual** reported relay
 state (`device_on`), distinct from `status` (the gateway's own session state).

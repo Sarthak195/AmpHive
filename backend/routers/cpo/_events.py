@@ -9,8 +9,8 @@ from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database.db import get_db
-from backend.database.models import AuditLog, GatewayEvent, User
-from backend.schemas import GatewayEventResponse
+from backend.database.models import AuditLog, Gateway, GatewayEvent, GatewayLog, User
+from backend.schemas import GatewayEventResponse, GatewayLogResponse
 from backend.services.rbac import require_role
 
 router = APIRouter()
@@ -96,6 +96,63 @@ async def cpo_acknowledge_event(
     event.acknowledged = True
     await db.commit()
     return {"status": "acknowledged", "event_id": event_id}
+
+
+@router.get("/api/cpo/gateways/{gateway_id}/logs")
+async def cpo_gateway_logs(
+    gateway_id: str,
+    user: User = Depends(require_role("cpo", "admin")),
+    db: AsyncSession = Depends(get_db),
+    limit: int = 50,
+    offset: int = 0,
+    level: Optional[str] = None,
+):
+    """
+    Forwarded firmware WARN/ERROR log lines (TD#28) for one of the CPO's
+    gateways — raw diagnostics, not the structured alarm/event feed above.
+    Newest first. `limit` capped at 200; `level` filters (error/warning/info).
+    """
+    gw_result = await db.execute(
+        select(Gateway).where(
+            and_(Gateway.id == gateway_id, Gateway.tenant_id == user.tenant_id)
+        )
+    )
+    if gw_result.scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail="Gateway not found or access denied.")
+
+    limit, offset = max(1, min(limit, 200)), max(0, offset)
+    conditions = [GatewayLog.gateway_id == gateway_id]
+    if level:
+        conditions.append(GatewayLog.level == level)
+
+    total = (
+        await db.execute(
+            select(func.count(GatewayLog.id)).where(and_(*conditions))
+        )
+    ).scalar() or 0
+
+    result = await db.execute(
+        select(GatewayLog)
+        .where(and_(*conditions))
+        .order_by(GatewayLog.created_at.desc(), GatewayLog.id.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+    logs = list(result.scalars().all())
+
+    return {
+        "total": int(total),
+        "items": [
+            GatewayLogResponse(
+                id=log.id,
+                gateway_id=log.gateway_id,
+                level=log.level,
+                message=log.message,
+                created_at=log.created_at.isoformat() if log.created_at else None,
+            )
+            for log in logs
+        ],
+    }
 
 
 # --- CPO Admin Audit Trail ---

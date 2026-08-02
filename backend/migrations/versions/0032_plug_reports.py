@@ -35,8 +35,8 @@ Create Date: 2026-08-01
 """
 from alembic import op
 
-revision = "0027_plug_reports"
-down_revision = "0026_offline_topups"
+revision = "0032_plug_reports"
+down_revision = "0031_user_favorites"
 branch_labels = None
 depends_on = None
 

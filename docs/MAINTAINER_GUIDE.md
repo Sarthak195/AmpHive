@@ -19,16 +19,16 @@ bills a prepaid **coin** wallet → a command reaches the plug via:
   `AMPHIVE_DIRECT_MQTT=1`; there is no VPN/overlay hop on devices.
 
 *(Historical: two earlier paths are retired — a Headscale/WireGuard overlay
-that gateways once tunneled through, and a separate "Direct Mode" that had the
-backend call a relay/tapo lib over a WireGuard tunnel to a plug on the
-developer's home LAN. The `tapo_direct` / `/direct/*` backend code remains but
-is dormant.)
+that gateways once tunneled through (`firmware/components/microlink/`, deleted
+2026-08-02), and a separate "Direct Mode" that had the backend call a
+relay/tapo lib over a WireGuard tunnel to a plug on the developer's home LAN.
+The `tapo_direct` / `/direct/*` backend code was removed 2026-08-02.)
 
 ## 2. Where things live
 
 | You want to change… | Go to |
 |---|---|
-| A REST endpoint | `backend/routers/{auth,groups,plugs,sessions,payments,direct,cpo}.py` (since the 2026-07-07 split; `main.py` is assembly only) |
+| A REST endpoint | `backend/routers/{auth,groups,plugs,sessions,payments,cpo}.py` (since the 2026-07-07 split; `main.py` is assembly only) |
 | A request/response schema | `backend/schemas.py` |
 | Runtime handles (mqtt_manager, telemetry_store, …) | `backend/state.py` (set by the lifespan — always access as `state.x`, never from-import) |
 | Auth / JWT / password hashing | `backend/services/auth.py` |
@@ -40,7 +40,7 @@ is dormant.)
 | DB tables | `backend/database/models.py` (**runtime source of truth**, not the `.sql` files) |
 | Driver UI | `frontend/src/pages/*`, `components/*`, `contexts/*` |
 | CPO operator portal | `frontend/src/pages/cpo/*` |
-| ESP32-C3 firmware | `firmware/main/*.c` (app); the old `firmware/components/microlink/*` overlay client is retired/compiled out |
+| ESP32-C3 firmware | `firmware/main/*.c` (app); the old `firmware/components/microlink/*` overlay client was removed 2026-08-02 |
 | Deploy | `deploy/scripts/deploy.ps1`, `deploy/docker/docker-compose.prod.yml` |
 
 ## 3. Golden rules (from AGENTS.md — do not break these)

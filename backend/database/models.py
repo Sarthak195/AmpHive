@@ -270,6 +270,17 @@ class Plug(Base):
     # auto_start_delay(). Mirrors the max_current_a override precedent above.
     queued_charging_enabled: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
     auto_start_delay_min: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # [Discovery] Driver-facing charger specs (0030_plug_specs). NULL until a
+    # CPO fills them in on create/edit.
+    # rated_power_w: the ADVERTISED spec (what the driver is told the socket
+    # supports) — deliberately SEPARATE from max_current_a above, which is
+    # load-balancing POLICY (an operator can cap a plug's draw below its
+    # rated power for circuit admission). Only feeds the discovery power
+    # filter + spec display, never caps.py.
+    # connector_type: VARCHAR not a native enum — same rationale as
+    # plug_model, connector naming evolves without a migration.
+    rated_power_w: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    connector_type: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
 
     # Relationships
     gateway: Mapped[Gateway] = relationship("Gateway", back_populates="plugs")
@@ -386,14 +397,77 @@ class ChargingSession(Base):
     rate_segment_start_kwh: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     rate_valid_until: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    # [Payout settlement-marking] Row-ownership replacement for the
+    # ended_at/watermark TIME-WINDOW that used to decide which sessions were
+    # "unsettled" for GROSS (services/payouts.py's module docstring,
+    # "Settlement marking" section). A payout claims its sessions by
+    # stamping its own id here in the SAME UPDATE...RETURNING statement that
+    # sums their coins_spent (services.payouts.
+    # mark_unsettled_sessions_and_sum_gross), so the read (which sessions are
+    # unsettled) and the write (mark them settled) can never disagree.
+    # NULL = unsettled/eligible for the NEXT payout request, regardless of
+    # when ended_at falls relative to any watermark -- this is what closes
+    # the race where a session finalizing concurrently with a payout
+    # snapshot could land with an ended_at just behind the snapshot's `now`
+    # and never be paid out under the old windowed scheme (see "Watermark
+    # race (closed)" in services/payouts.py). A CANCELLED payout
+    # (routers/cpo/_payouts.py cpo_cancel_payout) resets every session it had
+    # claimed back to NULL, freeing them for a future payout instead of
+    # stranding them forever behind a cancelled snapshot. Refund/top-up
+    # windowing is UNCHANGED by this column -- those stay keyed off the
+    # tenant's watermark (Payout.period_end) and each dispute's own
+    # resolved_at, exactly as before.
+    settled_payout_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("payouts.id", ondelete="SET NULL"), nullable=True
+    )
+
+    # [REC-01 follow-up — energy counter reset] The P110/ESP32 wire `kwh` is a
+    # SESSION-RELATIVE counter maintained on the device; a mid-session device
+    # reboot/reflash (or the ESP32 losing its NVS baseline) restarts that
+    # counter near 0. The plain `max(energy_kwh, kwh)` clamp in
+    # MQTTTelemetryMixin._persist_telemetry used to freeze billing at the
+    # pre-reset peak until the raw counter climbed back past it — every kWh
+    # delivered in between went unbilled. These two columns let that clamp
+    # re-baseline instead of freezing:
+    #   - energy_counter_last_raw_kwh: the last UNADJUSTED wire kwh seen on a
+    #     LIVE frame only (never an offline-resync replay — those legitimately
+    #     replay older readings out of order and must never look like a
+    #     reset). Read only to detect the NEXT regression; never billed from
+    #     directly.
+    #   - energy_reset_offset_kwh: cumulative energy banked from segments
+    #     closed off by a detected reset. Billed energy =
+    #     max(energy_kwh, energy_reset_offset_kwh + raw_kwh). NOT NULL /
+    #     default 0.0 so every session (including legacy rows predating this
+    #     column) reads as "no offset" without a NULL check on the billing hot
+    #     path. Persisted (not an in-process dict) so it survives a backend
+    #     restart mid-session. Alembic revision 0027_energy_counter_reset.
+    energy_counter_last_raw_kwh: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    energy_reset_offset_kwh: Mapped[float] = mapped_column(Float, default=0.0, server_default="0", nullable=False)
+
     # Hot-path composite indexes (Alembic revision 0024_session_ledger_indexes):
     # plug_id/status backs "is this plug's session still active", user_id/status
     # backs a driver's active/past sessions, tenant_id/started_at backs CPO
     # session history ordered newest-first.
+    #
+    # settled_payout_id (Alembic revision 0028_payout_settlement_marking):
+    # a plain btree backs the FK lookup and cpo_cancel_payout's free-on-cancel
+    # UPDATE; the partial composite backs the new unsettled-sessions query
+    # (mark_unsettled_sessions_and_sum_gross / sum_unsettled_session_coins) --
+    # only rows with settled_payout_id IS NULL are ever read by that path, so
+    # indexing just those keeps the index small and the settled majority of
+    # rows out of it entirely (mirrors ix_session_disputes_one_open_per_session's
+    # partial-index style).
     __table_args__ = (
         Index("ix_charging_sessions_plug_status", "plug_id", "status"),
         Index("ix_charging_sessions_user_status", "user_id", "status"),
         Index("ix_charging_sessions_tenant_started", "tenant_id", "started_at"),
+        Index("idx_charging_sessions_settled_payout_id", "settled_payout_id"),
+        Index(
+            "idx_charging_sessions_unsettled",
+            "tenant_id",
+            "status",
+            postgresql_where=text("settled_payout_id IS NULL"),
+        ),
     )
 
 
@@ -570,6 +644,45 @@ class GatewayEvent(Base):
     )
 
 
+class GatewayLog(Base):
+    """
+    Raw firmware WARN/ERROR log lines forwarded over MQTT (TD#28,
+    `amphive/gateways/{gw}/logs`, fw >= 2.1.0-direct — see
+    firmware/main/main.c log_forward_task and docs/MQTT_CONTRACT.md). A
+    diagnostics feed distinct from GatewayEvent: these are raw ESP-IDF log
+    lines (not structured alarm/event payloads), so a CPO/operator can see
+    what a deployed gateway printed without a serial cable. No socket/notify
+    fan-out — see services/mqtt/logs.py's module docstring.
+
+    Design notes mirror GatewayEvent/TelemetryReading:
+    - level is a plain String, not a PG enum — mirrors the firmware's own
+      E/W/I/D/V letters (mapped to error/warning/info), not a fixed schema.
+    - tenant_id is denormalized (gateway -> tenant) so the CPO/admin feeds
+      filter without a join.
+    - message is capped at 220 chars — firmware truncates lines to
+      LOG_FWD_LINE_MAX (200) before publishing; 220 leaves headroom.
+    - Pruned by services/session_reaper.py reap_gateway_logs_once() per
+      GATEWAY_LOGS_RETENTION_DAYS (default 14) — much shorter than
+      GatewayEvent/TelemetryReading retention since this is high-volume,
+      low-value-per-row diagnostic noise, not an audit trail.
+    """
+    __tablename__ = "gateway_logs"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    gateway_id: Mapped[str] = mapped_column(String(50), ForeignKey("gateways.id", ondelete="CASCADE"), nullable=False)
+    # "error" | "warning" | "info" — mapped from the firmware's E/W/I/D/V
+    # level letter (see services/mqtt/logs.py's log_line_level port).
+    level: Mapped[str] = mapped_column(String(16), nullable=False)
+    message: Mapped[str] = mapped_column(String(220), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+
+    __table_args__ = (
+        Index("idx_gateway_logs_tenant_created", "tenant_id", "created_at"),
+        Index("idx_gateway_logs_gateway_created", "gateway_id", "created_at"),
+    )
+
+
 # --- CPO Admin Audit Trail ---
 
 class AuditLog(Base):
@@ -632,15 +745,24 @@ class AuditLog(Base):
 
 class Notification(Base):
     """
-    Per-user notification feed (drivers first; the CPO alarm feed stays on
-    gateway_events). Written by services/notifications.py at the session
-    lifecycle / wallet / safety emit points, delivered live over Socket.io
-    (user room) + Web Push, and listed by GET /api/notifications.
+    Per-user notification feed (drivers first — most notify() call sites are
+    driver-facing session/wallet/safety events; the CPO alarm feed
+    historically stayed on gateway_events instead). As of the orphan-OFF
+    operator alert (mqtt/status.py._republish_off_for_orphaned_plugs, the
+    first CPO-targeted bell notification: user_id there is a CPO, not a
+    driver), this feed is no longer driver-EXCLUSIVE — it's just per-USER,
+    and a CPO's user_id works exactly like a driver's. gateway_events remains
+    the primary structured operator alert/audit feed (GET /api/cpo/events);
+    this row type is for the rarer one-off "you should know this happened"
+    push to a specific person, driver or CPO. Written by
+    services/notifications.py at the session lifecycle / wallet / safety /
+    ops emit points, delivered live over Socket.io (user room) + Web Push,
+    and listed by GET /api/notifications.
 
     Design notes mirror GatewayEvent:
     - type/severity are plain Strings, not PG enums — the set evolves without
       a schema migration ("session_stopped", "low_balance", "charger_offline",
-      "safety_cutoff", "topup_credited", ...).
+      "safety_cutoff", "topup_credited", "orphan_off", ...).
     - plug_id/session_id are nullable SET NULL context refs: deleting a plug
       or session must not erase a user's notification history.
     - read (not "acknowledged") — driver-facing wording; flipping it hides the
@@ -1223,6 +1345,44 @@ class PlugWatch(Base):
     __table_args__ = (
         UniqueConstraint("user_id", "plug_id", name="uq_plug_watches_user_plug"),
         Index("idx_plug_watches_plug", "plug_id"),
+    )
+
+
+# --- User Favorites (discovery bundle: "star this charger") ---
+
+class UserFavorite(Base):
+    """
+    A driver's standing "favorite this charger" star — styled exactly after
+    PlugWatch above, EXCEPT it is not one-shot: nothing deletes the row
+    automatically (unlike a watch, which self-clears when the plug flips
+    available). It only goes away via DELETE /api/plugs/{id}/favorite or a
+    CASCADE from either FK.
+
+    Design notes (mirrors PlugWatch):
+    - UNIQUE(user_id, plug_id): starring twice is idempotent (the router
+      catches the IntegrityError on a double-tap race); the leading user_id
+      also serves the "which plugs has this user favorited" lookup the plug
+      list/detail responses make (their `is_favorite` field). Declared as a
+      unique INDEX (not a UniqueConstraint like PlugWatch) because 0031's
+      DDL is `CREATE UNIQUE INDEX` — the two must be the same object kind
+      or alembic autogenerate flags drift (test_migrations.py).
+    - idx_user_favorites_plug: not read yet, but the same shape as
+      idx_plug_watches_plug for a future per-plug fan-out/count.
+    - FKs CASCADE both ways: a favorite is meaningless without its user or
+      its plug.
+    - No relationship() back-refs on User/Plug: same rationale as PlugWatch
+      — never a lazy-loadable collection.
+    """
+    __tablename__ = "user_favorites"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    plug_id: Mapped[int] = mapped_column(Integer, ForeignKey("plugs.id", ondelete="CASCADE"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+
+    __table_args__ = (
+        Index("uq_user_favorites_user_plug", "user_id", "plug_id", unique=True),
+        Index("idx_user_favorites_plug", "plug_id"),
     )
 
 

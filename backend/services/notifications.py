@@ -1,9 +1,13 @@
 """
 Driver notifications (TODO.md "Driver notifications"; pairs with the CPO
-gateway_events feed).
+gateway_events feed). Despite the name, notify()'s `user_id` is just a
+users.id — as of the orphan-OFF operator alert
+(services/mqtt/status.py._republish_off_for_orphaned_plugs) it is also
+called with a CPO's user_id, the first CPO-targeted bell notification (see
+the Notification model docstring in database/models.py).
 
 One entry point — notify() — called from the session-lifecycle / wallet /
-safety emit points. Each call:
+safety / ops emit points. Each call:
   1. persists a Notification row (its own transaction via
      async_session_factory, so callers' transactions stay untouched),
   2. emits a Socket.io "notification" event to the user's room (live UI),

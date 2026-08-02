@@ -18,7 +18,9 @@ duplicated here): `deploy/relay/deploy-relay.sh` (relay host prep: swap file +
 Docker install) and `deploy/relay/docker-compose.relay.yml` (the relay-sized
 compose stack). If either has drifted from what's described here, the script
 is the source of truth for exact commands — update this doc to match, don't
-silently follow stale steps.
+silently follow stale steps. `deploy-relay.sh` also installs logrotate for the
+durable `mosquitto.log` file on every run — see
+[mosquitto_log_rotation.md](mosquitto_log_rotation.md).
 
 ## Ground rules
 

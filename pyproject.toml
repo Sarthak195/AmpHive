@@ -67,7 +67,6 @@ files = [
     "backend/routers/cpo/_profile.py",
     "backend/routers/cpo/_reservations.py",
     "backend/routers/cpo/_topups.py",
-    "backend/routers/direct.py",
     "backend/routers/groups.py",
     "backend/routers/plugs.py",
     "backend/routers/reservations.py",
@@ -95,7 +94,8 @@ files = [
     "backend/services/telemetry_persistence.py",
     "backend/services/wallet.py",
 ]
-# TODO(mypy-scope): these 18 files (149 errors total, measured 2026-07-21)
+# TODO(mypy-scope): these 17 files (148 errors total, measured 2026-07-21;
+# backend/services/tapo_direct.py (1) removed 2026-08-02)
 # aren't in `files` yet — each needs real annotation/fix work, not just a
 # config change. Move a file up into `files` once its errors are cleared:
 #   backend/services/telemetry.py (58 — TelemetryStore attr-defined: methods
@@ -111,6 +111,6 @@ files = [
 #     — same mixin attr-defined pattern as mqtt/telemetry.py
 #   backend/services/session_lifecycle.py (3), backend/routers/admin.py (3)
 #   backend/routers/notifications.py (2), backend/routers/auth.py (2)
-#   backend/services/tapo_direct.py (1), backend/services/session_start.py (1),
+#   backend/services/session_start.py (1),
 #   backend/services/reservations.py (1), backend/routers/sessions.py (1),
 #   backend/routers/payments.py (1), backend/routers/cpo/_gateways.py (1)
