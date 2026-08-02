@@ -27,9 +27,6 @@ from backend.database.db import async_session_factory, init_db
 from backend.logging_config import configure_logging, set_correlation_id
 from backend.services.mqtt_manager import MQTTManager
 from backend.services.session_reaper import SessionReaperService
-
-# [Direct Mode] Import the Tapo direct driver for ESP32-bypass plug control
-from backend.services.tapo_direct import TapoDirectDriver
 from backend.services.telemetry import COINS_PER_KWH
 from backend.services.telemetry_persistence import TelemetryPersistenceService
 
@@ -47,15 +44,6 @@ MQTT_BROKER_PORT = int(os.getenv("MQTT_BROKER_PORT", 1883))
 MQTT_USERNAME = os.getenv("MQTT_USERNAME", None)
 MQTT_PASSWORD = os.getenv("MQTT_PASSWORD", None)
 
-# --- [Direct Mode] Tapo P110 Configuration ---
-# When DIRECT_MODE=true, the backend can control the plug directly via the
-# `tapo` Python library, bypassing the ESP32 gateway and MQTT broker.
-# This is used for development/testing before the ESP32 board is available.
-DIRECT_MODE = os.getenv("DIRECT_MODE", "false").lower() == "true"
-TAPO_USERNAME = os.getenv("TAPO_USERNAME", "")
-TAPO_PASSWORD = os.getenv("TAPO_PASSWORD", "")
-TAPO_PLUG_IP = os.getenv("TAPO_PLUG_IP", "")
-
 # --- Shared runtime state + session-lifecycle helpers (TD#7 split) ---
 # Mutable runtime handles live in backend/state.py (set below in lifespan);
 # the session helpers moved verbatim to services/session_lifecycle.py.
@@ -67,7 +55,7 @@ from backend.services.session_lifecycle import (  # noqa: E402
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Manage MQTT and Tapo Direct connection lifecycles with the FastAPI application."""
+    """Manage MQTT connection lifecycle with the FastAPI application."""
     # Initialize the database tables
     await init_db()
 
@@ -96,19 +84,6 @@ async def lifespan(app: FastAPI):
         telemetry_persistence=state.telemetry_persistence,
     )
     state.mqtt_manager.start()
-
-    # [Direct Mode] Initialize the Tapo direct driver if enabled.
-    # This allows controlling the plug without an ESP32 gateway, useful for
-    # development/testing. The plug is reached via a WireGuard tunnel to
-    # the developer's home network.
-    if DIRECT_MODE and TAPO_USERNAME and TAPO_PASSWORD:
-        state.tapo_driver = TapoDirectDriver(
-            tapo_email=TAPO_USERNAME,
-            tapo_password=TAPO_PASSWORD,
-        )
-        logger.info(f"🔌 Direct Mode ENABLED — Tapo plug target: {TAPO_PLUG_IP}")
-    else:
-        logger.info("Direct Mode DISABLED — using standard ESP32/MQTT path")
 
     # Auto-finalize ACTIVE sessions whose telemetry has gone silent (dead
     # gateway mid-session). Shares finalize_charging_session with the stop
@@ -217,7 +192,6 @@ from backend.routers import (  # noqa: E402
     admin,
     auth,
     cpo,
-    direct,
     groups,
     notifications,
     payments,
@@ -232,7 +206,6 @@ app.include_router(plugs.router)
 app.include_router(sessions.router)
 app.include_router(payments.router)
 app.include_router(notifications.router)
-app.include_router(direct.router)
 app.include_router(cpo.router)
 # Appended after the original eight so their OpenAPI order stays stable
 # (feat/reservations, 2026-07-12).
