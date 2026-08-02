@@ -1,6 +1,9 @@
 # Proposal: Per-plug power sensing + queue-charge-during-outage
 
-Status: **Draft plan (not yet approved / not built)**
+Status: **SHIPPED** — per-plug-power foundation + start-gate (PR #48), the
+queued-charge feature itself (PR #49, tenant flag `queued_charging_enabled`,
+ENABLED tenant-wide 2026-07-21), and the orphan-OFF operator alert (§follow-up,
+PR #87, 2026-08-02). Kept as the design record.
 Author: dev + Claude
 Date: 2026-07-14
 

@@ -390,8 +390,11 @@ been fixed by the 2026-07-08…11 work — see the shipped sections below).*
       plaintext `1883` listener stays up during transition (backend internal +
       OTA-rollback target), bound internal-only once all gateways are on 8883.
       Deploy ships certs via `deploy.ps1`; firmware ships via OTA. (SEC §3)
-- [ ] **MQTT broker DNS un-pinning — operator rollout** (code done, fw
-      2.3.0-direct): firmware default is now `mqtts://mqtt.amphive.app:8883`
+- [x] **MQTT broker DNS un-pinning — operator rollout** — **Done: verified
+      2026-08-02** (`mqtt.amphive.app` A record resolves to the relay VM
+      136.117.94.209; fw ≥2.3.0 fleet connects via the hostname over TLS —
+      post-consolidation the broker, cert, and DNS all live on/point at
+      `amphive-relay`). Original steps (code done, fw 2.3.0-direct): firmware default is now `mqtts://mqtt.amphive.app:8883`
       (was pinned `8.231.81.12`; NVS `broker_url` override + legacy-IP
       self-migration). Remaining operator steps, in order: reissue the server
       cert (same CA, dual DNS+IP SANs) → create the `mqtt.amphive.app` A

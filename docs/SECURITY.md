@@ -508,8 +508,9 @@ Status — open items and recently closed:
       2026-07-11** (`allow-amphive-ports` is tcp:80-only now; HSTS
       max-age=31536000 in the generated Caddyfile).
 - [x] Replace DuckDNS with a real domain (2026-07-20) — `amphive.app` /
-      `cpo.amphive.app` are live; DuckDNS retired. Still open: flip bare-IP
-      serve-mode to a redirect.
+      `cpo.amphive.app` are live; DuckDNS retired. Bare-IP serve-mode is
+      DELIBERATELY kept (not flipped to a redirect) — it is the DNS-outage
+      escape hatch; see the TODO.md cutover entry's DECISION note.
 - [x] **Rotate** WireGuard keys, DuckDNS token, Tapo & DB passwords at the source
       (2026-07-06). Dead old values remain in git history — *optional* scrub.
 - [x] **Commit + deploy** the CORS allowlist (2026-07-06) — live in prod.

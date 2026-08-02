@@ -4,13 +4,11 @@
  * that moved to Wallet.jsx).
  *
  * Two tabs:
- * - Charging sessions: GET /api/sessions/history?limit&offset. The backend
- *   is landing the new `{total, items}` paginated shape in parallel — this
- *   page also accepts the legacy bare array and simply omits the pager when
- *   there's no `total` to page against.
+ * - Charging sessions: GET /api/sessions/history?limit&offset — the
+ *   `{total, items}` paginated shape; this page also tolerates a legacy bare
+ *   array and simply omits the pager when there's no `total` to page against.
  * - Issue reports: GET /api/sessions/disputes/my (a plain array). Renders
- *   ErrorState-with-retry (never a fake empty list) until the backend lands
- *   it.
+ *   ErrorState-with-retry on failure (never a fake empty list).
  *
  * Row click on either tab opens a self-contained session-detail modal (GET
  * /api/sessions/{id} — the same receipt-shape field set SessionReceipt
