@@ -37,6 +37,9 @@
 #include "esp_random.h"
 #include "esp_http_client.h"
 #include "nvs.h"
+#include "session_nvs.h"   /* PLUG_IP_MAX_LEN — shared with main.c's plug-slot IP buffer so a
+                             * roster "host:port" entry (bare-IP-or-":port", see PLUG_IP_MAX_LEN's
+                             * own comment) fits identically in every buffer that stores it. */
 #include "mbedtls/md.h"
 #if MBEDTLS_MAJOR_VERSION >= 4
 #define MBEDTLS_DECLARE_PRIVATE_IDENTIFIERS
@@ -76,7 +79,7 @@ typedef struct {
 
 /* ── per-plug driver context ──────────────────────────────────────────────── */
 struct tapo_plug_s {
-    char             ip[16];
+    char             ip[PLUG_IP_MAX_LEN];   /* bare IP, or "IP:port" for the emulator bench */
     int              plug_id;
     SemaphoreHandle_t mutex;
     klap_session_t   sess;

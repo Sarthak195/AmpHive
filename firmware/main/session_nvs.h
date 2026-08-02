@@ -6,7 +6,19 @@
 #include "esp_err.h"
 
 #define SESSION_ID_MAX_LEN 32
-#define PLUG_IP_MAX_LEN    16   /* "255.255.255.255" + NUL */
+/* "255.255.255.255:65535" (21 chars) + NUL. Was 16 (bare IPv4 only) until
+ * the P110 emulator bench work (tools/p110_sim/) needed several simulated
+ * plugs reachable on one LAN IP at different ports. The HTTP URL builders
+ * in tapo_protocol.c (klap_handshake/klap_request_once) already do a plain
+ * "http://%s/..." substitution, so a "host:port" string just works as a
+ * URL host:port — the only thing that needed to grow is this buffer size.
+ * Purely additive: existing bare-IP roster entries (<=15 chars) are
+ * unaffected, and the NVS session blob's self-describing size check
+ * (session_nvs_load_all's sz != expected) already makes a struct-layout
+ * change across an OTA safe-by-design (same precedent as every prior
+ * session_params_t field addition) — OTA is refused while a session is
+ * active, so there's never a live session to lose across the upgrade. */
+#define PLUG_IP_MAX_LEN    22
 
 /* Max concurrent per-plug sessions a single gateway persists for crash
  * recovery. main.c sizes its plug slot table to this too, so they can't
