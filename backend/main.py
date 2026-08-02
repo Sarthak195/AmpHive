@@ -26,6 +26,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from backend.database.db import async_session_factory, init_db
 from backend.logging_config import configure_logging, set_correlation_id
 from backend.services.mqtt_manager import MQTTManager
+from backend.services.rate_limit import api_rate_limit_middleware
 from backend.services.session_reaper import SessionReaperService
 from backend.services.telemetry import COINS_PER_KWH
 from backend.services.telemetry_persistence import TelemetryPersistenceService
@@ -111,6 +112,13 @@ app = FastAPI(
     version="2.0.0",
     lifespan=lifespan,
 )
+
+# --- Blanket per-IP API rate limit (SECURITY.md §8.6) ---
+# Registered BEFORE CORSMiddleware on purpose: the middleware added last is
+# the outermost, so CORS ends up wrapping this limiter — preflight OPTIONS
+# are answered by CORS without spending budget, and a 429 still gets CORS
+# headers stamped on the way out (a cross-origin page can read the error).
+app.middleware("http")(api_rate_limit_middleware)
 
 # --- CORS Middleware ---
 # Allow the frontend (running on a different port/domain) to make API requests.
