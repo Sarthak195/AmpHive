@@ -9,7 +9,7 @@ firmware.*
 ## 1. Backend (`backend/`)
 
 `main.py` is app assembly only (lifespan, CORS, health, router includes,
-Socket.io wrap) — routes live in **10 routers** under `backend/routers/`
+Socket.io wrap) — routes live in **9 routers** under `backend/routers/`
 (one of which, `cpo`, is itself a sub-package of 12 domain modules plus a
 shared `_common.py`), request/response schemas are centralized in
 `backend/schemas.py`, and business logic lives in `backend/services/`
@@ -20,14 +20,13 @@ shared `_common.py`), request/response schemas are centralized in
 ```
 main.py  (app assembly only since 2026-07-07: lifespan, CORS, health, router includes, Socket.io wrap)
 │
-├── routers/                    10 routers included in main.py
+├── routers/                    9 routers included in main.py
 │   ├── auth.py                 register/login/me/password-reset
 │   ├── groups.py                charger-group list/join (access codes)
 │   ├── plugs.py                 driver-facing plug listing/detail
 │   ├── sessions.py               start/stop/history + session limits
 │   ├── payments.py               Razorpay create-order/verify/webhook
 │   ├── notifications.py          driver notification feed + Web Push subscribe
-│   ├── direct.py                 Direct-Mode (ESP32-bypass) Tapo control, dev/test only
 │   ├── reservations.py           book-ahead charger reservations
 │   ├── admin.py                  platform-admin console (tenants/users/payouts/audit)
 │   └── cpo/                      operator-portal package (splice-mounted as one router)
@@ -86,7 +85,6 @@ main.py  (app assembly only since 2026-07-07: lifespan, CORS, health, router inc
 ├── services/audit.py           CPO/admin action audit trail (AuditLog writer)
 ├── services/email.py           password-reset email: SMTP (STARTTLS) or console-log fallback
 ├── services/socketio_manager.py  Socket.io server, auth, session rooms, telemetry broadcasting
-├── services/tapo_direct.py     Direct-Mode Tapo driver (tapo lib or HTTP relay via TAPO_RELAY_URL)
 │
 └── seed.py                     dev/test data seeder (tenants, CPOs, drivers, plugs, sessions)
 ```
@@ -106,7 +104,7 @@ main.py  (app assembly only since 2026-07-07: lifespan, CORS, health, router inc
 | `razorpay` | Payment gateway SDK (top-ups) |
 | `python-socketio`, `python-engineio` | Socket.io server + engine for real-time WebSockets |
 | `pywebpush` | Web Push delivery for driver notifications (VAPID) |
-| `tapo` (`<1.0`) | Rust-backed TP-Link Tapo control (Direct Mode dev/test path) |
+| `tapo` (`<1.0`) | Rust-backed TP-Link Tapo control — standalone tools bench scripts only (`tools/turn_on.py`, `turn_off.py`, `local_tapo_test.py`), not imported by the backend runtime |
 
 Dev/CI-only (`backend/requirements-dev.txt`): `pytest`, `pytest-asyncio`,
 `pytest-cov`, `ruff`, `mypy` — see [TESTING.md](TESTING.md).
@@ -205,13 +203,6 @@ main/main.c  (app_main)
 ├── ESP-IDF (esp_wifi, esp_event, esp_netif, esp_http_server, nvs_flash, mqtt_client, esp_http_client, mbedtls,
 │            esp_https_ota, app_update, esp_app_format — signed OTA)
 ├── #define AMPHIVE_DIRECT_MQTT 1   the only build mode shipped to the field: TLS MQTT straight to the broker
-├── components/microlink/          from-scratch Tailscale client (Noise/ts2021, DERP, DISCO, STUN, WG) — legacy
-│                                    overlay transport (AMPHIVE_DIRECT_MQTT == 0). Still #include'd and REQUIRES'd
-│                                    (so it's compiled into every binary), but under the default direct-MQTT
-│                                    build its VPN task is never spawned (`#if !AMPHIVE_DIRECT_MQTT` gates
-│                                    `microlink_task`) — linked-in dead code at runtime, not excluded from the build.
-├── components/wireguard_lwip/     vendored WireGuard-over-lwIP, pulled in transitively as microlink's own
-│                                    REQUIRES — same "compiled in, never invoked" status under direct MQTT.
 ├── components/json/                vendored cJSON (ESP-IDF v6 removed it from core; kept local instead of
 │                                    fetching it from the component registry)
 ├── main/tapo_protocol.c            Real KLAP v2 Tapo P110 driver (mbedTLS SHA/AES + esp_http_client)
@@ -220,7 +211,7 @@ main/main.c  (app_main)
 └── main/ota_update.c               Signed OTA-over-MQTT apply path (esp_https_ota + app_update)
 
 main/CMakeLists.txt → SRCS main.c tapo_protocol.c session_nvs.c offline_log.c ota_update.c
-                      REQUIRES microlink mqtt nvs_flash esp_wifi esp_http_server esp_http_client
+                      REQUIRES mqtt nvs_flash esp_wifi esp_http_server esp_http_client
                                mbedtls json esp_https_ota app_update esp_app_format
 main/idf_component.yml → espressif/mqtt ^1.0.0 (ESP-IDF v6 moved esp-mqtt out of core into the registry)
 ```
@@ -253,7 +244,7 @@ main/idf_component.yml → espressif/mqtt ^1.0.0 (ESP-IDF v6 moved esp-mqtt out 
 
 | File | Status | Recommendation |
 |------|--------|----------------|
-| `firmware/components/microlink/`, `firmware/components/wireguard_lwip/` | Legacy VPN-overlay transport. Still compiled into every firmware image (unconditional `REQUIRES`/`#include`), but `microlink_task` is never spawned under the shipped `AMPHIVE_DIRECT_MQTT=1` build | Candidate for a follow-up to gate the `REQUIRES` on a build flag (or delete outright) once the direct-MQTT transport has been the only shipped path long enough to be confident nothing needs the fallback |
+| ~~`firmware/components/microlink/`, `firmware/components/wireguard_lwip/`~~ | **Removed 2026-08-02** — legacy VPN-overlay transport, dead since the 2026-07-10 direct-MQTT pivot; the linker map showed zero objects pulled from either archive | — |
 | `frontend/README.md` | Stock Vite template, not project docs | Replace with project-specific notes |
 | ~~`backend/database/init_db.py`~~ | **Renamed 2026-07-09** to `reset_db.py` (TD#8) | — |
 | ~~`backend/database/schema.sql` / `schema_v2.sql`~~ | **Deleted 2026-07-07** — replaced by Alembic (`backend/migrations/`) | — |

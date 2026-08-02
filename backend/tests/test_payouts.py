@@ -174,7 +174,10 @@ async def test_cancel_blocks_cross_tenant_cpo():
 @pytest.mark.asyncio
 async def test_cancel_allows_admin_across_tenants():
     payout = _payout_mock(tenant_id=2, status=PayoutStatus.REQUESTED)
-    db = _db(_result(payout))
+    # Two db.execute calls now: the payout SELECT ... FOR UPDATE, then the
+    # free-claimed-sessions UPDATE charging_sessions (settlement marking) --
+    # its return value is never read by the route, so a bare mock stands in.
+    db = _db(_result(payout), MagicMock())
     admin = _stub_user(tenant_id=None, role=UserRole.ADMIN)
 
     result = await cpo_cancel_payout(payout_id=payout.id, user=admin, db=db)
@@ -193,7 +196,9 @@ async def test_cancel_audits_into_the_payouts_tenant_not_the_admins():
     tenant_id at all (AuditLog.tenant_id is NOT NULL, so using the actor's
     would also just break)."""
     payout = _payout_mock(id=7, tenant_id=2, status=PayoutStatus.REQUESTED)
-    db = _db(_result(payout))
+    # See test_cancel_allows_admin_across_tenants: cancel now issues a second
+    # db.execute for the free-claimed-sessions UPDATE (settlement marking).
+    db = _db(_result(payout), MagicMock())
     admin = _stub_user(tenant_id=None, role=UserRole.ADMIN, user_id=42)
 
     await cpo_cancel_payout(payout_id=payout.id, user=admin, db=db)
@@ -732,21 +737,34 @@ async def test_refund_approved_after_payout_still_claws_back_next_window(factory
     dispute's resolved_at, not the session's ended_at. Under the old ended_at
     windowing the refund fell behind the watermark and vanished, letting a CPO
     be paid in full and then approve the refund for free."""
-    from backend.database.models import DisputeStatus, Payout, SessionDispute
+    from sqlalchemy import update
+
+    from backend.database.models import (
+        ChargingSession,
+        DisputeStatus,
+        Payout,
+        SessionDispute,
+    )
 
     tenant_id, user_id = await _seed_tenant(factory, "PayThenRefundCo")
     driver_id = await _seed_driver(factory, "latedisputer")
     now = datetime.now(timezone.utc)
 
     # S1 ended 2h ago and was fully settled into a PAID payout whose period_end
-    # (90m ago) becomes the tenant's watermark -> S1 now sits behind it.
+    # (90m ago) becomes the tenant's watermark. Under settlement marking a
+    # settled session is one the payout CLAIMED (settled_payout_id), so the
+    # seeding stamps the claim explicitly — for a payout created through the
+    # API that's what cpo_request_payout does, and for a pre-marking payout
+    # like this fabricated one it's what migration 0028's backfill does
+    # (test_backfill_claims_windowed_sessions_for_legacy_payouts proves that
+    # SQL produces exactly this state).
     old_session_id = await _seed_session(
         factory, tenant_id, "20.00", SessionStatus.COMPLETED,
         ended_at=now - timedelta(hours=2),
     )
     settled_at = now - timedelta(minutes=90)
     async with factory() as db:
-        db.add(Payout(
+        paid_payout = Payout(
             tenant_id=tenant_id,
             period_start=payout_service.EPOCH,
             period_end=settled_at,
@@ -755,7 +773,14 @@ async def test_refund_approved_after_payout_still_claws_back_next_window(factory
             net_coins=Decimal("18.00"),
             status=PayoutStatus.PAID,
             requested_by_user_id=user_id,
-        ))
+        )
+        db.add(paid_payout)
+        await db.flush()
+        await db.execute(
+            update(ChargingSession)
+            .where(ChargingSession.id == old_session_id)
+            .values(settled_payout_id=paid_payout.id)
+        )
         await db.commit()
 
     # Fresh earnings in the current unsettled window for the clawback to bite.
@@ -938,3 +963,356 @@ async def test_failed_audit_write_never_breaks_the_action_or_session(factory):
     assert await _audit_rows(factory, tenant_id, "payout.mark_paid") == []
     request_rows = await _audit_rows(factory, tenant_id, "payout.request")
     assert [r.target_id for r in request_rows] == [str(requested["id"])]
+
+
+# ===========================================================================
+# Tier 2: settlement marking (ChargingSession.settled_payout_id) — the
+# watermark-race fix. Row-ownership replaces the ended_at/watermark window
+# for GROSS; refund/top-up windowing is untouched (covered by the tests
+# above, still passing unmodified).
+# ===========================================================================
+
+@requires_db
+@pytest.mark.asyncio
+async def test_late_landing_session_is_claimed_by_next_payout_not_lost(factory):
+    """Regression for the watermark race this fix closes: under the OLD
+    ended_at/watermark scheme, a session whose ended_at falls BEFORE a
+    payout's snapshot period_end but that only COMMITS after that payout was
+    already requested would be silently dropped from every future payout
+    (its ended_at is 'behind the watermark' forever). Under settlement
+    marking a session's eligibility depends only on settled_payout_id, not
+    on when its ended_at falls -- so it stays unsettled and is simply
+    claimed by the NEXT payout instead of lost."""
+    from backend.database.models import ChargingSession
+
+    tenant_id, user_id = await _seed_tenant(factory, "LateLandCo")
+    user = _cpo_user(tenant_id, user_id)
+    now = datetime.now(timezone.utc)
+
+    await _seed_session(
+        factory, tenant_id, "10.00", SessionStatus.COMPLETED,
+        ended_at=now - timedelta(hours=2),
+    )
+
+    async with factory() as db:
+        first = await cpo_request_payout(user=user, db=db)
+    assert first["gross_coins"] == pytest.approx(10.00)
+    first_period_end = datetime.fromisoformat(first["period_end"])
+
+    # Session B "lands" (its finalize commits) only now, AFTER the first
+    # payout snapshot -- but its own ended_at predates that snapshot's
+    # period_end, exactly the shape of the race: old windowing would already
+    # consider it settled-and-gone.
+    late_session_id = await _seed_session(
+        factory, tenant_id, "6.00", SessionStatus.COMPLETED,
+        ended_at=first_period_end - timedelta(seconds=1),
+    )
+
+    async with factory() as db:
+        unsettled = await payout_service.sum_unsettled_session_coins(db, tenant_id)
+    assert unsettled == Decimal("6.00")
+
+    # Settle the first payout so a second request is allowed (only one
+    # REQUESTED payout per tenant at a time).
+    admin_id = await _seed_admin(factory)
+    admin_user = _cpo_user(None, admin_id, role=UserRole.ADMIN)
+    async with factory() as db:
+        await cpo_mark_payout_paid(payout_id=first["id"], user=admin_user, db=db)
+
+    async with factory() as db:
+        second = await cpo_request_payout(user=user, db=db)
+    assert second["gross_coins"] == pytest.approx(6.00)
+
+    async with factory() as db:
+        from sqlalchemy import select
+        row = (
+            await db.execute(select(ChargingSession).where(ChargingSession.id == late_session_id))
+        ).scalar_one()
+    assert row.settled_payout_id == second["id"]
+
+
+@requires_db
+@pytest.mark.asyncio
+async def test_request_marks_exactly_its_claimed_sessions(factory):
+    """A payout's claim UPDATE must stamp settled_payout_id on exactly the
+    sessions its gross summed -- not more. A session seeded right after the
+    request must stay untouched (settled_payout_id still NULL)."""
+    from sqlalchemy import select
+
+    from backend.database.models import ChargingSession
+
+    tenant_id, user_id = await _seed_tenant(factory, "ExactClaimCo")
+    user = _cpo_user(tenant_id, user_id)
+    now = datetime.now(timezone.utc)
+
+    s1 = await _seed_session(factory, tenant_id, "5.00", SessionStatus.COMPLETED, ended_at=now - timedelta(hours=1))
+    s2 = await _seed_session(factory, tenant_id, "7.00", SessionStatus.COMPLETED, ended_at=now - timedelta(hours=1))
+
+    async with factory() as db:
+        payout = await cpo_request_payout(user=user, db=db)
+    assert payout["gross_coins"] == pytest.approx(12.00)
+
+    s3 = await _seed_session(factory, tenant_id, "3.00", SessionStatus.COMPLETED, ended_at=now)
+
+    async with factory() as db:
+        rows = {
+            row.id: row.settled_payout_id
+            for row in (await db.execute(select(ChargingSession))).scalars().all()
+        }
+    assert rows[s1] == payout["id"]
+    assert rows[s2] == payout["id"]
+    assert rows[s3] is None
+
+
+@requires_db
+@pytest.mark.asyncio
+async def test_cancel_frees_claimed_sessions_for_next_request(factory):
+    """cpo_cancel_payout must reset settled_payout_id back to NULL for every
+    session it had claimed, so a cancelled payout's earnings aren't
+    stranded -- they're claimable again by the very next request (the
+    row-ownership replacement for the old watermark-excludes-CANCELLED
+    window-freeing behavior)."""
+    from sqlalchemy import select
+
+    from backend.database.models import ChargingSession
+
+    tenant_id, user_id = await _seed_tenant(factory, "CancelFreesSessionsCo")
+    user = _cpo_user(tenant_id, user_id)
+    now = datetime.now(timezone.utc)
+
+    session_id = await _seed_session(
+        factory, tenant_id, "9.00", SessionStatus.COMPLETED, ended_at=now - timedelta(hours=1)
+    )
+
+    async with factory() as db:
+        first = await cpo_request_payout(user=user, db=db)
+
+    async with factory() as db:
+        row = (
+            await db.execute(select(ChargingSession).where(ChargingSession.id == session_id))
+        ).scalar_one()
+    assert row.settled_payout_id == first["id"]
+
+    async with factory() as db:
+        await cpo_cancel_payout(payout_id=first["id"], user=user, db=db)
+
+    async with factory() as db:
+        row = (
+            await db.execute(select(ChargingSession).where(ChargingSession.id == session_id))
+        ).scalar_one()
+    assert row.settled_payout_id is None
+
+    async with factory() as db:
+        second = await cpo_request_payout(user=user, db=db)
+    assert second["gross_coins"] == pytest.approx(9.00)
+
+    async with factory() as db:
+        row = (
+            await db.execute(select(ChargingSession).where(ChargingSession.id == session_id))
+        ).scalar_one()
+    assert row.settled_payout_id == second["id"]
+
+
+@requires_db
+@pytest.mark.asyncio
+async def test_second_payout_gross_excludes_first_payouts_claimed_sessions(factory):
+    """No double counting: once payout A claims S1, a later payout B (after
+    A is settled) must never re-count S1's coins -- its gross must reflect
+    only sessions that were still unsettled at B's claim time."""
+    tenant_id, user_id = await _seed_tenant(factory, "NoDoubleCountCo")
+    user = _cpo_user(tenant_id, user_id)
+    now = datetime.now(timezone.utc)
+
+    await _seed_session(factory, tenant_id, "20.00", SessionStatus.COMPLETED, ended_at=now - timedelta(hours=1))
+
+    async with factory() as db:
+        payout_a = await cpo_request_payout(user=user, db=db)
+    assert payout_a["gross_coins"] == pytest.approx(20.00)
+
+    admin_id = await _seed_admin(factory)
+    admin_user = _cpo_user(None, admin_id, role=UserRole.ADMIN)
+    async with factory() as db:
+        await cpo_mark_payout_paid(payout_id=payout_a["id"], user=admin_user, db=db)
+
+    await _seed_session(factory, tenant_id, "8.00", SessionStatus.COMPLETED, ended_at=datetime.now(timezone.utc))
+
+    async with factory() as db:
+        payout_b = await cpo_request_payout(user=user, db=db)
+    assert payout_b["gross_coins"] == pytest.approx(8.00)
+
+
+@requires_db
+@pytest.mark.asyncio
+async def test_payout_gross_matches_independent_sum_over_claimed_rows(factory):
+    """payout.gross_coins must equal SUM(coins_spent) of exactly the rows
+    that carry this payout's id in settled_payout_id -- the row-ownership
+    invariant settlement marking is built on."""
+    from sqlalchemy import func, select
+
+    from backend.database.models import ChargingSession
+
+    tenant_id, user_id = await _seed_tenant(factory, "InvariantCo")
+    user = _cpo_user(tenant_id, user_id)
+    now = datetime.now(timezone.utc)
+
+    await _seed_session(factory, tenant_id, "4.25", SessionStatus.COMPLETED, ended_at=now - timedelta(hours=1))
+    await _seed_session(factory, tenant_id, "11.75", SessionStatus.COMPLETED, ended_at=now - timedelta(hours=2))
+
+    async with factory() as db:
+        payout = await cpo_request_payout(user=user, db=db)
+
+    async with factory() as db:
+        independent_sum = (
+            await db.execute(
+                select(func.coalesce(func.sum(ChargingSession.coins_spent), 0)).where(
+                    ChargingSession.settled_payout_id == payout["id"]
+                )
+            )
+        ).scalar()
+
+    assert Decimal(str(independent_sum)) == Decimal(str(payout["gross_coins"]))
+
+
+@requires_db
+@pytest.mark.asyncio
+async def test_sum_unsettled_session_coins_matches_what_a_request_would_claim(factory):
+    """The read-only earnings-preview aggregate must agree with what
+    mark_unsettled_sessions_and_sum_gross actually claims -- GET
+    /api/cpo/earnings and POST /api/cpo/payouts must never disagree, and the
+    preview call itself must not have claimed anything (still unsettled
+    afterwards, claimable by the real request). Seeds an APPROVED refund so
+    the agreement covers the refund-clawback subtraction too, on BOTH paths:
+    a preview that skipped the subtraction would over-show, and a claim that
+    skipped it (e.g. by recomputing the watermark after the new payout row
+    is flushed, seeing its own period_end, and windowing the refund out --
+    the exact bug this guards against) would over-PAY."""
+    from backend.database.models import DisputeStatus, SessionDispute
+
+    tenant_id, user_id = await _seed_tenant(factory, "PreviewMatchesCo")
+    driver_id = await _seed_driver(factory, "previewdisputer")
+    user = _cpo_user(tenant_id, user_id)
+    now = datetime.now(timezone.utc)
+
+    session_id = await _seed_session(
+        factory, tenant_id, "13.50", SessionStatus.COMPLETED, ended_at=now - timedelta(hours=1)
+    )
+    async with factory() as db:
+        db.add(SessionDispute(
+            session_id=session_id,
+            tenant_id=tenant_id,
+            driver_user_id=driver_id,
+            reason="Partial refund before any payout",
+            status=DisputeStatus.APPROVED,
+            refund_coins=Decimal("2.00"),
+            resolved_at=now,
+        ))
+        await db.commit()
+
+    # Preview: 13.50 session gross minus the 2.00 approved refund.
+    async with factory() as db:
+        preview = await payout_service.sum_unsettled_session_coins(db, tenant_id)
+    assert preview == Decimal("11.50")
+
+    # The claim must compute the exact same post-refund gross.
+    async with factory() as db:
+        payout = await cpo_request_payout(user=user, db=db)
+    assert payout["gross_coins"] == pytest.approx(11.50)
+
+    # The preview read didn't claim anything -- a second preview right after
+    # the real request correctly shows zero unsettled left (and the already-
+    # subtracted refund, now behind the new watermark, is not re-subtracted).
+    async with factory() as db:
+        after = await payout_service.sum_unsettled_session_coins(db, tenant_id)
+    assert after == Decimal("0.00")
+
+
+@requires_db
+@pytest.mark.asyncio
+async def test_backfill_claims_windowed_sessions_for_legacy_payouts(factory):
+    """Migration 0028's backfill: payouts that predate settlement marking
+    never claimed their sessions, so without a one-time backfill the first
+    post-deploy request would re-pay all of history. The backfill stamps
+    each FINISHED session whose ended_at falls in a non-CANCELLED payout's
+    [period_start, period_end) window with that payout's id -- and nothing
+    else: out-of-window sessions and CANCELLED payouts' windows stay NULL.
+    Executes the migration's own _BACKFILL_SQL verbatim (imported from the
+    version file) against a seeded schema, since the alembic-driven
+    migration tests only ever run against an empty database."""
+    import importlib.util
+    from pathlib import Path
+
+    from sqlalchemy import select, text
+
+    from backend.database.models import ChargingSession, Payout
+
+    spec = importlib.util.spec_from_file_location(
+        "migration_0028",
+        Path(__file__).parents[1] / "migrations" / "versions" / "0028_payout_settlement_marking.py",
+    )
+    migration_0028 = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration_0028)
+
+    tenant_id, user_id = await _seed_tenant(factory, "BackfillCo")
+    now = datetime.now(timezone.utc)
+
+    in_window_id = await _seed_session(
+        factory, tenant_id, "20.00", SessionStatus.COMPLETED, ended_at=now - timedelta(hours=2)
+    )
+    paid_in_window_id = await _seed_session(
+        factory, tenant_id, "5.00", SessionStatus.PAID, ended_at=now - timedelta(hours=3)
+    )
+    after_window_id = await _seed_session(
+        factory, tenant_id, "8.00", SessionStatus.COMPLETED, ended_at=now - timedelta(minutes=30)
+    )
+    cancelled_window_id = await _seed_session(
+        factory, tenant_id, "7.00", SessionStatus.COMPLETED, ended_at=now - timedelta(minutes=70)
+    )
+
+    settled_at = now - timedelta(minutes=90)
+    async with factory() as db:
+        legacy_paid = Payout(
+            tenant_id=tenant_id,
+            period_start=payout_service.EPOCH,
+            period_end=settled_at,
+            gross_coins=Decimal("25.00"),
+            platform_fee_coins=Decimal("2.50"),
+            net_coins=Decimal("22.50"),
+            status=PayoutStatus.PAID,
+            requested_by_user_id=user_id,
+        )
+        # A CANCELLED payout whose window covers cancelled_window_id: its
+        # sessions must NOT be claimed (cancel always freed its window).
+        legacy_cancelled = Payout(
+            tenant_id=tenant_id,
+            period_start=settled_at,
+            period_end=now - timedelta(minutes=60),
+            gross_coins=Decimal("7.00"),
+            platform_fee_coins=Decimal("0.70"),
+            net_coins=Decimal("6.30"),
+            status=PayoutStatus.CANCELLED,
+            requested_by_user_id=user_id,
+        )
+        db.add(legacy_paid)
+        db.add(legacy_cancelled)
+        await db.commit()
+        legacy_paid_id = legacy_paid.id
+
+    async with factory() as db:
+        await db.execute(text(migration_0028._BACKFILL_SQL))
+        await db.commit()
+
+    async with factory() as db:
+        rows = {
+            row.id: row.settled_payout_id
+            for row in (await db.execute(select(ChargingSession))).scalars().all()
+        }
+    assert rows[in_window_id] == legacy_paid_id
+    assert rows[paid_in_window_id] == legacy_paid_id
+    assert rows[after_window_id] is None
+    assert rows[cancelled_window_id] is None
+
+    # Post-backfill, the unsettled preview shows only the truly-unsettled
+    # sessions -- history is not re-payable.
+    async with factory() as db:
+        unsettled = await payout_service.sum_unsettled_session_coins(db, tenant_id)
+    assert unsettled == Decimal("15.00")  # 8.00 + 7.00, not the settled 25.00

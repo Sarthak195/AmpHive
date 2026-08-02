@@ -17,7 +17,6 @@
 #include "nvs.h"
 #include "esp_netif.h"
 #include "mqtt_client.h"
-#include "microlink.h"
 #include "tapo_protocol.h"
 #include "esp_http_server.h"
 #include "session_nvs.h"
@@ -30,7 +29,6 @@
 // ─── Configuration Variables ──────────────────────────────────────────────────
 char wifi_ssid[32] = "";
 char wifi_password[64] = "";
-char ts_auth_key[128] = "";
 char device_name[32] = "";
 char gateway_id[32] = "";
 char tapo_email[64] = "";
@@ -94,21 +92,6 @@ static float default_plug_cap_a = DEFAULT_PLUG_CAP_A;
 #define LEGACY_BROKER_IP_PUBLIC  "8.231.81.12"    // VM static public IP (amphive-static-ip)
 #define LEGACY_BROKER_IP_OVERLAY "100.87.241.70"  // old Tailscale/overlay IP
 #define MQTT_USE_TLS        1
-#else
-// The central AmpHive server's Tailscale VPN IP
-#define SERVER_VPN_IP       "100.87.241.70"
-// INTERIM (2026-07-08): plaintext 1883. mqtts://8883 is verified
-// working on the broker, but the ESP's custom ml_* overlay cannot carry the TLS
-// handshake (transport stall — esp_tls timeout, no mbedTLS/cert error). The
-// overlay is already WireGuard-encrypted, so 1883 is not a confidentiality
-// regression. Restore to "mqtts://100.87.241.70:8883" once the overlay TLS
-// path is fixed (see auto-memory: broker-tls-ondevice-verify-pending).
-#define MQTT_BROKER_URL     "mqtt://100.87.241.70:1883"
-// Must match the URI scheme above: 1 for mqtts:// (TLS), 0 for mqtt:// (plain).
-// esp-mqtt refuses to init a client that has TLS verification configs set on a
-// non-SSL scheme ("Client was not initialized"), so the CA cert below is only
-// attached when this is 1. Set back to 1 when restoring the mqtts://8883 URL.
-#define MQTT_USE_TLS        0
 #endif
 
 // Broker CA, embedded via EMBED_TXTFILES (see main/CMakeLists.txt). The
@@ -331,10 +314,6 @@ static void start_mqtt_client(void);
 static void telemetry_task(void *pvParameters);
 static void start_captive_portal(void);
 static void resync_offline_logs(void);
-#if !AMPHIVE_DIRECT_MQTT
-static void on_overlay_disconnected(void);
-static void microlink_task(void *pvParameters);
-#endif
 
 // ─── NVS Configuration Helpers ───────────────────────────────────────────────
 #if AMPHIVE_DIRECT_MQTT
@@ -364,8 +343,6 @@ static void load_config_from_nvs(void) {
     }
     size = sizeof(wifi_password);
     nvs_get_str(my_handle, "wifi_pwd", wifi_password, &size);
-    size = sizeof(ts_auth_key);
-    nvs_get_str(my_handle, "ts_auth_key", ts_auth_key, &size);
     size = sizeof(device_name);
     nvs_get_str(my_handle, "device_name", device_name, &size);
     size = sizeof(gateway_id);
@@ -409,7 +386,8 @@ static void load_config_from_nvs(void) {
     // gateway_id is ALWAYS the device's STA MAC (lower-case, no separators) —
     // it is intrinsic to the hardware, so we derive it rather than ask the
     // installer to type it. This overrides any stored value and keeps the id
-    // stable across re-provisioning. device_name (legacy/overlay-only) follows.
+    // stable across re-provisioning. device_name is vestigial (was overlay
+    // hostname); retained for NVS compat.
     uint8_t mac[6];
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
     snprintf(gateway_id, sizeof(gateway_id), "%02x%02x%02x%02x%02x%02x",
@@ -432,14 +410,13 @@ static void load_config_from_nvs(void) {
     }
 }
 
-static void save_config_to_nvs(const char* ssid, const char* pwd, const char* auth, const char* dev_name, const char* gw_id, const char* t_email, const char* t_pwd, const char* m_user, const char* m_pwd) {
+static void save_config_to_nvs(const char* ssid, const char* pwd, const char* dev_name, const char* gw_id, const char* t_email, const char* t_pwd, const char* m_user, const char* m_pwd) {
     nvs_handle_t my_handle;
     esp_err_t err = nvs_open("storage", NVS_READWRITE, &my_handle);
     if (err != ESP_OK) return;
 
     nvs_set_str(my_handle, "wifi_ssid", ssid);
     nvs_set_str(my_handle, "wifi_pwd", pwd);
-    nvs_set_str(my_handle, "ts_auth_key", auth);
     nvs_set_str(my_handle, "device_name", dev_name);
     nvs_set_str(my_handle, "gateway_id", gw_id);
     nvs_set_str(my_handle, "tapo_email", t_email);
@@ -666,8 +643,8 @@ static esp_err_t portal_post_handler(httpd_req_t *req) {
         return ESP_OK;
     }
 
-    // mqtt_user == gateway_id (== MAC); ts_auth_key is unused in direct mode.
-    save_config_to_nvs(ssid, pwd, "", device_name, gateway_id,
+    // mqtt_user == gateway_id (== MAC).
+    save_config_to_nvs(ssid, pwd, device_name, gateway_id,
                        t_email, t_pwd, gateway_id, m_pwd);
 
     const char* resp = "<html><body><h2>Saved! Rebooting gateway...</h2></body></html>";
@@ -1209,24 +1186,6 @@ static void start_mqtt_client(void) {
     esp_mqtt_client_start(mqtt_client);
 }
 
-#if !AMPHIVE_DIRECT_MQTT
-// Overlay teardown hook — microlink calls this from microlink_disconnect() BEFORE
-// it frees the WireGuard netif (on an ERROR-triggered reconnect). Stop + destroy
-// the MQTT client here so its TCP socket/PCB is closed while the netif still
-// exists; freeing the netif under a live socket is a use-after-free crash
-// (LoadProhibited). Clearing mqtt_client makes microlink_task restart MQTT once
-// the overlay reconnects (state -> CONNECTED/MONITORING).
-static void on_overlay_disconnected(void) {
-    if (mqtt_client) {
-        ESP_LOGW(TAG, "Overlay down: stopping MQTT client before netif teardown");
-        esp_mqtt_client_stop(mqtt_client);
-        esp_mqtt_client_destroy(mqtt_client);
-        mqtt_client = NULL;
-        mqtt_connected = false;
-    }
-}
-#endif // !AMPHIVE_DIRECT_MQTT
-
 // ─── Offline Telemetry Resync ─────────────────────────────────────────────────
 static void resync_offline_logs(void) {
     uint16_t count = offline_log_count();
@@ -1450,60 +1409,6 @@ static void telemetry_task(void *pvParameters) {
     }
 }
 
-// ─── MicroLink VPN Tunnel Task ───────────────────────────────────────────────
-#if !AMPHIVE_DIRECT_MQTT
-static void microlink_task(void *pvParameters) {
-    ESP_LOGI(TAG, "=== Starting AmpHive MicroLink Network Client ===");
-
-    microlink_config_t config;
-    microlink_get_default_config(&config);
-    config.auth_key     = ts_auth_key;
-    config.device_name  = device_name;
-    config.enable_derp  = true;
-    config.enable_disco = true;
-    config.enable_stun  = true;
-    // Stop the MQTT client before the overlay tears down its netif (UAF guard).
-    config.on_disconnected = on_overlay_disconnected;
-
-    microlink_t *ml = microlink_init(&config);
-    if (!ml) {
-        ESP_LOGE(TAG, "MicroLink initialization failed.");
-        vTaskDelete(NULL);
-        return;
-    }
-
-    microlink_connect(ml);
-    microlink_state_t last_state = MICROLINK_STATE_IDLE;
-
-    while (1) {
-        microlink_update(ml);
-        microlink_state_t state = microlink_get_state(ml);
-        
-        if (state != last_state) {
-            ESP_LOGI(TAG, "VPN Tunnel State: %s -> %s",
-                     microlink_state_to_str(last_state),
-                     microlink_state_to_str(state));
-            last_state = state;
-
-            if (state == MICROLINK_STATE_CONNECTED || state == MICROLINK_STATE_MONITORING) {
-                char ip_str[16];
-                microlink_vpn_ip_to_str(microlink_get_vpn_ip(ml), ip_str);
-
-                ESP_LOGI(TAG, "=========================================");
-                ESP_LOGI(TAG, "  AMPHIVE VPN OVERLAY TUNNEL ACTIVE      ");
-                ESP_LOGI(TAG, "  GATEWAY PRIVATE IP: %s                ", ip_str);
-                ESP_LOGI(TAG, "=========================================");
-
-                if (mqtt_client == NULL) {
-                    start_mqtt_client();
-                }
-            }
-        }
-        vTaskDelay(pdMS_TO_TICKS(10));
-    }
-}
-#endif // !AMPHIVE_DIRECT_MQTT
-
 // ─── Entry Point ─────────────────────────────────────────────────────────────
 void app_main(void) {
     ESP_LOGI(TAG, "AmpHive gateway fw %s (partition: %s)",
@@ -1613,8 +1518,5 @@ void app_main(void) {
     ESP_LOGI(TAG, "Direct MQTT transport: connecting to %s",
              mqtt_broker_url[0] != '\0' ? mqtt_broker_url : MQTT_BROKER_URL);
     start_mqtt_client();
-#else
-    // 7. Start Tailscale connection client
-    xTaskCreate(microlink_task, "microlink_vpn", 32768, NULL, 6, NULL);
 #endif
 }

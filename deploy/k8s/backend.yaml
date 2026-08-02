@@ -42,7 +42,7 @@ spec:
             # DATABASE_URL, JWT_SECRET_KEY, MQTT_USERNAME/PASSWORD, RAZORPAY_*,
             # COINS_*, MIN_START_BALANCE_COINS, PLATFORM_FEE_PCT, GST_RATE_PCT,
             # TELEMETRY_RETENTION_DAYS, LOGIN/REGISTER_RATE_LIMIT, VAPID_*,
-            # FRONTEND_ORIGIN, SMTP_*, DIRECT_MODE, TAPO_* — all live in .env.
+            # FRONTEND_ORIGIN, SMTP_* — all live in .env.
             - secretRef:
                 name: amphive-env
           env:

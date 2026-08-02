@@ -1119,6 +1119,8 @@ async def test_persist_telemetry_energy_is_monotonic():
     active.user_id = 1
     active.energy_kwh = 5.0
     active.peak_power_w = 0.0
+    active.energy_counter_last_raw_kwh = None  # first frame — no reset baseline yet
+    active.energy_reset_offset_kwh = 0.0
     session = _FakeSession([
         _FakeResult(scalar=_owned_plug()),
         _FakeResult(scalar=active),
@@ -1146,6 +1148,8 @@ async def test_persist_telemetry_energy_climbs_on_higher_reading():
     active.user_id = 1
     active.energy_kwh = 5.0
     active.peak_power_w = 0.0
+    active.energy_counter_last_raw_kwh = None  # first frame — no reset baseline yet
+    active.energy_reset_offset_kwh = 0.0
     session = _FakeSession([
         _FakeResult(scalar=_owned_plug()),
         _FakeResult(scalar=active),
@@ -1160,6 +1164,178 @@ async def test_persist_telemetry_energy_climbs_on_higher_reading():
                                      session_id=10, sample=None, relay_on=True)
 
     assert active.energy_kwh == 7.5
+    MQTTManager._instance = None
+
+
+# ---------------------------------------------------------------------------
+# [REC-01 follow-up] Energy counter reset detection/re-baselining
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_persist_telemetry_counter_reset_banks_offset_and_stays_monotonic():
+    """A LIVE frame whose raw kwh drops well below the last-seen raw value is
+    a genuine counter reset (device reboot/reflash). The pre-reset raw value
+    is banked into energy_reset_offset_kwh, and billed energy_kwh does not
+    dip — it stays pinned at the pre-reset total (offset + tiny new raw kwh
+    is still below the stored total right after the reset)."""
+    MQTTManager._instance = None
+    active = MagicMock()
+    active.id = 10
+    active.user_id = 1
+    active.energy_kwh = 5.0
+    active.peak_power_w = 0.0
+    active.energy_counter_last_raw_kwh = 4.8
+    active.energy_reset_offset_kwh = 0.0
+    session = _FakeSession([
+        _FakeResult(scalar=_owned_plug()),
+        _FakeResult(scalar=active),
+    ])
+    mgr = MQTTManager(db_session_factory=lambda: session)
+    mgr._maybe_auto_stop_on_exhaustion = AsyncMock()
+    mgr._maybe_auto_stop_on_limits = AsyncMock()
+
+    with patch("backend.services.pricing.reprice_session_if_due",
+               AsyncMock(return_value=None)):
+        # Raw counter dropped 4.8 -> 0.1 (reset), well past the tolerance.
+        await mgr._persist_telemetry("gw-1", 100.0, 100.0, 0.1,
+                                     session_id=10, sample=None, relay_on=True)
+
+    assert active.energy_reset_offset_kwh == 4.8
+    assert active.energy_counter_last_raw_kwh == 0.1
+    assert active.energy_kwh == 5.0  # offset(4.8) + raw(0.1) = 4.9 < stored 5.0
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_persist_telemetry_post_reset_climb_bills_offset_plus_raw():
+    """Once the post-reset raw counter climbs enough that offset + raw exceeds
+    the pre-reset stored total, billed energy resumes climbing from the
+    banked offset rather than freezing or losing the pre-reset energy."""
+    MQTTManager._instance = None
+    active = MagicMock()
+    active.id = 10
+    active.user_id = 1
+    active.energy_kwh = 5.0
+    active.peak_power_w = 0.0
+    active.energy_counter_last_raw_kwh = 0.1   # left off here after the reset above
+    active.energy_reset_offset_kwh = 4.8       # already banked from the reset
+    session = _FakeSession([
+        _FakeResult(scalar=_owned_plug()),
+        _FakeResult(scalar=active),
+    ])
+    mgr = MQTTManager(db_session_factory=lambda: session)
+    mgr._maybe_auto_stop_on_exhaustion = AsyncMock()
+    mgr._maybe_auto_stop_on_limits = AsyncMock()
+
+    with patch("backend.services.pricing.reprice_session_if_due",
+               AsyncMock(return_value=None)):
+        await mgr._persist_telemetry("gw-1", 100.0, 100.0, 0.5,
+                                     session_id=10, sample=None, relay_on=True)
+
+    # 0.5 is not a drop from 0.1, so no new reset — offset stays 4.8.
+    assert active.energy_reset_offset_kwh == 4.8
+    assert active.energy_counter_last_raw_kwh == 0.5
+    assert active.energy_kwh == 5.3  # offset(4.8) + raw(0.5) = 5.3 > stored 5.0
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_persist_telemetry_small_drop_within_tolerance_is_not_a_reset():
+    """A tiny drop consistent with %.4f rounding jitter on an essentially-flat
+    reading must not be flagged as a counter reset (no offset banked)."""
+    MQTTManager._instance = None
+    active = MagicMock()
+    active.id = 10
+    active.user_id = 1
+    active.energy_kwh = 5.0
+    active.peak_power_w = 0.0
+    active.energy_counter_last_raw_kwh = 5.0
+    active.energy_reset_offset_kwh = 0.0
+    session = _FakeSession([
+        _FakeResult(scalar=_owned_plug()),
+        _FakeResult(scalar=active),
+    ])
+    mgr = MQTTManager(db_session_factory=lambda: session)
+    mgr._maybe_auto_stop_on_exhaustion = AsyncMock()
+    mgr._maybe_auto_stop_on_limits = AsyncMock()
+
+    with patch("backend.services.pricing.reprice_session_if_due",
+               AsyncMock(return_value=None)):
+        # 5.0 -> 4.998 is within ENERGY_COUNTER_RESET_DROP_KWH (default 0.005).
+        await mgr._persist_telemetry("gw-1", 100.0, 100.0, 4.998,
+                                     session_id=10, sample=None, relay_on=True)
+
+    assert active.energy_reset_offset_kwh == 0.0  # not treated as a reset
+    assert active.energy_counter_last_raw_kwh == 4.998  # still tracks the raw value
+    assert active.energy_kwh == 5.0  # monotonic clamp, unrelated to reset logic
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_persist_telemetry_offline_resync_never_triggers_reset_detection():
+    """[TD#24] An offline-resync frame replays historical readings out of
+    order — a lower kwh than the last LIVE raw value must never be mistaken
+    for a reset, and the offline frame must not clobber
+    energy_counter_last_raw_kwh (which tracks only the live counter)."""
+    MQTTManager._instance = None
+    active = MagicMock()
+    active.id = 11
+    active.user_id = 1
+    active.energy_kwh = 9.0
+    active.peak_power_w = 0.0
+    active.energy_counter_last_raw_kwh = 9.0  # last LIVE raw value
+    active.energy_reset_offset_kwh = 0.0
+    session = _FakeSession([
+        _FakeResult(scalar=_owned_plug()),
+        _FakeResult(scalar=active),
+    ])
+    mgr = MQTTManager(db_session_factory=lambda: session)
+    mgr._maybe_auto_stop_on_exhaustion = AsyncMock()
+    mgr._maybe_auto_stop_on_limits = AsyncMock()
+
+    with patch("backend.services.pricing.reprice_session_if_due",
+               AsyncMock(return_value=None)):
+        # Buffered historical reading, far below the last live raw value.
+        await mgr._persist_telemetry("gw-1", 5, 150.0, 1.0,
+                                     session_id=11, sample=None,
+                                     relay_on=True, is_offline=True)
+
+    assert active.energy_reset_offset_kwh == 0.0        # no reset banked
+    assert active.energy_counter_last_raw_kwh == 9.0     # untouched by the offline frame
+    assert active.energy_kwh == 9.0                      # monotonic clamp holds
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_persist_telemetry_first_frame_of_session_never_flags_reset():
+    """The very first frame of a session (energy_counter_last_raw_kwh NULL,
+    the column's default) has no prior raw value to compare against, so it
+    can never be flagged as a reset regardless of its kwh value."""
+    MQTTManager._instance = None
+    active = MagicMock()
+    active.id = 12
+    active.user_id = 1
+    active.energy_kwh = 0.0
+    active.peak_power_w = 0.0
+    active.energy_counter_last_raw_kwh = None
+    active.energy_reset_offset_kwh = 0.0
+    session = _FakeSession([
+        _FakeResult(scalar=_owned_plug()),
+        _FakeResult(scalar=active),
+    ])
+    mgr = MQTTManager(db_session_factory=lambda: session)
+    mgr._maybe_auto_stop_on_exhaustion = AsyncMock()
+    mgr._maybe_auto_stop_on_limits = AsyncMock()
+
+    with patch("backend.services.pricing.reprice_session_if_due",
+               AsyncMock(return_value=None)):
+        await mgr._persist_telemetry("gw-1", 100.0, 100.0, 0.05,
+                                     session_id=12, sample=None, relay_on=True)
+
+    assert active.energy_reset_offset_kwh == 0.0
+    assert active.energy_counter_last_raw_kwh == 0.05
+    assert active.energy_kwh == 0.05
     MQTTManager._instance = None
 
 
@@ -1203,6 +1379,8 @@ async def test_persist_telemetry_offline_resync_attributes_to_own_session():
     active.user_id = 1
     active.energy_kwh = 2.0
     active.peak_power_w = 0.0
+    active.energy_counter_last_raw_kwh = None
+    active.energy_reset_offset_kwh = 0.0
     session = _FakeSession([
         _FakeResult(scalar=_owned_plug()),
         _FakeResult(scalar=active),
