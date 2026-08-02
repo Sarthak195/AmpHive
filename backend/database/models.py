@@ -386,6 +386,29 @@ class ChargingSession(Base):
     rate_segment_start_kwh: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     rate_valid_until: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    # [REC-01 follow-up — energy counter reset] The P110/ESP32 wire `kwh` is a
+    # SESSION-RELATIVE counter maintained on the device; a mid-session device
+    # reboot/reflash (or the ESP32 losing its NVS baseline) restarts that
+    # counter near 0. The plain `max(energy_kwh, kwh)` clamp in
+    # MQTTTelemetryMixin._persist_telemetry used to freeze billing at the
+    # pre-reset peak until the raw counter climbed back past it — every kWh
+    # delivered in between went unbilled. These two columns let that clamp
+    # re-baseline instead of freezing:
+    #   - energy_counter_last_raw_kwh: the last UNADJUSTED wire kwh seen on a
+    #     LIVE frame only (never an offline-resync replay — those legitimately
+    #     replay older readings out of order and must never look like a
+    #     reset). Read only to detect the NEXT regression; never billed from
+    #     directly.
+    #   - energy_reset_offset_kwh: cumulative energy banked from segments
+    #     closed off by a detected reset. Billed energy =
+    #     max(energy_kwh, energy_reset_offset_kwh + raw_kwh). NOT NULL /
+    #     default 0.0 so every session (including legacy rows predating this
+    #     column) reads as "no offset" without a NULL check on the billing hot
+    #     path. Persisted (not an in-process dict) so it survives a backend
+    #     restart mid-session. Alembic revision 0027_energy_counter_reset.
+    energy_counter_last_raw_kwh: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    energy_reset_offset_kwh: Mapped[float] = mapped_column(Float, default=0.0, server_default="0", nullable=False)
+
     # Hot-path composite indexes (Alembic revision 0024_session_ledger_indexes):
     # plug_id/status backs "is this plug's session still active", user_id/status
     # backs a driver's active/past sessions, tenant_id/started_at backs CPO
