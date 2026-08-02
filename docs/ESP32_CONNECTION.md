@@ -196,24 +196,35 @@ On a board with no stored config (factory-fresh or after `erase-flash`):
    on the serial console (`idf.py monitor`). **Copy it onto the unit label**;
    it's needed for every (re-)provisioning. A full NVS erase generates a new
    code — re-label.
-2. Join that Wi-Fi network from a laptop/phone (password = setup code).
+2. Join that Wi-Fi network from a phone (password = setup code) — the portal
+   (2026-08-02 rework) is a mobile-first two-step wizard; a laptop works too.
 3. Browse to **`http://192.168.4.1`**.
-4. Fill in the form — the setup code + **5 config fields** (`gateway_id`,
-   device name, and MQTT username are derived from the MAC, not typed; the
-   auto-detected Gateway ID is shown at the top of the form — give it to the
-   AmpHive operator to get the per-gateway MQTT password):
+4. **Step 1 of 2 — Wi-Fi:** enter the setup code, then either tap a network
+   from the scanned list (`GET /scan` — a live "nearby networks" list; falls
+   back to manual typing if the scan finds nothing or the browser blocks it)
+   or type the SSID directly, plus the Wi-Fi password. `gateway_id`, device
+   name, and MQTT username are derived from the MAC, not typed — the
+   auto-detected Device ID is shown at the top of the page.
+5. **Step 2 of 2 — smart plug:** Tapo account email + password (same login as
+   the Tapo app). The per-gateway **MQTT password is optional** here — see
+   the table below.
    | Field | Example | Notes |
    |-------|---------|-------|
    | Setup Code | `x7kq2m9pfw` | from the unit label / serial log; gates `/save` |
-   | WiFi SSID | `HomeNet` | 2.4 GHz network the plug is on |
+   | WiFi network | `HomeNet` | 2.4 GHz network the plug is on; tap-to-fill or type |
    | WiFi Password | | |
    | **Tapo Account Email** | `you@example.com` | Tapo cloud login; used for KLAP auth |
    | **Tapo Account Password** | | stored in NVS (plaintext, prototype) |
-   | MQTT Password | | the per-gateway broker credential (`add_gateway_user.ps1`); username == gateway id |
-5. Submit → config is written to NVS and the board reboots into normal
-   operation. A wrong setup code gets a 403 (1 s throttle per attempt) and
-   nothing is saved. The portal reboots the board after **10 min** with no
-   HTTP activity.
+   | MQTT Password *(under "Installer options", optional)* | | the per-gateway broker credential (`add_gateway_user.ps1`); username == gateway id. A blank submission does **not** overwrite an existing NVS value — a preflashed unit can ship with this pre-provisioned so an ordinary buyer never sees or types it (deploy/docs/preflashed_unit_runbook.md). Installers/re-provisioning still set it here as before. |
+6. Submit ("Finish setup") → config is written to NVS and the board reboots
+   into normal operation. A wrong setup code gets a friendly error page (403,
+   1 s throttle per attempt) and nothing is saved; a Wi-Fi association
+   failure (TD#31 pre-check) shows a similar error without rebooting. The
+   portal reboots the board after **10 min** with no HTTP activity.
+7. **Then, on the CPO portal (`cpo.amphive.app`):** "Add gateway" → enter the
+   **claim code** printed on the unit's label to bind it to your account (see
+   docs/API_REFERENCE.md's `POST /api/cpo/gateways/claim` and
+   deploy/docs/buyer_setup_card.md) — no operator hand-registration needed.
 
 > **Plug IPs are managed in the backend, not here (fw ≥ 2.0.0-direct).** The
 > gateway no longer takes a plug IP at provisioning — the operator registers each

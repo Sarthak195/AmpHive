@@ -5,7 +5,7 @@
  * retry), and EmptyState when no gateways exist (never conflated).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 
@@ -230,5 +230,53 @@ describe('AdminGateways', () => {
 
     // API should be called with offset=25
     expect(api.get).toHaveBeenCalledWith(expect.stringContaining('offset=25'));
+  });
+
+  describe('mint inventory gateway', () => {
+    beforeEach(() => {
+      api.get.mockResolvedValue({ total: 0, items: [] });
+    });
+
+    it('mints a gateway and shows the claim code once', async () => {
+      api.post.mockResolvedValue({
+        status: 'minted',
+        gateway_id: 'aabbccddeeff',
+        name: 'Unclaimed gateway aabbccddeeff',
+        claim_code: 'H4KX9Q2PFW',
+      });
+      const user = userEvent.setup();
+      renderPage();
+      await screen.findByText('No gateways yet');
+
+      await user.click(screen.getByRole('button', { name: 'Mint inventory gateway' }));
+      const modal = (await screen.findByLabelText('Gateway ID (device MAC)')).closest('.modal');
+      await user.type(within(modal).getByLabelText('Gateway ID (device MAC)'), 'aabbccddeeff');
+      await user.click(within(modal).getByRole('button', { name: 'Mint gateway' }));
+
+      expect(api.post).toHaveBeenCalledWith('/api/admin/gateways/inventory', {
+        gateway_id: 'aabbccddeeff',
+        name: undefined,
+      });
+
+      // The code is shown exactly once (readonly, in a "Done"-only follow-up
+      // view) so the operator can copy it onto the unit's label.
+      const codeInput = await screen.findByLabelText('Claim code');
+      expect(codeInput).toHaveValue('H4KX9Q2PFW');
+      expect(screen.getByRole('button', { name: 'Copy' })).toBeInTheDocument();
+    });
+
+    it('surfaces a mint failure inline', async () => {
+      api.post.mockRejectedValue(new Error("Gateway 'dup' already exists."));
+      const user = userEvent.setup();
+      renderPage();
+      await screen.findByText('No gateways yet');
+
+      await user.click(screen.getByRole('button', { name: 'Mint inventory gateway' }));
+      const modal = (await screen.findByLabelText('Gateway ID (device MAC)')).closest('.modal');
+      await user.type(within(modal).getByLabelText('Gateway ID (device MAC)'), 'dup');
+      await user.click(within(modal).getByRole('button', { name: 'Mint gateway' }));
+
+      expect(await screen.findByText("Gateway 'dup' already exists.")).toBeInTheDocument();
+    });
   });
 });

@@ -15,6 +15,7 @@ that function's session-state caveat), paginated lists return
 {"total": int, "items": [...]} with limit (cap 200, default 50) + offset.
 """
 import logging
+import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Tuple
 
@@ -41,7 +42,11 @@ from backend.database.models import (
     User,
     UserRole,
 )
-from backend.schemas import AdminAdjustBalanceRequest, AdminUserUpdateRequest
+from backend.schemas import (
+    AdminAdjustBalanceRequest,
+    AdminGatewayMintRequest,
+    AdminUserUpdateRequest,
+)
 from backend.services.audit import try_record_audit
 from backend.services.money import ZERO_MONEY, to_money
 from backend.services.rbac import require_role
@@ -57,6 +62,29 @@ def _clamp_page(limit: int, offset: int) -> Tuple[int, int]:
     """House pagination bounds (see GET /api/cpo/audit): limit capped at 200
     per page, offset non-negative."""
     return max(1, min(limit, 200)), max(0, offset)
+
+
+# [Claim-code onboarding] Unambiguous alphabet for admin-minted gateway claim
+# codes — no 0/O, 1/I/L (hand-copied off a printed label, same rationale as
+# the firmware's captive-portal setup-code alphabet, firmware/main/main.c).
+# Uppercase-only: routers/cpo/_gateways.py normalizes a submitted code to
+# uppercase before lookup, so this is the canonical stored form.
+_CLAIM_CODE_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ"
+_CLAIM_CODE_LEN = 10
+
+
+async def _generate_unique_claim_code(db: AsyncSession) -> str:
+    """A fresh claim_code not already in use. claim_code is UNIQUE (partial
+    index, WHERE NOT NULL — see Gateway.__table_args__), so a collision on
+    32**10 possibilities is astronomically unlikely; the retry loop just
+    turns one into a re-roll instead of an IntegrityError, mirroring
+    routers/cpo/_groups.py's generate_unique_access_code."""
+    for _ in range(20):
+        code = "".join(secrets.choice(_CLAIM_CODE_ALPHABET) for _ in range(_CLAIM_CODE_LEN))
+        existing = await db.execute(select(Gateway.id).where(Gateway.claim_code == code))
+        if existing.scalar_one_or_none() is None:
+            return code
+    raise HTTPException(status_code=500, detail="Could not generate a unique claim code; try again.")
 
 
 def _iso(dt: Optional[datetime]) -> Optional[str]:
@@ -725,6 +753,110 @@ async def admin_list_gateways(
                 "plug_count": int(plug_count or 0),
             }
             for gw, tenant_name, plug_count in rows.all()
+        ],
+    }
+
+
+@router.post("/api/admin/gateways/inventory")
+async def admin_mint_inventory_gateway(
+    req: AdminGatewayMintRequest,
+    user: User = Depends(require_role("admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Pre-register a preflashed gateway as UNCLAIMED inventory (tenant_id
+    NULL) with a fresh claim code, for the "flash -> mint inventory row ->
+    create broker account -> print claim code + label" manufacturing
+    sequence (deploy/docs/preflashed_unit_runbook.md). The buyer/CPO later
+    binds it to their tenant via POST /api/cpo/gateways/claim.
+    """
+    existing = await db.execute(select(Gateway).where(Gateway.id == req.gateway_id))
+    if existing.scalar_one_or_none():
+        raise HTTPException(status_code=400, detail=f"Gateway '{req.gateway_id}' already exists.")
+
+    claim_code = await _generate_unique_claim_code(db)
+    gateway_name = req.name or f"Unclaimed gateway {req.gateway_id}"
+
+    # vpn_ip is a legacy overlay column (NOT NULL + UNIQUE) direct-MQTT
+    # gateways don't use — same gateway_id fallback as cpo_create_gateway.
+    gateway = Gateway(
+        id=req.gateway_id,
+        tenant_id=None,
+        name=gateway_name,
+        vpn_ip=req.gateway_id,
+        claim_code=claim_code,
+    )
+    db.add(gateway)
+    await db.commit()
+    await db.refresh(gateway)
+
+    gw_id = gateway.id  # snapshot before the audit write (see try_record_audit's docstring)
+
+    logger.info(f"Admin minted inventory gateway {gw_id} (claim code ***{claim_code[-4:]}) by {user.email}")
+
+    await try_record_audit(
+        db,
+        tenant_id=None,
+        actor_user_id=user.id,
+        action="gateway.mint_inventory",
+        target_type="gateway",
+        target_id=gw_id,
+        detail=f"name={gateway_name}",
+    )
+
+    return {
+        "status": "minted",
+        "gateway_id": gw_id,
+        "name": gateway_name,
+        "claim_code": claim_code,
+    }
+
+
+@router.get("/api/admin/gateways/inventory")
+async def admin_list_inventory_gateways(
+    user: User = Depends(require_role("admin")),
+    db: AsyncSession = Depends(get_db),
+    claimed: Optional[bool] = None,
+    limit: int = 50,
+    offset: int = 0,
+):
+    """
+    Factory inventory: every gateway minted via POST .../inventory, claimed
+    or not, newest first. Deliberately separate from GET /api/admin/gateways
+    above — that view inner-joins Tenant (a live tenant-scoped fleet view),
+    so it structurally can't show tenant_id IS NULL (unclaimed) rows.
+    `claimed` filters on `claimed_at IS [NOT] NULL`.
+    """
+    limit, offset = _clamp_page(limit, offset)
+
+    conditions = [Gateway.claim_code.is_not(None)]
+    if claimed is not None:
+        conditions.append(
+            Gateway.claimed_at.is_not(None) if claimed else Gateway.claimed_at.is_(None)
+        )
+
+    total = (await db.execute(select(func.count(Gateway.id)).where(*conditions))).scalar() or 0
+
+    rows = await db.execute(
+        select(Gateway)
+        .where(*conditions)
+        .order_by(Gateway.created_at.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+    return {
+        "total": int(total),
+        "items": [
+            {
+                "gateway_id": gw.id,
+                "name": gw.name,
+                "claim_code": gw.claim_code,
+                "claimed": gw.claimed_at is not None,
+                "claimed_at": _iso(gw.claimed_at),
+                "tenant_id": gw.tenant_id,
+                "created_at": _iso(gw.created_at),
+            }
+            for gw in rows.scalars().all()
         ],
     }
 

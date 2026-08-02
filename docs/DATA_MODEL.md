@@ -46,10 +46,25 @@ row-locked, clamped wallet debits.
 
 ### `gateways`
 `id` **VARCHAR(50) PK** (caller-supplied MAC/UUID) · `tenant_id` → tenants
-(CASCADE, **not null**) · `name` · `vpn_ip` unique · `status` (default `offline`)
-· `firmware_version` VARCHAR(32) nullable (fw last reported in the `online`
-status; rev `0006`, LWT never clobbers it) · `latitude`/`longitude` nullable
-· `last_seen_at` · `created_at`. Owns plugs.
+(CASCADE, **nullable** as of rev `0034_gateway_claim_code` — NULL = unclaimed
+inventory, mirrors the `users.tenant_id` nullable-FK precedent) · `name` ·
+`vpn_ip` unique · `status` (default `offline`) · `firmware_version`
+VARCHAR(32) nullable (fw last reported in the `online` status; rev `0006`,
+LWT never clobbers it) · `latitude`/`longitude` nullable ·
+`claim_code` VARCHAR(16) nullable, **partial-unique** (`WHERE claim_code IS
+NOT NULL`) · `claimed_at` TIMESTAMPTZ nullable · `last_seen_at` ·
+`created_at`. Owns plugs.
+
+**[Claim-code onboarding, 2026-08-02]** `claim_code`/`claimed_at` back the
+preflashed-unit self-claim flow (`POST /api/admin/gateways/inventory` mints
+an unclaimed row with `tenant_id NULL` + a fresh code; `POST
+/api/cpo/gateways/claim` sets `tenant_id` + `claimed_at` on a successful
+claim). `claim_code` is **not** cleared on claim — kept for admin
+audit/reprint; "claimed" is `claimed_at IS NOT NULL`, not code presence.
+Gateways created the old way (direct `POST /api/cpo/gateways`) have
+`claim_code NULL` and were never inventory. See
+[docs/API_REFERENCE.md](API_REFERENCE.md) and
+[deploy/docs/preflashed_unit_runbook.md](../deploy/docs/preflashed_unit_runbook.md).
 
 `last_seen_at` is the **liveness marker**: written only by the MQTT handlers
 (status connect/LWT, plus a telemetry-driven refresh throttled to once per

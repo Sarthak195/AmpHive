@@ -1,13 +1,21 @@
 /**
- * CpoGateways (redesign v3, D3) — fleet view of the CPO's ESP32 gateways:
- * online/offline state + last-seen, the firmware version each one last
- * reported (flagged "behind" against the fleet's newest reporting version),
- * plug count, and a one-click OTA push. Also registers new gateways.
+ * CpoGateways (redesign v3, D3; claim-code onboarding added 2026-08-02) —
+ * fleet view of the CPO's ESP32 gateways: online/offline state + last-seen,
+ * the firmware version each one last reported (flagged "behind" against the
+ * fleet's newest reporting version), plug count, and a one-click OTA push.
+ *
+ * Adding a gateway: the primary "Add gateway" flow is now the claim-code
+ * form (POST /api/cpo/gateways/claim) — a preflashed unit ships with a short
+ * code on its label, no operator hand-registration needed. The old manual
+ * gateway-ID/name form (POST /api/cpo/gateways) still exists for lab/legacy
+ * units that were never minted as claim-code inventory, tucked behind a
+ * "Register a gateway manually" link inside the claim modal.
  *
  * CpoLayout/TenantContext already own the org name and nav badges — this
  * page fetches only its own gateway list.
  *
- * Data: GET/POST /api/cpo/gateways, POST /api/cpo/gateways/{id}/ota,
+ * Data: GET /api/cpo/gateways, POST /api/cpo/gateways/claim (primary add),
+ * POST /api/cpo/gateways (manual add), POST /api/cpo/gateways/{id}/ota,
  * GET /api/cpo/audit (best-effort OTA URL prefill only — degrades to an
  * empty field if nothing OTA-shaped turns up, never a fake default).
  */
@@ -90,41 +98,80 @@ export default function CpoGateways() {
 
   usePoll(fetchGateways, POLL_MS);
 
-  // ---- Add gateway ----------------------------------------------------
-  const [addOpen, setAddOpen] = useState(false);
-  const [addGatewayId, setAddGatewayId] = useState('');
-  const [addName, setAddName] = useState('');
-  const [addBusy, setAddBusy] = useState(false);
-  const [addError, setAddError] = useState('');
+  // ---- Add gateway: claim code (primary flow) --------------------------
+  const [claimOpen, setClaimOpen] = useState(false);
+  const [claimCode, setClaimCode] = useState('');
+  const [claimName, setClaimName] = useState('');
+  const [claimBusy, setClaimBusy] = useState(false);
+  const [claimError, setClaimError] = useState('');
 
-  const openAdd = () => {
-    setAddGatewayId('');
-    setAddName('');
-    setAddError('');
-    setAddOpen(true);
+  const openClaim = () => {
+    setClaimCode('');
+    setClaimName('');
+    setClaimError('');
+    setClaimOpen(true);
   };
 
-  const closeAdd = () => {
-    if (addBusy) return;
-    setAddOpen(false);
+  const closeClaim = () => {
+    if (claimBusy) return;
+    setClaimOpen(false);
   };
 
-  const submitAdd = async (e) => {
+  const submitClaim = async (e) => {
     e.preventDefault();
-    setAddBusy(true);
-    setAddError('');
+    setClaimBusy(true);
+    setClaimError('');
+    try {
+      await api.post('/api/cpo/gateways/claim', {
+        claim_code: claimCode.trim(),
+        name: claimName.trim() || undefined,
+      });
+      setClaimOpen(false);
+      toast.ok('Gateway added.');
+      fetchGateways();
+    } catch (err) {
+      setClaimError(apiErrorCopy(err));
+    } finally {
+      setClaimBusy(false);
+    }
+  };
+
+  // ---- Add gateway: manual registration (secondary, lab/legacy units) --
+  const [manualOpen, setManualOpen] = useState(false);
+  const [manualGatewayId, setManualGatewayId] = useState('');
+  const [manualName, setManualName] = useState('');
+  const [manualBusy, setManualBusy] = useState(false);
+  const [manualError, setManualError] = useState('');
+
+  const openManual = () => {
+    setManualGatewayId('');
+    setManualName('');
+    setManualError('');
+    setClaimOpen(false);
+    setManualOpen(true);
+  };
+
+  const closeManual = () => {
+    if (manualBusy) return;
+    setManualOpen(false);
+  };
+
+  const submitManual = async (e) => {
+    e.preventDefault();
+    setManualBusy(true);
+    setManualError('');
     try {
       await api.post('/api/cpo/gateways', {
-        gateway_id: addGatewayId.trim(),
-        name: addName.trim(),
+        gateway_id: manualGatewayId.trim(),
+        name: manualName.trim(),
       });
-      setAddOpen(false);
+      setManualOpen(false);
       toast.ok('Gateway registered.');
       fetchGateways();
     } catch (err) {
-      setAddError(apiErrorCopy(err));
+      setManualError(apiErrorCopy(err));
     } finally {
-      setAddBusy(false);
+      setManualBusy(false);
     }
   };
 
@@ -237,7 +284,7 @@ export default function CpoGateways() {
         title="Gateways"
         sub="Your ESP32 gateways — status, firmware, and over-the-air updates."
         actions={
-          <button type="button" className="btn btn-primary" onClick={openAdd}>
+          <button type="button" className="btn btn-primary" onClick={openClaim}>
             <Plus size={16} aria-hidden="true" />
             Add gateway
           </button>
@@ -252,56 +299,106 @@ export default function CpoGateways() {
         onRetry={fetchGateways}
         emptyIcon={Radio}
         emptyTitle="No gateways yet"
-        emptyBody="Register a gateway's device ID to see it here."
+        emptyBody="Add a gateway with the claim code printed on its label to see it here."
         emptyAction={
-          <button type="button" className="btn btn-primary btn-sm" onClick={openAdd}>
+          <button type="button" className="btn btn-primary btn-sm" onClick={openClaim}>
             Add gateway
           </button>
         }
         collapse
       />
 
-      {/* Add gateway */}
-      <Modal open={addOpen} onClose={closeAdd} title="Add gateway">
-        <form className="stack" onSubmit={submitAdd}>
+      {/* Add gateway: claim code (primary flow) */}
+      <Modal open={claimOpen} onClose={closeClaim} title="Add gateway">
+        <form className="stack" onSubmit={submitClaim}>
+          <p className="text-2 text-sm">
+            Enter the claim code printed on the gateway&apos;s label or box. It
+            binds the device to your account — no separate registration step.
+          </p>
+          <div className="field">
+            <label className="field-label" htmlFor="gw-claim-code">
+              Claim code
+            </label>
+            <input
+              id="gw-claim-code"
+              className="input"
+              value={claimCode}
+              onChange={(e) => setClaimCode(e.target.value)}
+              placeholder="H4KX-9Q2P-FW"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck="false"
+              required
+            />
+          </div>
+          <div className="field">
+            <label className="field-label" htmlFor="gw-claim-name">
+              Name <span className="text-2 text-sm">(optional)</span>
+            </label>
+            <input
+              id="gw-claim-name"
+              className="input"
+              value={claimName}
+              onChange={(e) => setClaimName(e.target.value)}
+              placeholder="Basement gateway"
+            />
+          </div>
+          {claimError && <p className="field-error">{claimError}</p>}
+          <div className="modal-actions">
+            <button type="button" className="btn btn-quiet" onClick={closeClaim} disabled={claimBusy}>
+              Cancel
+            </button>
+            <button type="submit" className="btn btn-primary" disabled={claimBusy}>
+              {claimBusy ? 'Adding…' : 'Add gateway'}
+            </button>
+          </div>
+          <button type="button" className="btn btn-ghost btn-sm btn-full" onClick={openManual}>
+            Register a gateway manually instead
+          </button>
+        </form>
+      </Modal>
+
+      {/* Add gateway: manual registration (secondary, lab/legacy units) */}
+      <Modal open={manualOpen} onClose={closeManual} title="Register a gateway manually">
+        <form className="stack" onSubmit={submitManual}>
           <p className="text-2 text-sm">
             Flash the gateway firmware, then copy the device ID it shows in its own
             setup portal — that&apos;s the gateway ID below. Give it a name your team
             will recognize (its parking spot or building).
           </p>
           <div className="field">
-            <label className="field-label" htmlFor="gw-add-id">
+            <label className="field-label" htmlFor="gw-manual-id">
               Gateway ID (device MAC)
             </label>
             <input
-              id="gw-add-id"
+              id="gw-manual-id"
               className="input"
-              value={addGatewayId}
-              onChange={(e) => setAddGatewayId(e.target.value)}
+              value={manualGatewayId}
+              onChange={(e) => setManualGatewayId(e.target.value)}
               placeholder="a1b2c3d4e5f6"
               required
             />
           </div>
           <div className="field">
-            <label className="field-label" htmlFor="gw-add-name">
+            <label className="field-label" htmlFor="gw-manual-name">
               Name
             </label>
             <input
-              id="gw-add-name"
+              id="gw-manual-name"
               className="input"
-              value={addName}
-              onChange={(e) => setAddName(e.target.value)}
+              value={manualName}
+              onChange={(e) => setManualName(e.target.value)}
               placeholder="Basement gateway"
               required
             />
           </div>
-          {addError && <p className="field-error">{addError}</p>}
+          {manualError && <p className="field-error">{manualError}</p>}
           <div className="modal-actions">
-            <button type="button" className="btn btn-quiet" onClick={closeAdd} disabled={addBusy}>
+            <button type="button" className="btn btn-quiet" onClick={closeManual} disabled={manualBusy}>
               Cancel
             </button>
-            <button type="submit" className="btn btn-primary" disabled={addBusy}>
-              {addBusy ? 'Registering…' : 'Add gateway'}
+            <button type="submit" className="btn btn-primary" disabled={manualBusy}>
+              {manualBusy ? 'Registering…' : 'Add gateway'}
             </button>
           </div>
         </form>

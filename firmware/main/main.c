@@ -422,7 +422,15 @@ static void save_config_to_nvs(const char* ssid, const char* pwd, const char* de
     nvs_set_str(my_handle, "tapo_email", t_email);
     nvs_set_str(my_handle, "tapo_pwd", t_pwd);
     nvs_set_str(my_handle, "mqtt_user", m_user);
-    nvs_set_str(my_handle, "mqtt_pwd", m_pwd);
+    // mqtt_pwd is the one field the portal no longer REQUIRES (see the
+    // "Installer options" toggle in portal_html): a preflashed unit can have
+    // it pre-provisioned into NVS at manufacturing time (deploy/docs runbook),
+    // so an ordinary buyer who leaves the field blank must not erase that
+    // value. A non-empty submission (installer/lab use, or re-provisioning
+    // with a new password) still overwrites it as before.
+    if (m_pwd[0] != '\0') {
+        nvs_set_str(my_handle, "mqtt_pwd", m_pwd);
+    }
 
     nvs_commit(my_handle);
     nvs_close(my_handle);
@@ -484,29 +492,250 @@ static bool setup_code_matches(const char *submitted) {
     return diff == 0;
 }
 
-static const char* portal_html = \
-    "<html><head><title>AmpHive Gateway Setup</title>"
-    "<style>body{font-family:sans-serif;margin:40px;background:#1e1e1e;color:#fff;} input{padding:10px;margin:5px 0 20px 0;width:100%%;box-sizing:border-box;border-radius:5px;border:none;} button{padding:10px 20px;background:#00d2ff;border:none;border-radius:5px;cursor:pointer;font-weight:bold;} code{background:#333;padding:3px 8px;border-radius:4px;color:#00d2ff;}</style>"
-    "</head><body><h2>AmpHive Gateway Config</h2>"
-    "<p>Gateway ID (auto-detected): <code>%s</code><br>"
-    "<small>Give this ID to your AmpHive operator to get the MQTT password.</small></p>"
-    "<form method='POST' action='/save'>"
-    "<label>Setup Code (on the unit label):</label><input name='setup_code' required>"
-    "<label>WiFi SSID:</label><input name='ssid' required>"
-    "<label>WiFi Password:</label><input name='pwd' type='password'>"
-    "<label>Tapo Account Email:</label><input name='tapo_email' type='email' required>"
-    "<label>Tapo Account Password:</label><input name='tapo_pwd' type='password' required>"
-    "<label>MQTT Password:</label><input name='mqtt_pwd' type='password' required>"
-    "<button type='submit'>Save &amp; Reboot</button>"
-    "</form></body></html>";
+// ─── Portal page template ───────────────────────────────────────────────────
+// Mobile-first two-step setup wizard (easier-onboarding rework): Step 1
+// collects the setup code + Wi-Fi (a tappable scanned network list, GET
+// /scan, with a plain text field as a fallback/manual-entry option); Step 2
+// collects the Tapo account, with the per-gateway MQTT password tucked behind
+// an "Installer options" toggle since a preflashed unit can have it
+// pre-provisioned in NVS (see the mqtt_pwd handling in save_config_to_nvs)
+// and an ordinary buyer never needs to see or know it. Everything is
+// self-contained (inline CSS/JS, zero external resources — the phone has no
+// internet on the setup AP) and plain ASCII only: a narrow C string literal
+// containing "\u" would be compiler-interpreted as a universal character
+// name (UTF-8-encoded at compile time), which isn't worth gambling on across
+// ESP-IDF toolchain/locale versions for a couple of signal-bar glyphs.
+//
+// GWID_TOKEN is substituted with the auto-detected gateway_id at *request*
+// time via chunked sends (see portal_get_handler), not a printf-style
+// snprintf(page, size, portal_html, gateway_id) — so, unlike the old
+// template, every literal '%' below (CSS percentages) is free to appear
+// un-escaped; this content is never re-parsed as a format string.
+#define GWID_TOKEN "{{GWID}}"
+
+static const char *portal_html =
+"<!doctype html><html><head><meta charset='utf-8'>"
+"<meta name='viewport' content='width=device-width,initial-scale=1'>"
+"<title>AmpHive Gateway Setup</title>"
+"<style>"
+"*{box-sizing:border-box}"
+"body{margin:0;padding:20px 16px 48px;background:#0f1115;color:#fff;"
+"font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif}"
+".wrap{max-width:440px;margin:0 auto}"
+".brand{font-weight:700;font-size:1.1rem;color:#00d2ff;letter-spacing:.5px}"
+".devid{margin:6px 0 20px;font-size:.8rem;color:#888}"
+".devid code{background:#22252b;color:#00d2ff;padding:2px 7px;border-radius:5px}"
+".stepnum{display:inline-block;font-size:.72rem;font-weight:700;letter-spacing:.08em;"
+"color:#00d2ff;text-transform:uppercase;margin-bottom:4px}"
+"h1{font-size:1.35rem;margin:0 0 18px}"
+"label{display:block;font-size:.9rem;color:#ccc;margin:14px 0 4px;font-weight:600}"
+"label small{display:block;font-weight:400;color:#888;font-size:.78rem;margin-top:2px}"
+"input{width:100%;padding:13px 12px;font-size:16px;border-radius:10px;"
+"border:1px solid #333;background:#1a1c22;color:#fff;margin-bottom:2px}"
+"input:focus{outline:2px solid #00d2ff;border-color:#00d2ff}"
+".btn{display:block;width:100%;min-height:50px;padding:13px;margin-top:12px;"
+"border-radius:10px;border:none;font-size:1rem;font-weight:700;cursor:pointer}"
+".btn.primary{background:#00d2ff;color:#062}"
+".btn.primary:disabled{opacity:.4;cursor:not-allowed}"
+".btn.secondary{background:#22252b;color:#fff;border:1px solid #3a3d44}"
+".btn.link{background:transparent;color:#00d2ff;font-weight:600;text-decoration:underline;"
+"min-height:auto;padding:8px 0;text-align:left}"
+".netlist{margin-top:10px}"
+".netitem{display:flex;justify-content:space-between;align-items:center;width:100%;"
+"min-height:50px;padding:12px 14px;margin-bottom:8px;border-radius:10px;"
+"background:#1a1c22;border:1px solid #333;color:#fff;font-size:.95rem;text-align:left}"
+".netitem.sel{border-color:#00d2ff;background:rgba(0,210,255,.12)}"
+".netitem .bars{color:#00d2ff;font-size:.8rem;margin-left:10px;letter-spacing:1px;white-space:nowrap}"
+".netitem .lock{color:#888;font-size:.72rem;margin-left:6px}"
+".hint{color:#999;font-size:.85rem;margin:0 0 4px}"
+".muted{color:#777;font-size:.8rem;margin-top:18px}"
+".step{display:none}"
+".step.active{display:block}"
+"</style></head><body><div class='wrap'>"
+"<div class='brand'>AmpHive</div>"
+"<div class='devid'>Device ID <code>" GWID_TOKEN "</code></div>"
+"<form method='POST' action='/save' id='setupForm'>"
+"<div class='step active' id='step1'>"
+"<div class='stepnum'>Step 1 of 2</div><h1>Connect me to your Wi-Fi</h1>"
+"<label>Setup code<small>From the label on your device</small></label>"
+"<input id='setup_code' name='setup_code' required maxlength='10' "
+"autocapitalize='none' autocorrect='off' spellcheck='false' placeholder='e.g. h4kx9q2pfw'>"
+"<label>Wi-Fi network<small id='scanStatus'>Looking for nearby networks...</small></label>"
+"<div class='netlist' id='netlist'></div>"
+"<button type='button' class='btn link' id='rescanBtn'>Scan again</button>"
+"<input id='ssid' name='ssid' required autocapitalize='none' autocorrect='off' "
+"spellcheck='false' placeholder='Network name (tap one above, or type it)'>"
+"<label>Wi-Fi password<small>Leave blank for an open network</small></label>"
+"<input id='pwd' name='pwd' type='password'>"
+"<button type='button' class='btn primary' id='toStep2' disabled>Next</button>"
+"</div>"
+"<div class='step' id='step2'>"
+"<div class='stepnum'>Step 2 of 2</div><h1>Link your smart plug</h1>"
+"<p class='hint'>Use the same login you use in the Tapo app.</p>"
+"<label>Tapo account email</label>"
+"<input name='tapo_email' type='email' inputmode='email' required "
+"autocapitalize='none' autocorrect='off' spellcheck='false'>"
+"<label>Tapo account password</label>"
+"<input name='tapo_pwd' type='password' required>"
+"<button type='button' class='btn link' id='advToggle'>Installer options</button>"
+"<div id='adv' style='display:none'>"
+"<label>MQTT password<small>Only set this if AmpHive did not preset it on this unit</small></label>"
+"<input name='mqtt_pwd' type='password' autocapitalize='none' autocorrect='off' spellcheck='false'>"
+"</div>"
+"<button type='button' class='btn secondary' id='backBtn'>Back</button>"
+"<button type='submit' class='btn primary'>Finish setup</button>"
+"</div>"
+"</form>"
+"<p class='muted'>Trouble? Reboot the device and reconnect to its AmpHive_Setup_XXXX Wi-Fi to try again.</p>"
+"</div>"
+"<script>"
+"function bars(r){return r>-55?'||||':r>-67?'|||.':r>-78?'||..':'|...';}"
+"var ssidEl=document.getElementById('ssid');"
+"var listEl=document.getElementById('netlist');"
+"var statusEl=document.getElementById('scanStatus');"
+"function selectNet(name,btn){"
+"ssidEl.value=name;"
+"var all=listEl.querySelectorAll('.netitem');"
+"for(var i=0;i<all.length;i++){all[i].classList.remove('sel');}"
+"if(btn){btn.classList.add('sel');}"
+"document.getElementById('pwd').focus();"
+"checkStep1();}"
+"function renderNets(nets){"
+"listEl.innerHTML='';"
+"if(!nets||!nets.length){statusEl.textContent='No networks found - type yours below.';return;}"
+"statusEl.textContent='Tap your network, or type it below.';"
+"nets.forEach(function(n){"
+"var b=document.createElement('button');"
+"b.type='button';b.className='netitem';"
+"var nameSpan=document.createElement('span');nameSpan.textContent=n.ssid;"
+"var meta=document.createElement('span');"
+"var barsSpan=document.createElement('span');barsSpan.className='bars';barsSpan.textContent=bars(n.rssi);"
+"meta.appendChild(barsSpan);"
+"if(n.secure){var lockSpan=document.createElement('span');lockSpan.className='lock';"
+"lockSpan.textContent='Secured';meta.appendChild(lockSpan);}"
+"b.appendChild(nameSpan);b.appendChild(meta);"
+"b.onclick=function(){selectNet(n.ssid,b);};"
+"listEl.appendChild(b);});}"
+"function scanNets(){"
+"statusEl.textContent='Looking for nearby networks...';"
+"listEl.innerHTML='';"
+"fetch('/scan').then(function(r){return r.json();}).then(function(d){renderNets(d.networks);})"
+".catch(function(){statusEl.textContent='Could not scan - type your network below.';});}"
+"document.getElementById('rescanBtn').onclick=scanNets;"
+"function checkStep1(){"
+"document.getElementById('toStep2').disabled="
+"!(document.getElementById('setup_code').value.length===10&&ssidEl.value.length>0);}"
+"document.getElementById('setup_code').addEventListener('input',checkStep1);"
+"ssidEl.addEventListener('input',checkStep1);"
+"document.getElementById('toStep2').onclick=function(){"
+"document.getElementById('step1').classList.remove('active');"
+"document.getElementById('step2').classList.add('active');"
+"window.scrollTo(0,0);};"
+"document.getElementById('backBtn').onclick=function(){"
+"document.getElementById('step2').classList.remove('active');"
+"document.getElementById('step1').classList.add('active');"
+"window.scrollTo(0,0);};"
+"document.getElementById('advToggle').onclick=function(){"
+"var a=document.getElementById('adv');a.style.display=(a.style.display==='none')?'block':'none';};"
+"scanNets();"
+"</script>"
+"</body></html>";
 
 static esp_err_t portal_get_handler(httpd_req_t *req) {
     portal_last_activity = xTaskGetTickCount();
-    // Render with the auto-detected gateway_id embedded (load_config derives it).
-    // Static: 2 KB would crowd the httpd task stack, and handlers are serialized.
-    static char page[2048];
-    snprintf(page, sizeof(page), portal_html, gateway_id);
-    httpd_resp_send(req, page, HTTPD_RESP_USE_STRLEN);
+    httpd_resp_set_type(req, "text/html");
+    // Sent as flash-resident chunks rather than copied into a RAM buffer
+    // first — the wizard page is a few KB of CSS/JS and there is no reason
+    // to duplicate it just to substitute one token. A final
+    // httpd_resp_send_chunk(..., NULL, 0) ends the chunked response.
+    const char *tok = strstr(portal_html, GWID_TOKEN);
+    if (tok) {
+        httpd_resp_send_chunk(req, portal_html, (ssize_t)(tok - portal_html));
+        httpd_resp_send_chunk(req, gateway_id, HTTPD_RESP_USE_STRLEN);
+        httpd_resp_send_chunk(req, tok + strlen(GWID_TOKEN), HTTPD_RESP_USE_STRLEN);
+    } else {
+        httpd_resp_send_chunk(req, portal_html, HTTPD_RESP_USE_STRLEN);
+    }
+    httpd_resp_send_chunk(req, NULL, 0);
+    return ESP_OK;
+}
+
+// WiFi network list for the setup wizard (GET /scan): briefly hops to AP+STA
+// — the same single-radio trade-off as the Wi-Fi pre-check (TD#31; the AP
+// may drop the installer's phone for a couple of seconds while the radio
+// visits other channels) — runs one blocking active scan, and returns up to
+// WIFI_SCAN_MAX_APS networks as JSON, strongest-first and deduped by SSID
+// (mesh APs broadcast the same name on multiple BSSIDs). No STA connection
+// is ever attempted, so there is nothing to tear down beyond restoring
+// AP-only mode. Not gated by the setup code: only a client already on the
+// (WPA2, setup-code-as-passphrase) AP can reach this at all, so it adds no
+// exposure beyond what joining the AP already grants (SECURITY.md §8.1).
+#define WIFI_SCAN_MAX_APS 20
+
+static esp_err_t portal_scan_handler(httpd_req_t *req) {
+    portal_last_activity = xTaskGetTickCount();
+    httpd_resp_set_type(req, "application/json");
+
+    if (esp_wifi_set_mode(WIFI_MODE_APSTA) != ESP_OK) {
+        httpd_resp_send(req, "{\"networks\":[]}", HTTPD_RESP_USE_STRLEN);
+        return ESP_OK;
+    }
+
+    wifi_scan_config_t scan_cfg = { .show_hidden = false };
+    esp_err_t err = esp_wifi_scan_start(&scan_cfg, true);   // blocking
+
+    static wifi_ap_record_t s_recs[WIFI_SCAN_MAX_APS];
+    uint16_t n = WIFI_SCAN_MAX_APS;
+    if (err != ESP_OK || esp_wifi_scan_get_ap_records(&n, s_recs) != ESP_OK) {
+        n = 0;
+    }
+
+    // Restore AP-only so the portal stays reachable (no STA link was made).
+    esp_wifi_set_mode(WIFI_MODE_AP);
+
+    // Strongest signal first (simple insertion sort; n is small/bounded).
+    for (int i = 1; i < n; i++) {
+        wifi_ap_record_t key = s_recs[i];
+        int j = i - 1;
+        while (j >= 0 && s_recs[j].rssi < key.rssi) {
+            s_recs[j + 1] = s_recs[j];
+            j--;
+        }
+        s_recs[j + 1] = key;
+    }
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON *arr = cJSON_AddArrayToObject(root, "networks");
+    for (int i = 0; i < n; i++) {
+        if (s_recs[i].ssid[0] == '\0') continue;   // hidden/blank SSID
+        char ssid_str[33];
+        memcpy(ssid_str, s_recs[i].ssid, 32);
+        ssid_str[32] = '\0';
+
+        // Dedupe: the sort above means the first match already seen for this
+        // SSID is its strongest reading.
+        bool dup = false;
+        cJSON *existing;
+        cJSON_ArrayForEach(existing, arr) {
+            cJSON *nm = cJSON_GetObjectItem(existing, "ssid");
+            if (nm && nm->valuestring && strcmp(nm->valuestring, ssid_str) == 0) {
+                dup = true;
+                break;
+            }
+        }
+        if (dup) continue;
+
+        cJSON *net = cJSON_CreateObject();
+        cJSON_AddStringToObject(net, "ssid", ssid_str);
+        cJSON_AddNumberToObject(net, "rssi", s_recs[i].rssi);
+        cJSON_AddBoolToObject(net, "secure", s_recs[i].authmode != WIFI_AUTH_OPEN);
+        cJSON_AddItemToArray(arr, net);
+    }
+
+    char *out = cJSON_PrintUnformatted(root);
+    httpd_resp_send(req, out ? out : "{\"networks\":[]}", HTTPD_RESP_USE_STRLEN);
+    if (out) cJSON_free(out);
+    cJSON_Delete(root);
     return ESP_OK;
 }
 
@@ -581,6 +810,35 @@ static bool portal_precheck_wifi(const char *ssid, const char *pwd) {
     return true;                                   // timeout/ambiguous → fail-open
 }
 
+// Shared small status page for /save's outcomes (wrong code / Wi-Fi failure /
+// success) — one consistent, visible pass/fail look instead of three
+// hand-rolled pages. heading/message are always fixed string literals from
+// THIS file (never request data — see the three call sites below), so
+// passing them as %s arguments is safe regardless of content: printf only
+// ever re-parses the FORMAT string, never its %s arguments.
+static void send_status_page(httpd_req_t *req, const char *http_status,
+                              const char *heading_color, const char *heading,
+                              const char *message, bool show_retry_link) {
+    static char buf[1024];
+    snprintf(buf, sizeof(buf),
+        "<!doctype html><html><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<title>AmpHive Gateway Setup</title>"
+        "<style>body{font-family:-apple-system,sans-serif;background:#0f1115;color:#fff;"
+        "margin:0;padding:48px 20px;text-align:center}"
+        "h1{font-size:1.3rem;margin:0 0 10px;color:%s}"
+        "p{color:#aaa;font-size:.95rem;line-height:1.5;max-width:340px;margin:0 auto}"
+        "a.btn{display:inline-block;margin-top:26px;padding:14px 28px;min-height:50px;"
+        "background:#00d2ff;color:#062;border-radius:10px;text-decoration:none;font-weight:700}"
+        "</style></head><body>"
+        "<h1>%s</h1><p>%s</p>%s"
+        "</body></html>",
+        heading_color, heading, message,
+        show_retry_link ? "<p style='margin-top:22px'><a class='btn' href='/'>Try again</a></p>" : "");
+    if (http_status) httpd_resp_set_status(req, http_status);
+    httpd_resp_send(req, buf, HTTPD_RESP_USE_STRLEN);
+}
+
 static esp_err_t portal_post_handler(httpd_req_t *req) {
     char buf[512];
     int ret, remaining = req->content_len;
@@ -609,10 +867,8 @@ static esp_err_t portal_post_handler(httpd_req_t *req) {
     if (!setup_code_matches(code)) {
         ESP_LOGW(TAG, "Portal /save rejected: wrong setup code");
         vTaskDelay(pdMS_TO_TICKS(1000)); // throttle brute-force attempts
-        httpd_resp_set_status(req, "403 Forbidden");
-        httpd_resp_send(req, "<html><body><h2>Wrong setup code.</h2>"
-                             "<p>Use the code on the unit label.</p></body></html>",
-                        HTTPD_RESP_USE_STRLEN);
+        send_status_page(req, "403 Forbidden", "#ff6b6b", "That code didn't match",
+                          "Check the setup code on your device's label and try again.", true);
         return ESP_OK;
     }
 
@@ -636,19 +892,21 @@ static esp_err_t portal_post_handler(httpd_req_t *req) {
     // save, so this can catch a wrong SSID/password but never prevent provisioning.
     if (!portal_precheck_wifi(ssid, pwd)) {
         ESP_LOGW(TAG, "Portal /save: could not associate to Wi-Fi '%s' — not saving.", ssid);
-        httpd_resp_send(req,
-            "<html><body><h2>Could not connect to that Wi-Fi network.</h2>"
-            "<p>Check the network name and password, then go back and try again.</p>"
-            "</body></html>", HTTPD_RESP_USE_STRLEN);
+        send_status_page(req, NULL, "#ff6b6b", "Couldn't connect to that Wi-Fi network",
+                          "Double-check the network name and password, then try again.", true);
         return ESP_OK;
     }
 
-    // mqtt_user == gateway_id (== MAC).
+    // mqtt_user == gateway_id (== MAC). mqtt_pwd is optional (see
+    // save_config_to_nvs) so a preflashed unit's pre-provisioned broker
+    // password survives a buyer who never opens "Installer options".
     save_config_to_nvs(ssid, pwd, device_name, gateway_id,
                        t_email, t_pwd, gateway_id, m_pwd);
 
-    const char* resp = "<html><body><h2>Saved! Rebooting gateway...</h2></body></html>";
-    httpd_resp_send(req, resp, HTTPD_RESP_USE_STRLEN);
+    send_status_page(req, NULL, "#3ddc84", "All set!",
+        "Your AmpHive gateway is restarting and will connect automatically. "
+        "Next, open cpo.amphive.app and add this device with its claim code.",
+        false);
 
     ESP_LOGI(TAG, "Config saved. Restarting in 2 seconds...");
     vTaskDelay(2000 / portTICK_PERIOD_MS);
@@ -697,6 +955,9 @@ static void start_captive_portal(void) {
     if (httpd_start(&server, &config) == ESP_OK) {
         httpd_uri_t uri_get = { .uri = "/", .method = HTTP_GET, .handler = portal_get_handler, .user_ctx = NULL };
         httpd_register_uri_handler(server, &uri_get);
+
+        httpd_uri_t uri_scan = { .uri = "/scan", .method = HTTP_GET, .handler = portal_scan_handler, .user_ctx = NULL };
+        httpd_register_uri_handler(server, &uri_scan);
 
         httpd_uri_t uri_post = { .uri = "/save", .method = HTTP_POST, .handler = portal_post_handler, .user_ctx = NULL };
         httpd_register_uri_handler(server, &uri_post);

@@ -21,6 +21,7 @@ These are layered ON TOP of the per-IP limiters, not a replacement:
   PAYMENTS_CREATE_ORDER_ACCOUNT_RATE_LIMIT (default 10/60 — 10 payment orders per minute per account)
   CPO_TOPUP_ACCOUNT_RATE_LIMIT             (default 20/60 — 20 offline top-ups per minute per CPO actor)
   LOGIN_ACCOUNT_RATE_LIMIT                 (default 10/60 — 10 login attempts per minute per account/email)
+  CPO_GATEWAY_CLAIM_ACCOUNT_RATE_LIMIT     (default 10/60 — 10 gateway-claim attempts per minute per CPO actor)
 """
 import logging
 import os
@@ -224,4 +225,12 @@ cpo_topup_account_rate_limiter = SlidingWindowRateLimiter(
 )
 login_account_rate_limiter = SlidingWindowRateLimiter(
     *_rule_from_env("LOGIN_ACCOUNT_RATE_LIMIT", "10/60")
+)
+# [Claim-code onboarding] Bounds guessing at claim codes: the codes
+# themselves are drawn from a large unambiguous alphabet (see
+# routers/admin.py's inventory-mint helper) and every failure path returns
+# the same generic 404 (routers/cpo/_gateways.py cpo_claim_gateway), but a
+# rate limit is the practical anti-brute-force control regardless.
+cpo_gateway_claim_account_rate_limiter = SlidingWindowRateLimiter(
+    *_rule_from_env("CPO_GATEWAY_CLAIM_ACCOUNT_RATE_LIMIT", "10/60")
 )

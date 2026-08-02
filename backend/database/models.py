@@ -225,8 +225,26 @@ class User(Base):
 class Gateway(Base):
     __tablename__ = "gateways"
 
+    # [Claim-code onboarding] A partial-unique index (mirrors
+    # uq_users_google_sub): only inventory-minted rows carry a claim_code, so
+    # the many NULLs (gateways created the old hand-registered way) never
+    # collide with each other. Alembic revision 0034_gateway_claim_code.
+    __table_args__ = (
+        Index(
+            "uq_gateways_claim_code",
+            "claim_code",
+            unique=True,
+            postgresql_where=text("claim_code IS NOT NULL"),
+        ),
+    )
+
     id: Mapped[str] = mapped_column(String(50), primary_key=True) # MAC address or hardware UUID
-    tenant_id: Mapped[int] = mapped_column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    # [Claim-code onboarding] NULL = unclaimed inventory (admin-minted,
+    # awaiting a CPO to claim it via POST /api/cpo/gateways/claim). Mirrors
+    # the User.tenant_id nullable-FK precedent above. ondelete="CASCADE" only
+    # ever fires for a non-NULL value, so an unclaimed row is unaffected by
+    # any tenant delete. Alembic revision 0034_gateway_claim_code.
+    tenant_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=True)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     vpn_ip: Mapped[str] = mapped_column(String(45), unique=True, nullable=False)
     status: Mapped[GatewayStatus] = mapped_column(SQLEnum(GatewayStatus, name="gateway_status", values_callable=lambda x: [e.value for e in x]), default=GatewayStatus.OFFLINE, nullable=False)
@@ -236,6 +254,18 @@ class Gateway(Base):
     firmware_version: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     latitude: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     longitude: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # [Claim-code onboarding] A short, unambiguous-alphabet code an admin
+    # mints alongside an unclaimed inventory row (POST
+    # /api/admin/gateways/inventory) and prints on the unit/box label. NULL
+    # for gateways created the old way (direct CPO registration). Not
+    # cleared on claim — kept for admin audit/reprint; claimed-or-not is
+    # `claimed_at IS NOT NULL`, not code presence. See the partial unique
+    # index in __table_args__.
+    claim_code: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    # [Claim-code onboarding] Set once, when POST /api/cpo/gateways/claim
+    # successfully binds this row to a tenant. NULL = never claimed (either
+    # unclaimed inventory, or a legacy row with no claim_code at all).
+    claimed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     # Liveness marker: written ONLY by the MQTT handlers (status connect/LWT +
     # throttled telemetry refresh) and read by the session-start liveness gate.
     # No onupdate hook — an unrelated row edit (e.g. a CPO rename) must not
@@ -244,7 +274,7 @@ class Gateway(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
 
     # Relationships
-    tenant: Mapped[Tenant] = relationship("Tenant", back_populates="gateways")
+    tenant: Mapped[Optional[Tenant]] = relationship("Tenant", back_populates="gateways")
     plugs: Mapped[List["Plug"]] = relationship("Plug", back_populates="gateway", cascade="all, delete-orphan")
 
 

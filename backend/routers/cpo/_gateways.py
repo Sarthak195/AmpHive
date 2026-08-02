@@ -2,6 +2,8 @@
 CPO Gateway Management routes — split out of the original monolithic cpo.py
 (2026-07-21 package split, TD#7 follow-up).
 """
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,13 +11,36 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend import state
 from backend.database.db import get_db
 from backend.database.models import Gateway, GatewayStatus, Plug, User
-from backend.schemas import CpoGatewayCreateRequest, CpoGatewayOtaRequest
+from backend.schemas import (
+    CpoGatewayClaimRequest,
+    CpoGatewayCreateRequest,
+    CpoGatewayOtaRequest,
+)
 from backend.services.audit import try_record_audit
+from backend.services.rate_limit import (
+    account_rate_limit_dependency,
+    cpo_gateway_claim_account_rate_limiter,
+)
 from backend.services.rbac import require_role
 
 from ._common import logger
 
 router = APIRouter()
+
+# Generic response for EVERY claim failure (unknown code, already-claimed
+# code, malformed code) — deliberately identical so a caller can never learn
+# which of those it hit (no enumeration oracle). Same reasoning as
+# routers/auth.py's forgot_password generic response.
+_CLAIM_NOT_FOUND_DETAIL = "Claim code not found or already used."
+
+
+def _normalize_claim_code(raw: str) -> str:
+    """Buyer-friendly normalization: strip surrounding whitespace and the
+    dashes/spaces someone might type between groups of characters (codes are
+    printed as one unbroken string, but "copy the code off the label" typos
+    are common), then uppercase — claim codes are minted uppercase (see
+    routers/admin.py's inventory-mint helper)."""
+    return raw.strip().upper().replace("-", "").replace(" ", "")
 
 
 # --- CPO Gateway Management ---
@@ -99,6 +124,73 @@ async def cpo_create_gateway(
         "gateway_id": gateway.id,
         "name": gateway.name,
         "vpn_ip": gateway.vpn_ip,
+    }
+
+
+@router.post(
+    "/api/cpo/gateways/claim",
+    dependencies=[
+        Depends(account_rate_limit_dependency(cpo_gateway_claim_account_rate_limiter, "gateway claim"))
+    ],
+)
+async def cpo_claim_gateway(
+    req: CpoGatewayClaimRequest,
+    user: User = Depends(require_role("cpo", "admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Bind a preflashed, admin-minted unclaimed gateway (POST
+    /api/admin/gateways/inventory) to the caller's tenant, replacing the
+    "operator hand-registers every unit" flow above for preflashed hardware.
+
+    Every failure mode — unknown code, a code that's already been claimed,
+    or a malformed one — returns the SAME generic 404
+    (_CLAIM_NOT_FOUND_DETAIL), and the lookup query always runs before any
+    branch decision, so a caller can't distinguish "wrong code" from
+    "someone already claimed this" by response shape or rough timing (same
+    enumeration-safety reasoning as routers/auth.py's forgot_password).
+    """
+    code = _normalize_claim_code(req.claim_code)
+
+    # Always query — even a blank/malformed code — rather than short-circuit
+    # on an empty string, so "malformed" isn't a cheaper/faster path than
+    # "wrong but well-formed" (claim_code is never empty on a real row, so
+    # this simply finds nothing).
+    result = await db.execute(select(Gateway).where(Gateway.claim_code == code))
+    gateway = result.scalar_one_or_none()
+
+    if gateway is None or gateway.claimed_at is not None:
+        raise HTTPException(status_code=404, detail=_CLAIM_NOT_FOUND_DETAIL)
+
+    gateway.tenant_id = user.tenant_id
+    gateway.claimed_at = datetime.now(timezone.utc)
+    if req.name:
+        gateway.name = req.name
+    await db.commit()
+    await db.refresh(gateway)
+
+    # Snapshot before the audit write — a failed audit commit rolls back and
+    # expires every ORM instance in the session (see try_record_audit's
+    # docstring), which would make a later gateway.id/name access raise.
+    gw_id, gw_name, gw_vpn_ip = gateway.id, gateway.name, gateway.vpn_ip
+
+    logger.info(f"Gateway claimed: {gw_id} ({gw_name}) by {user.email} (tenant {user.tenant_id})")
+
+    await try_record_audit(
+        db,
+        tenant_id=user.tenant_id,
+        actor_user_id=user.id,
+        action="gateway.claim",
+        target_type="gateway",
+        target_id=gw_id,
+        detail=f"name={gw_name}, claim_code_tail=***{code[-4:] if len(code) >= 4 else code}",
+    )
+
+    return {
+        "status": "claimed",
+        "gateway_id": gw_id,
+        "name": gw_name,
+        "vpn_ip": gw_vpn_ip,
     }
 
 

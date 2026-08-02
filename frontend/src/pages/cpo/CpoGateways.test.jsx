@@ -105,15 +105,67 @@ describe('CpoGateways', () => {
     expect(await screen.findByText('No gateways yet')).toBeInTheDocument();
   });
 
-  it('registers a new gateway and refreshes the list', async () => {
+  it('claims a gateway by code (primary Add gateway flow) and refreshes the list', async () => {
+    api.post.mockResolvedValue({ status: 'claimed' });
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText('Basement gateway');
+
+    await user.click(screen.getByRole('button', { name: 'Add gateway' }));
+    const modal = (await screen.findByText(/Enter the claim code/, { exact: false })).closest('.modal');
+
+    await user.type(within(modal).getByLabelText('Claim code'), 'h4kx9q2pfw');
+    await user.type(within(modal).getByLabelText(/Name/), 'New gateway');
+    await user.click(within(modal).getByRole('button', { name: 'Add gateway' }));
+
+    expect(api.post).toHaveBeenCalledWith('/api/cpo/gateways/claim', {
+      claim_code: 'h4kx9q2pfw',
+      name: 'New gateway',
+    });
+    expect(toast.ok).toHaveBeenCalled();
+  });
+
+  it('claims a gateway with no name (optional field omitted from the payload)', async () => {
+    api.post.mockResolvedValue({ status: 'claimed' });
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText('Basement gateway');
+
+    await user.click(screen.getByRole('button', { name: 'Add gateway' }));
+    const modal = (await screen.findByText(/Enter the claim code/, { exact: false })).closest('.modal');
+    await user.type(within(modal).getByLabelText('Claim code'), 'h4kx9q2pfw');
+    await user.click(within(modal).getByRole('button', { name: 'Add gateway' }));
+
+    expect(api.post).toHaveBeenCalledWith('/api/cpo/gateways/claim', {
+      claim_code: 'h4kx9q2pfw',
+      name: undefined,
+    });
+  });
+
+  it('surfaces a claim failure inline in the Add gateway modal', async () => {
+    api.post.mockRejectedValue(new Error('Claim code not found or already used.'));
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText('Basement gateway');
+
+    await user.click(screen.getByRole('button', { name: 'Add gateway' }));
+    const modal = (await screen.findByText(/Enter the claim code/, { exact: false })).closest('.modal');
+    await user.type(within(modal).getByLabelText('Claim code'), 'wrongcode');
+    await user.click(within(modal).getByRole('button', { name: 'Add gateway' }));
+
+    expect(await screen.findByText('Claim code not found or already used.')).toBeInTheDocument();
+  });
+
+  it('falls back to manual registration from the claim modal', async () => {
     api.post.mockResolvedValue({ status: 'registered' });
     const user = userEvent.setup();
     renderPage();
     await screen.findByText('Basement gateway');
 
     await user.click(screen.getByRole('button', { name: 'Add gateway' }));
-    const modal = (await screen.findByText('Flash the gateway firmware,', { exact: false })).closest('.modal');
+    await user.click(screen.getByRole('button', { name: 'Register a gateway manually instead' }));
 
+    const modal = (await screen.findByText('Flash the gateway firmware,', { exact: false })).closest('.modal');
     await user.type(within(modal).getByLabelText('Gateway ID (device MAC)'), 'ff00ff00ff00');
     await user.type(within(modal).getByLabelText('Name'), 'New gateway');
     await user.click(within(modal).getByRole('button', { name: 'Add gateway' }));
@@ -125,13 +177,14 @@ describe('CpoGateways', () => {
     expect(toast.ok).toHaveBeenCalled();
   });
 
-  it('surfaces a registration failure inline in the Add gateway modal', async () => {
+  it('surfaces a manual registration failure inline in its own modal', async () => {
     api.post.mockRejectedValue(new Error("Gateway 'x' already exists."));
     const user = userEvent.setup();
     renderPage();
     await screen.findByText('Basement gateway');
 
     await user.click(screen.getByRole('button', { name: 'Add gateway' }));
+    await user.click(screen.getByRole('button', { name: 'Register a gateway manually instead' }));
     const modal = (await screen.findByText('Flash the gateway firmware,', { exact: false })).closest('.modal');
     await user.type(within(modal).getByLabelText('Gateway ID (device MAC)'), 'dupe');
     await user.type(within(modal).getByLabelText('Name'), 'Dupe');
