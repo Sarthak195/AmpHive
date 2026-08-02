@@ -126,7 +126,7 @@ describe('PlugCard — unpowered', () => {
 });
 
 describe('PlugCard — offline and maintenance', () => {
-  it('offline: only the bookmark star and Report remain, "Can't be reached" sublabel', () => {
+  it(`offline: only the bookmark star and Report remain, "Can't be reached" sublabel`, () => {
     renderCard({ ...BASE, gateway_online: false });
     expect(screen.getByText("Can't be reached right now")).toBeInTheDocument();
     // The favorite star is a bookmark and Report must work on broken
