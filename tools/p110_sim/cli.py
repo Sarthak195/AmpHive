@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import signal
 import sys
 import threading
@@ -111,8 +112,19 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Comma-separated DB-style plug ids (default: 1..count).",
     )
-    p.add_argument("--email", required=True, help="Tapo account email the emulator accepts.")
-    p.add_argument("--password", required=True, help="Tapo account password the emulator accepts.")
+    p.add_argument(
+        "--email",
+        default=None,
+        help="Tapo account email the emulator accepts (falls back to TAPO_EMAIL "
+        "or TAPO_USERNAME env var).",
+    )
+    p.add_argument(
+        "--password",
+        default=None,
+        help="Tapo account password the emulator accepts (falls back to the "
+        "TAPO_PASSWORD env var — preferred over the flag, which leaks the "
+        "credential into shell history and process listings).",
+    )
     p.add_argument(
         "--watts",
         default=None,
@@ -219,8 +231,17 @@ def run(args: argparse.Namespace) -> int:
         datefmt="%H:%M:%S",
     )
 
+    email = args.email or os.environ.get("TAPO_EMAIL") or os.environ.get("TAPO_USERNAME")
+    password = args.password or os.environ.get("TAPO_PASSWORD")
+    if not email or not password:
+        log.error(
+            "Tapo credentials missing: pass --email/--password or set "
+            "TAPO_EMAIL (or TAPO_USERNAME) and TAPO_PASSWORD env vars."
+        )
+        return 2
+
     configs = build_configs(args)
-    ah = auth_hash(args.email, args.password)
+    ah = auth_hash(email, password)
     store = StateStore(Path(args.state_file))
 
     servers: list[PlugHTTPServer] = []
@@ -250,7 +271,7 @@ def run(args: argparse.Namespace) -> int:
     for t in threads:
         t.start()
 
-    log.info("%d plug(s) running. Account: %s. Ctrl-C to stop.", len(servers), args.email)
+    log.info("%d plug(s) running. Account: %s. Ctrl-C to stop.", len(servers), email)
 
     stop_event = threading.Event()
 
