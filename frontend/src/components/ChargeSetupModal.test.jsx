@@ -72,9 +72,9 @@ describe('ChargeSetupModal — copy per mode', () => {
     expect(screen.getByText(/covers ≈ 4\.0 kWh/)).toBeInTheDocument();
   });
 
-  it('shows default limits helper when "No limit" chip is selected', () => {
+  it('shows "charges until stopped" helper when "No limit" chip is selected', () => {
     renderModal();
-    expect(screen.getByText(/Defaults to 30 kWh \/ 4 h if no limit set/i)).toBeInTheDocument();
+    expect(screen.getByText(/Charges until you stop it — no time limit/i)).toBeInTheDocument();
   });
 
   it('a zero tariff (free charging) is used as-is, not coerced to the global fallback', () => {
@@ -179,10 +179,10 @@ describe('ChargeSetupModal — limits payload', () => {
     expect(screen.getByRole('button', { name: 'Start charging' })).not.toBeDisabled();
   });
 
-  it('shows default kWh helper when energy limit is blank', async () => {
+  it('shows "charges until stopped" kWh helper when energy limit is blank', async () => {
     renderModal();
     const kwh = screen.getByLabelText('Energy limit (kWh)');
-    expect(screen.getByText(/Defaults to 30 kWh if no limit set/i)).toBeInTheDocument();
+    expect(screen.getByText(/Charges until you stop it — no energy limit/i)).toBeInTheDocument();
 
     // When user types something, the hint should remain
     await userEvent.type(kwh, '50');

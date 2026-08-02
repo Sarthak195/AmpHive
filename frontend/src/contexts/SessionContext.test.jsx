@@ -142,7 +142,8 @@ describe('startSession', () => {
 
     await userEvent.click(screen.getByText('start'));
 
-    // No limit chosen → ONLY plug_id is sent (backend defaults apply).
+    // No limit chosen → ONLY plug_id is sent (opt-in limits: the backend
+    // persists no duration/energy cap — the session charges until stopped).
     expect(api.post).toHaveBeenCalledWith('/api/sessions/start', { plug_id: 7 });
     expect(screen.getByTestId('focused')).toHaveTextContent('9');
     await waitFor(() => expect(screen.getByText('Plug X')).toBeInTheDocument());
@@ -156,7 +157,9 @@ describe('startSession', () => {
       plug_id: 7,
       plug_name: 'Plug X',
       max_kwh: 1.5,
-      max_duration_seconds: 14400, // backend echoes the default it applied
+      // [Opt-in charging limits] duration wasn't set, so the backend echoes
+      // null back — not a hidden default — even though max_kwh was chosen.
+      max_duration_seconds: null,
     });
     renderProbe();
     await waitFor(() => expect(api.get).toHaveBeenCalled());
@@ -165,7 +168,7 @@ describe('startSession', () => {
 
     expect(api.post).toHaveBeenCalledWith('/api/sessions/start', { plug_id: 7, max_kwh: 1.5 });
     expect(screen.getByTestId('limits')).toHaveTextContent(
-      JSON.stringify({ max_kwh: 1.5, max_duration_seconds: 14400 })
+      JSON.stringify({ max_kwh: 1.5, max_duration_seconds: null })
     );
   });
 

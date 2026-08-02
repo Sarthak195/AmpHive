@@ -233,7 +233,9 @@ async def test_queue_success_creates_waiting_row():
 
     assert resp["status"] == "waiting"
     assert resp["plug_id"] == 1
-    assert resp["max_kwh"] == 30.0            # schema default snapshotted
+    # [Opt-in charging limits] no limit chosen -> NULL snapshotted, not a
+    # hidden default; the eventual auto-start charges until stopped.
+    assert resp["max_kwh"] is None
     db.add.assert_called_once()
     notify.assert_awaited_once()
     # The persisted row carries a TTL-derived expiry in the future.
