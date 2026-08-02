@@ -97,3 +97,10 @@ research/
 # find-skills skill install + its lockfile. See .claude/ (also ignored).
 .agents/
 skills-lock.json
+
+# Flasher tool (tools/flasher/): prebuilt firmware images and PyInstaller
+# output are build artifacts, not source — never commit them. The README
+# placeholder in firmware-images/ is tracked so the folder exists in a
+# checkout. See tools/flasher/README.md.
+tools/flasher/firmware-images/*.bin
+tools/flasher/*.spec.bak

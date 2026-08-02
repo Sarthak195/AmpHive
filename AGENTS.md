@@ -28,7 +28,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 | Firmware (ESP-IDF, ESP32-C3) | `firmware/` | [FIRMWARE](docs/FIRMWARE.md) |
 | Deploy (compose, K8s, configs, runbooks) | `deploy/` | [DEPLOYMENT](docs/DEPLOYMENT.md) |
 | Ops helper scripts (VM start/stop, remote logs) | `scripts/` | [DEPLOYMENT](docs/DEPLOYMENT.md#helper-scripts-scripts) |
-| Standalone Tapo bench scripts (manual on/off, KLAP probe) | `tools/` | [DEPLOYMENT](docs/DEPLOYMENT.md) |
+| Standalone Tapo bench scripts (manual on/off, KLAP probe) + the gateway flasher EXE (`tools/flasher/`) | `tools/` | [DEPLOYMENT](docs/DEPLOYMENT.md) · [FIRMWARE](docs/FIRMWARE.md) |
 | Import graphs / high-impact files | — | [DEPENDENCIES](docs/DEPENDENCIES.md) |
 
 ## Hard rules
