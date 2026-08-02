@@ -21,6 +21,7 @@ from backend.database.models import (
     PlugWatch,
     Tenant,
     User,
+    UserFavorite,
 )
 from backend.schemas import (
     PlugResponse,
@@ -190,6 +191,14 @@ async def get_available_plugs(
         )).scalars().all()
     )
 
+    # [Favorites] Same shape as watched_plug_ids above — ONE extra query for
+    # the whole list, keeping this endpoint N+1-free.
+    favorited_plug_ids = set(
+        (await db.execute(
+            select(UserFavorite.plug_id).where(UserFavorite.user_id == user.id)
+        )).scalars().all()
+    )
+
     now = datetime.now(timezone.utc)
     all_rows = rows.all()
 
@@ -240,6 +249,9 @@ async def get_available_plugs(
                 # only an explicit False marks a private group.
                 is_private=group_is_public is False,
                 watching=plug.id in watched_plug_ids,
+                rated_power_w=plug.rated_power_w,
+                connector_type=plug.connector_type,
+                is_favorite=plug.id in favorited_plug_ids,
                 **reservation_fields.get(plug.id, {}),
             )
         )
@@ -315,6 +327,8 @@ async def get_public_plugs(db: AsyncSession = Depends(get_db)):
                 longitude=lon,
                 price_per_kwh=float(rate),
                 gateway_online=gateway_is_live(gateway, now),
+                rated_power_w=plug.rated_power_w,
+                connector_type=plug.connector_type,
             )
         )
     return out
@@ -375,6 +389,14 @@ async def get_plug(
         )
     )).scalar_one_or_none() is not None
 
+    # [Favorites] Whether THIS user has starred the plug — same shape as the
+    # watching lookup just above.
+    is_favorite = (await db.execute(
+        select(UserFavorite.id).where(
+            and_(UserFavorite.user_id == user.id, UserFavorite.plug_id == plug.id)
+        )
+    )).scalar_one_or_none() is not None
+
     gw_online = gateway_is_live(gateway) if gateway else False
     powered = plug_is_powered(plug, now)
     return PlugResponse(
@@ -397,6 +419,9 @@ async def get_plug(
         price_changes_at=changes_at.isoformat() if changes_at is not None else None,
         is_private=is_private,
         watching=watching,
+        rated_power_w=plug.rated_power_w,
+        connector_type=plug.connector_type,
+        is_favorite=is_favorite,
         **reservation_fields.get(plug.id, {}),
     )
 
@@ -480,6 +505,69 @@ async def unwatch_plug(
     )
     await db.commit()
     return {"status": "not_watching", "plug_id": plug_id, "watching": False}
+
+
+# ===========================================================================
+# Favorites — a standing "star this charger" preference
+# ===========================================================================
+
+@router.post("/api/plugs/{plug_id}/favorite")
+async def favorite_plug(
+    plug_id: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Star a plug as a favorite (a STANDING preference — unlike watch_plug's
+    one-shot arm, nothing clears this automatically). Idempotent — starring
+    an already-favorited plug returns the same 200. Access follows
+    GET /api/plugs/{id}: 403 for a private-group plug the user hasn't
+    joined. Unlike watch_plug, there is no state-based rejection — starring
+    an available-right-now plug is perfectly normal (it's a bookmark, not a
+    "notify me" arm).
+    """
+    result = await db.execute(select(Plug).where(Plug.id == plug_id))
+    plug = result.scalar_one_or_none()
+    if not plug:
+        raise HTTPException(status_code=404, detail=f"Plug with ID {plug_id} not found.")
+
+    await ensure_plug_group_access(db, plug, user)
+
+    existing = (await db.execute(
+        select(UserFavorite).where(
+            and_(UserFavorite.user_id == user.id, UserFavorite.plug_id == plug_id)
+        )
+    )).scalar_one_or_none()
+    if not existing:
+        db.add(UserFavorite(user_id=user.id, plug_id=plug_id))
+        try:
+            await db.commit()
+        except IntegrityError:
+            # Double-tap race: the UNIQUE(user_id, plug_id) row landed between
+            # the check and this insert — already favorited, same outcome.
+            await db.rollback()
+
+    return {"status": "favorited", "plug_id": plug_id, "is_favorite": True}
+
+
+@router.delete("/api/plugs/{plug_id}/favorite")
+async def unfavorite_plug(
+    plug_id: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Un-star a favorite. Idempotent — deleting a favorite that doesn't exist
+    (never starred, or the plug is gone) is a no-op 200. No access check on
+    purpose, same rationale as unwatch_plug: the row is the user's own.
+    """
+    await db.execute(
+        delete(UserFavorite).where(
+            and_(UserFavorite.user_id == user.id, UserFavorite.plug_id == plug_id)
+        )
+    )
+    await db.commit()
+    return {"status": "unfavorited", "plug_id": plug_id, "is_favorite": False}
 
 
 # ===========================================================================
