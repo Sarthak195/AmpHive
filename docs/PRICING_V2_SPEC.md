@@ -11,7 +11,10 @@ hold-at-`max_rate_over_window`; Phase 4 = operator slot-editor (`/cpo/tariffs` +
 (`resolve_price_display` → `PlugResponse.price_next_per_kwh`/`price_changes_at`
 → Home ribbon hint). Deployed-safe: a flat tariff resolves no boundary, so it
 bills byte-identically until a CPO adds a slot. All phases 1–4 are live in prod
-(main @ 3a54377) and deployed.*
+(main @ 3a54377) and deployed. **Phase 5 (2026-08-02, §"Phasing suggestion"
+below):** a Simple/Advanced split on the operator pricing page — same API,
+no schema change — so a small CPO isn't handed the full TOD/assignment
+editor just to set one price.*
 
 Related: [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) "Per-CPO/per-site
 tariff model" (🟡) · [MARKET_GAP_ANALYSIS.md](MARKET_GAP_ANALYSIS.md) §1.5/§3 ·
@@ -378,3 +381,22 @@ persist individually in this design — see §11 open decision on a segment log)
    `Tenant.timezone` edit endpoint (default Asia/Kolkata, shown read-only), and
    the session-monitor inline "rate is now" notice (the `rate_changed` bell
    notification already delivers it).
+5. ✅ **Simple/Advanced operator UX** *(Built 2026-08-02, feat/simple-pricing-ux)*
+   — owner feedback after P4 shipped: exposing the full tariff/slot/assignment
+   machinery up front overwhelmed a small CPO who just wants "one price". The
+   `/cpo/pricing` page now opens in a **Simple** tab (one "Price per kWh"
+   field + a plain-language example cost) by default, with the P4 editor
+   moved, unchanged, behind an **Advanced** tab. Purely a frontend
+   re-presentation of the same API from §9 — no schema/endpoint change:
+   Simple's Save PUTs (or creates) the tenant's one flat tariff, DELETEs any
+   `tariff_slots` on it (a flat rate needs no slot — the base `price_per_kwh`
+   already covers every weekday/phase, which is what "broadcast the value
+   across weekdays/phases" means here), PUTs it as `tenant/default-tariff`,
+   and PUTs `tariff_id: null` on any group/plug pinned to a *different*
+   tariff. `frontend/src/utils/pricingUniformity.js` decides Simple-vs-
+   Advanced (and what Simple shows) from the tenant's current
+   tariffs/slots/assignments: **uniform** (0 tariffs, or exactly 1 that's the
+   tenant default with no slots and no group/plug override) opens Simple;
+   anything else opens Advanced and Simple shows a "Custom schedule active"
+   notice instead of a single number, with Save routed through a confirm
+   dialog before it overwrites that schedule.
