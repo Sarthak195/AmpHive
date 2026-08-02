@@ -21,21 +21,17 @@ constraint, not a separately-named index — same convention as
 schema against the models.
 
 Revision ID: 0036_firmware_releases
-Revises: 0034_gateway_claim_code
+Revises: 0035_offline_consumption
 Create Date: 2026-08-02
 
-NOTE on revision chaining: 0035 is reserved for a sibling agent's work on
-feat/offline-consumption, not yet visible on this branch/main at authoring
-time, so this chains directly off 0034 (the current main head) rather than
-0035. Per this repo's parallel-branch convention (docs/MAINTAINER_GUIDE.md
-§7 "Parallel-branch migration renumbering"), whichever of the two PRs merges
-second renumbers its revision (and down_revision) to sit after the first's
-before merging — run test_migrations.py to confirm a single linear chain.
+(Authored chained off 0034 while 0035 lived on a sibling branch; re-chained
+onto 0035_offline_consumption at merge time per docs/MAINTAINER_GUIDE.md §7
+"Parallel-branch migration renumbering".)
 """
 from alembic import op
 
 revision = "0036_firmware_releases"
-down_revision = "0034_gateway_claim_code"
+down_revision = "0035_offline_consumption"
 branch_labels = None
 depends_on = None
 
