@@ -285,6 +285,39 @@ async def test_orphan_off_notifies_tenant_cpos():
     MQTTManager._instance = None
 
 
+@pytest.mark.asyncio
+async def test_orphan_off_replay_offs_plug_but_skips_operator_alert():
+    """alert_operators=False (a retained `online` replay, not a real
+    reconnect): the idempotent OFF still publishes, but no CPO lookup and no
+    `orphan_off` bell — backend restarts were re-alerting operators about the
+    same plugs on every roll."""
+    MQTTManager._instance = None
+
+    plug_rows_result = MagicMock()
+    plug_rows_result.all.return_value = [(1, "10.0.0.11", "Bay 1")]
+
+    active_result = MagicMock()
+    active_result.scalars.return_value.all.return_value = []   # no ACTIVE session
+
+    queued_result = MagicMock()
+    queued_result.all.return_value = []   # no queued charges
+
+    # No cpo_result: the CPO lookup query must never be issued.
+    db = _SeqRowsDB([plug_rows_result, active_result, queued_result])
+    mgr = MQTTManager(db_session_factory=lambda: db)
+    mgr.send_plug_command = MagicMock(return_value=True)
+
+    notify_mock = AsyncMock()
+    with patch("backend.services.mqtt.status.notify", notify_mock):
+        await mgr._republish_off_for_orphaned_plugs("gw-1", alert_operators=False)
+
+    mgr.send_plug_command.assert_called_once_with(
+        "gw-1", 1, "OFF", local_ip="10.0.0.11", wait=False
+    )
+    notify_mock.assert_not_awaited()
+    MQTTManager._instance = None
+
+
 # ------------------------------------------------ safety-cutoff finalize ----
 
 @pytest.mark.asyncio

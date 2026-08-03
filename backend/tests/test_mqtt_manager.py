@@ -886,6 +886,60 @@ async def test_gateway_online_publishes_roster():
     MQTTManager._instance = None
 
 
+def _status_mgr(loop, gw_status):
+    """MQTTManager wired for a `_persist_gateway_status` call against a
+    gateway currently in `gw_status`, with the online-path collaborators
+    mocked out."""
+    from backend.database.models import GatewayStatus  # noqa: F401
+
+    gw = MagicMock()
+    gw.status = gw_status
+    session = _FakeSession([_FakeResult(scalar=gw)])
+    mgr = MQTTManager(db_session_factory=lambda: session, event_loop=loop)
+    mgr.client = MagicMock()
+    mgr._republish_off_for_orphaned_plugs = AsyncMock()
+    mgr._publish_roster_for_gateway = AsyncMock()
+    mgr._broadcast_plug_connectivity = AsyncMock()
+    return mgr
+
+
+@pytest.mark.asyncio
+async def test_real_online_transition_alerts_operators_in_off_sweep():
+    """OFFLINE->ONLINE is a genuine reconnect: the orphan-OFF sweep may alert
+    the tenant's CPOs about force-OFF'd plugs."""
+    from backend.database.models import GatewayStatus
+
+    MQTTManager._instance = None
+    mgr = _status_mgr(asyncio.get_running_loop(), GatewayStatus.OFFLINE)
+
+    await mgr._persist_gateway_status("gw-1", "online")
+
+    mgr._republish_off_for_orphaned_plugs.assert_awaited_once_with(
+        "gw-1", alert_operators=True
+    )
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_retained_online_replay_runs_off_sweep_without_operator_alert():
+    """A retained `online` replay (gateway already ONLINE — re-delivered on
+    every backend/broker reconnect) still runs the idempotent OFF sweep but
+    must NOT re-alert operators: every backend restart was producing a fresh
+    round of `orphan_off` bells (32 by the end of the 2026-08-03
+    outage-recovery morning)."""
+    from backend.database.models import GatewayStatus
+
+    MQTTManager._instance = None
+    mgr = _status_mgr(asyncio.get_running_loop(), GatewayStatus.ONLINE)
+
+    await mgr._persist_gateway_status("gw-1", "online")
+
+    mgr._republish_off_for_orphaned_plugs.assert_awaited_once_with(
+        "gw-1", alert_operators=False
+    )
+    MQTTManager._instance = None
+
+
 @pytest.mark.asyncio
 async def test_persist_discovery_unknown_gateway_publishes_nothing():
     """Discovery for an unclaimed gateway is dropped (no plug, no assign map)."""

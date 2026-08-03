@@ -104,7 +104,16 @@ class MQTTStatusMixin:
             return
 
         if status == "online":
-            await self._republish_off_for_orphaned_plugs(gateway_id)
+            # The OFF sweep runs on every `online` (idempotent safety net), but
+            # the CPO bell only fires on a real OFFLINE->ONLINE transition: a
+            # retained `online` replay arrives on every backend/broker
+            # reconnect, and re-alerting operators about the same plugs on
+            # every backend restart is noise (32 bells by the end of the
+            # 2026-08-03 outage-recovery morning). Same replay-vs-transition
+            # reasoning as the REC-08 gate on the driver offline notice.
+            await self._republish_off_for_orphaned_plugs(
+                gateway_id, alert_operators=became_online
+            )
             # Push the current plug roster (retained) so a gateway that just
             # (re)connected builds/reconciles its slot table without waiting for
             # a command. Fires on every `online` incl. a retained replay — the
@@ -183,7 +192,9 @@ class MQTTStatusMixin:
         for plug_id in plug_ids:
             await emit_plug_connectivity(plug_id, gateway_online)
 
-    async def _republish_off_for_orphaned_plugs(self, gateway_id: str):
+    async def _republish_off_for_orphaned_plugs(
+        self, gateway_id: str, alert_operators: bool = True
+    ):
         """
         On gateway reconnect, re-send OFF to each of its plugs that has no
         ACTIVE session. OFF commands aren't retained, so a gateway that was
@@ -209,7 +220,11 @@ class MQTTStatusMixin:
         a skipped mid-debounce one) are worth a CPO's attention — it means the
         plug was left OCCUPIED-looking with no session backing it. After every
         plug's OFF publishes, every CPO of the gateway's tenant gets one
-        `orphan_off` bell notification per (plug, CPO) pair via notify(). This
+        `orphan_off` bell notification per (plug, CPO) pair via notify() —
+        but only when `alert_operators` is set: the caller passes
+        became_online, so a retained `online` replay (re-delivered on every
+        backend/broker reconnect) still runs the idempotent OFF sweep without
+        re-alerting operators on every backend restart. This
         fires AFTER the `async with` session block closes (notify() opens its
         own transaction via async_session_factory — it must not nest inside
         this one), and the CPO-lookup query itself runs *inside* the session
@@ -306,9 +321,10 @@ class MQTTStatusMixin:
                         )
 
                 # [Operator alert] Only look up CPOs to notify when something
-                # was actually OFF'd — the common case (a clean reconnect with
-                # no orphans) skips this query entirely.
-                if off_plugs:
+                # was actually OFF'd on a real transition — the common cases
+                # (a clean reconnect with no orphans, or a retained replay)
+                # skip this query entirely.
+                if off_plugs and alert_operators:
                     cpo_result = await session.execute(
                         select(User.id)
                         .join(Gateway, Gateway.tenant_id == User.tenant_id)
