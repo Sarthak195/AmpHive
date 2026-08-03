@@ -396,7 +396,7 @@ async def finalize_charging_session(
         session_id=session.id,
     )
 
-    return {
+    receipt = {
         "status": "completed",
         "session_id": session.id,
         "plug_id": plug.id,
@@ -431,3 +431,13 @@ async def finalize_charging_session(
         "max_duration_seconds": session.max_duration_seconds,
         "reason": reason,
     }
+
+    # Bill email — fire-and-forget off the same payload the app shows, so the
+    # email can never disagree with the in-app receipt. schedule() keeps the
+    # billing path free of SMTP latency and never raises.
+    from backend.services import billing_emails
+    billing_emails.schedule(
+        billing_emails.send_session_bill(session.user_id, receipt)
+    )
+
+    return receipt

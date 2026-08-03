@@ -22,6 +22,9 @@ What's proven here:
    (amount + balance_after), and a topup.create AuditLog row.
 4. GET /api/cpo/topups: paginated {total, items} shape, tenant-scoped.
 5. Role gating: require_role("cpo", "admin") rejects a driver.
+6. The route schedules a receipt email (services/billing_emails.py) after a
+   successful top-up, with the driver's own email/name and the actual
+   amount/new-balance figures — not just that *some* notification fired.
 """
 import asyncio
 import os
@@ -418,6 +421,47 @@ async def test_topup_400_without_a_tenant(factory):
                 admin, db,
             )
     assert exc.value.status_code == 400
+
+
+# --- POST /api/cpo/topups: receipt email wiring -----------------------------
+
+@requires_db
+@pytest.mark.asyncio
+async def test_topup_schedules_receipt_email_with_driver_details(factory):
+    """billing_emails.schedule(billing_emails.send_topup_receipt(...)) fires
+    with the real driver email/name and the actual amount/new-balance coming
+    out of this request — not a stale/placeholder value. Both schedule() and
+    send_topup_receipt() are patched so the real one never touches SMTP or
+    asyncio.create_task (schedule() is a fire-and-forget wrapper; asserting
+    on it directly, rather than letting it run, avoids a dangling background
+    task outliving this test)."""
+    from unittest.mock import patch
+
+    from backend.routers.cpo import cpo_create_topup
+    from backend.schemas import CpoTopupCreateRequest
+
+    world = await _seed_tenant_with_earnings(factory, gross_coins="100.00")
+    cpo = _cpo_user(world["tenant_id"], world["cpo_id"], world["cpo_email"])
+
+    with patch("backend.services.billing_emails.schedule") as schedule_mock, \
+         patch("backend.services.billing_emails.send_topup_receipt") as send_mock:
+        async with factory() as db:
+            await cpo_create_topup(
+                CpoTopupCreateRequest(
+                    driver_email=world["driver_email"], amount_coins=15.00, note="cash, pump 1",
+                ),
+                cpo, db,
+            )
+
+    send_mock.assert_called_once_with(
+        to_addr=world["driver_email"],
+        full_name="Driver Test",
+        amount_coins=15.00,
+        new_balance=15.00,
+        credited_by=world["cpo_email"],
+        note="cash, pump 1",
+    )
+    schedule_mock.assert_called_once_with(send_mock.return_value)
 
 
 # --- GET /api/cpo/topups: pagination + tenant scoping -----------------------
