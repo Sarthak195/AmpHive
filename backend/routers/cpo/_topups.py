@@ -178,6 +178,18 @@ async def cpo_create_topup(
         severity="info",
     )
 
+    # Fire-and-forget receipt email — schedule() backgrounds the send so the
+    # route never waits on SMTP.
+    from backend.services import billing_emails
+    billing_emails.schedule(billing_emails.send_topup_receipt(
+        to_addr=driver.email,
+        full_name=driver.full_name,
+        amount_coins=float(amount),
+        new_balance=float(new_balance),
+        credited_by=user.email,
+        note=req.note,
+    ))
+
     return response
 
 
