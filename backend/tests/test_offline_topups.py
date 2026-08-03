@@ -434,8 +434,13 @@ async def test_topup_schedules_receipt_email_with_driver_details(factory):
     send_topup_receipt() are patched so the real one never touches SMTP or
     asyncio.create_task (schedule() is a fire-and-forget wrapper; asserting
     on it directly, rather than letting it run, avoids a dangling background
-    task outliving this test)."""
-    from unittest.mock import patch
+    task outliving this test).
+
+    send_topup_receipt is forced to a plain MagicMock: patch() auto-detects
+    the real async def and would install an AsyncMock, whose call returns a
+    fresh coroutine object — NOT .return_value — so the schedule assertion
+    below could never match (and the coroutine would leak un-awaited)."""
+    from unittest.mock import MagicMock, patch
 
     from backend.routers.cpo import cpo_create_topup
     from backend.schemas import CpoTopupCreateRequest
@@ -444,7 +449,10 @@ async def test_topup_schedules_receipt_email_with_driver_details(factory):
     cpo = _cpo_user(world["tenant_id"], world["cpo_id"], world["cpo_email"])
 
     with patch("backend.services.billing_emails.schedule") as schedule_mock, \
-         patch("backend.services.billing_emails.send_topup_receipt") as send_mock:
+         patch(
+             "backend.services.billing_emails.send_topup_receipt",
+             new_callable=MagicMock,
+         ) as send_mock:
         async with factory() as db:
             await cpo_create_topup(
                 CpoTopupCreateRequest(
