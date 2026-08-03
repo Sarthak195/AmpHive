@@ -77,7 +77,12 @@ describe('session restore on mount', () => {
 
     renderProbe();
 
-    expect(await screen.findByTestId('user')).toHaveTextContent('driver@amphive.test');
+    // waitFor, not findBy: the probe renders immediately with 'anonymous',
+    // so findByTestId resolves on existence and asserts once — a race the
+    // slow CI runners kept losing (recurring main-branch run failure).
+    await waitFor(() =>
+      expect(screen.getByTestId('user')).toHaveTextContent('driver@amphive.test')
+    );
     expect(api.get).toHaveBeenCalledWith('/api/auth/me');
   });
 
