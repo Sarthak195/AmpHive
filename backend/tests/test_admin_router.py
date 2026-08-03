@@ -8,7 +8,7 @@ is asserted on the shared require_role dependency (and on every admin
 route's declared dependencies) the same way test_direct_rbac.py does —
 calling a route function directly bypasses FastAPI's DI entirely.
 """
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -345,24 +345,30 @@ async def test_adjust_balance_unknown_user_404():
 # --- List shapes ------------------------------------------------------------
 
 
-def _gateway(gw_id="gw-1", tenant_id=1, status=GatewayStatus.ONLINE):
+def _gateway(gw_id="gw-1", tenant_id=1, status=GatewayStatus.ONLINE,
+             last_seen_at=None):
     gw = MagicMock()
     gw.id = gw_id
     gw.name = "Site A"
     gw.tenant_id = tenant_id
     gw.status = status
     gw.firmware_version = "2.1.0-direct"
-    gw.last_seen_at = datetime(2026, 7, 21, tzinfo=timezone.utc)
+    # Fresh by default: `online` derives from gateway_is_live (status AND a
+    # fresh last_seen_at), so a dated fixture timestamp reads as offline.
+    gw.last_seen_at = last_seen_at or datetime.now(timezone.utc)
     return gw
 
 
 @pytest.mark.asyncio
 async def test_list_gateways_shape_and_online_derivation():
+    seen = datetime.now(timezone.utc)
     db = _db(
         _scalar(2),  # total
         _all([
-            (_gateway("gw-1", status=GatewayStatus.ONLINE), "Acme Charging", 3),
-            (_gateway("gw-2", status=GatewayStatus.OFFLINE), "Beta Homes", 0),
+            (_gateway("gw-1", status=GatewayStatus.ONLINE, last_seen_at=seen),
+             "Acme Charging", 3),
+            (_gateway("gw-2", status=GatewayStatus.OFFLINE, last_seen_at=seen),
+             "Beta Homes", 0),
         ]),
     )
 
@@ -377,12 +383,31 @@ async def test_list_gateways_shape_and_online_derivation():
         "tenant_id": 1,
         "tenant_name": "Acme Charging",
         "online": True,
-        "last_seen_at": "2026-07-21T00:00:00+00:00",
+        "last_seen_at": seen.isoformat(),
         "firmware_version": "2.1.0-direct",
         "plug_count": 3,
     }
     assert resp["items"][1]["online"] is False
     assert resp["items"][1]["plug_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_list_gateways_stale_online_flag_reads_offline():
+    """Crash-outage case: the DB flag is stuck ONLINE (LWT never delivered,
+    retained `online` replayed on broker restart) but nothing has been seen
+    for hours — the fleet list must not report it online."""
+    stale = datetime.now(timezone.utc) - timedelta(hours=9)
+    db = _db(
+        _scalar(1),
+        _all([
+            (_gateway("gw-1", status=GatewayStatus.ONLINE, last_seen_at=stale),
+             "Acme Charging", 3),
+        ]),
+    )
+
+    resp = await admin_list_gateways(_admin(), db, online=None, limit=50, offset=0)
+
+    assert resp["items"][0]["online"] is False
 
 
 @pytest.mark.asyncio

@@ -29,6 +29,7 @@ from backend.services.rate_limit import (
     cpo_gateway_claim_account_rate_limiter,
 )
 from backend.services.rbac import require_role
+from backend.services.session_lifecycle import gateway_is_live
 from backend.services.versioning import version_sort_key
 
 from ._common import logger
@@ -76,7 +77,12 @@ async def cpo_list_gateways(
             "id": gw.id,
             "name": gw.name,
             "vpn_ip": gw.vpn_ip,
-            "status": gw.status.value,
+            # Liveness-derived, not the raw DB flag: the stored status only
+            # flips on a delivered LWT, so a crash outage (broker died with the
+            # connection — no LWT) leaves it ONLINE forever, and the firmware's
+            # retained `online` replay re-asserts it on every broker restart.
+            # Same status+freshness rule the session-start gate uses.
+            "status": "online" if gateway_is_live(gw) else "offline",
             "firmware_version": gw.firmware_version,
             "last_seen_at": gw.last_seen_at.isoformat() if gw.last_seen_at else None,
             "created_at": gw.created_at.isoformat() if gw.created_at else None,
