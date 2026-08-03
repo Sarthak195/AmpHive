@@ -41,12 +41,18 @@ export default function CpoPricingSimple({
   const [priceInput, setPriceInput] = useState('');
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [localError, setLocalError] = useState('');
+  // Once the user has typed, later seedPrice arrivals must not clobber the
+  // field: the parent's fetches land in waves, and on a slow connection a
+  // late wave was wiping a price typed mid-hydration (also the recurring
+  // CpoPricing CI flake). Cleared after a successful save so the parent's
+  // refetch re-seeds as before.
+  const [dirty, setDirty] = useState(false);
 
   // Re-seed the field whenever the resolved starting price changes — on
   // first load, and again after a successful save (the parent refetches).
   useEffect(() => {
-    setPriceInput(seedPrice ?? '');
-  }, [seedPrice]);
+    if (!dirty) setPriceInput(seedPrice ?? '');
+  }, [seedPrice, dirty]);
 
   if (!pricingSummary) {
     return null; // parent shows a skeleton while this is unresolved
@@ -56,7 +62,7 @@ export default function CpoPricingSimple({
   const isValid = price != null && price > 0 && price <= 1000;
   const exampleCoins = isValid ? price * EXAMPLE_KWH : null;
 
-  const attemptSave = () => {
+  const attemptSave = async () => {
     setLocalError('');
     if (!isValid) {
       setLocalError('Enter a rate greater than ₹0 and at most ₹1000.');
@@ -66,12 +72,16 @@ export default function CpoPricingSimple({
       setConfirmOpen(true);
       return;
     }
-    onSave(price);
+    const ok = await onSave(price);
+    if (ok) setDirty(false);
   };
 
   const confirmOverwrite = async () => {
     const ok = await onSave(price);
-    if (ok) setConfirmOpen(false);
+    if (ok) {
+      setConfirmOpen(false);
+      setDirty(false);
+    }
   };
 
   return (
@@ -97,7 +107,10 @@ export default function CpoPricingSimple({
           max="1000"
           className="input"
           value={priceInput}
-          onChange={(e) => setPriceInput(e.target.value)}
+          onChange={(e) => {
+            setDirty(true);
+            setPriceInput(e.target.value);
+          }}
         />
         <p className="field-help">
           This is the one rate every charger bills at, every hour, every day of the week.
