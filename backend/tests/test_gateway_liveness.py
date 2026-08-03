@@ -13,7 +13,7 @@ MQTTManager) so long-connected gateways stay live without reconnecting.
 """
 import asyncio
 from datetime import datetime, timedelta, timezone
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -69,6 +69,47 @@ def test_online_with_naive_fresh_timestamp_is_live():
 def test_missing_last_seen_is_dead():
     gw = _gateway(GatewayStatus.ONLINE, None)
     assert gateway_is_live(gw, now=NOW) is False
+
+
+# --- CPO gateway list derives status from liveness --------------------------
+
+@pytest.mark.asyncio
+async def test_cpo_gateway_list_reports_stale_online_flag_as_offline():
+    """
+    Crash-outage regression (2026-08-03): the broker died with the gateway's
+    connection, so no LWT ever flipped the DB flag, and the retained `online`
+    replay re-asserted it on broker restart. The CPO portal showed a
+    powered-off gateway as active for 9 hours. The list endpoint must derive
+    status from gateway_is_live, not echo the raw column.
+    """
+    from backend.routers.cpo._gateways import cpo_list_gateways
+
+    def _gw(gw_id, last_seen_at):
+        gw = _gateway(GatewayStatus.ONLINE, last_seen_at)
+        gw.id = gw_id
+        gw.created_at = None
+        return gw
+
+    now = datetime.now(timezone.utc)
+    fresh = _gw("gw-fresh", now - timedelta(seconds=10))
+    stale = _gw("gw-stale", now - timedelta(hours=9))
+
+    gateways_result = MagicMock()
+    gateways_result.scalars.return_value.all.return_value = [fresh, stale]
+    plug_count = MagicMock()
+    plug_count.scalar.return_value = 1
+    db = AsyncMock()
+    db.execute = AsyncMock(side_effect=[gateways_result, plug_count, plug_count])
+
+    user = MagicMock()
+    user.tenant_id = 1
+
+    resp = await cpo_list_gateways(user, db)
+
+    assert [(g["id"], g["status"]) for g in resp] == [
+        ("gw-fresh", "online"),
+        ("gw-stale", "offline"),
+    ]
 
 
 # --- MQTTManager last_seen_at refresh --------------------------------------

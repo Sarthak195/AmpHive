@@ -52,6 +52,10 @@ from backend.schemas import (
 from backend.services.audit import try_record_audit
 from backend.services.money import ZERO_MONEY, to_money
 from backend.services.rbac import require_role
+from backend.services.session_lifecycle import (
+    GATEWAY_LIVENESS_WINDOW_SEC,
+    gateway_is_live,
+)
 from backend.services.versioning import version_sort_key
 
 logger = logging.getLogger("amphive.api")
@@ -714,14 +718,23 @@ async def admin_list_gateways(
     offset: int = 0,
 ):
     """Cross-tenant gateway fleet, most recently seen first. `online` derives
-    from Gateway.status == ONLINE — the same flag routers/cpo.py gates OTA on
-    (the MQTT status/LWT handlers own it)."""
+    from gateway_is_live (status flag AND fresh last_seen_at) — the raw flag
+    alone lies after a missed LWT (crash outage), and the firmware's retained
+    `online` replay re-asserts it on every broker restart."""
     limit, offset = _clamp_page(limit, offset)
 
     conditions = []
     if online is not None:
+        # SQL mirror of gateway_is_live so the filter matches the derived field.
+        cutoff = datetime.now(timezone.utc) - timedelta(
+            seconds=GATEWAY_LIVENESS_WINDOW_SEC
+        )
+        live = and_(
+            Gateway.status == GatewayStatus.ONLINE, Gateway.last_seen_at >= cutoff
+        )
         conditions.append(
-            Gateway.status == (GatewayStatus.ONLINE if online else GatewayStatus.OFFLINE)
+            live if online
+            else or_(Gateway.status != GatewayStatus.ONLINE, Gateway.last_seen_at < cutoff)
         )
 
     total = (
@@ -750,7 +763,7 @@ async def admin_list_gateways(
                 "name": gw.name,
                 "tenant_id": gw.tenant_id,
                 "tenant_name": tenant_name,
-                "online": gw.status == GatewayStatus.ONLINE,
+                "online": gateway_is_live(gw),
                 "last_seen_at": _iso(gw.last_seen_at),
                 "firmware_version": gw.firmware_version,
                 "plug_count": int(plug_count or 0),
