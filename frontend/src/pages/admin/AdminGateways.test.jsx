@@ -16,6 +16,12 @@ vi.mock('../../api/client', () => ({
   default: { get: vi.fn(), post: vi.fn(), put: vi.fn(), patch: vi.fn(), delete: vi.fn() },
 }));
 
+const toast = { ok: vi.fn(), error: vi.fn(), info: vi.fn(), warn: vi.fn() };
+vi.mock('../../components/ui', async (importOriginal) => {
+  const actual = await importOriginal();
+  return { ...actual, useToast: () => toast };
+});
+
 const GATEWAYS = {
   total: 3,
   items: [
@@ -277,6 +283,94 @@ describe('AdminGateways', () => {
       await user.click(within(modal).getByRole('button', { name: 'Mint gateway' }));
 
       expect(await screen.findByText("Gateway 'dup' already exists.")).toBeInTheDocument();
+    });
+  });
+
+  describe('OTA update firmware', () => {
+    const RELEASES = [
+      { id: 3, version: '2.4.0-direct', url: 'https://fw/2.4.0.bin', notes: 'adds sub-16A cap enforcement', is_active: true },
+      { id: 2, version: '2.3.0', url: 'https://fw/2.3.0.bin', notes: null, is_active: true },
+      { id: 1, version: '2.0.0', url: 'https://fw/2.0.0.bin', notes: null, is_active: true },
+    ];
+
+    const mockRoutes = ({ gateways = GATEWAYS, releases = RELEASES } = {}) => {
+      api.get.mockImplementation((url) => {
+        if (url.startsWith('/api/admin/firmware-releases')) {
+          return Promise.resolve({ total: releases.length, items: releases });
+        }
+        if (url.startsWith('/api/admin/gateways')) return Promise.resolve(gateways);
+        return Promise.reject(new Error(`unhandled url ${url}`));
+      });
+    };
+
+    beforeEach(() => mockRoutes());
+
+    it('enables the action only for online gateways with chargers', async () => {
+      renderPage();
+      await screen.findByText('Main Hub');
+      const buttons = screen.getAllByRole('button', { name: 'Update firmware' });
+      // gw-1 (online, 4 plugs) enabled; gw-3 (offline, 6 plugs) disabled.
+      expect(buttons[0]).not.toBeDisabled();
+      expect(buttons[2]).toBeDisabled();
+    });
+
+    it('runs the flow: releases dropdown (envelope unwrapped, newest default) → confirm → POST release_id', async () => {
+      api.post.mockResolvedValue({ status: 'ota_triggered', message: 'Update queued for Main Hub.' });
+      const user = userEvent.setup();
+      renderPage();
+      await screen.findByText('Main Hub');
+
+      await user.click(screen.getAllByRole('button', { name: 'Update firmware' })[0]);
+      const modal = (await screen.findByText(/Push an update to/)).closest('.modal');
+
+      const select = within(modal).getByLabelText('Firmware version');
+      expect(select).toHaveValue('3'); // newest release default
+      const optionTexts = within(select).getAllByRole('option').map((o) => o.textContent);
+      expect(optionTexts).toEqual(['2.4.0-direct — newer', '2.3.0', '2.0.0']);
+
+      await user.click(within(modal).getByRole('button', { name: 'Continue' }));
+      const confirm = (await screen.findByText('Push firmware update?')).closest('.modal');
+      await user.click(within(confirm).getByRole('button', { name: 'Push update' }));
+
+      expect(api.post).toHaveBeenCalledWith('/api/admin/gateways/gw-1/ota', { release_id: 3 });
+      expect(toast.ok).toHaveBeenCalledWith('Update queued for Main Hub.');
+    });
+
+    it('lets the admin switch to a custom URL and POSTs firmware_url instead', async () => {
+      api.post.mockResolvedValue({ status: 'ota_triggered' });
+      const user = userEvent.setup();
+      renderPage();
+      await screen.findByText('Main Hub');
+
+      await user.click(screen.getAllByRole('button', { name: 'Update firmware' })[0]);
+      const modal = (await screen.findByText(/Push an update to/)).closest('.modal');
+      await user.click(within(modal).getByRole('button', { name: /Use a custom URL instead/ }));
+
+      expect(within(modal).queryByLabelText('Firmware version')).not.toBeInTheDocument();
+      await user.type(within(modal).getByLabelText('Firmware image URL (https)'), 'https://fw.example.com/2.5.0.bin');
+      await user.click(within(modal).getByRole('button', { name: 'Continue' }));
+
+      const confirm = (await screen.findByText('Push firmware update?')).closest('.modal');
+      await user.click(within(confirm).getByRole('button', { name: 'Push update' }));
+
+      expect(api.post).toHaveBeenCalledWith('/api/admin/gateways/gw-1/ota', {
+        firmware_url: 'https://fw.example.com/2.5.0.bin',
+      });
+    });
+
+    it('surfaces an OTA failure as a toast', async () => {
+      api.post.mockRejectedValue(new Error('Gateway is offline.'));
+      const user = userEvent.setup();
+      renderPage();
+      await screen.findByText('Main Hub');
+
+      await user.click(screen.getAllByRole('button', { name: 'Update firmware' })[0]);
+      const modal = (await screen.findByText(/Push an update to/)).closest('.modal');
+      await user.click(within(modal).getByRole('button', { name: 'Continue' }));
+      const confirm = (await screen.findByText('Push firmware update?')).closest('.modal');
+      await user.click(within(confirm).getByRole('button', { name: 'Push update' }));
+
+      expect(toast.error).toHaveBeenCalledWith('Gateway is offline.');
     });
   });
 });

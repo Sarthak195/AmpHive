@@ -66,7 +66,7 @@ describe('AdminLayout', () => {
 
   it('renders the nav with links to every admin section and marks the active one', () => {
     renderLayout('/admin/tenants');
-    for (const label of ['Overview', 'Tenants', 'Users', 'Payouts', 'Gateways', 'Disputes', 'Audit']) {
+    for (const label of ['Overview', 'Tenants', 'Users', 'Payouts', 'Gateways', 'Chargers', 'Firmware', 'Disputes', 'Audit']) {
       expect(screen.getByRole('link', { name: label })).toBeInTheDocument();
     }
     expect(screen.getByRole('link', { name: 'Tenants' })).toHaveClass('active');

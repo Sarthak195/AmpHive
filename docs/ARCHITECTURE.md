@@ -197,9 +197,13 @@ Sessions/Reservations (server-side totals; day timeline), Pricing (tariff CRUD +
 `/cpo/chargers|health|pricing`.
 
 **Admin portal** (`pages/admin/`, volt theme + violet accent, new in v3) sits
-behind `AdminProtectedRoute` on the CPO host at `/admin/*`: platform overview,
-tenants, users (role/disable/balance adjust), cross-tenant payout queue
-(mark-paid), gateway fleet, disputes, audit — driven by `/api/admin/*`.
+behind `AdminProtectedRoute` on the CPO host at `/admin/*`: platform overview
+(with 30-day energy/revenue tiles + the public/private charger split,
+2026-08-04), tenants, users (role/disable/balance adjust), cross-tenant payout
+queue (mark-paid), gateway fleet (with an "Update firmware" OTA picker,
+2026-08-04), chargers (`/admin/chargers` — cross-tenant public+private
+listing with filters, 2026-08-04), firmware releases (registry + `.bin`
+upload widget), disputes, audit — driven by `/api/admin/*`.
 
 **Hostname partition (2026-07-20)** — one bundle, two hostnames. The portal
 is served on `cpo.amphive.app` (the real `amphive.app` domain went live

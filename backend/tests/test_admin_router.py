@@ -19,13 +19,16 @@ from fastapi.security import HTTPAuthorizationCredentials
 
 from backend.database.models import (
     GatewayStatus,
+    PlugStatus,
     TransactionType,
     UserRole,
 )
 from backend.routers.admin import (
     admin_adjust_balance,
+    admin_gateway_ota,
     admin_list_gateways,
     admin_list_payouts,
+    admin_list_plugs,
     admin_stats_overview,
     admin_update_user,
 )
@@ -36,6 +39,7 @@ from backend.routers.auth import login
 from backend.schemas import (
     AdminAdjustBalanceRequest,
     AdminUserUpdateRequest,
+    CpoGatewayOtaRequest,
     LoginRequest,
 )
 from backend.services.auth import (
@@ -123,8 +127,13 @@ def test_every_admin_route_is_admin_only():
     # contract §4 + GET /api/admin/gateway-logs (TD#28) + POST/GET
     # /api/admin/gateways/inventory (feat/easy-provisioning claim-code onboarding)
     # + POST/GET /api/admin/firmware-releases + POST .../deactivate
-    # (feat/ota-version-picker)
-    assert len(routes) == 16
+    # (feat/ota-version-picker) + GET /api/admin/plugs + POST
+    # /api/admin/gateways/{id}/ota + POST /api/admin/firmware-releases/upload
+    # (feat/admin-dashboard completion). NOTE: the public GET
+    # /api/firmware/images/{filename} deliberately lives in a SEPARATE router
+    # (routers/firmware_images.py), not here — it must be reachable without the
+    # admin gate — so it is not counted among these admin-only routes.
+    assert len(routes) == 19
     for route in routes:
         assert route.path.startswith("/api/admin/")
         gates = [
@@ -433,6 +442,10 @@ async def test_stats_overview_shape():
         _first((100.0, Decimal("1234.50"))),                     # total energy/revenue
         _first((2, Decimal("55.50"))),                           # requested payouts
         _scalar(1),                                              # open disputes
+        # [Admin dashboard completion] the three APPENDED queries, in order:
+        _scalar(4),                                              # public plugs
+        _scalar(2),                                              # private plugs
+        _first((50.0, Decimal("600.00"))),                       # last-30d energy/revenue
     )
 
     resp = await admin_stats_overview(_admin(), db)
@@ -441,13 +454,211 @@ async def test_stats_overview_shape():
         "tenants": 3,
         "users": {"total": 8, "drivers": 5, "cpos": 2, "admins": 1},
         "gateways": {"total": 4, "online": 2},
-        "plugs": {"total": 6},
+        "plugs": {"total": 6, "public": 4, "private": 2},
         "sessions": {"active": 1, "today": 2, "total": 10},
-        "energy_kwh": {"today": 1.5, "total": 100.0},
-        "revenue_coins": {"today": 20.0, "total": 1234.5},
+        "energy_kwh": {"today": 1.5, "total": 100.0, "last_30d": 50.0},
+        "revenue_coins": {"today": 20.0, "total": 1234.5, "last_30d": 600.0},
         "payouts": {"requested_count": 2, "requested_net_coins": 55.5},
         "disputes": {"open": 1},
     }
+
+
+# --- GET /api/admin/plugs ---------------------------------------------------
+
+
+def _plug(plug_id=1, name="Plug A", status=PlugStatus.AVAILABLE, gateway_id="gw-1",
+          group_id=None, local_ip="10.0.0.5", plug_model="tapo_p110",
+          connector_type="Type2", rated_power_w=7400, current_power_w=0.0,
+          last_telemetry_at=None, tariff_id=None):
+    p = MagicMock()
+    p.id = plug_id
+    p.name = name
+    p.status = status
+    p.gateway_id = gateway_id
+    p.group_id = group_id
+    p.local_ip = local_ip
+    p.plug_model = plug_model
+    p.connector_type = connector_type
+    p.rated_power_w = rated_power_w
+    p.current_power_w = current_power_w
+    p.last_telemetry_at = last_telemetry_at
+    p.tariff_id = tariff_id
+    return p
+
+
+@pytest.mark.asyncio
+async def test_list_plugs_shape_and_visibility_derivation():
+    """Ungrouped and public-group plugs read `public`; a private-group plug
+    reads `private` — the derived per-item value must track the (row's group)
+    is_public exactly, the same rule the SQL visibility filter uses."""
+    seen = datetime.now(timezone.utc)
+    p_ungrouped = _plug(1, "Ungrouped", group_id=None, last_telemetry_at=seen)
+    p_public = _plug(2, "In public group", group_id=5)
+    p_private = _plug(3, "In private group", group_id=9)
+    db = _db(
+        _scalar(3),
+        _all([
+            # (plug, gateway_name, tenant_id, tenant_name, group_name, is_public)
+            (p_ungrouped, "GW One", 1, "Acme", None, None),
+            (p_public, "GW One", 1, "Acme", "Public Lot", True),
+            (p_private, "GW Two", 2, "Beta", "Private Lot", False),
+        ]),
+    )
+
+    resp = await admin_list_plugs(
+        _admin(), db, q=None, visibility=None, status=None, limit=50, offset=0)
+
+    assert resp["total"] == 3
+    assert [i["visibility"] for i in resp["items"]] == ["public", "public", "private"]
+    assert resp["items"][0] == {
+        "id": 1,
+        "name": "Ungrouped",
+        "status": "available",
+        "gateway_id": "gw-1",
+        "gateway_name": "GW One",
+        "tenant_id": 1,
+        "tenant_name": "Acme",
+        "group_id": None,
+        "group_name": None,
+        "visibility": "public",
+        "local_ip": "10.0.0.5",
+        "plug_model": "tapo_p110",
+        "connector_type": "Type2",
+        "rated_power_w": 7400,
+        "current_power_w": 0.0,
+        "last_telemetry_at": seen.isoformat(),
+        "tariff_id": None,
+    }
+    assert resp["items"][1]["group_id"] == 5
+    assert resp["items"][1]["group_name"] == "Public Lot"
+    assert resp["items"][2]["group_id"] == 9
+    assert resp["items"][2]["group_name"] == "Private Lot"
+
+
+@pytest.mark.asyncio
+async def test_list_plugs_visibility_and_status_filter_accepted():
+    p = _plug(2, "Public plug", group_id=5)
+    db = _db(_scalar(1), _all([(p, "GW", 1, "Acme", "Lot", True)]))
+
+    resp = await admin_list_plugs(
+        _admin(), db, q="pub", visibility="public", status="available", limit=50, offset=0)
+
+    assert resp["total"] == 1
+    assert resp["items"][0]["visibility"] == "public"
+
+
+@pytest.mark.asyncio
+async def test_list_plugs_invalid_visibility_400():
+    db = _db()  # rejected before any query runs
+    with pytest.raises(HTTPException) as exc:
+        await admin_list_plugs(
+            _admin(), db, q=None, visibility="secret", status=None, limit=50, offset=0)
+    assert exc.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_list_plugs_invalid_status_400():
+    db = _db()
+    with pytest.raises(HTTPException) as exc:
+        await admin_list_plugs(
+            _admin(), db, q=None, visibility=None, status="frying", limit=50, offset=0)
+    assert exc.value.status_code == 400
+
+
+# --- POST /api/admin/gateways/{id}/ota --------------------------------------
+
+OTA_URL = "https://storage.googleapis.com/amphive-fw/amphive-gateway-2.4.0.bin"
+
+
+def _release_row(release_id=7, version="2.4.0-direct", url=OTA_URL):
+    r = MagicMock()
+    r.id = release_id
+    r.version = version
+    r.url = url
+    r.is_active = True
+    return r
+
+
+@pytest.mark.asyncio
+async def test_admin_ota_via_release_id_audits_into_gateway_tenant():
+    gw = _gateway("gw-1", tenant_id=3, status=GatewayStatus.ONLINE)
+    db = _db(
+        _scalar_one_or_none(gw),                 # gateway lookup (no tenant filter)
+        _scalar_one_or_none(_release_row(7)),    # release lookup
+        _scalar_one_or_none(5),                  # lowest plug id
+    )
+    with patch("backend.routers.admin.state") as st:
+        st.mqtt_manager.send_gateway_ota.return_value = True
+        resp = await admin_gateway_ota(
+            "gw-1", CpoGatewayOtaRequest(release_id=7), _admin(), db)
+
+    assert resp["status"] == "ota_triggered"
+    assert resp["firmware_url"] == OTA_URL
+    assert resp["release_version"] == "2.4.0-direct"
+    st.mqtt_manager.send_gateway_ota.assert_called_once_with("gw-1", 5, OTA_URL)
+    audit = db.add.call_args[0][0]
+    assert audit.action == "gateway.ota"
+    assert audit.target_type == "gateway"
+    assert audit.target_id == "gw-1"
+    assert audit.tenant_id == 3
+
+
+@pytest.mark.asyncio
+async def test_admin_ota_via_firmware_url_on_unclaimed_gateway():
+    # tenant_id None: unclaimed inventory gateways are permitted for admin OTA.
+    gw = _gateway("gw-9", tenant_id=None, status=GatewayStatus.ONLINE)
+    db = _db(_scalar_one_or_none(gw), _scalar_one_or_none(2))
+    with patch("backend.routers.admin.state") as st:
+        st.mqtt_manager.send_gateway_ota.return_value = True
+        resp = await admin_gateway_ota(
+            "gw-9", CpoGatewayOtaRequest(firmware_url=OTA_URL), _admin(), db)
+
+    assert resp["release_version"] is None
+    assert resp["firmware_url"] == OTA_URL
+    st.mqtt_manager.send_gateway_ota.assert_called_once_with("gw-9", 2, OTA_URL)
+
+
+@pytest.mark.asyncio
+async def test_admin_ota_unknown_gateway_404():
+    db = _db(_scalar_one_or_none(None))
+    with pytest.raises(HTTPException) as exc:
+        await admin_gateway_ota(
+            "nope", CpoGatewayOtaRequest(firmware_url=OTA_URL), _admin(), db)
+    assert exc.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_admin_ota_offline_gateway_409():
+    gw = _gateway("gw-1", status=GatewayStatus.OFFLINE)
+    db = _db(_scalar_one_or_none(gw))
+    with pytest.raises(HTTPException) as exc:
+        await admin_gateway_ota(
+            "gw-1", CpoGatewayOtaRequest(firmware_url=OTA_URL), _admin(), db)
+    assert exc.value.status_code == 409
+    assert "offline" in exc.value.detail.lower()
+
+
+@pytest.mark.asyncio
+async def test_admin_ota_no_plugs_409():
+    gw = _gateway("gw-1", status=GatewayStatus.ONLINE)
+    db = _db(_scalar_one_or_none(gw), _scalar_one_or_none(None))  # live, no plugs
+    with pytest.raises(HTTPException) as exc:
+        await admin_gateway_ota(
+            "gw-1", CpoGatewayOtaRequest(firmware_url=OTA_URL), _admin(), db)
+    assert exc.value.status_code == 409
+    assert "no registered plugs" in exc.value.detail
+
+
+@pytest.mark.asyncio
+async def test_admin_ota_publish_failure_502():
+    gw = _gateway("gw-1", status=GatewayStatus.ONLINE)
+    db = _db(_scalar_one_or_none(gw), _scalar_one_or_none(1))
+    with patch("backend.routers.admin.state") as st:
+        st.mqtt_manager.send_gateway_ota.return_value = False
+        with pytest.raises(HTTPException) as exc:
+            await admin_gateway_ota(
+                "gw-1", CpoGatewayOtaRequest(firmware_url=OTA_URL), _admin(), db)
+    assert exc.value.status_code == 502
 
 
 # --- is_disabled enforcement (login + get_current_user) ---------------------

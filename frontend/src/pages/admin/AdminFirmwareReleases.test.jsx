@@ -12,7 +12,7 @@ import AdminFirmwareReleases from './AdminFirmwareReleases';
 import api from '../../api/client';
 
 vi.mock('../../api/client', () => ({
-  default: { get: vi.fn(), post: vi.fn(), put: vi.fn(), delete: vi.fn() },
+  default: { get: vi.fn(), post: vi.fn(), put: vi.fn(), delete: vi.fn(), upload: vi.fn() },
 }));
 
 const toast = { ok: vi.fn(), error: vi.fn(), info: vi.fn(), warn: vi.fn() };
@@ -122,6 +122,60 @@ describe('AdminFirmwareReleases', () => {
 
     expect(api.post).toHaveBeenCalledWith('/api/admin/firmware-releases/2/deactivate');
     expect(toast.ok).toHaveBeenCalled();
+  });
+
+  it('uploads a firmware image (notes in the query string) and refreshes on success', async () => {
+    api.upload.mockResolvedValue({ id: 5, version: '2.6.0-direct', size_bytes: 1048576, filename: 'amphive-gateway.bin' });
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText('2.4.0-direct');
+
+    await user.click(screen.getByRole('button', { name: 'Upload image' }));
+    const modal = (await screen.findByLabelText('Firmware image (.bin)')).closest('.modal');
+    const file = new File([new Uint8Array([1, 2, 3])], 'amphive-gateway.bin', {
+      type: 'application/octet-stream',
+    });
+    await user.upload(within(modal).getByLabelText('Firmware image (.bin)'), file);
+    await user.type(within(modal).getByLabelText(/Notes/), 'nightly');
+    await user.click(within(modal).getByRole('button', { name: 'Upload image' }));
+
+    expect(api.upload).toHaveBeenCalledWith('/api/admin/firmware-releases/upload?notes=nightly', file);
+    expect(toast.ok).toHaveBeenCalledWith('Registered 2.6.0-direct.');
+  });
+
+  it('uploads without notes (no query string)', async () => {
+    api.upload.mockResolvedValue({ id: 6, version: '2.7.0-direct' });
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText('2.4.0-direct');
+
+    await user.click(screen.getByRole('button', { name: 'Upload image' }));
+    const modal = (await screen.findByLabelText('Firmware image (.bin)')).closest('.modal');
+    const file = new File([new Uint8Array([9])], 'amphive-gateway.bin', {
+      type: 'application/octet-stream',
+    });
+    await user.upload(within(modal).getByLabelText('Firmware image (.bin)'), file);
+    await user.click(within(modal).getByRole('button', { name: 'Upload image' }));
+
+    expect(api.upload).toHaveBeenCalledWith('/api/admin/firmware-releases/upload', file);
+  });
+
+  it('surfaces an upload error detail inline (e.g. bad image)', async () => {
+    api.upload.mockRejectedValue(new Error('not an ESP32 app image'));
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText('2.4.0-direct');
+
+    await user.click(screen.getByRole('button', { name: 'Upload image' }));
+    const modal = (await screen.findByLabelText('Firmware image (.bin)')).closest('.modal');
+    const file = new File([new Uint8Array([0])], 'notfirmware.bin', {
+      type: 'application/octet-stream',
+    });
+    await user.upload(within(modal).getByLabelText('Firmware image (.bin)'), file);
+    await user.click(within(modal).getByRole('button', { name: 'Upload image' }));
+
+    expect(await screen.findByText('not an ESP32 app image')).toBeInTheDocument();
+    expect(toast.ok).not.toHaveBeenCalled(); // no success toast on failure
   });
 
   it('shows EmptyState when there are no releases', async () => {

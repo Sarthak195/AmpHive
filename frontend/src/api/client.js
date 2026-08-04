@@ -44,9 +44,11 @@ export async function apiRequest(endpoint, options = {}) {
     headers['Authorization'] = `Bearer ${token}`;
   }
 
-  // Timeout: abort the request after 20s so a dead backend fails fast.
+  // Timeout: abort the request after `timeoutMs` (default 20s) so a dead
+  // backend fails fast. Callers streaming a large body (see `api.upload`) pass
+  // a longer window.
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timeoutId = setTimeout(() => controller.abort(), options.timeoutMs ?? REQUEST_TIMEOUT_MS);
 
   let response;
   try {
@@ -125,6 +127,18 @@ export const api = {
     apiRequest(endpoint, {
       method: 'DELETE',
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+    }),
+
+  // Upload a raw binary body (a Blob/File) as application/octet-stream —
+  // reuses the same auth/401/error plumbing as apiRequest, but sends the body
+  // as-is instead of JSON-stringifying it. Defaults to a longer 60s timeout
+  // since payloads (e.g. firmware images) are multi-MB.
+  upload: (endpoint, blobOrFile, { timeoutMs = 60_000 } = {}) =>
+    apiRequest(endpoint, {
+      method: 'POST',
+      body: blobOrFile,
+      headers: { 'Content-Type': 'application/octet-stream' },
+      timeoutMs,
     }),
 
   // --- Queued charges ---

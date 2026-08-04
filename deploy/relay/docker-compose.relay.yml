@@ -116,6 +116,14 @@ services:
     # needed the way prod's compose files spell out ~30 individually (this is
     # the simplification the env_file switch buys you).
     env_file: .env
+    volumes:
+      # [Firmware upload] Admin-uploaded OTA .bin images (POST
+      # /api/admin/firmware-releases/upload), served back publicly by GET
+      # /api/firmware/images/{filename}. Named volume so they survive container
+      # recreation / `up --build`. The Dockerfile WORKDIR is /app and
+      # FIRMWARE_IMAGE_DIR defaults to the relative "data/firmware-images",
+      # i.e. /app/data/firmware-images — mount the volume there.
+      - firmware_images:/app/data/firmware-images
     ports:
       # Published for VM-local debugging (curl/health polling), same as prod.
       # Not meant to be reachable from the internet — do not open GCP firewall
@@ -197,3 +205,4 @@ volumes:
   mosquitto_log:
   caddy_data:       # Let's Encrypt certs — also must survive redeploys.
   caddy_config:
+  firmware_images:  # Admin-uploaded OTA images (POST /api/admin/firmware-releases/upload).

@@ -482,7 +482,25 @@ artifact (68 bytes smaller) and must never be shipped.
 
 ### Publishing an OTA image
 
-Images are served from the **public-read GCS bucket `gs://amphive-fw`**
+**Primary path — admin-portal upload (feat/admin-dashboard, 2026-08-04).**
+The whole publish flow is UI-based: build locally, then drag the signed
+`build/amphive-gateway.bin` into **Admin → Firmware Releases** (upload widget →
+`POST /api/admin/firmware-releases/upload`, raw `application/octet-stream`,
+≤4 MiB). The backend validates the ESP image header (magic `0xE9` +
+`esp_app_desc` magic `0xABCD5432`), reads the **version and project name out
+of the binary itself** (`project_name` must be `amphive-gateway` — no typo'd
+version strings), stores the image under `FIRMWARE_IMAGE_DIR` (a docker
+volume in `docker-compose.relay.yml`), and **auto-registers** the
+`FirmwareRelease` pointing at the backend's own public image host,
+`{PUBLIC_API_ORIGIN||FRONTEND_ORIGIN}/api/firmware/images/amphive-gateway-<version>.bin`
+(`GET /api/firmware/images/{filename}`, `routers/firmware_images.py`,
+unauthenticated by design — the ECDSA app signature, §6, is the trust
+anchor, exactly as it was on the world-readable bucket). Then push from the
+version picker on any gateway page (CPO portal, or the new cross-tenant
+admin picker — `POST /api/admin/gateways/{gateway_id}/ota`).
+
+**Fallback path — GCS bucket.** Images can still be served from the
+**public-read GCS bucket `gs://amphive-fw`**
 (`https://storage.googleapis.com/amphive-fw/...`) — a valid public-CA TLS
 host the firmware's Mozilla bundle validates. Upload + trigger:
 
@@ -498,6 +516,9 @@ or run `deploy/scripts/publish_firmware.ps1`, which reads the version from
 calls. Full runbook (including the one-time bucket setup that was run
 2026-07-10):
 [deploy/docs/ota_image_publishing.md](../deploy/docs/ota_image_publishing.md).
+Release rows store full URLs, so **both hosting schemes coexist** —
+already-registered bucket URLs keep working unchanged alongside
+backend-hosted `/api/firmware/images/...` ones.
 
 **Version registry + picker (feat/ota-version-picker, 2026-08-02).** Updating
 a gateway used to mean hand-pasting this URL into the CPO portal. Now an

@@ -115,6 +115,57 @@ def test_malformed_content_length_passes_through(monkeypatch):
     assert result == "downstream-response"
 
 
+def _upload_path_app():
+    """Like _body_size_app, but with a route AT the firmware-upload path so
+    the middleware's per-path carve-out (FIRMWARE_UPLOAD_MAX_BYTES) is
+    exercised through real routing."""
+    app = FastAPI()
+    app.middleware("http")(main.max_body_size_middleware)
+
+    @app.post("/api/admin/firmware-releases/upload")
+    def upload():
+        return {"ok": True}
+
+    return app
+
+
+def test_firmware_upload_path_gets_its_own_larger_cap(monkeypatch):
+    """A body over the global cap but under FIRMWARE_UPLOAD_MAX_BYTES passes
+    on the firmware-upload path — the global 1 MiB cap would otherwise 413 a
+    ~1 MB signed OTA image at the middleware before it ever reached the
+    admin endpoint (2.5.0-direct is 12 bytes under the global default)."""
+    monkeypatch.setattr(main, "MAX_REQUEST_BODY_BYTES", 10)
+    monkeypatch.setattr(main, "FIRMWARE_UPLOAD_MAX_BYTES", 100)
+    client = TestClient(_upload_path_app())
+
+    resp = client.post("/api/admin/firmware-releases/upload", content=b"x" * 50)
+
+    assert resp.status_code == 200
+
+
+def test_firmware_upload_cap_is_still_a_ceiling(monkeypatch):
+    monkeypatch.setattr(main, "MAX_REQUEST_BODY_BYTES", 10)
+    monkeypatch.setattr(main, "FIRMWARE_UPLOAD_MAX_BYTES", 100)
+    client = TestClient(_upload_path_app())
+
+    resp = client.post("/api/admin/firmware-releases/upload", content=b"x" * 101)
+
+    assert resp.status_code == 413
+    assert "max 100 bytes" in resp.json()["detail"]
+
+
+def test_other_paths_keep_the_global_cap(monkeypatch):
+    """The carve-out is path-exact — every other endpoint still enforces
+    MAX_REQUEST_BODY_BYTES."""
+    monkeypatch.setattr(main, "MAX_REQUEST_BODY_BYTES", 10)
+    monkeypatch.setattr(main, "FIRMWARE_UPLOAD_MAX_BYTES", 100)
+    client = TestClient(_body_size_app())
+
+    resp = client.post("/echo", content=b"x" * 50)
+
+    assert resp.status_code == 413
+
+
 def test_cap_is_env_overridable():
     """MAX_REQUEST_BODY_BYTES is read from the environment (default 1 MiB =
     1048576) at import time — assert the actual wiring in main.py rather
