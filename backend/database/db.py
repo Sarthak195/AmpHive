@@ -158,6 +158,13 @@ async def _provision_runtime_role(owner_conn, role: str, password: str, dbname: 
     owner). The role gets NO DDL — it cannot DROP/ALTER a table — which is the
     whole point: a future SQLi caps out at row-level DML, never schema loss.
 
+    OBJECT-CLASS LIMIT (read before adding a migration): the grant covers
+    tables/views/sequences created by THIS owner in schema `public` only. It does
+    NOT reach materialized views, objects in a new schema, or objects created by
+    a different role — those would give the runtime role "permission denied" at
+    runtime (invisible to CI, which runs as the owner). If a migration adds any,
+    grant to APP_DB_USER explicitly. See docs/TODO.md "2026-08-04" backlog.
+
     Injection-safe: `role`/`dbname` are validated SQL identifiers double-quoted
     into the DDL; the password (the only free-form value) is quoted server-side
     via Postgres `format('%L', ...)`, never string-built here.

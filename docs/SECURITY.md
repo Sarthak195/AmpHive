@@ -71,11 +71,16 @@ firmware-image upload — mirrored by an 8m nginx `location`) + nginx
 >   prior behavior); activated per-env by setting `APP_DB_PASSWORD`, on which the
 >   app idempotently provisions the role after migrations and verifies the runtime
 >   connection before serving (`backend/database/db.py`). See §2.
-> - **MQTT payload DoS (MEDIUM).** The broker now sets `message_size_limit 8192`
->   and the router drops any inbound frame over `MAX_MQTT_PAYLOAD_BYTES` (16 KB)
->   before decoding, and catches `RecursionError`/`ValueError`/`MemoryError` (not
->   just `JSONDecodeError`) — so an authenticated-but-hostile gateway can neither
->   memory-DoS the shared backend nor crash the paho callback thread.
+> - **MQTT payload DoS (MEDIUM).** The router drops any inbound frame over
+>   `MAX_MQTT_PAYLOAD_BYTES` (16 KB) before decoding, and catches
+>   `RecursionError`/`ValueError`/`MemoryError` (not just `JSONDecodeError`) — so
+>   an authenticated-but-hostile gateway can neither memory-DoS the shared
+>   backend nor crash the paho callback thread. The repo's `mosquitto.conf` also
+>   sets `message_size_limit 8192` as a broker-side primary gate, **but that file
+>   is VM-operator-managed and NOT shipped by `deploy.ps1`** — so on any broker
+>   not yet manually updated, the *deployed* backstop is the 16 KB app-layer
+>   guard alone (push the conf + recreate the `mqtt` container to activate the
+>   broker cap; tracked in docs/TODO.md "2026-08-04" backlog).
 > - **Web-Push SSRF (LOW).** Subscription `endpoint` URLs are validated
 >   (`is_safe_push_endpoint`) at both the subscribe API (422) and the send path
 >   (skip+log) — `https` public FQDN only, IP-literal/loopback/link-local/private/
