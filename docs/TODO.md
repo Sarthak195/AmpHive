@@ -11,6 +11,121 @@ been fixed by the 2026-07-08…11 work — see the shipped sections below).*
 
 ---
 
+## OPEN — 2026-08-04 reliability & integration backlog
+
+*Surfaced by two prod incidents on 2026-08-04 (activating the DB
+privilege-separation crash-looped the backend; the admin-uploaded firmware
+would not OTA to the real gateway) plus a follow-up reliability sweep. Common
+theme: all are the "passes CI / passes unit tests, fails the first time it hits
+real infra or hardware" class — CI validates logic and bytes, not "does asyncpg
+accept this SQL against a live DB" or "can a constrained ESP32 finish a 1 MB TLS
+download through the proxy". Both incidents are RESOLVED (fix PRs #107/#108
+merged+deployed; DB separation is live and proven; 2.5.0 OTA repointed to GCS);
+the items below are the follow-ups so they don't recur. Security audit from the
+same day is fully remediated — see [SECURITY.md](SECURITY.md) §"2026-08-04"; not
+repeated here.*
+
+- [ ] **OTA upload feature is unreliable for real devices — keep OTA on GCS.**
+      **(High — recurs on every UI upload.)** The admin firmware-**upload**
+      path self-hosts images at `GET /api/firmware/images/{file}`
+      (`backend/routers/firmware_images.py:46`, Caddy→nginx→FastAPI
+      `FileResponse`); the release URL is minted from
+      `PUBLIC_API_ORIGIN||FRONTEND_ORIGIN` (`backend/routers/admin.py:1163`).
+      A real ESP32 cannot finish that download — the TLS stream breaks mid-way
+      (`esp-tls-mbedtls: read error :-0x7100:` → `download failed/incomplete`),
+      even though curl fetches a byte-identical image. **Compounding:** the
+      `firmware_images` volume + `PUBLIC_API_ORIGIN`/`FIRMWARE_IMAGE_DIR` env are
+      NOT shipped by `deploy.ps1` (it ships only `backend/`+`frontend/`), so an
+      uploaded `.bin` is also non-persistent — it vanishes on the next redeploy
+      and 404s. Every historically-successful OTA used `gs://amphive-fw`.
+      **Fix:** make the upload endpoint push the image to GCS and register the
+      GCS URL (or, if keeping self-host, verify the volume+env are on the VM AND
+      tune nginx/Caddy for large streamed downloads AND validate against a real
+      device). Until fixed, publish via `deploy/scripts/publish_firmware.ps1`
+      and point releases at the bucket. (2.5.0-direct release row was repointed
+      to GCS by hand as the immediate unblock.)
+
+- [ ] **Least-privilege role has no test/boot coverage — add the guardrail that
+      would have caught the crash.** **(Med — highest leverage.)** Every
+      DB-gated test connects as the Postgres owner/superuser (all the
+      `DROP TABLE IF EXISTS alembic_version` fixtures), and the runtime-role
+      boot check is only `SELECT 1` (`backend/database/db.py:271-272`), so
+      NEITHER CI NOR startup ever exercises `amphive_app`. That's exactly why
+      the `format()`/asyncpg provisioning bug reached prod, and the fix
+      (`cast(:x AS text)`, `db.py:190-199`) still has no automated coverage.
+      **Fix:** add a DB-gated test that provisions the role against a live
+      Postgres and then does INSERT+UPDATE+DELETE+`nextval` **as `amphive_app`**;
+      change the boot check to a transactional write-then-rollback.
+
+- [ ] **`mosquitto message_size_limit` is repo-only, not on the prod broker.**
+      **(Low, quick.)** `backend/services/mqtt/router.py:16-23` comments that the
+      broker's `message_size_limit 8192` (`deploy/config/mosquitto.conf:45`) is
+      "the primary gate", but `deploy.ps1` never ships broker config, so the prod
+      broker almost certainly still runs mosquitto's 256 MB default — the only
+      real ceiling is the 16 KB app-layer guard. `SECURITY.md` claims the broker
+      caps at 8 KB (true of the repo, not the running broker). **Fix:** `scp` the
+      conf to the VM + recreate the `mqtt` container; reconcile the stale
+      `deploy/k8s/mosquitto.yaml` copy.
+
+- [ ] **Firmware release "deactivate" is a one-way trap.** **(Med.)** There's a
+      `.../deactivate` endpoint (`backend/routers/admin.py:1379`) but no
+      reactivate, and the upload endpoint rejects any existing version even when
+      it's deactivated — so a deactivated release can neither be re-enabled nor
+      re-uploaded (stranded the 2.5.0 release; unblocked by a hand DB
+      `is_active=true`). **Fix:** add a reactivate endpoint + a Reactivate button
+      in `AdminFirmwareReleases.jsx`, and make re-uploading a deactivated version
+      overwrite-and-reactivate it (so notes-on-retry works).
+
+- [ ] **Startup-migration hazards (latent outage).** **(Low, preventive.)**
+      `init_db` runs `alembic upgrade head` on every boot inside the single
+      backend container (`backend/database/db.py:259-260`). A future slow
+      migration (a big backfill `UPDATE`, or a non-`CONCURRENTLY` index on the
+      large `telemetry_readings` table) would hold locks and stall startup =
+      downtime, since `up -d` recreates the only backend container. Separately,
+      the "PROVISIONAL NUMBERING" pattern + parallel agents can produce two
+      migration heads, which wedges boot until hand-merged. **Fix:** convention
+      to run data backfills out-of-band and use `CREATE INDEX CONCURRENTLY`
+      (Alembic `autocommit_block`) on hot tables; add a CI single-head check.
+
+- [ ] **Document the least-privilege role's object-class limits (latent).**
+      **(Low.)** The runtime grant is `... ON ALL TABLES` + `ALTER DEFAULT
+      PRIVILEGES` in schema `public` (`backend/database/db.py:201-211`). This
+      covers tables/views/sequences created by the owner in `public` — but NOT
+      materialized views, objects in a new schema, or objects created by a
+      different role. A future migration adding any of those would give
+      `amphive_app` "permission denied" at runtime, invisible to CI. **Fix:**
+      note "public-schema tables/views/sequences only" in the migration guide;
+      grant explicitly for anything else.
+
+- [ ] **`.env.template` missing the firmware-upload keys.** **(Low.)** Add
+      `PUBLIC_API_ORIGIN` and `FIRMWARE_IMAGE_DIR` to
+      `deploy/config/.env.template` (only referenced in a compose comment today),
+      so a new deploy doesn't silently mis-configure the upload feature. Part of
+      the broader deploy.ps1-doesn't-ship-`deploy/` drift (mosquitto.conf,
+      compose, Caddyfile are all VM-managed — see the config-drift note in the
+      2026-08-04 sweep).
+
+- [ ] **On-hardware verification backlog (operator, no code).** **(Reality-
+      check.)** fw 2.5.0-direct's WiFi-reconnect fix is built + on GCS but has
+      never run on the gateway — verify by power-cycling the router after it
+      installs and confirming it reconnects unaided. Also the standing
+      "on-device verify pending" cluster that only rides to the field via manual
+      OTA: crash-recovery duration watchdog (fw 2.1.0), offline-resync per-entry
+      `session_id` billing attribution (fw 2.1.0), energy-integrator NVS restore
+      (needs ≥50 Wh accrued), and the two-real-plug multi-plug concurrency path
+      (needs a second unit). `docs/TESTING.md` notes firmware has zero
+      host-runnable tests — these billing/safety paths are on-device-only.
+
+- [ ] **(Note, not a bug) `_persist_telemetry` loads the `Plug` row without
+      `with_for_update`** (`backend/services/mqtt/telemetry.py:395`), so
+      concurrent frames for one plug can last-writer-wins on
+      `current_power_w`/`last_telemetry_at`/`last_*_energy_kwh`. Session energy
+      is under the session row lock (not affected); the unmetered-consumption
+      baseline race is already documented in-code as an accepted best-effort
+      safety net. Recorded so it isn't mistaken for an untracked bug.
+
+---
+
 ## Immediate (this week) — security & correctness
 
 - [x] **[2026-07-06 audit] Lock down the ESP32 provisioning portal.** Done
