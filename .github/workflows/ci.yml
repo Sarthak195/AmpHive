@@ -1,13 +1,36 @@
 # AmpHive CI — pytest (backend) + eslint (frontend) on every push/PR.
 # This is the pipeline that would have caught the get_participants
 # "verified-but-broken" regression before it shipped (TD#13).
+#
+# Runner cost note: this repo is PUBLIC, so standard GitHub-hosted runners
+# (ubuntu-latest here) are FREE with unlimited minutes — the 2000/3000-min
+# quota only applies to PRIVATE repos. The two settings below cut wasted runs
+# anyway (good hygiene, and they'd matter if this repo ever went private):
+#   - concurrency: cancel a ref's in-flight run when a newer commit lands, so
+#     rapid PR pushes don't pile up N full runs.
+#   - paths-ignore: skip CI for docs-only changes (no test/lint surface). Safe
+#     here because main has no required status checks; a mixed docs+code change
+#     still runs (paths-ignore only skips when EVERY changed file matches).
 
 name: CI
+
+# Cancel superseded runs on the same branch/PR (keeps the newest, drops the rest).
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - 'plans/**'
+      - '**/*.md'
   pull_request:
+    paths-ignore:
+      - 'docs/**'
+      - 'plans/**'
+      - '**/*.md'
 
 jobs:
   backend-tests:
