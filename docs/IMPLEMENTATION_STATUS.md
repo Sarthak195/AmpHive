@@ -7,7 +7,34 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 
 ---
 
-## 0. Latest — 2026-08-02 offline/unmetered-consumption detection (fw 2.4.0-direct)
+## 0. Latest — 2026-08-04 runtime Wi-Fi reconnect fix (fw 2.5.0-direct)
+
+Real incident: a home router rebooted at midnight and the gateway never came
+back — it needed a manual power cycle in the morning. Root cause in
+`firmware/main/main.c`: on `WIFI_EVENT_STA_DISCONNECTED` the handler retried
+`esp_wifi_connect()` only `MAXIMUM_RETRY` (5) times — exhausted in well under
+a minute while the AP was still down — then set `WIFI_FAIL_BIT` and stopped.
+Nothing consumes that bit after boot (only boot-time `wifi_init` and the
+portal pre-check wait on it), and ESP-IDF never reconnects on its own, so the
+gateway sat disassociated forever while the backend's LWT reaper marked it
+offline.
+
+Fix (fw `2.5.0-direct`): once the STA link has held an IP at least once,
+exhausted retries arm a 10 s one-shot redial timer that keeps calling
+`esp_wifi_connect()` until the AP returns; a persistent outage past 1 h
+triggers a last-resort reboot (skipped while any charging session is active —
+same rule as OTA `REBOOT`), which lands in the existing boot-time
+portal-idle→retry-STA loop. esp-mqtt already owns its own reconnection, so no
+backend or MQTT change was needed. Boot-time and portal pre-check semantics
+(bounded retry → definite pass/fail) are unchanged. Details in
+[FIRMWARE.md](FIRMWARE.md) §1; security angle (persistent-DoS-by-brief-jam,
+now closed) in [SECURITY.md](SECURITY.md) §8.4. Build-verified with ESP-IDF
+v5.3.3; **not yet OTA'd** — the fielded gateway needs one last manual-ish
+update to pick this up (admin OTA picker).
+
+---
+
+## 0.01 — 2026-08-02 offline/unmetered-consumption detection (fw 2.4.0-direct)
 
 Real incident: an operator manually toggled a P110 on/off (physical button /
 Tapo app) while its gateway was fully unreachable, and the platform never

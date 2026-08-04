@@ -59,6 +59,20 @@ firmware/
 |------|-------|------|------|
 | `telemetry_safety` | 8192 | 5 | floating |
 
+**Runtime Wi-Fi resilience (fw ≥ 2.5.0-direct):** the `MAXIMUM_RETRY` (5)
+burst on `WIFI_EVENT_STA_DISCONNECTED` exists only to give the two bounded
+waiters (boot-time `wifi_init`, portal Wi-Fi pre-check) a definite
+`WIFI_FAIL_BIT`. Once the STA link has held an IP at least once, exhausted
+retries arm a **10 s one-shot redial timer** that keeps calling
+`esp_wifi_connect()` until the AP returns — ESP-IDF never reconnects on its
+own, and before 2.5.0 nothing consumed `WIFI_FAIL_BIT` after boot, so a home
+router rebooting (an AP outage of minutes) stranded the gateway offline until
+a manual power cycle. If the outage persists past **60 min** the gateway
+reboots as a last resort (the Wi-Fi driver itself may be wedged) — but never
+with an active charging session, same rule as OTA `REBOOT` — landing in the
+boot path, whose portal-idle loop retries STA every 10 min. esp-mqtt owns its
+own reconnection, so MQTT recovers as soon as IP is back.
+
 Broker endpoint (fw ≥ 2.3.0): `AMPHIVE_DIRECT_MQTT 1` → default `MQTT_BROKER_URL
 "mqtts://mqtt.amphive.app:8883"` — a **DNS name**, so the broker can move
 machines by flipping the A record without touching firmware. An optional NVS
@@ -557,8 +571,13 @@ the wire). Three changes:
   cadence (`s_energy_last_power_w` holds the previous sample). See §4.
 - **Telemetry `relay` field** — telemetry now includes `"relay":<bool>` (the
   actual `device_on`), distinct from `"status"` (session state). See §3.
+- **Runtime Wi-Fi reconnect fix (fw 2.5.0-direct)** — a previously-online
+  gateway no longer gives up on the STA link after `MAXIMUM_RETRY` failed
+  reconnects (which a minutes-long router reboot always exhausted, stranding
+  the gateway offline until a manual power cycle): it now redials every 10 s
+  forever, with a session-safe last-resort reboot after 1 h. See §1.
 
-**Current: fw `2.4.0-direct`** (`firmware/CMakeLists.txt` `PROJECT_VER`). Fw has
+**Current: fw `2.5.0-direct`** (`firmware/CMakeLists.txt` `PROJECT_VER`). Fw has
 advanced well past 1.5.0 through many small, individually-verified jumps — DNS-based
 broker addressing with legacy-IP self-migration (§1), the multi-plug refactor
 (TD#20) with a backend-pushed retained plug roster replacing captive-portal plug
@@ -566,12 +585,11 @@ IPs, per-plug current caps (REC-03) persisted across crash recovery, a Wi-Fi
 pre-check at provisioning (TD#31), WARN/ERROR log forwarding over MQTT
 (TD#28), and offline/unmetered-consumption reconciliation via the plug's own
 day/month energy counters (§4a) — none of which change the overall shape
-described in §§1–4 above. `2.4.0-direct` was build-verified with ESP-IDF
-v5.3.3 (`idf.py set-target esp32 && idf.py build`, per operator instruction
-for this change — note this targets classic ESP32, not the ESP32-C3
-documented as the fielded hardware elsewhere in this file; the source
-doesn't reference chip-specific peripherals, so both targets build clean off
-the same `main/` sources, but confirm the right `set-target` before
-flashing/OTA-ing a real unit); not yet OTA'd to a fielded gateway. See
+described in §§1–4 above. `2.5.0-direct` was build-verified with ESP-IDF
+v5.3.3 (`idf.py set-target esp32 && idf.py build` — note this targets classic
+ESP32, not the ESP32-C3 documented as the fielded hardware elsewhere in this
+file; the source doesn't reference chip-specific peripherals, so both targets
+build clean off the same `main/` sources, but confirm the right `set-target`
+before flashing/OTA-ing a real unit); not yet OTA'd to a fielded gateway. See
 [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for the version-by-version
 matrix and on-device verification history.
