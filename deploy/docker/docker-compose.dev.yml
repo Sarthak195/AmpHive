@@ -10,7 +10,8 @@ services:
     container_name: amphive-db-dev
     restart: unless-stopped
     ports:
-      - "5432:5432"
+      # localhost-only dev binding — this DB uses a weak dev password, keep it off 0.0.0.0
+      - "127.0.0.1:5432:5432"
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: amphive_dev
@@ -23,8 +24,9 @@ services:
     container_name: amphive-mqtt-dev
     restart: unless-stopped
     ports:
-      - "1883:1883"
-      - "9001:9001"
+      # localhost-only dev bindings — keep the broker off 0.0.0.0
+      - "127.0.0.1:1883:1883"
+      - "127.0.0.1:9001:9001"
     volumes:
       - ../../mosquitto.conf:/mosquitto/config/mosquitto.conf
 

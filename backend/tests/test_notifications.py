@@ -146,7 +146,10 @@ async def test_push_disabled_without_vapid_key():
 @pytest.mark.asyncio
 async def test_push_prunes_gone_subscriptions():
     """A subscription the push service reports 404/410 for is deleted."""
-    sub = MagicMock(id=7, endpoint="https://push/x", p256dh="k", auth="a", user_id=1)
+    sub = MagicMock(
+        id=7, endpoint="https://fcm.googleapis.com/fcm/send/abc",
+        p256dh="k", auth="a", user_id=1,
+    )
     list_result = _ScalarsResult([sub])
     read_db = _FakeSession([list_result])
     delete_db = _FakeSession()

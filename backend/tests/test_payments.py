@@ -332,6 +332,22 @@ async def test_verify_endpoint_403_on_order_notes_user_mismatch():
     assert exc.value.status_code == 403
 
 
+@pytest.mark.asyncio
+async def test_verify_endpoint_400_when_order_missing_user_attribution():
+    """Fail closed: a captured payment whose order note carries no user_id
+    can't be safely attributed to anyone, so it must be rejected (400) rather
+    than credited to whoever happens to be calling."""
+    fetched = {
+        "payment_id": "pay_1", "order_id": "order_1", "status": "captured",
+        "amount_inr": 10.0, "notes": {},  # order created without a user_id note
+    }
+    with patch.object(payments_router.payment_service, "verify_payment_signature", return_value=True), \
+         patch.object(payments_router.payment_service, "fetch_captured_payment", return_value=fetched):
+        with pytest.raises(HTTPException) as exc:
+            await payments_router.verify_payment(_verify_req(), _driver(user_id=1), AsyncMock())
+    assert exc.value.status_code == 400
+
+
 # ===========================================================================
 # routers/payments.py razorpay_webhook — HMAC + empty-secret hard-fail
 # ===========================================================================

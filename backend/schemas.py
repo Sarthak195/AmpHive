@@ -336,6 +336,24 @@ class PushSubscribeRequest(BaseModel):
     endpoint: str = Field(min_length=1, max_length=1024)
     keys: PushSubscriptionKeys
 
+    @field_validator("endpoint")
+    @classmethod
+    def _validate_endpoint(cls, v: str) -> str:
+        # The endpoint is a browser-supplied URL the backend later POSTs to on
+        # every notification — reject internal/loopback/non-https targets at
+        # the edge so a stored endpoint can never become an SSRF primitive.
+        # Deferred import: keeps schemas.py free of the service module's
+        # DB/socketio imports at load time. Shared with the send-path guard so
+        # both layers apply the exact same rules.
+        from backend.services.notifications import is_safe_push_endpoint
+
+        if not is_safe_push_endpoint(v):
+            raise ValueError(
+                "endpoint must be an https URL for a public push service "
+                "(no IP literals, loopback, or internal hosts)."
+            )
+        return v
+
 
 class PushUnsubscribeRequest(BaseModel):
     endpoint: str = Field(min_length=1, max_length=1024)

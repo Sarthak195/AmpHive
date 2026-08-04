@@ -385,6 +385,29 @@ async def test_topup_404_for_unknown_driver_email(factory):
 
 @requires_db
 @pytest.mark.asyncio
+async def test_topup_driver_email_lookup_is_case_insensitive(factory):
+    """The driver row is stored lowercase; a CPO who types the email in a
+    different case (or with stray whitespace) must still resolve to the same
+    account, matching the case-insensitive lookup used at register/login."""
+    from backend.routers.cpo import cpo_create_topup
+    from backend.schemas import CpoTopupCreateRequest
+
+    world = await _seed_tenant_with_earnings(factory, gross_coins="100.00")
+    cpo = _cpo_user(world["tenant_id"], world["cpo_id"], world["cpo_email"])
+
+    async with factory() as db:
+        res = await cpo_create_topup(
+            CpoTopupCreateRequest(
+                driver_email=f"  {world['driver_email'].upper()}  ", amount_coins=10.00,
+            ),
+            cpo, db,
+        )
+    assert res.driver_user_id == world["driver_id"]
+    assert await _fresh_balance(factory, world["driver_id"]) == Decimal("10.00")
+
+
+@requires_db
+@pytest.mark.asyncio
 async def test_topup_404_when_email_belongs_to_a_non_driver(factory):
     """A CPO can only credit a driver — an email that resolves to a CPO or
     admin account is treated the same as "no such driver", not a 400/403, so

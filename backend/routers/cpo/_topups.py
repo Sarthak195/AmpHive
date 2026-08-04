@@ -35,6 +35,7 @@ from backend.database.models import (
 from backend.schemas import CpoTopupCreateRequest, CpoTopupResponse
 from backend.services import payouts as payout_service
 from backend.services.audit import try_record_audit
+from backend.services.auth import normalize_email
 from backend.services.money import ZERO_MONEY, to_money
 from backend.services.rate_limit import (
     account_rate_limit_dependency,
@@ -93,8 +94,12 @@ async def cpo_create_topup(
     if lock_result.scalar_one_or_none() is None:
         raise HTTPException(status_code=404, detail="Tenant not found.")
 
+    # Case-insensitive lookup, matching register/login (services/auth.py
+    # normalize_email) so a differently-cased driver email still resolves.
     driver_result = await db.execute(
-        select(User).where(User.email == req.driver_email).with_for_update()
+        select(User)
+        .where(func.lower(User.email) == normalize_email(req.driver_email))
+        .with_for_update()
     )
     driver = driver_result.scalar_one_or_none()
     if not driver or driver.role != UserRole.DRIVER:

@@ -328,10 +328,16 @@ async def verify_payment(
                    "automatically once the payment settles.",
         )
 
-    # The order's notes carry the user it was created for — refuse to credit
-    # this caller with a payment made for a different account.
+    # The order's notes carry the user it was created for. Fail closed: an
+    # order with no user attribution can't be safely credited to anyone, and a
+    # note that names a DIFFERENT user must never credit this caller.
     notes_user_id = payment["notes"].get("user_id")
-    if notes_user_id is not None and str(notes_user_id) != str(user.id):
+    if notes_user_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail="This order is missing its user attribution; cannot credit.",
+        )
+    if str(notes_user_id) != str(user.id):
         raise HTTPException(
             status_code=403,
             detail="This payment belongs to a different account.",
