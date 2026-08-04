@@ -11,6 +11,7 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "esp_timer.h"
 #include "esp_random.h"
 #include "esp_mac.h"
 #include "nvs_flash.h"
@@ -119,6 +120,25 @@ static esp_mqtt_client_handle_t mqtt_client = NULL;
 static bool mqtt_connected = false;
 static int wifi_retry_count = 0;
 #define MAXIMUM_RETRY  5
+
+// ── Runtime Wi-Fi resilience ─────────────────────────────────────────────────
+// The bounded MAXIMUM_RETRY burst exists only to produce a definite pass/fail
+// signal for the two paths that wait on WIFI_FAIL_BIT: boot-time wifi_init()
+// (portal fallback) and the portal's credential pre-check. A provisioned
+// gateway that has already been online must NEVER give up on the STA link:
+// ESP-IDF does not reconnect on its own — someone has to keep calling
+// esp_wifi_connect() — and a home router rebooting takes the AP away for
+// minutes, far longer than the retry burst lasts. So once the link has held an
+// IP at least once, exhausted retries arm a low-cadence redial timer that
+// keeps dialing until the AP returns. If the outage still persists after
+// WIFI_DOWN_REBOOT_MS the Wi-Fi driver itself may be wedged, so reboot as a
+// last resort (never away from a charging vehicle — same rule as OTA); the
+// boot path's portal-idle loop then keeps retrying STA every 10 minutes.
+static bool sta_got_ip_once = false;        // provisioned link was up at least once
+static esp_timer_handle_t wifi_redial_timer = NULL;
+static TickType_t wifi_down_since_tick = 0; // tick of the first DISCONNECTED this outage
+#define WIFI_REDIAL_INTERVAL_MS  10000                  // redial cadence while the AP is gone
+#define WIFI_DOWN_REBOOT_MS      (60 * 60 * 1000)       // last-resort reboot after 1 h down
 
 // ─── Per-plug state (multi-plug, TD#20) ──────────────────────────────────────
 // One ESP32 gateway drives several P110s. Each plug the backend addresses (via
@@ -966,6 +986,38 @@ static void start_captive_portal(void) {
 }
 
 // ─── WiFi Event Handler ───────────────────────────────────────────────────────
+
+// One-shot redial while the AP is away (armed only after the link has been up
+// once — see the wifi_redial_timer declaration). Re-armed from the
+// DISCONNECTED handler each time the dial fails, so the loop self-paces at one
+// attempt per WIFI_REDIAL_INTERVAL_MS forever.
+static void wifi_redial_timer_cb(void *arg) {
+    // Snapshot: GOT_IP (event-loop task) zeroes wifi_down_since_tick and stops
+    // this timer, but a callback already in flight would otherwise compute a
+    // bogus `now - 0` elapsed and could reboot right as the link recovers.
+    TickType_t down_since = wifi_down_since_tick;
+    if (down_since == 0) return;   // outage already over — nothing to redial
+    if ((TickType_t)(xTaskGetTickCount() - down_since) * portTICK_PERIOD_MS
+            >= WIFI_DOWN_REBOOT_MS) {
+        bool any_active = false;
+        if (plugs_mutex) {
+            xSemaphoreTake(plugs_mutex, portMAX_DELAY);
+            for (int i = 0; i < MAX_PLUGS; i++) {
+                if (plugs[i].in_use && plugs[i].session_active) { any_active = true; break; }
+            }
+            xSemaphoreGive(plugs_mutex);
+        }
+        if (!any_active) {
+            ESP_LOGE(TAG, "Wi-Fi down for over %d min — rebooting as last resort",
+                     WIFI_DOWN_REBOOT_MS / 60000);
+            esp_restart();
+        }
+        // Session active: keep redialing; the check re-runs next interval.
+    }
+    ESP_LOGW(TAG, "Wi-Fi still down — redialing STA");
+    esp_wifi_connect();
+}
+
 static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                                 int32_t event_id, void *event_data) {
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
@@ -973,17 +1025,34 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
             esp_wifi_connect();
         }
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        if (sta_got_ip_once && wifi_down_since_tick == 0) {
+            wifi_down_since_tick = xTaskGetTickCount();   // outage begins
+        }
         if (wifi_retry_count < MAXIMUM_RETRY) {
             esp_wifi_connect();
             wifi_retry_count++;
             ESP_LOGW(TAG, "WiFi connection dropped. Retrying...");
         } else {
+            // Definite-failure signal for the two bounded waiters
+            // (boot-time wifi_init and the portal pre-check).
             xEventGroupSetBits(wifi_event_group, WIFI_FAIL_BIT);
+            if (sta_got_ip_once && wifi_redial_timer) {
+                // Previously-online gateway: never give up. If the timer is
+                // already pending (stray disconnect event) start_once fails
+                // harmlessly — one redial per interval either way.
+                ESP_LOGW(TAG, "WiFi retries exhausted — redialing every %d s until the AP returns",
+                         WIFI_REDIAL_INTERVAL_MS / 1000);
+                esp_timer_start_once(wifi_redial_timer,
+                                     (uint64_t)WIFI_REDIAL_INTERVAL_MS * 1000);
+            }
         }
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
         ESP_LOGI(TAG, "WiFi connected. Local IP: " IPSTR, IP2STR(&event->ip_info.ip));
         wifi_retry_count = 0;
+        sta_got_ip_once = true;
+        wifi_down_since_tick = 0;                         // outage over
+        if (wifi_redial_timer) esp_timer_stop(wifi_redial_timer);  // no-op if not armed
         xEventGroupSetBits(wifi_event_group, WIFI_CONNECTED_BIT);
     }
 }
@@ -1010,6 +1079,12 @@ static bool wifi_init(void) {
 
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL));
+
+    const esp_timer_create_args_t redial_args = {
+        .callback = wifi_redial_timer_cb,
+        .name = "wifi_redial",
+    };
+    ESP_ERROR_CHECK(esp_timer_create(&redial_args, &wifi_redial_timer));
 
     if (!config_loaded) {
         return false;

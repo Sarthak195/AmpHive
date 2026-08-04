@@ -458,6 +458,14 @@ over or harvest the owner's Tapo account. Ordered by severity.*
   transient Wi-Fi loss now self-heals. Residual: a jamming attacker can still
   keep the gateway offline (that's inherent to radio) and the setup AP
   beacons during each 10-min window.
+- **Runtime give-up fixed fw 2.5.0** — before 2.5.0 this self-heal only
+  covered *boot-time* loss: a Wi-Fi outage while the gateway was already
+  running (router reboot, or a jam lasting past `MAXIMUM_RETRY` quick
+  retries) permanently stopped STA reconnection — the device stayed offline
+  even after the AP returned, until a manual power cycle (a cheap persistent
+  DoS: jam for ~a minute, walk away). Fw ≥ 2.5.0 redials every 10 s forever
+  and, if the outage exceeds 1 h, reboots (never mid-charging-session) into
+  the boot-time retry loop above.
 - **Remaining fix:** require a physical button-hold to enter provisioning
   instead of auto-opening it on Wi-Fi loss; keep retrying STA otherwise.
 
