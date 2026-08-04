@@ -183,11 +183,15 @@ async def _provision_runtime_role(owner_conn, role: str, password: str, dbname: 
         )
     # Set/refresh the password each boot (self-heals a rotated APP_DB_PASSWORD)
     # via Postgres-side literal quoting — never string-built from the env value.
+    # cast(... AS text): asyncpg can't infer the type of a bare parameter passed
+    # to the variadic "any" args of format() (IndeterminateDatatypeError) — the
+    # explicit text cast pins it. %I quotes as identifier, %L as a literal, both
+    # server-side, so ANY password is escaped safely (never string-built here).
     alter_sql = (
         await owner_conn.execute(
             text(
                 "SELECT format('ALTER ROLE %I WITH LOGIN NOSUPERUSER NOCREATEDB "
-                "NOCREATEROLE PASSWORD %L', :r, :p)"
+                "NOCREATEROLE PASSWORD %L', cast(:r AS text), cast(:p AS text))"
             ),
             {"r": role, "p": password},
         )
