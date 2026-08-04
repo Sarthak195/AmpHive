@@ -397,10 +397,15 @@ describe('Simple mode save (broadcast)', () => {
     );
     api.post.mockResolvedValue({ status: 'created', tariff_id: 42, name: 'Standard rate', price_per_kwh: 7 });
     renderPage();
-    await screen.findByLabelText('Price per kWh (₹)');
+    const priceInput = await screen.findByLabelText('Price per kWh (₹)');
+    // Wait for the async seed price (5) to settle before typing. Otherwise
+    // `clear` runs against the still-empty input (a no-op that never marks the
+    // field dirty), the seed then lands as "5" mid-interaction, and `type('7')`
+    // appends to it → "57" — the recurring CpoPricing CI flake.
+    await waitFor(() => expect(priceInput).toHaveValue(5));
 
-    await userEvent.clear(screen.getByLabelText('Price per kWh (₹)'));
-    await userEvent.type(screen.getByLabelText('Price per kWh (₹)'), '7');
+    await userEvent.clear(priceInput);
+    await userEvent.type(priceInput, '7');
     await userEvent.click(screen.getByRole('button', { name: 'Save price' }));
 
     await waitFor(() =>
