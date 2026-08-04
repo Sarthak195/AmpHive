@@ -19,10 +19,12 @@ in the environment; without it, steps 1–2 still work and push is skipped.
 Subscriptions the push service reports gone (404/410) are pruned.
 """
 import asyncio
+import ipaddress
 import json
 import logging
 import os
 from typing import Optional
+from urllib.parse import urlsplit
 
 from sqlalchemy import delete, select
 
@@ -34,6 +36,89 @@ logger = logging.getLogger("amphive.notifications")
 VAPID_PRIVATE_KEY = os.getenv("VAPID_PRIVATE_KEY", "")
 # Contact URI the push service may use to reach the operator (spec-required).
 VAPID_SUBJECT = os.getenv("VAPID_SUBJECT", "mailto:admin@amphive.example")
+
+
+# --- Web-Push endpoint SSRF guard -----------------------------------------
+#
+# The push `endpoint` is a browser-supplied URL that the backend later POSTs
+# to (pywebpush -> requests) for every notification. Left unchecked it is a
+# blind-SSRF primitive: an authenticated driver could register
+# https://127.0.0.1:8000/... or an internal host and make the server fan out
+# requests to it. `is_safe_push_endpoint` is the single source of truth,
+# enforced at BOTH the subscribe edge (schema field validator) and the send
+# site (defense-in-depth, covers rows saved before this guard existed).
+
+# Internal-looking hostname suffixes that are never a public push service.
+_UNSAFE_HOST_SUFFIXES = (".local", ".localhost", ".internal", ".lan", ".home")
+# Belt-and-suspenders explicit denylist (link-local already covers the cloud
+# metadata IP, but reject it and its name outright for clarity).
+_UNSAFE_HOSTS = {"localhost", "169.254.169.254", "metadata.google.internal"}
+
+
+def is_safe_push_endpoint(url: str) -> bool:
+    """Return True only for a plausible *public* Web-Push endpoint that is safe
+    to POST to (SSRF guard). Rules:
+
+    - scheme must be exactly ``https`` (reject http/file/gopher/...);
+    - if the host is an IP literal (v4 or v6, including IPv4-mapped v6), reject
+      any private/loopback/link-local/reserved/multicast/unspecified address;
+    - reject ``localhost``, the cloud metadata host/IP, hostnames ending in an
+      internal suffix (``.local``/``.internal``/...), and bare single-label
+      hostnames (no dot) — real push services are public FQDNs.
+
+    No DNS resolution is performed (blocking + TOCTOU); the IP-literal and
+    hostname-shape checks are the guard.
+    """
+    if not isinstance(url, str) or not url.strip():
+        return False
+    try:
+        parts = urlsplit(url.strip())
+    except ValueError:
+        return False
+
+    # Scheme must be exactly https.
+    if parts.scheme != "https":
+        return False
+
+    host = parts.hostname  # lower-cased; IPv6 brackets stripped
+    if not host:
+        return False
+    host = host.rstrip(".")  # tolerate a fully-qualified trailing dot
+    if not host:
+        return False
+
+    if host in _UNSAFE_HOSTS:
+        return False
+
+    # IP literal? Reject anything that is not globally routable.
+    ip = _parse_ip_literal(host)
+    if ip is not None:
+        # Compare IPv4-mapped IPv6 (::ffff:10.0.0.1) on the embedded v4 address.
+        if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+            ip = ip.ipv4_mapped
+        return not (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_reserved
+            or ip.is_multicast
+            or ip.is_unspecified
+        )
+
+    # Hostname (not an IP): shape checks only, no live DNS.
+    if host.endswith(_UNSAFE_HOST_SUFFIXES):
+        return False
+    if "." not in host:  # bare single-label host is never a public FQDN
+        return False
+    return True
+
+
+def _parse_ip_literal(host: str):
+    """Return an ip_address for `host` when it is an IP literal, else None."""
+    try:
+        return ipaddress.ip_address(host)
+    except ValueError:
+        return None
 
 
 def _serialize(n: Notification) -> dict:
@@ -143,6 +228,18 @@ def _send_one_push(sub: dict, payload: dict) -> bool:
     """Send one push message. Returns True when the subscription is gone
     (404/410) and should be pruned; False otherwise (success or transient
     failure — transient failures are logged and dropped, not retried)."""
+    endpoint = sub.get("endpoint", "")
+    if not is_safe_push_endpoint(endpoint):
+        # Defense-in-depth SSRF guard: a subscription persisted before this
+        # check existed (or one that somehow slipped past the schema) must
+        # never be POSTed to. Skip it — don't prune (return False) and don't
+        # let it crash the rest of the fan-out.
+        logger.warning(
+            "Skipping web push to subscription %s: endpoint failed SSRF "
+            "safety check (%r).", sub.get("id"), endpoint,
+        )
+        return False
+
     try:
         from pywebpush import WebPushException, webpush
     except ImportError:

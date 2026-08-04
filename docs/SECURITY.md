@@ -56,6 +56,38 @@ firmware-image upload — mirrored by an 8m nginx `location`) + nginx
 > backend, and is admin-only + ECDSA-signature-gated), no path traversal, no XSS,
 > no IDOR across all routes, CSRF-resistant bearer auth.
 
+> **2026-08-04 threat audit + remediation batch.** A four-track audit
+> (DB/injection, authz/tenancy, secrets/config, injection/SSRF/MQTT) found the
+> authz/tenancy and secrets surfaces clean (the new admin console + firmware
+> upload/serve endpoints all correctly gated; path-traversal + SSRF defenses
+> hold) and no live SQL injection anywhere. The one HIGH finding and the rest
+> were fixed in this batch:
+> - **DB privilege separation (HIGH).** Request-serving previously ran on the
+>   `DATABASE_URL` role, which in prod is the Postgres **superuser** (full DDL +
+>   `COPY..TO PROGRAM`), so any *future* SQLi would escalate to `DROP TABLE` /
+>   DB-host RCE. Requests now serve through a separate **non-superuser role**
+>   (`amphive_app`, DML-only — cannot DROP/ALTER a table); the owner role keeps
+>   DDL for migrations alone. Safe-inert by default (unset `APP_DB_PASSWORD` =
+>   prior behavior); activated per-env by setting `APP_DB_PASSWORD`, on which the
+>   app idempotently provisions the role after migrations and verifies the runtime
+>   connection before serving (`backend/database/db.py`). See §2.
+> - **MQTT payload DoS (MEDIUM).** The broker now sets `message_size_limit 8192`
+>   and the router drops any inbound frame over `MAX_MQTT_PAYLOAD_BYTES` (16 KB)
+>   before decoding, and catches `RecursionError`/`ValueError`/`MemoryError` (not
+>   just `JSONDecodeError`) — so an authenticated-but-hostile gateway can neither
+>   memory-DoS the shared backend nor crash the paho callback thread.
+> - **Web-Push SSRF (LOW).** Subscription `endpoint` URLs are validated
+>   (`is_safe_push_endpoint`) at both the subscribe API (422) and the send path
+>   (skip+log) — `https` public FQDN only, IP-literal/loopback/link-local/private/
+>   internal hosts rejected — closing the authenticated blind-SSRF via the
+>   notification fan-out.
+> - **Hardening.** Backend `:8000` and dev `db`/`mqtt` ports loopback-bound in the
+>   compose files (no longer relying solely on the cloud firewall); `deploy.ps1`
+>   now re-validates `POSTGRES_PASSWORD` on **every** deploy (not just first
+>   bootstrap); payments credit path fails closed when an order lacks its
+>   `user_id` note; CPO top-up email lookup made case-insensitive; MQTT discovery
+>   `unique_id` truncated; `bcrypt` requirement/lock pin reconciled.
+
 ---
 
 ## 1. Committed secrets (ROTATED 2026-07-06)
@@ -103,6 +135,20 @@ BFG + force-push) to purge the dead values entirely.
   epoch is per-user, not per-token); single-device logout isn't distinguished
   from all-device. Legacy pre-`tv` tokens are treated as epoch 0 (valid until
   the first revoke), so the change didn't force-log-out existing sessions.
+- [Added 2026-08-04] **Least-privilege DB runtime role (privilege separation).**
+  `DATABASE_URL` is the OWNER connection (superuser in prod) and is now used
+  ONLY for migrations + one-time role provisioning. When `APP_DB_PASSWORD` is
+  set, every request session connects instead as a NON-superuser role
+  (`APP_DB_USER`, default `amphive_app`) holding only SELECT/INSERT/UPDATE/DELETE
+  — it cannot DROP/ALTER tables, so a future SQLi caps out at row-level DML
+  rather than schema loss or `COPY..TO PROGRAM` RCE. The app provisions the role
+  idempotently at startup (create-if-missing, refresh password, GRANT DML +
+  ALTER DEFAULT PRIVILEGES for future migration tables) on the owner connection,
+  then verifies the runtime connection before serving (`backend/database/db.py`
+  `init_db` / `_provision_runtime_role`). Safe-inert if `APP_DB_PASSWORD` is
+  unset (identical to prior behavior); the startup log states whether separation
+  is ACTIVE. Role name is validated as a plain SQL identifier and the password
+  is quoted server-side (`format('%L')`) — never string-built into DDL.
 
 ## 3. Open / unauthenticated surfaces
 

@@ -51,7 +51,9 @@ class MQTTDiscoveryMixin:
 
         from backend.database.models import Gateway, Plug
 
-        unique_id = payload.get("unique_id")
+        # Truncate to match Plug.unique_id (String(128)) — like the siblings
+        # below — so an over-long value can't raise a DataError on insert.
+        unique_id = str(payload.get("unique_id"))[:128]
         alias = str(payload.get("alias") or unique_id)[:100]
         model = str(payload.get("model") or "agent")[:50]
         local_ip = str(payload.get("ip") or "agent")[:45]

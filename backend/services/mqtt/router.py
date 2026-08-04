@@ -13,11 +13,30 @@ import logging
 
 logger = logging.getLogger("amphive.mqtt")
 
+# Hard ceiling on the size of a single inbound MQTT payload we will decode/parse.
+# Set slightly ABOVE the broker's own message_size_limit (8 KB in
+# deploy/config/mosquitto.conf) so the broker is the primary gate and this is
+# defense-in-depth: real telemetry/status/alarm frames are ~200 bytes, so any
+# frame anywhere near this is hostile. An authenticated-but-compromised gateway
+# could otherwise publish a multi-megabyte payload and memory-DoS the shared
+# backend (every frame is decoded and JSON-parsed on the paho callback thread).
+MAX_MQTT_PAYLOAD_BYTES = 16384
+
 
 class MQTTRouterMixin:
     """Topic-pattern dispatch for inbound MQTT messages."""
 
     def _on_message(self, client, userdata, msg):
+        # Untrusted device edge: drop oversized frames BEFORE decoding/parsing so
+        # a hostile gateway can't force a large allocation. len() on the raw
+        # bytes is O(1) and doesn't copy.
+        if len(msg.payload) > MAX_MQTT_PAYLOAD_BYTES:
+            logger.warning(
+                "Oversized MQTT payload dropped",
+                extra={"topic": msg.topic, "size": len(msg.payload)},
+            )
+            return
+
         payload_str = msg.payload.decode("utf-8", errors="ignore")
         logger.debug(
             "Received MQTT message",
@@ -35,7 +54,12 @@ class MQTTRouterMixin:
 
         try:
             payload = json.loads(payload_str)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, ValueError, RecursionError, MemoryError):
+            # Beyond ordinary malformed JSON (JSONDecodeError/ValueError): a
+            # deeply-nested payload makes json.loads recurse until it raises
+            # RecursionError, and a pathological one can raise MemoryError.
+            # None of these may escape into the paho callback thread as an
+            # unhandled exception — log and drop the frame.
             logger.warning(
                 "Invalid JSON payload on MQTT topic",
                 extra={"topic": msg.topic, "payload": payload_str},

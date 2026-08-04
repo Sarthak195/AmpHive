@@ -81,6 +81,17 @@ if ("$remoteCheck" -notmatch "READY") {
     Fail "$REMOTE_DIR/.env or $COMPOSE_FILE missing on $VM_NAME — this script only refreshes source. See deploy/relay/deploy-relay.sh for first-time bootstrap."
 }
 
+# Re-validate POSTGRES_PASSWORD on EVERY deploy, not just first-time bootstrap
+# (deploy-relay.sh only gates it once). A weak/legacy DB password reintroduced
+# by a later .env edit would otherwise slip through unnoticed. Same blocklist as
+# deploy-relay.sh: empty, the template placeholder, and the rotated-out legacy
+# literal. (Strong values pass — this rejects only known-bad ones, never
+# heuristically.)
+$pgPwd = (Ssh "grep -E '^POSTGRES_PASSWORD=' $REMOTE_DIR/.env | head -1 | cut -d= -f2-").Trim()
+if ($pgPwd -eq "" -or $pgPwd -eq "set-a-strong-db-password" -or $pgPwd -eq "amphive_db_admin") {
+    Fail "POSTGRES_PASSWORD in $REMOTE_DIR/.env is missing/placeholder/legacy ('amphive_db_admin' or the template default). Set a strong value on the VM before deploying."
+}
+
 # ---- Step 2: Archive committed source --------------------------------------
 Write-Host "`n[2/6] Archiving HEAD (backend/ + frontend/)..." -ForegroundColor Cyan
 $tarball = Join-Path $env:TEMP "amphive-relay-src.tar.gz"

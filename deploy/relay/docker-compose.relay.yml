@@ -128,7 +128,9 @@ services:
       # Published for VM-local debugging (curl/health polling), same as prod.
       # Not meant to be reachable from the internet — do not open GCP firewall
       # tcp:8000 to 0.0.0.0/0; only 80/443 (caddy) and 8883 (mqtt) should be.
-      - "8000:8000"
+      # Bound to loopback so a redeploy from this repo file can't widen exposure
+      # beyond the VM's own 127.0.0.1-only binding.
+      - "127.0.0.1:8000:8000"
     depends_on:
       db:
         condition: service_healthy
