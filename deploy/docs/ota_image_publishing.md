@@ -4,6 +4,16 @@
 background: [docs/FIRMWARE.md](../../docs/FIRMWARE.md) §6–§8,
 [docs/SECURITY.md](../../docs/SECURITY.md) §3.*
 
+> **2026-08-04: this runbook is now the FALLBACK path.** The primary publish
+> flow is the admin portal's upload widget (Admin → Firmware Releases →
+> Upload image): it takes the signed `build/amphive-gateway.bin`, validates
+> the ESP image header, reads the version out of the embedded app
+> descriptor, stores the image on the backend volume, and auto-registers the
+> release — no gcloud or curl. See docs/FIRMWARE.md §7. The bucket flow
+> below still works (release rows store full URLs, so both hosting schemes
+> coexist) and remains useful when the backend is unreachable or for
+> pre-registry images.
+
 Since the 2026-07-10 hardening, an OTA image must be:
 
 1. **Signed** — the build appends an ECDSA (scheme v1) signature made with

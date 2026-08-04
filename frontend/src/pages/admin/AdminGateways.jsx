@@ -20,8 +20,9 @@
  */
 
 import { useState, useCallback } from 'react';
-import { Server, Plus } from 'lucide-react';
+import { Server, Plus, UploadCloud } from 'lucide-react';
 import {
+  ConfirmDialog,
   DataTable,
   ErrorState,
   Modal,
@@ -32,6 +33,7 @@ import {
 import api from '../../api/client';
 import usePoll from '../../hooks/usePoll';
 import { apiErrorCopy } from '../../utils/statusCopy';
+import { isNewerVersion } from '../../utils/version';
 
 const DEFAULT_LIMIT = 25;
 
@@ -178,6 +180,77 @@ export default function AdminGateways() {
   // Poll every 30s to catch online/offline state and firmware changes
   usePoll(fetchGateways, 30_000, [offset, onlineFilter]);
 
+  // ---- OTA: version picker → named confirm (fleet-wide admin push) --------
+  // Mirrors the CPO "Update firmware" flow (CpoGateways) but draws releases
+  // from the admin registry and always exposes the custom-URL escape hatch.
+  const [otaTarget, setOtaTarget] = useState(null);
+  const [releases, setReleases] = useState([]);
+  const [releasesLoading, setReleasesLoading] = useState(false);
+  const [releasesError, setReleasesError] = useState('');
+  const [selectedReleaseId, setSelectedReleaseId] = useState('');
+  const [useCustomUrl, setUseCustomUrl] = useState(false);
+  const [customUrl, setCustomUrl] = useState('');
+  const [otaConfirming, setOtaConfirming] = useState(false);
+  const [otaBusy, setOtaBusy] = useState(false);
+  const [otaError, setOtaError] = useState('');
+
+  const openOta = async (gw) => {
+    setOtaTarget(gw);
+    setOtaConfirming(false);
+    setOtaError('');
+    setUseCustomUrl(false);
+    setCustomUrl('');
+    setSelectedReleaseId('');
+    setReleases([]);
+    setReleasesError('');
+    setReleasesLoading(true);
+    try {
+      const res = await api.get('/api/admin/firmware-releases?active=true');
+      const list = Array.isArray(res) ? res : res?.items || [];
+      setReleases(list);
+      // Default to the newest release — the common case is "push the latest".
+      if (list.length > 0) setSelectedReleaseId(String(list[0].id));
+    } catch (err) {
+      setReleasesError(apiErrorCopy(err));
+    } finally {
+      setReleasesLoading(false);
+    }
+  };
+
+  const closeOta = () => {
+    if (otaBusy) return;
+    setOtaTarget(null);
+    setOtaConfirming(false);
+  };
+
+  const submitOta = (e) => {
+    e.preventDefault();
+    setOtaConfirming(true);
+  };
+
+  const selectedRelease = releases.find((r) => String(r.id) === selectedReleaseId);
+
+  const confirmOta = async () => {
+    if (!otaTarget) return;
+    setOtaBusy(true);
+    setOtaError('');
+    try {
+      const body = useCustomUrl
+        ? { firmware_url: customUrl.trim() }
+        : { release_id: Number(selectedReleaseId) };
+      const res = await api.post(`/api/admin/gateways/${otaTarget.id}/ota`, body);
+      toast.ok(res?.message || `Update pushed to ${otaTarget.name}.`);
+      setOtaTarget(null);
+      setOtaConfirming(false);
+      setTimeout(fetchGateways, 4000);
+    } catch (err) {
+      toast.error(apiErrorCopy(err));
+      setOtaConfirming(false);
+    } finally {
+      setOtaBusy(false);
+    }
+  };
+
   const items = data.items || [];
   const total = data.total || 0;
 
@@ -200,33 +273,58 @@ export default function AdminGateways() {
       count,
     }));
 
-  // DataTable columns
+  // DataTable columns — render-based so the actions cell receives the raw
+  // gateway (firmware_version string, online, plug_count) rather than the
+  // pre-rendered status/firmware JSX.
   const columns = [
     { key: 'tenant_name', label: 'Organization' },
     { key: 'name', label: 'Gateway' },
-    { key: 'last_seen', label: 'Status' },
-    { key: 'firmware_version', label: 'Firmware' },
+    {
+      key: 'last_seen',
+      label: 'Status',
+      render: (gw) => (
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <StatusDot state={gw.online ? 'available' : 'offline'} />
+          <span>{relativeTime(gw.last_seen_at)}</span>
+        </div>
+      ),
+    },
+    {
+      key: 'firmware_version',
+      label: 'Firmware',
+      render: (gw) => (
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <code>{gw.firmware_version || '—'}</code>
+          {maxFw && gw.firmware_version && gw.firmware_version !== maxFw && (
+            <span className="badge badge-warn">behind</span>
+          )}
+        </div>
+      ),
+    },
     { key: 'plug_count', label: 'Chargers', num: true },
+    {
+      key: 'actions',
+      label: 'Actions',
+      render: (gw) => (
+        <button
+          type="button"
+          className="btn btn-quiet btn-sm"
+          disabled={!gw.online || gw.plug_count === 0}
+          title={
+            !gw.online
+              ? 'Gateway must be online to receive an update'
+              : gw.plug_count === 0
+                ? 'Gateway has no chargers to update'
+                : 'Push a firmware update over the air'
+          }
+          onClick={() => openOta(gw)}
+        >
+          <UploadCloud size={15} aria-hidden="true" />
+          Update firmware
+        </button>
+      ),
+    },
   ];
-
-  // Render status + last seen in one column
-  const rows = items.map((gw) => ({
-    ...gw,
-    last_seen: (
-      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-        <StatusDot state={gw.online ? 'available' : 'offline'} />
-        <span>{relativeTime(gw.last_seen_at)}</span>
-      </div>
-    ),
-    firmware_version: (
-      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-        <code>{gw.firmware_version || '—'}</code>
-        {maxFw && gw.firmware_version && gw.firmware_version !== maxFw && (
-          <span className="badge badge-warn">behind</span>
-        )}
-      </div>
-    ),
-  }));
 
   const mintAction = (
     <button type="button" className="btn btn-primary" onClick={openMint}>
@@ -366,7 +464,7 @@ export default function AdminGateways() {
       <div className="table-wrap">
         <DataTable
           columns={columns}
-          rows={rows}
+          rows={items}
           keyField="id"
           loading={loading}
           emptyIcon={Server}
@@ -383,6 +481,115 @@ export default function AdminGateways() {
         />
       </div>
       {mintModal}
+
+      {/* OTA: version picker (active releases; custom URL always available) */}
+      <Modal open={Boolean(otaTarget) && !otaConfirming} onClose={closeOta} title="Update firmware">
+        {otaTarget && (
+          <form className="stack" onSubmit={submitOta}>
+            <p className="text-2 text-sm">
+              Push an update to <strong>{otaTarget.name}</strong>, currently on{' '}
+              <strong>{otaTarget.firmware_version || 'unknown'}</strong>. It downloads the image,
+              reboots, and rolls back automatically if it fails to reconnect — it refuses the
+              update while a session is active.
+            </p>
+
+            {!useCustomUrl && (
+              <div className="field">
+                <label className="field-label" htmlFor="admin-ota-release">
+                  Firmware version
+                </label>
+                {releasesLoading ? (
+                  <p className="text-2 text-sm">Loading available versions…</p>
+                ) : releasesError ? (
+                  <p className="field-error">{releasesError}</p>
+                ) : releases.length === 0 ? (
+                  <p className="text-2 text-sm">
+                    No active firmware releases. Register one on the Firmware page first.
+                  </p>
+                ) : (
+                  <select
+                    id="admin-ota-release"
+                    className="select"
+                    value={selectedReleaseId}
+                    onChange={(e) => setSelectedReleaseId(e.target.value)}
+                    required
+                  >
+                    {releases.map((r) => (
+                      <option key={r.id} value={r.id}>
+                        {r.version}
+                        {isNewerVersion(r.version, otaTarget.firmware_version) ? ' — newer' : ''}
+                      </option>
+                    ))}
+                  </select>
+                )}
+                {selectedRelease?.notes && <span className="field-help">{selectedRelease.notes}</span>}
+              </div>
+            )}
+
+            {useCustomUrl && (
+              <div className="field">
+                <label className="field-label" htmlFor="admin-ota-url">
+                  Firmware image URL (https)
+                </label>
+                <input
+                  id="admin-ota-url"
+                  type="url"
+                  className="input"
+                  value={customUrl}
+                  onChange={(e) => setCustomUrl(e.target.value)}
+                  placeholder="https://storage.googleapis.com/…/amphive-gateway-<version>.bin"
+                  pattern="https://.*"
+                  required
+                />
+                <span className="field-help">
+                  Must be https and signed — firmware ≥ 1.4.0 verifies the signature and rejects
+                  plain http.
+                </span>
+              </div>
+            )}
+
+            {otaError && <p className="field-error">{otaError}</p>}
+
+            <div className="modal-actions">
+              <button type="button" className="btn btn-quiet" onClick={closeOta}>
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="btn btn-primary"
+                disabled={!useCustomUrl && (releasesLoading || releases.length === 0)}
+              >
+                Continue
+              </button>
+            </div>
+
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm btn-full"
+              onClick={() => setUseCustomUrl((v) => !v)}
+            >
+              {useCustomUrl ? 'Pick a registered version instead' : 'Use a custom URL instead'}
+            </button>
+          </form>
+        )}
+      </Modal>
+
+      {/* OTA: named confirm step */}
+      <ConfirmDialog
+        open={Boolean(otaTarget) && otaConfirming}
+        onClose={() => setOtaConfirming(false)}
+        onConfirm={confirmOta}
+        title="Push firmware update?"
+        body={
+          useCustomUrl
+            ? `${otaTarget?.name || 'This gateway'} will download and install the custom firmware image now. This can't be undone once it starts.`
+            : `${otaTarget?.name || 'This gateway'} will download and install ${selectedRelease?.version || 'the selected version'} now. This can't be undone once it starts.`
+        }
+        confirmLabel="Push update"
+        tone="primary"
+        busy={otaBusy}
+        busyLabel="Sending…"
+      />
     </>
   );
 }

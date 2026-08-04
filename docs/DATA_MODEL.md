@@ -286,16 +286,22 @@ full column list of each:
 - **`firmware_releases`** (`0036_firmware_releases.py`, feat/ota-version-
   picker) — an admin-registered firmware release catalog (`FirmwareRelease`:
   `version` UNIQUE, `url` the already-published `https://` image location —
-  today `gs://amphive-fw`, see [FIRMWARE.md](FIRMWARE.md) §7 — `notes`,
+  `gs://amphive-fw` or the backend's own image host, see
+  [FIRMWARE.md](FIRMWARE.md) §7 — `notes`,
   `is_active` soft-deactivate flag). Not tenant-scoped: one firmware fleet.
   Replaces hand-pasting a firmware URL with a version dropdown on the CPO
   OTA flow; ordering everywhere is semver-aware
   (`services/versioning.version_sort_key`), never a raw string sort. Backs
   `POST/GET /api/admin/firmware-releases` + `POST
   /api/admin/firmware-releases/{id}/deactivate` + `GET
-  /api/cpo/firmware-releases` (active only). Does not store binaries —
-  registering a URL per version is this cut's deliverable; upload/hosting
-  through this table is a follow-up.
+  /api/cpo/firmware-releases` (active only). The table itself still stores
+  only URLs, never binary blobs — but since feat/admin-dashboard
+  (2026-08-04) `POST /api/admin/firmware-releases/upload` stores uploaded
+  `.bin` images **on the backend volume** (`FIRMWARE_IMAGE_DIR`, default
+  `data/firmware-images`; served by the public
+  `GET /api/firmware/images/{filename}`) and auto-registers a row whose
+  `url` points there. Rows registered against GCS-hosted images are
+  unchanged and coexist.
 
 The live schema is now **25 tables** (up from the 15 documented in the
 sections above), all applied via Alembic per §4 below.

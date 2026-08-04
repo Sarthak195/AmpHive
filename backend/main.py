@@ -141,6 +141,16 @@ app.middleware("http")(api_rate_limit_middleware)
 # services/rate_limit.py, so tests can monkeypatch it directly.
 MAX_REQUEST_BODY_BYTES = int(os.getenv("MAX_REQUEST_BODY_BYTES", 1024 * 1024))
 
+# [Firmware upload] The ONE endpoint that legitimately carries a multi-MB
+# body: POST /api/admin/firmware-releases/upload takes a raw signed OTA image
+# (~1 MB today — 2.5.0-direct is 1,048,564 bytes, 12 bytes under the global
+# 1 MiB cap — and the OTA app partition allows up to 1.9 MB). That path gets
+# its own ceiling, matching routers/admin.py's _FIRMWARE_MAX_BYTES endpoint
+# guard (which re-checks the actual body) and the per-location
+# client_max_body_size carve-out in frontend/nginx.conf.
+FIRMWARE_UPLOAD_MAX_BYTES = int(os.getenv("FIRMWARE_UPLOAD_MAX_BYTES", 4 * 1024 * 1024))
+_FIRMWARE_UPLOAD_PATH = "/api/admin/firmware-releases/upload"
+
 
 @app.middleware("http")
 async def max_body_size_middleware(request: Request, call_next):
@@ -152,16 +162,22 @@ async def max_body_size_middleware(request: Request, call_next):
             declared_length = int(content_length)
         except ValueError:
             declared_length = None
-        if declared_length is not None and declared_length > MAX_REQUEST_BODY_BYTES:
-            return JSONResponse(
-                status_code=413,
-                content={
-                    "detail": (
-                        f"Request body too large ({declared_length} bytes; "
-                        f"max {MAX_REQUEST_BODY_BYTES} bytes)."
-                    )
-                },
+        if declared_length is not None:
+            cap = (
+                FIRMWARE_UPLOAD_MAX_BYTES
+                if request.url.path == _FIRMWARE_UPLOAD_PATH
+                else MAX_REQUEST_BODY_BYTES
             )
+            if declared_length > cap:
+                return JSONResponse(
+                    status_code=413,
+                    content={
+                        "detail": (
+                            f"Request body too large ({declared_length} bytes; "
+                            f"max {cap} bytes)."
+                        )
+                    },
+                )
     return await call_next(request)
 
 
@@ -252,6 +268,7 @@ from backend.routers import (  # noqa: E402
     admin,
     auth,
     cpo,
+    firmware_images,
     groups,
     notifications,
     payments,
@@ -263,6 +280,10 @@ from backend.routers import (  # noqa: E402
 app.include_router(auth.router)
 app.include_router(groups.router)
 app.include_router(plugs.router)
+# Public OTA image host (GET /api/firmware/images/{filename}) — unauthenticated
+# by design (the device verifies the image's ECDSA signature, not the
+# transport); kept next to the other public/plug routers.
+app.include_router(firmware_images.router)
 app.include_router(sessions.router)
 app.include_router(payments.router)
 app.include_router(notifications.router)

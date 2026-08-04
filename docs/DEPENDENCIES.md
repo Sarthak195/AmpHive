@@ -9,7 +9,7 @@ firmware.*
 ## 1. Backend (`backend/`)
 
 `main.py` is app assembly only (lifespan, CORS, health, router includes,
-Socket.io wrap) — routes live in **9 routers** under `backend/routers/`
+Socket.io wrap) — routes live in **10 routers** under `backend/routers/`
 (one of which, `cpo`, is itself a sub-package of 12 domain modules plus a
 shared `_common.py`), request/response schemas are centralized in
 `backend/schemas.py`, and business logic lives in `backend/services/`
@@ -20,7 +20,7 @@ shared `_common.py`), request/response schemas are centralized in
 ```
 main.py  (app assembly only since 2026-07-07: lifespan, CORS, health, router includes, Socket.io wrap)
 │
-├── routers/                    9 routers included in main.py
+├── routers/                    10 routers included in main.py
 │   ├── auth.py                 register/login/me/password-reset
 │   ├── groups.py                charger-group list/join (access codes)
 │   ├── plugs.py                 driver-facing plug listing/detail
@@ -29,6 +29,7 @@ main.py  (app assembly only since 2026-07-07: lifespan, CORS, health, router inc
 │   ├── notifications.py          driver notification feed + Web Push subscribe
 │   ├── reservations.py           book-ahead charger reservations
 │   ├── admin.py                  platform-admin console (tenants/users/payouts/audit)
+│   ├── firmware_images.py        public firmware-image host (unauthenticated OTA downloads)
 │   └── cpo/                      operator-portal package (splice-mounted as one router)
 │       ├── __init__.py           assembles + re-exports the sub-routers below
 │       ├── _common.py            shared tenant-scope guard, cross-tenant tariff loader

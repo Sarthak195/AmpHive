@@ -7,7 +7,64 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 
 ---
 
-## 0. Latest — 2026-08-04 runtime Wi-Fi reconnect fix (fw 2.5.0-direct)
+## 0. Latest — 2026-08-04 admin console completion: cross-tenant chargers view, admin OTA, UI-based firmware publishing
+
+Trigger: the platform operator logged into the CPO portal with the admin
+account and found it empty — the admin console at `/admin` now covers the
+whole fleet. Branch `feat/admin-dashboard`. Four backend additions plus the
+matching admin-portal UI:
+
+- **`GET /api/admin/stats/overview` extended** — `plugs` splits into
+  `{total, public, private}` (`public` = ungrouped or in an
+  `is_public` group; `private` = group with `is_public` false), and
+  `energy_kwh` / `revenue_coins` each gain a `last_30d` window
+  (`started_at >= now-30d`; revenue over COMPLETED+PAID sessions).
+- **New `GET /api/admin/plugs`** — the **first-ever cross-tenant charger
+  listing** (previously the admin console only had a plug *count* in the
+  overview). Filters `q` (name ilike), `visibility=public|private`,
+  `status` (a `PlugStatus`, 400 on invalid); house `{total, items}` +
+  `limit` (cap 200)/`offset` pagination. INNER-joins Gateway+Tenant
+  (claimed gateways only), LEFT-joins the charger group; items carry
+  gateway/tenant/group names, `visibility`, live power, telemetry
+  freshness, and `tariff_id`.
+- **New `POST /api/admin/gateways/{gateway_id}/ota`** — cross-tenant OTA
+  with the same body/semantics as the CPO endpoint (`CpoGatewayOtaRequest`:
+  `release_id` XOR `firmware_url`) but no tenant scoping — an admin can
+  target any gateway including unclaimed inventory, and `firmware_url` is
+  allowed without the CPO-side 403. Gates on raw `status == ONLINE` (the
+  same deliberate choice as the CPO endpoint), 409 with no plugs to route
+  through, 502 on broker publish failure; audited as `gateway.ota`.
+- **New `POST /api/admin/firmware-releases/upload`** — UI-based firmware
+  publishing: raw-body (`application/octet-stream`, ≤4 MiB) upload of the
+  signed `build/amphive-gateway.bin`. The backend validates the ESP image
+  magic (`0xE9`) + `esp_app_desc` magic (`0xABCD5432`), extracts the
+  version and project name (must be `amphive-gateway`) from the binary
+  itself, stores it under `FIRMWARE_IMAGE_DIR` (docker volume in
+  `docker-compose.relay.yml`), auto-registers the `FirmwareRelease`
+  (audited `firmware_release.upload`; duplicate version → 400), and serves
+  it from the **new public, unauthenticated
+  `GET /api/firmware/images/{filename}`** (`routers/firmware_images.py`;
+  filename-whitelisted + path-contained; public by design — parity with
+  the world-readable GCS bucket, the on-device ECDSA app signature is the
+  trust anchor). Publishing is now: build locally → drag the `.bin` into
+  Admin → Firmware Releases → push from any gateway page picker.
+  `gs://amphive-fw` remains valid for already-registered URLs and as the
+  script fallback (`deploy/scripts/publish_firmware.ps1`).
+- **Frontend:** new **Admin → Chargers** page (`/admin/chargers`) listing
+  all public+private chargers with filters; an **"Update firmware"
+  picker** on Admin → Gateways (mirrors the CPO flow, custom-URL always
+  available); the **upload widget** on Admin → Firmware Releases; and the
+  Admin Overview gains Energy(30d)/Revenue(30d) tiles plus the
+  public/private charger split.
+
+See [API_REFERENCE.md](API_REFERENCE.md) (Platform Admin Console table +
+the public firmware-image host note), [FIRMWARE.md](FIRMWARE.md) §7
+(publishing flow), [DATA_MODEL.md](DATA_MODEL.md) (`firmware_releases`),
+and [SECURITY.md](SECURITY.md) §3 (why the image route is public).
+
+---
+
+## 0.005 — 2026-08-04 runtime Wi-Fi reconnect fix (fw 2.5.0-direct)
 
 Real incident: a home router rebooted at midnight and the gateway never came
 back — it needed a manual power cycle in the morning. Root cause in

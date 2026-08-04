@@ -3,7 +3,7 @@
 *Verified against `backend/` on 2026-07-02; endpoint list refreshed 2026-07-21.*
 
 Routes live in `backend/routers/*.py` (`{auth,groups,plugs,sessions,payments,
-cpo,notifications,reservations,admin}.py`), each an `APIRouter` mounted on the FastAPI `app` in
+cpo,notifications,reservations,admin,firmware_images}.py`), each an `APIRouter` mounted on the FastAPI `app` in
 `backend/main.py` (the 2026-07-07 `main.py` split — TD#7). Every path is
 hard-coded under `/api` (no router `prefix=`). The app title is
 **"AmpHive Shared EV Charging API"**, version **2.0.0**.
@@ -25,16 +25,22 @@ Interactive docs: `http://<host>:8000/docs`.
   describes the whole filtered set, never the page.
 - **CORS:** explicit allowlist (localhost dev origins, `amphive.app`, `cpo.amphive.app`) —
   locked down 2026-07-06.
-- **101 `@router` route decorators total** across 9 routers (see Swagger
+- **105 `@router` route decorators total** across 10 routers (see Swagger
   `/docs` for the live, authoritative list): admin (10), auth (6), cpo (48),
   groups (3), notifications (6), payments (4), plugs (7),
-  reservations (4), sessions (13). (`direct` — 5 dev/test-only Tapo-bypass
+  reservations (4), sessions (13), firmware_images (1). (`direct` — 5 dev/test-only Tapo-bypass
   routes — was removed 2026-08-02. `cpo` grew from 46 to 48 with the
   2026-07-21 offline top-up endpoints, `POST`/`GET /api/cpo/topups`. Both
   `admin` and `cpo` grew again 2026-08-02 (feat/ota-version-picker): `admin`
   +3 — `POST`/`GET /api/admin/firmware-releases` +
   `POST /api/admin/firmware-releases/{id}/deactivate`; `cpo` +1 —
-  `GET /api/cpo/firmware-releases`. This per-router breakdown predates
+  `GET /api/cpo/firmware-releases`. `admin` grew a further **+3 2026-08-04**
+  (feat/admin-dashboard): `GET /api/admin/plugs`,
+  `POST /api/admin/gateways/{gateway_id}/ota`,
+  `POST /api/admin/firmware-releases/upload` — and the **new 10th router
+  `firmware_images`** adds its one **public, unauthenticated** route
+  `GET /api/firmware/images/{filename}` (counted above; lives outside
+  `routers/admin.py`). This per-router breakdown predates
   several other additions too — see `test_admin_router.py`'s route-count
   assertion for `admin`'s live total, not this line.)
   (The legacy SSE endpoint `/api/sessions/live/{id}` was retired 2026-07-07 —
@@ -293,7 +299,7 @@ surface in the tenant-scoped `GET /api/cpo/audit`).
 
 | Method | Path | Auth | Body/Params | Behaviour |
 |--------|------|------|-------------|-----------|
-| GET | `/api/admin/stats/overview` | admin | — | Cross-tenant platform KPIs → `{tenants, users:{total, drivers, cpos, admins}, gateways:{total, online}, plugs:{total}, sessions:{active, today, total}, energy_kwh:{today, total}, revenue_coins:{today, total}, payouts:{requested_count, requested_net_coins}, disputes:{open}}`. Revenue/energy count COMPLETED/PAID sessions; "today" = UTC midnight. |
+| GET | `/api/admin/stats/overview` | admin | — | Cross-tenant platform KPIs → `{tenants, users:{total, drivers, cpos, admins}, gateways:{total, online}, plugs:{total, public, private}, sessions:{active, today, total}, energy_kwh:{today, total, last_30d}, revenue_coins:{today, total, last_30d}, payouts:{requested_count, requested_net_coins}, disputes:{open}}`. Revenue/energy count COMPLETED/PAID sessions; "today" = UTC midnight. **Extended 2026-08-04 (feat/admin-dashboard):** `plugs` now splits into `public` (ungrouped **or** in a `group.is_public` group) vs `private` (group `is_public` false), and `energy_kwh`/`revenue_coins` each gain `last_30d` (sessions with `started_at >= now-30d`; revenue over COMPLETED+PAID). |
 | GET | `/api/admin/tenants` | admin | query `q?` (name substring, case-insensitive), `limit`, `offset` | All tenants with per-tenant fleet/usage aggregates, newest first → items `{id, name, created_at, user_count, gateway_count, gateways_online, plug_count, sessions_30d, revenue_30d_coins, pending_payouts}` (correlated scalar subqueries — no N+1). |
 | GET | `/api/admin/tenants/{id}` | admin | path `id:int` | The list row's aggregates + `{gst_number, legal_name, default_tariff_id, recent_sessions:[…10 rows with plug_name/user_email], payouts:[…50, same shape as GET /api/cpo/payouts]}`. 404 unknown. |
 | GET | `/api/admin/users` | admin | query `q?` (email/name substring), `role?` (400 on unknown), `limit`, `offset` | All accounts, newest first → items `{id, email, full_name, role, tenant_id, tenant_name, coin_balance, is_disabled, created_at}`. |
@@ -303,11 +309,26 @@ surface in the tenant-scoped `GET /api/cpo/audit`).
 | GET | `/api/admin/gateways` | admin | query `online?` (bool), `limit`, `offset` | Cross-tenant gateway fleet, most recently seen first → items `{id, gateway_id, name, tenant_id, tenant_name, online, last_seen_at, firmware_version, plug_count}`. `online` derives from `Gateway.status == ONLINE` — the same flag the CPO OTA gate uses. Inner-joins `Tenant`, so unclaimed inventory (`tenant_id NULL`) never appears here — see the two rows below. |
 | POST | `/api/admin/gateways/inventory` | admin | `{gateway_id, name?}` | **Preflashed-unit onboarding (2026-08-02).** Pre-registers a gateway as UNCLAIMED inventory (`tenant_id NULL`) with a fresh 10-char claim code (unambiguous alphabet `23456789ABCDEFGHJKMNPQRSTUVWXYZ`, collision-retried against the partial-unique index). 400 if `gateway_id` already exists. Part of the "flash → mint inventory row → create broker account → print claim code + label" manufacturing sequence — see [deploy/docs/preflashed_unit_runbook.md](../deploy/docs/preflashed_unit_runbook.md). → `{status:"minted", gateway_id, name, claim_code}` (the code is shown in full here — this is the one time it's returned in plaintext by mint; reprint via the list endpoint below) |
 | GET | `/api/admin/gateways/inventory` | admin | query `claimed?` (bool), `limit`, `offset` | Every gateway minted via the mint endpoint above, claimed or not, newest first → items `{gateway_id, name, claim_code, claimed, claimed_at, tenant_id, created_at}`. Deliberately separate from `GET /api/admin/gateways` (which structurally can't show `tenant_id IS NULL` rows). |
+| POST | `/api/admin/gateways/{gateway_id}/ota` | admin | `{release_id}` **or** `{firmware_url}` (https, ≤512 chars; exactly one — the same `CpoGatewayOtaRequest` body as the CPO endpoint) | **(feat/admin-dashboard, 2026-08-04)** **Cross-tenant OTA** — identical semantics to `POST /api/cpo/gateways/{id}/ota` but **not tenant-scoped**: an admin may target **any** gateway, including unclaimed (`tenant_id NULL`) inventory, and `firmware_url` is allowed **without** the CPO-side 403 (admins can push an unregistered image). Gates on raw `status == ONLINE` (409 if offline — the same deliberate flag-not-telemetry-freshness choice as the CPO endpoint); 409 if the gateway has no plugs to route the per-plug OTA command through; 502 on broker publish failure. Audited as `gateway.ota`. → `{status:"ota_triggered", gateway_id, firmware_url, release_version, message}` (same shape as the CPO endpoint). |
+| GET | `/api/admin/plugs` | admin | query `q?` (name `ilike`), `visibility?` (`public`\|`private`), `status?` (a `PlugStatus`; 400 on invalid), `limit`, `offset` (house convention, cap 200) | **(feat/admin-dashboard, 2026-08-04)** First-ever **cross-tenant charger list** — previously the admin console only had the `plugs.total` count in the overview. INNER-joins `Gateway`+`Tenant` (claimed gateways only) and LEFT-joins the charger group → `{total, items:[{id, name, status, gateway_id, gateway_name, tenant_id, tenant_name, group_id, group_name, visibility, local_ip, plug_model, connector_type, rated_power_w, current_power_w, last_telemetry_at, tariff_id}]}`. `visibility` is `public` when the plug is ungrouped **or** its group `is_public`, else `private` (the `visibility=` filter applies the same rule). Backs the new **Admin → Chargers** page. |
 | POST | `/api/admin/firmware-releases` | admin | `{version, url, notes?}` (`version` semver-shaped e.g. `2.4.0-direct`; `url` https, ≤512 chars) | **(feat/ota-version-picker, 2026-08-02)** Register a firmware release the CPO version picker can offer — does **not** upload/host the binary, `url` must already be a reachable published image (today: `gs://amphive-fw`, see [FIRMWARE.md](FIRMWARE.md) §7). 400 if `version` is already registered (UNIQUE). → `{id, version, url, notes, is_active, created_at}` |
+| POST | `/api/admin/firmware-releases/upload` | admin | query `notes?`; **raw body** (`application/octet-stream`, ≤4 MiB) = the **signed** `build/amphive-gateway.bin` | **(feat/admin-dashboard, 2026-08-04)** UI-based publish — the sibling of the register-a-URL endpoint above, but the backend now **hosts** the binary. Validates the ESP image magic `0xE9` + the `esp_app_desc` magic `0xABCD5432` at offset 32, extracts `version` (offset 48) and `project_name` (offset 80 — must equal `amphive-gateway`), stores the file under `FIRMWARE_IMAGE_DIR` (default `data/firmware-images`; a docker volume in `docker-compose.relay.yml`), builds the public URL `{PUBLIC_API_ORIGIN‖FRONTEND_ORIGIN}/api/firmware/images/amphive-gateway-<version>.bin`, and **auto-registers** the `FirmwareRelease` (`is_active`). Duplicate `version` → 400. Audited as `firmware_release.upload`. → the release row + `size_bytes` + `filename`. Turns publishing into: build locally → drag the `.bin` into **Admin → Firmware Releases** → push from any gateway page picker. `gs://amphive-fw` stays valid for already-registered URLs and as the script fallback (`deploy/scripts/publish_firmware.ps1`). |
 | GET | `/api/admin/firmware-releases` | admin | query `active?` (bool), `limit`, `offset` | Every registered release, active or not (deactivated ones stay here for admin audit — only the CPO list below hides them), newest-version-first (semver-aware, not string sort) → `{total, items:[{id, version, url, notes, is_active, created_at}]}` |
 | POST | `/api/admin/firmware-releases/{id}/deactivate` | admin | path `id:int` | **(feat/ota-version-picker, 2026-08-02)** Soft-deactivate a release — drops out of the CPO picker immediately; the row (and any past OTA that referenced it) is kept, not deleted. Idempotent. 404 if missing. → `{status:"deactivated", id, version}` |
 | GET | `/api/admin/disputes` | admin | query `status?` (open/approved/rejected; 400 otherwise), `limit`, `offset` | Every tenant's disputes, newest first → items = dispute fields + `{tenant_name, user_email, session_cost_coins}`. Resolution stays on the tenant-scoped `POST /api/cpo/disputes/{id}/resolve`. |
 | GET | `/api/admin/audit` | admin | query `tenant_id?`, `limit`, `offset` | Cross-tenant audit trail, newest first (row shape mirrors `GET /api/cpo/audit` + `tenant_id`/`tenant_name`). Platform-level rows (admin user actions) carry `tenant_id NULL` and appear only in the unfiltered view. |
+
+**Public firmware-image host (`routers/firmware_images.py`, feat/admin-dashboard, 2026-08-04).**
+`GET /api/firmware/images/{filename}` — **auth: none, unauthenticated by design** —
+serves the images stored by `POST /api/admin/firmware-releases/upload` above.
+`filename` is constrained by a whitelist regex plus path containment (no
+traversal). This is deliberate parity with the previously world-readable GCS
+bucket: the device trusts its embedded **ECDSA app-signature** check (see
+[FIRMWARE.md](FIRMWARE.md) §6), not the transport, so the image itself needs no
+access control. It lives in its **own** router (`firmware_images.py`), **not**
+`routers/admin.py` — see [SECURITY.md](SECURITY.md) §3. Because
+`firmware_releases.url` stores the full URL, backend-hosted images and
+`gs://amphive-fw`-hosted images coexist.
 
 ---
 
@@ -329,6 +350,9 @@ surface in the tenant-scoped `GET /api/cpo/audit`).
 | `FORGOT_PASSWORD_RATE_LIMIT` / `RESET_PASSWORD_RATE_LIMIT` | `5/3600` / `10/3600` | Password-reset rate limits, same format/mechanism as the login/register limits |
 | `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASSWORD` / `SMTP_FROM` | `""` / `587` / `""` / `""` / `""` | Outbound email (STARTTLS) for password-reset links; `SMTP_HOST` unset = console fallback (link logged at WARNING). Login skipped when `SMTP_USER` empty |
 | `FRONTEND_ORIGIN` | `https://amphive.app` | Base URL for links in outbound email (`/reset-password?token=...`) and the Google OAuth callback redirect (`/auth/google/callback#token=...`) |
+| `PUBLIC_API_ORIGIN` | `""` | **(feat/admin-dashboard, 2026-08-04)** Base URL stamped into uploaded firmware-release image URLs (`/api/firmware/images/...`); empty = falls back to `FRONTEND_ORIGIN` |
+| `FIRMWARE_IMAGE_DIR` | `data/firmware-images` | **(feat/admin-dashboard, 2026-08-04)** Where `POST /api/admin/firmware-releases/upload` stores `.bin` images (a docker volume in `docker-compose.relay.yml`); served by the public `GET /api/firmware/images/{filename}` |
+| `FIRMWARE_UPLOAD_MAX_BYTES` | `4194304` | **(feat/admin-dashboard, 2026-08-04)** Per-path body-cap carve-out for the firmware upload route — the global `MAX_REQUEST_BODY_BYTES` (1 MiB) would 413 a ~1 MB signed image at the middleware; nginx has a matching 8m `location` carve-out |
 | `RESET_TOKEN_TTL_MIN` | `30` | Minutes a password-reset link stays valid (single use) |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_OAUTH_REDIRECT_URI` | `""` / `""` / `""` | **(2026-08-02)** OAuth client from the Google Cloud Console; `GOOGLE_OAUTH_REDIRECT_URI` must exactly match an "Authorized redirect URI" on that client (e.g. `https://amphive.app/api/auth/google/callback`). Any one unset = "Sign in with Google" hidden everywhere (`google_login_enabled: false`, `/api/auth/google/login` 503s) |
 | `VAPID_PRIVATE_KEY` / `VAPID_SUBJECT` | `""` / `mailto:admin@amphive.example` | Web Push signing key + contact; empty key = push disabled (feed + Socket.io still work) |

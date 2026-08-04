@@ -13,7 +13,7 @@
 
 import { useCallback, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Banknote, Zap, BatteryCharging, Building2, Users, Radio, Wallet, Scale } from 'lucide-react';
+import { Banknote, Zap, BatteryCharging, Building2, Users, Radio, PlugZap, Wallet, Scale } from 'lucide-react';
 import PageHeader from '../../components/ui/PageHeader';
 import ErrorState from '../../components/ui/ErrorState';
 import Skeleton, { SkeletonTitle } from '../../components/ui/Skeleton';
@@ -25,7 +25,7 @@ import { formatKwh } from '../../utils/money';
 import './AdminOverview.css';
 
 const POLL_MS = 30_000;
-const SKELETON_TILES = 8;
+const SKELETON_TILES = 11;
 
 const AdminOverview = () => {
   const { coin_inr_rate: rate } = useConfig();
@@ -83,12 +83,28 @@ const AdminOverview = () => {
       sub: <>All-time <Money coins={stats.revenue_coins?.total} rate={rate} /></>,
     },
     {
+      key: 'revenue_30d',
+      to: '/admin/tenants',
+      icon: Banknote,
+      label: 'Revenue (30d)',
+      value: <Money coins={stats.revenue_coins?.last_30d ?? 0} rate={rate} />,
+      sub: 'Last 30 days',
+    },
+    {
       key: 'energy',
       to: '/admin/tenants',
       icon: Zap,
       label: 'Energy today',
       value: formatKwh(stats.energy_kwh?.today),
       sub: `All-time ${formatKwh(stats.energy_kwh?.total)}`,
+    },
+    {
+      key: 'energy_30d',
+      to: '/admin/tenants',
+      icon: Zap,
+      label: 'Energy (30d)',
+      value: formatKwh(stats.energy_kwh?.last_30d ?? 0),
+      sub: 'Last 30 days',
     },
     {
       key: 'sessions',
@@ -120,7 +136,15 @@ const AdminOverview = () => {
       icon: Radio,
       label: 'Gateways online',
       value: `${stats.gateways?.online ?? 0} / ${stats.gateways?.total ?? 0}`,
-      sub: `${stats.plugs?.total ?? 0} chargers total`,
+      sub: 'Reporting across the fleet',
+    },
+    {
+      key: 'chargers',
+      to: '/admin/chargers',
+      icon: PlugZap,
+      label: 'Chargers',
+      value: stats.plugs?.total ?? 0,
+      sub: `${stats.plugs?.public ?? 0} public · ${stats.plugs?.private ?? 0} private`,
     },
     {
       key: 'payouts',

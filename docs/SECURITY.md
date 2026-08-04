@@ -44,7 +44,9 @@ known security gaps, not a formal audit. Items are roughly ordered by severity.*
 > `= + - @`/tab/CR); a **blanket per-IP `/api` rate-limit floor** (`API_RATE_LIMIT`,
 > §8.6) plus dedicated limiters on **group-code join** (`GROUP_JOIN_ACCOUNT_RATE_LIMIT`)
 > and **CPO setup** (`CPO_SETUP_ACCOUNT_RATE_LIMIT`); an explicit **request-body
-> size cap** (`MAX_REQUEST_BODY_BYTES`, default 1 MB, 413) + nginx
+> size cap** (`MAX_REQUEST_BODY_BYTES`, default 1 MB, 413; since 2026-08-04 one
+path-exact carve-out, `FIRMWARE_UPLOAD_MAX_BYTES` 4 MiB, for the admin
+firmware-image upload — mirrored by an 8m nginx `location`) + nginx
 > `client_max_body_size`; **bounded** the previously-uncapped `/api/plugs/available`,
 > `/api/plugs/public`, `/api/groups/my` list endpoints; `RegisterRequest.full_name`
 > `max_length` (422 not 500); a loud CRITICAL guard on the weak `DATABASE_URL`
@@ -217,6 +219,15 @@ BFG + force-push) to purge the dead values entirely.
     is deployed (see `deploy/docs/ota_image_publishing.md`). Pre-1.4.0
     firmware ignores the signature trailer, so the migration jump installed
     cleanly; from 1.4.0 on, only signed images install.
+  - [Added 2026-08-04, feat/admin-dashboard] **Backend-hosted OTA images —
+    intentionally public.** `GET /api/firmware/images/{filename}`
+    (`routers/firmware_images.py`, serving images uploaded via
+    `POST /api/admin/firmware-releases/upload`) is deliberately
+    **unauthenticated** — parity with the public-read GCS bucket above
+    (images hold no secrets; the on-device **ECDSA app signature** is the
+    trust anchor, not the transport). The route is filename-whitelisted
+    (regex) and path-contained (no traversal); upload itself is admin-only
+    and validates the ESP image header before storing.
 - [Added 2026-07-10, fw 1.5.0] **Unauthorized-use safety control.** The plug's
   physical button and the Tapo app are control paths that bypass AmpHive
   entirely — a relay could be energized with no authorized session (free,

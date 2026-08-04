@@ -15,17 +15,22 @@ that function's session-state caveat), paginated lists return
 {"total": int, "items": [...]} with limit (cap 200, default 50) + offset.
 """
 import logging
+import os
 import secrets
+import struct
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Tuple
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import ValidationError
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend import state
 from backend.database.db import get_db
 from backend.database.models import (
     AuditLog,
+    ChargerGroup,
     ChargingSession,
     DisputeStatus,
     FirmwareRelease,
@@ -36,6 +41,7 @@ from backend.database.models import (
     Payout,
     PayoutStatus,
     Plug,
+    PlugStatus,
     SessionDispute,
     SessionStatus,
     Tenant,
@@ -48,6 +54,7 @@ from backend.schemas import (
     AdminFirmwareReleaseCreateRequest,
     AdminGatewayMintRequest,
     AdminUserUpdateRequest,
+    CpoGatewayOtaRequest,
 )
 from backend.services.audit import try_record_audit
 from backend.services.money import ZERO_MONEY, to_money
@@ -63,6 +70,18 @@ router = APIRouter()
 
 # Statuses that count as realized revenue — same set the CPO analytics use.
 _REVENUE_STATUSES = (SessionStatus.COMPLETED, SessionStatus.PAID)
+
+# [Firmware upload] Ceiling on an uploaded OTA image. Real gateway app images
+# are ~1.2 MB; 4 MiB is comfortable headroom while still bounding the raw-body
+# read so a hostile/huge upload is rejected before we parse or buffer it.
+_FIRMWARE_MAX_BYTES = 4 * 1024 * 1024
+# esp_app_desc_t magic word (little-endian uint32 at offset 32 of an ESP-IDF
+# app image) — the on-device app-descriptor sentinel, ESP_APP_DESC_MAGIC_WORD.
+_ESP_APP_DESC_MAGIC = 0xABCD5432
+# The firmware's CMakeLists PROJECT_NAME — every legit gateway image carries it
+# in the app descriptor's project_name field. Guards against uploading some
+# other ESP32 app (or a truncated/corrupt file) as gateway firmware.
+_FIRMWARE_PROJECT_NAME = "amphive-gateway"
 
 
 def _clamp_page(limit: int, offset: int) -> Tuple[int, int]:
@@ -187,6 +206,41 @@ async def admin_stats_overview(
         )
     ).scalar() or 0
 
+    # [Admin dashboard completion] Public/private plug split + a 30-day rolling
+    # energy/revenue window. Appended AFTER the block above deliberately: the
+    # unit test feeds db.execute side-effects in query order, so keeping these
+    # last preserves the existing prefix. Visibility rule mirrors
+    # routers/plugs.py — a plug is PUBLIC when it's ungrouped (group_id NULL)
+    # or its group is public; PRIVATE only when its group is explicitly not.
+    cutoff_30d = datetime.now(timezone.utc) - timedelta(days=30)
+
+    plugs_public = (
+        await db.execute(
+            select(func.count(Plug.id))
+            .outerjoin(ChargerGroup, ChargerGroup.id == Plug.group_id)
+            .where(or_(Plug.group_id.is_(None), ChargerGroup.is_public.is_(True)))
+        )
+    ).scalar() or 0
+    plugs_private = (
+        await db.execute(
+            select(func.count(Plug.id))
+            .join(ChargerGroup, ChargerGroup.id == Plug.group_id)
+            .where(ChargerGroup.is_public.is_(False))
+        )
+    ).scalar() or 0
+
+    last_30d_row = (
+        await db.execute(
+            select(
+                func.coalesce(func.sum(ChargingSession.energy_kwh), 0),
+                func.coalesce(func.sum(ChargingSession.coins_spent), 0),
+            ).where(and_(
+                ChargingSession.started_at >= cutoff_30d,
+                ChargingSession.status.in_(_REVENUE_STATUSES),
+            ))
+        )
+    ).first()
+
     return {
         "tenants": int(tenants_total),
         "users": {
@@ -196,7 +250,11 @@ async def admin_stats_overview(
             "admins": role_counts.get(UserRole.ADMIN, 0),
         },
         "gateways": {"total": int(gateways_total), "online": int(gateways_online)},
-        "plugs": {"total": int(plugs_total)},
+        "plugs": {
+            "total": int(plugs_total),
+            "public": int(plugs_public),
+            "private": int(plugs_private),
+        },
         "sessions": {
             "active": int(sessions_active),
             "today": int(sessions_today),
@@ -205,10 +263,12 @@ async def admin_stats_overview(
         "energy_kwh": {
             "today": round(float(today_row[0]), 3) if today_row else 0.0,
             "total": round(float(total_row[0]), 3) if total_row else 0.0,
+            "last_30d": round(float(last_30d_row[0]), 3) if last_30d_row else 0.0,
         },
         "revenue_coins": {
             "today": round(float(today_row[1]), 2) if today_row else 0.0,
             "total": round(float(total_row[1]), 2) if total_row else 0.0,
+            "last_30d": round(float(last_30d_row[1]), 2) if last_30d_row else 0.0,
         },
         "payouts": {
             "requested_count": int(payout_row[0]) if payout_row else 0,
@@ -773,6 +833,115 @@ async def admin_list_gateways(
     }
 
 
+# ===========================================================================
+# Plugs (cross-tenant read)
+# ===========================================================================
+
+
+@router.get("/api/admin/plugs")
+async def admin_list_plugs(
+    user: User = Depends(require_role("admin")),
+    db: AsyncSession = Depends(get_db),
+    q: Optional[str] = None,
+    visibility: Optional[str] = None,
+    status: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+):
+    """
+    Cross-tenant plug fleet, id-ascending (stable). Mirrors GET
+    /api/admin/gateways' join shape: INNER JOIN Gateway + Tenant, so — like
+    that view — only plugs on a CLAIMED gateway (tenant_id NOT NULL) appear;
+    LEFT JOIN ChargerGroup for the group name + visibility.
+
+    Filters: `q` substring-matches the plug name (case-insensitive);
+    `visibility` is "public"/"private" (400 otherwise), applied IN SQL with
+    the routers/plugs.py rule (public = ungrouped OR group public; private =
+    group explicitly not public) so the per-item `visibility` always agrees
+    with the filter; `status` is a PlugStatus value (400 on an invalid one).
+    """
+    limit, offset = _clamp_page(limit, offset)
+
+    conditions = []
+    if q:
+        conditions.append(Plug.name.ilike(f"%{q}%"))
+    if visibility is not None:
+        if visibility == "public":
+            conditions.append(
+                or_(Plug.group_id.is_(None), ChargerGroup.is_public.is_(True))
+            )
+        elif visibility == "private":
+            conditions.append(ChargerGroup.is_public.is_(False))
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid visibility '{visibility}'. Valid: ['public', 'private']",
+            )
+    if status is not None:
+        try:
+            conditions.append(Plug.status == PlugStatus(status))
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid status '{status}'. Valid: {[s.value for s in PlugStatus]}",
+            )
+
+    total = (
+        await db.execute(
+            select(func.count(Plug.id))
+            .join(Gateway, Gateway.id == Plug.gateway_id)
+            .join(Tenant, Tenant.id == Gateway.tenant_id)
+            .outerjoin(ChargerGroup, ChargerGroup.id == Plug.group_id)
+            .where(*conditions)
+        )
+    ).scalar() or 0
+
+    rows = await db.execute(
+        select(
+            Plug,
+            Gateway.name,
+            Gateway.tenant_id,
+            Tenant.name,
+            ChargerGroup.name,
+            ChargerGroup.is_public,
+        )
+        .join(Gateway, Gateway.id == Plug.gateway_id)
+        .join(Tenant, Tenant.id == Gateway.tenant_id)
+        .outerjoin(ChargerGroup, ChargerGroup.id == Plug.group_id)
+        .where(*conditions)
+        .order_by(Plug.id.asc())
+        .limit(limit)
+        .offset(offset)
+    )
+
+    items = []
+    for plug, gateway_name, tenant_id, tenant_name, group_name, is_public in rows.all():
+        # Same rule as the SQL visibility filter above, derived per-row so the
+        # two can never disagree: ungrouped OR public group => public.
+        is_public_plug = plug.group_id is None or bool(is_public)
+        items.append({
+            "id": plug.id,
+            "name": plug.name,
+            "status": plug.status.value,
+            "gateway_id": plug.gateway_id,
+            "gateway_name": gateway_name,
+            "tenant_id": tenant_id,
+            "tenant_name": tenant_name,
+            "group_id": plug.group_id,
+            "group_name": group_name,
+            "visibility": "public" if is_public_plug else "private",
+            "local_ip": plug.local_ip,
+            "plug_model": plug.plug_model,
+            "connector_type": plug.connector_type,
+            "rated_power_w": plug.rated_power_w,
+            "current_power_w": plug.current_power_w,
+            "last_telemetry_at": _iso(plug.last_telemetry_at),
+            "tariff_id": plug.tariff_id,
+        })
+
+    return {"total": int(total), "items": items}
+
+
 @router.post("/api/admin/gateways/inventory")
 async def admin_mint_inventory_gateway(
     req: AdminGatewayMintRequest,
@@ -928,6 +1097,244 @@ async def admin_create_firmware_release(
         "notes": release.notes,
         "is_active": release.is_active,
         "created_at": _iso(release.created_at),
+    }
+
+
+@router.post("/api/admin/firmware-releases/upload")
+async def admin_upload_firmware_release(
+    request: Request,
+    user: User = Depends(require_role("admin")),
+    db: AsyncSession = Depends(get_db),
+    notes: Optional[str] = None,
+):
+    """
+    Upload an OTA firmware binary directly, host it on the backend, and
+    register it as a release — the "no more hand-publishing to gs://amphive-fw"
+    flow that complements POST /api/admin/firmware-releases (register a URL you
+    published yourself).
+
+    RAW body, NOT multipart: the request body IS the .bin (no python-multipart
+    dependency). The image is validated as a genuine amphive-gateway ESP32 app
+    (0xE9 image magic, the esp_app_desc_t descriptor magic, and the descriptor's
+    embedded project_name/version) before anything is stored — the version and
+    filename are read out of the image itself, not trusted from the client.
+
+    The stored file is served publicly by GET /api/firmware/images/{filename};
+    `req.url` is built from PUBLIC_API_ORIGIN (or FRONTEND_ORIGIN) so a fielded
+    gateway can fetch it over https. Metadata (version/url/notes) is validated
+    by instantiating AdminFirmwareReleaseCreateRequest, reusing its exact
+    version regex + https-only rule — so a plain http:// dev origin is rejected.
+    """
+    body = await request.body()
+
+    # Size guard first — reject a giant upload before parsing/buffering.
+    if len(body) > _FIRMWARE_MAX_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Firmware image exceeds the {_FIRMWARE_MAX_BYTES // (1024 * 1024)} MiB limit.",
+        )
+    # ESP32 image magic byte + enough length to hold the app descriptor.
+    if len(body) < 288 or body[0] != 0xE9:
+        raise HTTPException(status_code=400, detail="Uploaded file is not an ESP32 app image.")
+    # esp_app_desc_t magic word (little-endian uint32) at offset 32.
+    (desc_magic,) = struct.unpack_from("<I", body, 32)
+    if desc_magic != _ESP_APP_DESC_MAGIC:
+        raise HTTPException(
+            status_code=400,
+            detail="ESP32 app descriptor magic missing; not a valid gateway image.",
+        )
+
+    # NUL-terminated ascii fields inside esp_app_desc_t: version[32] @48,
+    # project_name[32] @80.
+    version = body[48:80].split(b"\x00", 1)[0].decode("ascii", "replace")
+    project_name = body[80:112].split(b"\x00", 1)[0].decode("ascii", "replace")
+
+    if project_name != _FIRMWARE_PROJECT_NAME:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Image project_name is '{project_name}', expected "
+                f"'{_FIRMWARE_PROJECT_NAME}' — this is not gateway firmware."
+            ),
+        )
+
+    filename = f"{_FIRMWARE_PROJECT_NAME}-{version}.bin"
+
+    base = os.getenv("PUBLIC_API_ORIGIN") or os.getenv("FRONTEND_ORIGIN")
+    if not base:
+        raise HTTPException(
+            status_code=500,
+            detail="FRONTEND_ORIGIN not configured; cannot build a public image URL.",
+        )
+    url = f"{base.rstrip('/')}/api/firmware/images/{filename}"
+
+    # Reuse the create endpoint's schema so the version regex + https-only URL
+    # rule are enforced identically. A plain http:// origin therefore fails
+    # here — the URL must be https.
+    try:
+        validated = AdminFirmwareReleaseCreateRequest(version=version, url=url, notes=notes)
+    except ValidationError as exc:
+        first = exc.errors()[0]
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Rejected firmware metadata ({first.get('loc', ['?'])[-1]}): "
+                f"{first.get('msg', 'invalid')}. Parsed version={version!r}, url={url!r} — "
+                f"note a plain http:// dev origin is rejected (the image URL must be https)."
+            ),
+        )
+
+    # Duplicate-version guard, same as admin_create_firmware_release.
+    existing = await db.execute(
+        select(FirmwareRelease).where(FirmwareRelease.version == validated.version)
+    )
+    if existing.scalar_one_or_none():
+        raise HTTPException(
+            status_code=400,
+            detail=f"Firmware release '{validated.version}' is already registered.",
+        )
+
+    # Persist the image atomically: write a .tmp then os.replace so a
+    # concurrent GET never sees a half-written file, and a crash mid-write
+    # leaves only a stray .tmp, never a corrupt .bin.
+    store_dir = os.getenv("FIRMWARE_IMAGE_DIR", "data/firmware-images")
+    os.makedirs(store_dir, exist_ok=True)
+    dest_path = os.path.join(store_dir, filename)
+    tmp_path = f"{dest_path}.tmp"
+    with open(tmp_path, "wb") as fh:
+        fh.write(body)
+    os.replace(tmp_path, dest_path)
+
+    size_bytes = len(body)
+
+    release = FirmwareRelease(
+        version=validated.version, url=validated.url, notes=validated.notes, is_active=True
+    )
+    db.add(release)
+    await db.commit()
+    await db.refresh(release)
+
+    rel_id = release.id  # snapshot before the audit write (see try_record_audit's docstring)
+
+    logger.info(
+        f"Admin uploaded firmware release {validated.version} "
+        f"(id={rel_id}, {size_bytes} bytes -> {dest_path}) by {user.email}"
+    )
+
+    await try_record_audit(
+        db,
+        tenant_id=None,
+        actor_user_id=user.id,
+        action="firmware_release.upload",
+        target_type="firmware_release",
+        target_id=str(rel_id),
+        detail=f"version={validated.version}, size={size_bytes} bytes",
+    )
+
+    return {
+        "id": rel_id,
+        "version": release.version,
+        "url": release.url,
+        "notes": release.notes,
+        "is_active": release.is_active,
+        "created_at": _iso(release.created_at),
+        "size_bytes": size_bytes,
+        "filename": filename,
+    }
+
+
+@router.post("/api/admin/gateways/{gateway_id}/ota")
+async def admin_gateway_ota(
+    gateway_id: str,
+    req: CpoGatewayOtaRequest,
+    user: User = Depends(require_role("admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Trigger an OTA firmware update on ANY gateway, cross-tenant — the admin
+    mirror of POST /api/cpo/gateways/{id}/ota (routers/cpo/_gateways.py),
+    minus the tenant filter (a plain id lookup, so unclaimed inventory
+    gateways are permitted too). Because the caller is already an admin, the
+    `firmware_url` custom-URL escape hatch needs no extra role re-check here.
+
+    Same guards/semantics as the CPO endpoint: 404 unknown gateway, 409
+    offline (gates on the raw ONLINE flag, NOT gateway_is_live — the same
+    telemetry-vs-link rationale spelled out there), 404 missing/inactive
+    release, 409 no registered plugs to route the command through, 502 on a
+    failed broker publish. Audited afterwards.
+    """
+    gw_result = await db.execute(select(Gateway).where(Gateway.id == gateway_id))
+    gateway = gw_result.scalar_one_or_none()
+    if not gateway:
+        raise HTTPException(status_code=404, detail="Gateway not found.")
+
+    if gateway.status != GatewayStatus.ONLINE:
+        raise HTTPException(
+            status_code=409,
+            detail="Gateway is offline; it must be connected to receive an OTA command.",
+        )
+
+    release_version = None
+    if req.firmware_url:
+        firmware_url = req.firmware_url
+    else:
+        release_result = await db.execute(
+            select(FirmwareRelease).where(
+                and_(FirmwareRelease.id == req.release_id, FirmwareRelease.is_active.is_(True))
+            )
+        )
+        release = release_result.scalar_one_or_none()
+        if release is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Firmware release not found or no longer active.",
+            )
+        firmware_url = release.url
+        release_version = release.version
+
+    plug_result = await db.execute(
+        select(Plug.id).where(Plug.gateway_id == gateway_id).order_by(Plug.id).limit(1)
+    )
+    plug_id = plug_result.scalar_one_or_none()
+    if plug_id is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Gateway has no registered plugs to route the OTA command through.",
+        )
+
+    # Snapshot before the publish/audit — the OTA detail + audit tenant_id are
+    # read off the gateway ORM instance, which try_record_audit's failure-path
+    # rollback would expire.
+    target_tenant_id = gateway.tenant_id
+
+    published = state.mqtt_manager.send_gateway_ota(gateway_id, plug_id, firmware_url)
+    if not published:
+        raise HTTPException(
+            status_code=502,
+            detail="Failed to publish the OTA command to the broker.",
+        )
+
+    logger.info(
+        f"Admin OTA command published for gateway {gateway_id} "
+        f"(url={firmware_url}, release={release_version}) by {user.email}"
+    )
+
+    await try_record_audit(
+        db,
+        tenant_id=target_tenant_id,
+        actor_user_id=user.id,
+        action="gateway.ota",
+        target_type="gateway",
+        target_id=gateway_id,
+        detail=f"url={firmware_url}, release={release_version}",
+    )
+
+    return {
+        "status": "ota_triggered",
+        "gateway_id": gateway_id,
+        "firmware_url": firmware_url,
+        "release_version": release_version,
+        "message": "OTA command published. Watch the gateway's alarms topic / status fw version.",
     }
 
 

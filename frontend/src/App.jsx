@@ -70,6 +70,7 @@ const AdminTenantDetail = lazy(() => import('./pages/admin/AdminTenantDetail'));
 const AdminUsers = lazy(() => import('./pages/admin/AdminUsers'));
 const AdminPayouts = lazy(() => import('./pages/admin/AdminPayouts'));
 const AdminGateways = lazy(() => import('./pages/admin/AdminGateways'));
+const AdminPlugs = lazy(() => import('./pages/admin/AdminPlugs'));
 const AdminFirmwareReleases = lazy(() => import('./pages/admin/AdminFirmwareReleases'));
 const AdminDisputes = lazy(() => import('./pages/admin/AdminDisputes'));
 const AdminAudit = lazy(() => import('./pages/admin/AdminAudit'));
@@ -220,6 +221,7 @@ const adminRoutes = (
     <Route path="/admin/users" element={<AdminUsers />} />
     <Route path="/admin/payouts" element={<AdminPayouts />} />
     <Route path="/admin/gateways" element={<AdminGateways />} />
+    <Route path="/admin/chargers" element={<AdminPlugs />} />
     <Route path="/admin/firmware-releases" element={<AdminFirmwareReleases />} />
     <Route path="/admin/disputes" element={<AdminDisputes />} />
     <Route path="/admin/audit" element={<AdminAudit />} />

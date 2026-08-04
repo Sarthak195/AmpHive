@@ -94,6 +94,52 @@ export default function AdminFirmwareReleases() {
     }
   };
 
+  // ---- Upload an image (hosts + registers in one step) -------------------
+  // Unlike "Register release" (a pointer to an already-published URL), this
+  // streams the raw .bin to the backend, which stores it and reads the
+  // version out of the ESP32 app image itself.
+  const [uploadOpen, setUploadOpen] = useState(false);
+  const [uploadFile, setUploadFile] = useState(null);
+  const [uploadNotes, setUploadNotes] = useState('');
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState('');
+
+  const openUpload = () => {
+    setUploadFile(null);
+    setUploadNotes('');
+    setUploadError('');
+    setUploadOpen(true);
+  };
+
+  const closeUpload = () => {
+    if (uploading) return;
+    setUploadOpen(false);
+  };
+
+  const submitUpload = async (e) => {
+    e.preventDefault();
+    if (!uploadFile) {
+      setUploadError('Choose a firmware .bin file to upload.');
+      return;
+    }
+    setUploading(true);
+    setUploadError('');
+    try {
+      const notes = uploadNotes.trim();
+      const res = await api.upload(
+        `/api/admin/firmware-releases/upload${notes ? `?notes=${encodeURIComponent(notes)}` : ''}`,
+        uploadFile
+      );
+      setUploadOpen(false);
+      toast.ok(`Registered ${res?.version ?? 'firmware'}.`);
+      fetchReleases();
+    } catch (err) {
+      setUploadError(apiErrorCopy(err));
+    } finally {
+      setUploading(false);
+    }
+  };
+
   // ---- Deactivate ----------------------------------------------------------
   const [deactivateTarget, setDeactivateTarget] = useState(null);
   const [deactivateBusy, setDeactivateBusy] = useState(false);
@@ -157,10 +203,16 @@ export default function AdminFirmwareReleases() {
         title="Firmware releases"
         sub="Registered OTA images the CPO version picker draws from — see docs/FIRMWARE.md for how images are published."
         actions={
-          <button type="button" className="btn btn-primary" onClick={openRegister}>
-            <Plus size={16} aria-hidden="true" />
-            Register release
-          </button>
+          <>
+            <button type="button" className="btn btn-quiet" onClick={openUpload}>
+              <UploadCloud size={16} aria-hidden="true" />
+              Upload image
+            </button>
+            <button type="button" className="btn btn-primary" onClick={openRegister}>
+              <Plus size={16} aria-hidden="true" />
+              Register release
+            </button>
+          </>
         }
       />
 
@@ -247,6 +299,49 @@ export default function AdminFirmwareReleases() {
             </button>
             <button type="submit" className="btn btn-primary" disabled={registerBusy}>
               {registerBusy ? 'Registering…' : 'Register'}
+            </button>
+          </div>
+        </form>
+      </Modal>
+
+      <Modal open={uploadOpen} onClose={closeUpload} title="Upload firmware image">
+        <form className="stack" onSubmit={submitUpload}>
+          <p className="text-2 text-sm">
+            Signed build output (<code>build/amphive-gateway.bin</code>) — version is read from
+            the image itself. It&apos;s hosted and registered in one step, so there&apos;s no URL
+            to paste.
+          </p>
+          <div className="field">
+            <label className="field-label" htmlFor="fw-upload-file">
+              Firmware image (.bin)
+            </label>
+            <input
+              id="fw-upload-file"
+              className="input"
+              type="file"
+              accept=".bin,application/octet-stream"
+              onChange={(e) => setUploadFile(e.target.files?.[0] || null)}
+            />
+          </div>
+          <div className="field">
+            <label className="field-label" htmlFor="fw-upload-notes">
+              Notes <span className="text-2 text-sm">(optional)</span>
+            </label>
+            <input
+              id="fw-upload-notes"
+              className="input"
+              value={uploadNotes}
+              onChange={(e) => setUploadNotes(e.target.value)}
+              placeholder="Adds sub-16A on-device current cap enforcement"
+            />
+          </div>
+          {uploadError && <p className="field-error">{uploadError}</p>}
+          <div className="modal-actions">
+            <button type="button" className="btn btn-quiet" onClick={closeUpload} disabled={uploading}>
+              Cancel
+            </button>
+            <button type="submit" className="btn btn-primary" disabled={uploading || !uploadFile}>
+              {uploading ? 'Uploading…' : 'Upload image'}
             </button>
           </div>
         </form>

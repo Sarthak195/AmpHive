@@ -71,6 +71,11 @@ docker-compose.override.yml
 pgdata/
 *.tar.gz
 
+# Admin-uploaded OTA firmware images (POST /api/admin/firmware-releases/upload).
+# Runtime data written under the default FIRMWARE_IMAGE_DIR (data/firmware-
+# images) — served by GET /api/firmware/images/{filename}, never source.
+/data/
+
 # Python cache files
 __pycache__/
 *.pyc
