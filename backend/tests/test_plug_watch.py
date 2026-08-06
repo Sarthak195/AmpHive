@@ -468,8 +468,9 @@ async def _run_finalize(db, monkeypatch, watchers_mock=None):
 async def test_finalize_notifies_watchers_excluding_the_stopping_driver(monkeypatch):
     session, plug = _finalize_fixtures()
     db = _db(
-        _scalar_one_or_none(session),  # locked session select
-        _scalar_one(plug),             # plug select
+        _scalar_one_or_none(_user(3)),  # [L8] user row locked first (user->session)
+        _scalar_one_or_none(session),   # locked session select
+        _scalar_one(plug),              # plug select
     )
     watchers_mock = AsyncMock(return_value=1)
 
@@ -490,6 +491,7 @@ async def test_finalize_survives_watch_fanout_db_failure(monkeypatch):
     still returns a complete receipt (billing unharmed)."""
     session, plug = _finalize_fixtures()
     db = _db(
+        _scalar_one_or_none(_user(3)),  # [L8] user row locked first (user->session)
         _scalar_one_or_none(session),
         _scalar_one(plug),
         RuntimeError("watch select exploded"),  # raised by the service's SELECT

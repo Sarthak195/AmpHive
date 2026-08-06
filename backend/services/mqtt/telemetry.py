@@ -203,57 +203,73 @@ class MQTTTelemetryMixin:
             },
         )
 
-        # --- 1. Feed the in-memory TelemetryStore (for the live stream) ---
-        # This callback runs on the paho network thread. TelemetryStore.update()
-        # signals asyncio.Events that live on the server's event loop, and
-        # asyncio.Event.set() is NOT thread-safe when called from another thread —
-        # it can fail to wake stream() waiters or corrupt loop state. Marshal the
-        # update onto the loop so the whole store stays single-threaded.
+        # Whether the DB-backed persist path will run for this frame. When it
+        # does, BOTH the live-store feed AND the time-series enqueue are deferred
+        # into _persist_telemetry so they sit behind the plug-ownership check
+        # there (H1): the broker ACLs scope only the *topic*, not the JSON body's
+        # plug_id, so any tenant with one provisioned gateway could otherwise
+        # publish a victim plug_id on its OWN topic and poison that plug's shared
+        # live snapshot — which drives the SSE stream and (before this fix) fed
+        # billing at finalize. With no DB there is nothing to check ownership
+        # against, so the store is fed directly here (standalone / unit tests).
+        db_backed = bool(self.db_session_factory and self.event_loop)
+
+        # --- 1. Build the raw telemetry sample ---
+        # Carries the fields the persist path needs beyond the session-total
+        # inputs (watts/kwh): current/voltage/status drive BOTH the ownership-
+        # gated live-store feed in _persist_telemetry and the time-series
+        # enqueue. Built unconditionally so the deferred store feed has the full
+        # snapshot even when time-series persistence isn't configured; the
+        # enqueue itself stays gated on telemetry_persistence below.
+        sample = {
+            "plug_id": plug_id,
+            "recorded_at": datetime.now(timezone.utc),
+            "power_w": watts,
+            "energy_kwh": kwh,
+            "voltage_v": voltage,
+            "current_a": current,
+            "status": status,
+        }
+
+        # --- 2. Feed the in-memory TelemetryStore (for the live stream) ---
+        # DB-backed path: deferred into _persist_telemetry (behind the ownership
+        # check). No-DB / standalone path: feed here. This callback runs on the
+        # paho network thread, and TelemetryStore.update() signals asyncio.Events
+        # that live on the server's event loop — asyncio.Event.set() is NOT
+        # thread-safe across threads — so marshal onto the loop when one exists,
+        # else call directly (no loop: a synchronous unit-test harness).
         # (cost_coins is left to TelemetryStore to auto-calc from this plug's
         # snapshotted per-session rate, falling back to COINS_PER_KWH.)
-        if self.telemetry_store and self.event_loop:
-            self.event_loop.call_soon_threadsafe(
-                functools.partial(
-                    self.telemetry_store.update,
-                    plug_id, watts, current, kwh, telem_status,
-                    voltage_v=voltage, relay_on=relay_on,
+        if self.telemetry_store and not db_backed:
+            if self.event_loop:
+                self.event_loop.call_soon_threadsafe(
+                    functools.partial(
+                        self.telemetry_store.update,
+                        plug_id, watts, current, kwh, telem_status,
+                        voltage_v=voltage, relay_on=relay_on,
+                    )
                 )
-            )
-        elif self.telemetry_store:
-            # No loop reference (e.g. unit tests): safe to call directly.
-            self.telemetry_store.update(
-                plug_id=plug_id,
-                power_w=watts,
-                current_a=current,
-                energy_kwh=kwh,
-                status=telem_status,
-                voltage_v=voltage,
-                relay_on=relay_on,
-            )
+            else:
+                self.telemetry_store.update(
+                    plug_id=plug_id,
+                    power_w=watts,
+                    current_a=current,
+                    energy_kwh=kwh,
+                    status=telem_status,
+                    voltage_v=voltage,
+                    relay_on=relay_on,
+                )
 
-        # --- 2. Build the raw sample for time-series persistence ---
-        # Buffered + batch-flushed by TelemetryPersistenceService. This is where
-        # voltage/current/status (parsed above but not used for session totals)
-        # get persisted to telemetry_readings. When a DB is available the
-        # enqueue is deferred into _persist_telemetry so it only happens after
-        # the plug-ownership check (a gateway must not write history rows for
-        # another gateway's plug); with no DB there is nothing to check
-        # against, so enqueue directly (unit tests / standalone use).
-        sample = None
-        if self.telemetry_persistence:
-            sample = {
-                "plug_id": plug_id,
-                "recorded_at": datetime.now(timezone.utc),
-                "power_w": watts,
-                "energy_kwh": kwh,
-                "voltage_v": voltage,
-                "current_a": current,
-                "status": status,
-            }
-            if not (self.db_session_factory and self.event_loop):
-                self.telemetry_persistence.enqueue(sample)
+        # --- 3. Enqueue the raw sample for time-series persistence ---
+        # Buffered + batch-flushed by TelemetryPersistenceService. When a DB is
+        # available the enqueue is deferred into _persist_telemetry so it only
+        # happens after the plug-ownership check (a gateway must not write
+        # history rows for another gateway's plug); with no DB there is nothing
+        # to check against, so enqueue directly (unit tests / standalone use).
+        if self.telemetry_persistence and not db_backed:
+            self.telemetry_persistence.enqueue(sample)
 
-        # --- 3. Persist authoritative session totals (async, fire-and-forget) ---
+        # --- 4. Persist authoritative session totals (async, fire-and-forget) ---
         if self.db_session_factory and self.event_loop:
             asyncio.run_coroutine_threadsafe(
                 self._persist_telemetry(gateway_id, plug_id, watts, kwh, session_id, sample, relay_on, is_offline,
@@ -333,6 +349,9 @@ class MQTTTelemetryMixin:
           (the broker ACLs scope *topics* to a gateway, not payload claims — a
           compromised gateway could otherwise attribute energy/billing to
           another tenant's plug).
+        - [H1] Feed the live-stream TelemetryStore, deferred here from the
+          handler so it sits behind that ownership check (a gateway must not be
+          able to poison another gateway's plug's live snapshot).
         - Update `plugs.current_power_w` so the plug list shows real-time power.
         - Enqueue the raw `sample` for time-series persistence (deferred here
           from the handler so it sits behind the same ownership check).
@@ -406,6 +425,32 @@ class MQTTTelemetryMixin:
                         },
                     )
                     return
+
+                # [H1] Feed the live-stream TelemetryStore now that ownership is
+                # proven. The store's snapshot drives the SSE stream; feeding it
+                # in the handler BEFORE this check (as it used to, synchronously)
+                # let any tenant publish a victim plug_id on its OWN topic and
+                # poison that plug's shared live snapshot for another driver.
+                # Deferred here so it only ever runs for a plug this gateway
+                # actually owns. This coroutine runs ON the event loop (scheduled
+                # via run_coroutine_threadsafe), so update() — which signals the
+                # stream's asyncio.Events — is safe to call directly, without the
+                # call_soon_threadsafe hop the no-DB handler path needs.
+                # current/voltage/status ride on the handler-built `sample`;
+                # cost_coins is auto-calc'd by the store from the session's rate.
+                if self.telemetry_store is not None and sample is not None:
+                    telem_status = (
+                        "charging" if sample.get("status") == "occupied" else "idle"
+                    )
+                    self.telemetry_store.update(
+                        plug_id=plug_id,
+                        power_w=watts,
+                        current_a=sample.get("current_a", 0.0),
+                        energy_kwh=kwh,
+                        status=telem_status,
+                        voltage_v=sample.get("voltage_v", 230.0),
+                        relay_on=relay_on,
+                    )
 
                 # [Plug power] Stamp the per-plug liveness clock. powered_since
                 # re-baselines to now whenever telemetry resumes after a gap

@@ -24,6 +24,20 @@ COPY amphive_agent ./amphive_agent
 RUN if [ -n "$EXTRAS" ]; then pip install --no-cache-dir ".[$EXTRAS]"; \
     else pip install --no-cache-dir .; fi
 
+# Drop root: run as a non-root system user (uid 10001). Create /state and hand
+# it (and /app) to the app user BEFORE the VOLUME declaration below, so a fresh
+# NAMED volume inherits the non-root ownership (Docker seeds an empty named
+# volume from the image path's perms). A host bind-mounted /state instead keeps
+# the host directory's owner — chown it to 10001 on the host if you bind-mount.
+# The agent needs no Linux capabilities (it's an MQTT client + high-port UDP LAN
+# discovery), so it is safe to `docker run` it with
+#   --cap-drop ALL --security-opt no-new-privileges
+RUN groupadd --system --gid 10001 app \
+    && useradd --system --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin app \
+    && mkdir -p /state \
+    && chown -R app:app /app /state
+USER app
+
 # Persist the unique_id->plug_id map + session baselines across restarts.
 ENV AMPHIVE_STATE=/state/amphive_agent_state.json
 VOLUME ["/state"]

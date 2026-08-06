@@ -16,6 +16,8 @@ needed) — google_callback does at most one SELECT (by email) then either an
 INSERT (new account) or an UPDATE-in-place (link), same shape as
 register()/login().
 """
+import json
+from http.cookies import SimpleCookie
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -23,10 +25,37 @@ from fastapi import HTTPException
 from sqlalchemy.exc import IntegrityError
 
 import backend.routers.auth as auth_router
-from backend.routers.auth import google_callback, google_login
+from backend.routers.auth import (
+    GoogleExchangeRequest,
+    google_callback,
+    google_exchange,
+    google_login,
+)
 from backend.services.auth import decode_access_token, hash_password, verify_password
 
 GOOGLE_ENV_VARS = ("GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_OAUTH_REDIRECT_URI")
+
+
+@pytest.fixture(autouse=True)
+def _clear_exchange_store():
+    """Keep the module-global single-use code store from leaking codes across
+    tests (each test that needs a code mints its own via a real callback)."""
+    auth_router._google_exchange_store.clear()
+    yield
+    auth_router._google_exchange_store.clear()
+
+
+def _set_cookie_value(response, name):
+    """Pull one Set-Cookie value by name off a Starlette response — the success
+    callback emits SEVERAL Set-Cookie headers (clear google_oauth_state + set
+    google_oauth_nonce), so index-by-name rather than taking the first."""
+    for key, value in response.raw_headers:
+        if key.decode().lower() == "set-cookie":
+            jar = SimpleCookie()
+            jar.load(value.decode())
+            if name in jar and jar[name].value:
+                return jar[name].value
+    return None
 
 
 def _set_google_env(
@@ -114,6 +143,21 @@ def _mock_verify_claims(monkeypatch, claims):
 
 def _claims(email="newdriver@amphive.test", sub="google-sub-1", email_verified=True, name="New Driver"):
     return {"email": email, "sub": sub, "email_verified": email_verified, "name": name}
+
+
+async def _run_successful_callback(monkeypatch, db, *, sub="google-sub-x", email="driver@amphive.test"):
+    """Drive google_callback through to its success redirect and return
+    (response, code-from-fragment, nonce-from-cookie) — the two halves the SPA
+    later re-presents to /api/auth/google/exchange."""
+    _set_google_env(monkeypatch)
+    _mock_token_exchange(monkeypatch)
+    _mock_verify_claims(monkeypatch, _claims(email=email, sub=sub))
+    req = _FakeRequest(cookies={"google_oauth_state": "abc"}, query_params={"state": "abc", "code": "x"})
+    resp = await google_callback(req, db)
+    assert resp.status_code == 302
+    code = resp.headers["location"].split("#code=", 1)[1]
+    nonce = _set_cookie_value(resp, auth_router.GOOGLE_EXCHANGE_COOKIE)
+    return resp, code, nonce
 
 
 # --------------------------------------------------------------------------
@@ -288,7 +332,9 @@ async def test_callback_creates_new_driver_account(monkeypatch):
     resp = await google_callback(req, db)
 
     assert resp.status_code == 302
-    assert resp.headers["location"].startswith("https://amphive.app/auth/google/callback#token=")
+    # [M5] The fragment now carries a single-use CODE, never the raw JWT.
+    assert resp.headers["location"].startswith("https://amphive.app/auth/google/callback#code=")
+    assert "#token=" not in resp.headers["location"]
     db.commit.assert_awaited_once()
 
     created = db.add.call_args.args[0]
@@ -408,7 +454,7 @@ async def test_callback_matching_sub_signs_in_without_mutation(monkeypatch):
     resp = await google_callback(req, db)
 
     assert resp.status_code == 302
-    assert resp.headers["location"].startswith("https://amphive.app/auth/google/callback#token=")
+    assert resp.headers["location"].startswith("https://amphive.app/auth/google/callback#code=")
     db.commit.assert_not_awaited()  # nothing to persist — pure sign-in
 
 
@@ -490,29 +536,132 @@ def test_google_only_dummy_hash_never_verifies():
 
 
 # --------------------------------------------------------------------------
-# Redirect target + token shape
+# Redirect target + code/nonce shape (M5: browser-bound single-use code)
 # --------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_callback_success_redirect_carries_valid_jwt_in_fragment(monkeypatch):
-    _set_google_env(monkeypatch)
-    _mock_token_exchange(monkeypatch)
-    _mock_verify_claims(monkeypatch, _claims(sub="google-sub-5"))
+async def test_callback_redirect_carries_code_not_raw_jwt_and_sets_nonce_cookie(monkeypatch):
+    """The callback must hand the SPA a single-use CODE in the fragment (not a
+    usable JWT) and bind it to the browser with an httpOnly/Secure/Lax nonce
+    cookie."""
     existing = _user(user_id=42, email="driver@amphive.test", role="driver", token_version=3,
-                      auth_provider="google", google_sub="google-sub-5")
+                     auth_provider="google", google_sub="google-sub-5")
     db = _db_returning(existing)
-    req = _FakeRequest(cookies={"google_oauth_state": "abc"}, query_params={"state": "abc", "code": "x"})
 
-    resp = await google_callback(req, db)
+    resp, code, nonce = await _run_successful_callback(
+        monkeypatch, db, sub="google-sub-5", email="driver@amphive.test"
+    )
 
     location = resp.headers["location"]
-    assert "#token=" in location
-    assert "?token=" not in location  # fragment, never a query string
-    token = location.split("#token=", 1)[1]
+    assert "#code=" in location
+    assert "#token=" not in location  # the raw JWT never rides in the URL anymore
+    assert "?code=" not in location   # the code is a fragment, never a query string
+    # The fragment value is an opaque code, NOT a decodable app JWT.
+    assert decode_access_token(code) is None
+    assert code
+
+    # Nonce cookie bound the flow to this browser; state cookie cleared.
+    assert nonce
+    set_cookies = "; ".join(
+        v.decode() for k, v in resp.raw_headers if k.decode().lower() == "set-cookie"
+    )
+    assert "google_oauth_nonce=" in set_cookies
+    assert "HttpOnly" in set_cookies
+    assert "Secure" in set_cookies
+    assert "samesite=lax" in set_cookies.lower()
+    assert "google_oauth_state=" in set_cookies  # single-use state cookie cleared too
+
+
+# --------------------------------------------------------------------------
+# google_exchange: trade the browser-bound code for the real app JWT
+# --------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_exchange_returns_jwt_with_matching_nonce_and_unused_code(monkeypatch):
+    existing = _user(user_id=42, email="driver@amphive.test", role="driver", token_version=3,
+                     auth_provider="google", google_sub="google-sub-5")
+    db = _db_returning(existing)
+    _resp, code, nonce = await _run_successful_callback(monkeypatch, db, sub="google-sub-5")
+
+    exch = _FakeRequest(cookies={auth_router.GOOGLE_EXCHANGE_COOKIE: nonce})
+    result = await google_exchange(GoogleExchangeRequest(code=code), exch)
+
+    assert result.status_code == 200
+    token = json.loads(result.body)["token"]
     payload = decode_access_token(token)
     assert payload is not None
     assert payload["sub"] == "42"
     assert payload["role"] == "driver"
     assert payload["tv"] == 3
-    # Single-use state cookie cleared on the success path too.
-    assert "google_oauth_state=" in resp.headers["set-cookie"]
+    # Nonce cookie cleared once the code is spent.
+    set_cookies = "; ".join(
+        v.decode() for k, v in result.raw_headers if k.decode().lower() == "set-cookie"
+    )
+    assert "google_oauth_nonce=" in set_cookies
+
+
+@pytest.mark.asyncio
+async def test_exchange_replay_of_consumed_code_fails(monkeypatch):
+    """Single-use: the second redemption of the same code is refused (400)."""
+    db = _db_returning(_user(auth_provider="google", google_sub="google-sub-6"))
+    _resp, code, nonce = await _run_successful_callback(monkeypatch, db, sub="google-sub-6")
+    exch = _FakeRequest(cookies={auth_router.GOOGLE_EXCHANGE_COOKIE: nonce})
+
+    first = await google_exchange(GoogleExchangeRequest(code=code), exch)
+    assert first.status_code == 200
+
+    second = await google_exchange(GoogleExchangeRequest(code=code), exch)
+    assert second.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_exchange_missing_nonce_cookie_fails(monkeypatch):
+    """A code presented WITHOUT the bound nonce cookie (e.g. a planted link
+    opened in a different browser) is worthless — this is the core M5 fix."""
+    db = _db_returning(_user(auth_provider="google", google_sub="google-sub-7"))
+    _resp, code, _nonce = await _run_successful_callback(monkeypatch, db, sub="google-sub-7")
+
+    exch = _FakeRequest(cookies={})  # no nonce cookie
+    result = await google_exchange(GoogleExchangeRequest(code=code), exch)
+
+    assert result.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_exchange_mismatched_nonce_fails(monkeypatch):
+    """A wrong nonce cookie can't redeem the code (and burns it — strictly
+    single-use)."""
+    db = _db_returning(_user(auth_provider="google", google_sub="google-sub-8"))
+    _resp, code, nonce = await _run_successful_callback(monkeypatch, db, sub="google-sub-8")
+
+    exch = _FakeRequest(cookies={auth_router.GOOGLE_EXCHANGE_COOKIE: nonce + "-tampered"})
+    result = await google_exchange(GoogleExchangeRequest(code=code), exch)
+    assert result.status_code == 400
+
+    # Even the correct nonce now fails — the wrong-nonce attempt already
+    # consumed the code.
+    good = _FakeRequest(cookies={auth_router.GOOGLE_EXCHANGE_COOKIE: nonce})
+    replay = await google_exchange(GoogleExchangeRequest(code=code), good)
+    assert replay.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_exchange_unknown_code_fails(monkeypatch):
+    exch = _FakeRequest(cookies={auth_router.GOOGLE_EXCHANGE_COOKIE: "whatever"})
+    result = await google_exchange(GoogleExchangeRequest(code="never-issued"), exch)
+    assert result.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_exchange_expired_code_fails(monkeypatch):
+    """A code past its TTL is refused even with the right nonce cookie."""
+    db = _db_returning(_user(auth_provider="google", google_sub="google-sub-9"))
+    _resp, code, nonce = await _run_successful_callback(monkeypatch, db, sub="google-sub-9")
+
+    # Rewind the stored entry's expiry into the past (simulates TTL lapse).
+    token, stored_nonce, _exp = auth_router._google_exchange_store[code]
+    auth_router._google_exchange_store[code] = (token, stored_nonce, 0.0)
+
+    exch = _FakeRequest(cookies={auth_router.GOOGLE_EXCHANGE_COOKIE: nonce})
+    result = await google_exchange(GoogleExchangeRequest(code=code), exch)
+    assert result.status_code == 400

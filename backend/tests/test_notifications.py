@@ -404,3 +404,90 @@ def test_finalize_notifies_on_stop_reasons():
     assert "session_stopped" in src
     for marker in ("exhausted", "telemetry lost", "safety cutoff", "current cap exceeded"):
         assert marker in src, f"finalize no longer maps reason {marker!r}"
+
+
+# ------------------------------------------- push-subscription per-user cap ---
+
+class _PushDB:
+    """Async DB stand-in for push_subscribe: one execute() answers both the
+    endpoint lookup (scalar_one_or_none) and the per-user count (scalar_one)."""
+
+    def __init__(self, *, existing=None, count=0):
+        self._existing = existing
+        self._count = count
+        self.added = []
+        self.committed = False
+
+    async def execute(self, *_a, **_k):
+        r = MagicMock()
+        r.scalar_one_or_none.return_value = self._existing
+        r.scalar_one.return_value = self._count
+        return r
+
+    def add(self, row):
+        self.added.append(row)
+
+    async def commit(self):
+        self.committed = True
+
+    async def rollback(self):  # pragma: no cover - only the IntegrityError path
+        pass
+
+
+def _push_req():
+    from backend.schemas import PushSubscribeRequest, PushSubscriptionKeys
+    return PushSubscribeRequest(
+        endpoint="https://fcm.googleapis.com/fcm/send/abc",
+        keys=PushSubscriptionKeys(p256dh="k", auth="a"),
+    )
+
+
+@pytest.mark.asyncio
+async def test_push_subscribe_rejects_over_per_user_cap():
+    """At the per-user cap, a NEW endpoint is refused (429) and nothing is
+    persisted — bounds subscription-table flooding / SSRF-target hoarding."""
+    from fastapi import HTTPException
+
+    from backend.routers import notifications as notif_router
+
+    user = MagicMock()
+    user.id = 7
+    db = _PushDB(existing=None, count=notif_router.MAX_PUSH_SUBSCRIPTIONS_PER_USER)
+    with pytest.raises(HTTPException) as exc:
+        await notif_router.push_subscribe(_push_req(), user, db)
+
+    assert exc.value.status_code == 429
+    assert db.added == []
+    assert db.committed is False
+
+
+@pytest.mark.asyncio
+async def test_push_subscribe_adds_new_under_cap():
+    from backend.routers import notifications as notif_router
+
+    user = MagicMock()
+    user.id = 7
+    db = _PushDB(existing=None, count=0)
+    result = await notif_router.push_subscribe(_push_req(), user, db)
+
+    assert result == {"status": "subscribed"}
+    assert len(db.added) == 1
+    assert db.committed is True
+
+
+@pytest.mark.asyncio
+async def test_push_subscribe_reown_existing_is_exempt_from_cap():
+    """Re-subscribing an already-stored endpoint updates in place even when the
+    user is over the cap — a real device that keeps its endpoint never breaks."""
+    from backend.routers import notifications as notif_router
+
+    user = MagicMock()
+    user.id = 7
+    existing = MagicMock()
+    db = _PushDB(existing=existing, count=10_000)
+    result = await notif_router.push_subscribe(_push_req(), user, db)
+
+    assert result == {"status": "subscribed"}
+    assert existing.user_id == 7      # re-owned to the current user
+    assert db.added == []             # updated in place, not inserted
+    assert db.committed is True

@@ -26,6 +26,7 @@ from backend.database.models import (
     PlugStatus,
     SessionStatus,
     TransactionType,
+    User,
 )
 from backend.services.billing import session_cost
 from backend.services.telemetry import COINS_PER_KWH
@@ -151,6 +152,29 @@ async def finalize_charging_session(
     filters = [ChargingSession.id == session_id]
     if expected_user_id is not None:
         filters.append(ChargingSession.user_id == expected_user_id)
+
+    # [L8] Acquire the User row lock BEFORE the ChargingSession row lock, so this
+    # billing path locks in the same user -> session order as the walk-up start
+    # (routers/sessions.py start_charging_session) and update_session_limits.
+    # The old order here — ChargingSession FOR UPDATE first, then the User lock
+    # taken later inside debit_wallet_clamped — was the inverse, so a finalize
+    # racing an update_session_limits (or start) on the SAME (user, session)
+    # pair could AB-BA deadlock (Postgres aborts one tx with 40P01). The user id
+    # is resolved via an UN-locked scalar subquery on the session row (user_id is
+    # immutable, and the authoritative ACTIVE re-check still happens under the
+    # session lock below), so we never lock the session before the user; the
+    # re-lock of the same row inside debit_wallet_clamped is then a no-op.
+    await db.execute(
+        select(User)
+        .where(
+            User.id
+            == select(ChargingSession.user_id)
+            .where(and_(*filters))
+            .scalar_subquery()
+        )
+        .with_for_update()
+    )
+
     result = await db.execute(
         select(ChargingSession).where(and_(*filters)).with_for_update()
     )
@@ -181,24 +205,25 @@ async def finalize_charging_session(
         )
 
     # 2. Determine final energy, then derive cost from it.
-    #    Prefer the live in-memory snapshot, but fall back to the energy
-    #    persisted on the session row (updated from inbound MQTT telemetry by
-    #    MQTTManager._persist_telemetry). This matters after a backend restart:
-    #    TelemetryStore is empty, and session.coins_spent is NEVER written
-    #    mid-session — so the old `latest.cost_coins if latest else
-    #    session.coins_spent` billed 0 for any session that outlived a restart.
-    #    Take the max so a stale/empty store can't bill LESS than what was
-    #    already recorded, and always compute cost from energy * rate (the
+    #    [H1] Bill STRICTLY from the ownership-guarded persisted total
+    #    (session.energy_kwh), NEVER from the in-memory TelemetryStore. The
+    #    store is fed from inbound MQTT and, before this fix, the money path
+    #    took `max(live_energy, persisted_energy)` — so a live snapshot poisoned
+    #    by a foreign gateway (which only gets ownership-checked in the async
+    #    persist path) could inflate the bill up to the store's clamp ceiling.
+    #    session.energy_kwh is written every frame by the ownership-checked,
+    #    monotonic _persist_telemetry, so it is the authoritative figure and, as
+    #    a persisted DB column, already survives a backend restart (the reason
+    #    the live read was originally added — REC-11's hydrate now rebuilds the
+    #    live *display* mirror from this same row, so the store is no longer
+    #    needed as a billing fallback). Cost is computed from energy * rate (the
     #    same formula TelemetryStore uses) for a single source of truth.
     #    The rate is the one SNAPSHOTTED on the session at start (services/
     #    pricing.py resolve_rate_for_plug, via routers/sessions.py) — a
     #    tariff edit or reassignment made mid-session must not change what
     #    this session bills. Only a legacy session (started before the
     #    rate_coins_per_kwh column existed) falls back to the env default.
-    latest = state.telemetry_store.get_latest(plug.id)
-    persisted_energy = session.energy_kwh or 0.0
-    live_energy = latest.energy_kwh if latest else 0.0
-    final_energy = max(live_energy, persisted_energy)
+    final_energy = session.energy_kwh or 0.0
     rate = session.rate_coins_per_kwh if session.rate_coins_per_kwh is not None else COINS_PER_KWH
     # [Pricing v2] Segment-aware total: the frozen cost of any closed segments
     # (energy metered under an earlier TOD rate) plus the open segment's energy

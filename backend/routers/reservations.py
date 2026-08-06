@@ -34,6 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database.db import get_db
 from backend.database.models import (
+    ChargerGroup,
     Gateway,
     Plug,
     PlugStatus,
@@ -400,8 +401,8 @@ async def plug_reservations(
     within RESERVATION_MAX_ADVANCE_DAYS (default 7 days — the booking
     horizon, so this always shows everything bookable-around), soonest
     first. Visible to any user with plug access — this is how group members
-    see the schedule and book around each other; each entry carries the
-    holder's name and `is_mine`.
+    see the schedule and book around each other; each entry carries `is_mine`
+    and, for the private-group coordination case, the holder's name.
     """
     plug_result = await db.execute(select(Plug).where(Plug.id == plug_id))
     plug = plug_result.scalar_one_or_none()
@@ -413,6 +414,21 @@ async def plug_reservations(
             status_code=403,
             detail="You don't have access to this plug. Join the group first.",
         )
+
+    # [L6] Identity-disclosure gate. Other drivers' real names are only
+    # revealed for the coordination case this feature was built for — a PRIVATE
+    # group the caller belongs to. Access is already granted above, so a plug in
+    # a private group here means the caller IS a member. For a plug the caller
+    # can see ONLY because it is ungrouped (legacy/public) or in a PUBLIC group,
+    # other holders' names are withheld (user_name=None) so a public charger's
+    # schedule can't be mined for who booked it and exactly when (a stalking
+    # aid). The caller's own rows always keep full detail.
+    reveal_identities = False
+    if plug.group_id:
+        group = (await db.execute(
+            select(ChargerGroup).where(ChargerGroup.id == plug.group_id)
+        )).scalar_one_or_none()
+        reveal_identities = group is not None and not group.is_public
 
     now = datetime.now(timezone.utc)
     expired = await expire_lapsed_reservations(db, plug_id=plug.id, now=now)
@@ -434,7 +450,13 @@ async def plug_reservations(
         .order_by(Reservation.start_at)
     )
     return [
-        _reservation_response(r, plug_name=plug.name, user_name=full_name,
-                              current_user_id=user.id)
+        _reservation_response(
+            r,
+            plug_name=plug.name,
+            user_name=(
+                full_name if (reveal_identities or r.user_id == user.id) else None
+            ),
+            current_user_id=user.id,
+        )
         for r, full_name in rows.all()
     ]

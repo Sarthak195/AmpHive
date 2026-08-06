@@ -217,6 +217,14 @@ static void be32(int32_t v, uint8_t out[4]) {
     out[2] = (uint8_t)(v >> 8);  out[3] = (uint8_t)(v);
 }
 
+/* Constant-time equality for a fixed-length byte span — compares a signature
+ * without leaking, via timing, how many leading bytes matched. */
+static bool ct_bytes_eq(const uint8_t *a, const uint8_t *b, size_t n) {
+    uint8_t diff = 0;
+    for (size_t i = 0; i < n; i++) diff |= (uint8_t)(a[i] ^ b[i]);
+    return diff == 0;
+}
+
 /* ── HTTP layer (esp_http_client, stateless) ──────────────────────────────── */
 typedef struct {
     uint8_t *body;
@@ -412,6 +420,22 @@ static esp_err_t klap_request_once(const char *ip, klap_session_t *sess, const c
 
     size_t ct_len = resp_len - 32;
     if (ct_len % 16 != 0 || (int)ct_len >= out_cap) { ESP_LOGE(TAG, "resp ct_len %d invalid", (int)ct_len); result = ESP_FAIL; goto done; }
+
+    /* Authenticate the response BEFORE trusting its ciphertext. The reply is
+     * signature(32) || ct, with signature = SHA256(sess->sig || be32(seq) || ct)
+     * over the same seq as the request. Skipping this (only stepping past the
+     * 32-byte prefix) let a LAN MITM forge/corrupt a response — e.g. mask an
+     * overheat/overcurrent status so the safety cutoff never fires. Reject on
+     * mismatch rather than AES-decrypt attacker-chosen bytes. */
+    uint8_t resp_sig[32];
+    seg_t rs[3] = { {sess->sig, 28}, {seqb, 4}, {resp + 32, ct_len} };
+    sha256_segs(rs, 3, resp_sig);
+    if (!ct_bytes_eq(resp_sig, resp, 32)) {
+        ESP_LOGE(TAG, "resp signature mismatch (seq=%ld) — possible tamper", (long)seq);
+        result = ESP_FAIL;
+        goto done;
+    }
+
     if (aes_cbc_crypt(MBEDTLS_AES_DECRYPT, sess->key, full_iv, resp + 32, out_plain, ct_len) != 0) goto done;
 
     int plen = (int)ct_len;

@@ -1,9 +1,22 @@
 # Firmware Flash + NVS Encryption — Operator Runbook
 
-*Status: **config prepared, not burned.** The build recipe and partition table
-exist in-repo (`firmware/sdkconfig.flashenc`, `firmware/partitions_ota_enc.csv`);
-no device has been encrypted. Burning encryption is a deliberate, per-device,
-**irreversible** operator action — decide with this doc.*
+*Status: **config prepared + designated the standard for new field units, not
+yet burned.** The build recipe and partition table exist in-repo
+(`firmware/sdkconfig.flashenc`, `firmware/partitions_ota_enc.csv`) and are
+verified complete; **as of the 2026-08-06 deep-audit remediation (finding H2),
+encrypted-NVS is the standard production build for all NEW
+field/manufacturing units** — but no device has been encrypted yet, and the
+**mainline default (`sdkconfig.defaults`) stays plaintext/reversible on
+purpose** (so dev boards and already-fielded units keep a safe serial
+re-flash). Burning encryption is a deliberate, per-device, **irreversible**
+operator action done once at manufacture — decide with this doc.*
+
+> **Why the split (default plaintext, but encrypted for new production units)?**
+> Flipping the mainline default to enable flash encryption would make the next
+> `idf.py flash` of ANY unit — including dev boards and existing gateways —
+> burn eFuses irreversibly. So encryption lives in an opt-in build profile
+> (`sdkconfig.flashenc`, layered over the defaults) that the manufacturing flow
+> selects for new units, never the default target.
 
 Closes the config half of [SECURITY.md §8.2](../../docs/SECURITY.md) (plaintext
 NVS secrets) / TECH_DEBT device-security. See also
@@ -22,11 +35,13 @@ is encrypted is unrecoverable (below).
 >   and the number of plaintext reflash cycles is bounded by the `FLASH_CRYPT_CNT`
 >   eFuse. Casual "flash a random sketch" reuse is gone.
 >
-> **Only encrypt units you are committing to production AmpHive gateways — never a
-> board you may want to reclaim** for prototyping or another project. If you rotate
-> a small pool of dev boards between projects, leave them **plaintext** and rely on
-> physical security of the enclosure instead (a legitimate choice for a
-> low-physical-risk site, e.g. a locked cabinet).
+> **Encrypt every unit you are committing to production AmpHive gateways — this
+> is now the standard for new field/manufacturing units (finding H2) — but never
+> a board you may want to reclaim** for prototyping or another project. Any unit
+> being shipped to a customer/site IS a production unit and should be encrypted;
+> if instead you rotate a small pool of dev boards between projects, leave them
+> **plaintext** and rely on physical security of the enclosure instead (a
+> legitimate choice for a low-physical-risk site, e.g. a locked cabinet).
 >
 > **Encryption does NOT freeze credentials.** Changing the Wi-Fi / Tapo / MQTT
 > password later still works normally — NVS encryption is transparent on write, so

@@ -7,6 +7,7 @@ import hmac
 import logging
 import os
 import secrets
+import time
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
 
@@ -15,6 +16,7 @@ import google.oauth2.id_token as google_id_token
 import requests
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
+from pydantic import BaseModel
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -258,6 +260,68 @@ GOOGLE_STATE_COOKIE_MAX_AGE = 600  # 10 minutes — this leg of the flow is fast
 GOOGLE_AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 
+# --- Single-use, browser-bound OAuth exchange codes (M5 hardening) ---------
+#
+# Once google_callback has finished the server-side Google round-trip it must
+# get the freshly-minted app JWT to the SPA. Handing the JWT straight to the
+# browser in the redirect's URL fragment (`#token=...`) is a login-CSRF /
+# session-fixation vector: the token is an UNBOUND bearer credential sitting
+# in a shareable URL, so an attacker who completes their OWN Google sign-in
+# can mail the resulting `.../callback#token=<attacker JWT>` link to a victim
+# and silently drop the victim into the ATTACKER's account (victim's added
+# credit, PII, etc. land on the attacker's account).
+#
+# Instead the callback mints a random, SINGLE-USE, short-lived CODE, stashes
+# the real JWT server-side keyed by that code alongside a fresh per-flow
+# NONCE, and sets the nonce in an httpOnly cookie on the redirect. The SPA
+# reads `#code=...` from the fragment and POSTs it to /api/auth/google/exchange
+# (which sends the nonce cookie back); only the browser that actually finished
+# the flow — and therefore holds the httpOnly nonce cookie — can trade the
+# code for the JWT. A planted code carried by a different browser has no
+# matching nonce cookie and is refused. The code still travels in the fragment
+# (never hits server/proxy access logs); the nonce never leaves the browser.
+#
+# In-memory, single-process store — matches the single-backend deployment
+# (see docs). A restart just forces any in-flight sign-in to retry the (fast)
+# redirect; nothing durable is lost.
+GOOGLE_EXCHANGE_COOKIE = "google_oauth_nonce"
+GOOGLE_EXCHANGE_TTL_SECONDS = 120  # the SPA redeems the code immediately on land
+_google_exchange_store: dict[str, tuple[str, str, float]] = {}  # code -> (jwt, nonce, expires_at)
+
+
+def _prune_expired_exchange_codes(now: float) -> None:
+    """Drop timed-out codes so the store can't grow unbounded from abandoned
+    sign-ins (browser closed before the SPA redeemed the code)."""
+    for code in [c for c, (_jwt, _nonce, exp) in _google_exchange_store.items() if exp <= now]:
+        _google_exchange_store.pop(code, None)
+
+
+def _store_exchange_code(token: str, nonce: str) -> str:
+    """Stash `token` under a fresh random code bound to `nonce`; return the
+    code. No await between here and consumption, so the plain-dict mutation is
+    safe under the single-process event loop (no lock needed)."""
+    now = time.monotonic()
+    _prune_expired_exchange_codes(now)
+    code = secrets.token_urlsafe(32)
+    _google_exchange_store[code] = (token, nonce, now + GOOGLE_EXCHANGE_TTL_SECONDS)
+    return code
+
+
+def _consume_exchange_code(code: str, nonce: str | None) -> str | None:
+    """Redeem `code` for its JWT iff `nonce` matches the one it was bound to
+    and it hasn't expired. The code is popped UNCONDITIONALLY (strictly
+    single-use — a replay, or a wrong-nonce attempt, both burn it), then the
+    nonce is checked in constant time. Returns None on any failure."""
+    entry = _google_exchange_store.pop(code, None)
+    if entry is None:
+        return None
+    token, stored_nonce, expires_at = entry
+    if time.monotonic() > expires_at:
+        return None
+    if not nonce or not hmac.compare_digest(stored_nonce, nonce):
+        return None
+    return token
+
 
 def _google_oauth_config():
     """Read the three Google OAuth env vars at CALL time, not import time, so
@@ -491,9 +555,63 @@ async def google_callback(request: Request, db: AsyncSession = Depends(get_db)):
     )
     await check_and_speed_up_active_session(db, user.id)
 
-    redirect_url = f"{email_service.frontend_origin()}/auth/google/callback#token={token}"
+    # [M5] Don't hand the raw JWT to the browser in the fragment (an unbound
+    # bearer token in a shareable URL = login-CSRF / session-fixation). Mint a
+    # single-use code bound to a fresh nonce, stash the JWT server-side, and
+    # set the nonce httpOnly cookie so ONLY this browser can redeem the code at
+    # /api/auth/google/exchange. See the exchange-store block above.
+    nonce = secrets.token_urlsafe(24)
+    code = _store_exchange_code(token, nonce)
+    redirect_url = f"{email_service.frontend_origin()}/auth/google/callback#code={code}"
     response = RedirectResponse(url=redirect_url, status_code=302)
     response.delete_cookie(GOOGLE_STATE_COOKIE)
+    response.set_cookie(
+        GOOGLE_EXCHANGE_COOKIE,
+        nonce,
+        max_age=GOOGLE_EXCHANGE_TTL_SECONDS,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+    )
+    return response
+
+
+class GoogleExchangeRequest(BaseModel):
+    """Body for POST /api/auth/google/exchange — just the single-use code the
+    SPA pulled out of the callback redirect's URL fragment. Defined inline
+    (not in schemas.py) since it's specific to this one browser-binding step."""
+
+    code: str
+
+
+@router.post("/api/auth/google/exchange")
+async def google_exchange(req: GoogleExchangeRequest, request: Request):
+    """
+    Trade a single-use Google sign-in code for the real app JWT.
+
+    The code was delivered to the SPA in the callback redirect's URL fragment;
+    the matching nonce rides in the httpOnly `google_oauth_nonce` cookie set on
+    that same redirect. Redemption succeeds only when BOTH arrive together from
+    the same browser — that binding is what defeats the M5 login-CSRF /
+    session-fixation attack (a planted `#code=...` link opened in a victim's
+    browser has no matching nonce cookie, so the code is worthless there).
+
+    The code is consumed on first lookup (single-use); replay, wrong nonce,
+    expiry, and unknown code all get the same generic 400 (no oracle). The
+    nonce cookie is cleared on every exit — the code is spent regardless.
+    """
+    nonce = request.cookies.get(GOOGLE_EXCHANGE_COOKIE)
+    token = _consume_exchange_code(req.code, nonce)
+    if token is None:
+        response = JSONResponse(
+            status_code=400,
+            content={"detail": "Invalid or expired sign-in. Please try again."},
+        )
+        response.delete_cookie(GOOGLE_EXCHANGE_COOKIE)
+        return response
+
+    response = JSONResponse(status_code=200, content={"token": token})
+    response.delete_cookie(GOOGLE_EXCHANGE_COOKIE)
     return response
 
 

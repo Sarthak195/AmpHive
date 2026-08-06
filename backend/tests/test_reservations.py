@@ -779,14 +779,19 @@ async def test_my_reservations_splits_upcoming_and_history(factory):
 
 
 @pytest.mark.asyncio
-async def test_plug_schedule_lists_booked_windows_with_holder(factory):
+async def test_plug_schedule_reveals_holder_to_private_group_member(factory):
+    """The coordination case (L6): on a PRIVATE group the caller belongs to,
+    fellow members see each holder's name so they can book around each other."""
     from backend.routers.reservations import plug_reservations
 
     tenant_id = await _seed_tenant(factory)
     gw = await _seed_gateway(factory, tenant_id)
-    plug_id = await _seed_plug(factory, gw)
+    group_id = await _seed_private_group(factory, tenant_id)
+    plug_id = await _seed_plug(factory, gw, group_id=group_id)
     holder = await _seed_user(factory, tenant_id=tenant_id)
     viewer = await _seed_user(factory, tenant_id=tenant_id)
+    await _join_group(factory, holder, group_id)
+    await _join_group(factory, viewer, group_id)
 
     now = _now()
     await _seed_reservation(
@@ -801,6 +806,41 @@ async def test_plug_schedule_lists_booked_windows_with_holder(factory):
     assert schedule[0].user_name == "Reservation Tester"
     assert schedule[0].is_mine is False
     assert schedule[0].status == "booked"
+
+
+@pytest.mark.asyncio
+async def test_plug_schedule_hides_other_holder_identity_on_public_plug(factory):
+    """L6: on an ungrouped/public plug — visible to anyone — other drivers'
+    names are withheld (user_name=None) so the schedule can't be mined for who
+    booked a public charger and when. The caller's OWN row keeps full detail."""
+    from backend.routers.reservations import plug_reservations
+
+    tenant_id = await _seed_tenant(factory)
+    gw = await _seed_gateway(factory, tenant_id)
+    plug_id = await _seed_plug(factory, gw)  # ungrouped → public visibility
+    holder = await _seed_user(factory, tenant_id=tenant_id)
+    viewer = await _seed_user(factory, tenant_id=tenant_id)
+
+    now = _now()
+    # Someone else's booking (soonest) + the viewer's own (later).
+    await _seed_reservation(
+        factory, plug_id=plug_id, user_id=holder, tenant_id=tenant_id,
+        start_at=now + timedelta(hours=1), end_at=now + timedelta(hours=2),
+    )
+    await _seed_reservation(
+        factory, plug_id=plug_id, user_id=viewer, tenant_id=tenant_id,
+        start_at=now + timedelta(hours=3), end_at=now + timedelta(hours=4),
+    )
+
+    async with factory() as db:
+        schedule = await plug_reservations(plug_id, _fake_user(viewer), db)
+
+    assert len(schedule) == 2
+    other, mine = schedule[0], schedule[1]
+    assert other.is_mine is False
+    assert other.user_name is None            # other driver's identity withheld
+    assert mine.is_mine is True
+    assert mine.user_name == "Reservation Tester"  # own row keeps full detail
 
 
 @pytest.mark.asyncio

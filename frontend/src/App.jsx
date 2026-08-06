@@ -119,9 +119,10 @@ const authRoutes = (
     <Route path="/login" element={<Login />} />
     <Route path="/signup" element={<Signup />} />
     {passwordResetRoutes}
-    {/* "Sign in with Google" lands here with the app JWT in the URL
-        fragment (#token=...) — see backend/routers/auth.py google_callback
-        and pages/GoogleCallback.jsx. */}
+    {/* "Sign in with Google" lands here with a single-use, nonce-bound
+        exchange code in the URL fragment (#code=...) that GoogleCallback
+        POSTs to /api/auth/google/exchange for the app JWT — see
+        backend/routers/auth.py google_callback and pages/GoogleCallback.jsx. */}
     <Route path="/auth/google/callback" element={<GoogleCallback />} />
   </>
 );

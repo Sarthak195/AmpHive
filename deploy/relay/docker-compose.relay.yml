@@ -69,6 +69,12 @@ services:
     container_name: amphive-mqtt
     restart: unless-stopped
     mem_limit: 48m
+    # Block privilege escalation. NOT cap_drop-ed: the mosquitto image starts as
+    # root to chown its data/log dirs and setuid down to the mosquitto user, so
+    # dropping ALL caps risks breaking that startup — kept conservative per the
+    # audit (do-not-break mqtt).
+    security_opt:
+      - "no-new-privileges:true"
     ports:
       # Direct-MQTT: gateways/agents dial mqtts://mqtt.amphive.app:8883 (or the
       # relay's IP directly) from anywhere. Plaintext 1883 is intentionally
@@ -109,6 +115,16 @@ services:
     container_name: amphive-backend
     restart: unless-stopped
     mem_limit: 300m
+    # Hardening (Dockerfile already runs uvicorn as non-root uid 10001): block
+    # privilege escalation and drop ALL Linux capabilities — uvicorn on the
+    # unprivileged :8000 needs none. NOTE: the firmware_images volume below is
+    # mounted at /app/data/firmware-images; if it already exists root-owned on
+    # this relay (created while the backend ran as root), chown it to 10001 on
+    # the host or admin firmware upload 500s with EACCES (see deploy notes).
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
     # Every backend setting (DATABASE_URL, MQTT_*, JWT_SECRET_KEY, RAZORPAY_*,
     # coin/GST/reservation config, VAPID, SMTP, ...) comes straight from .env —
     # .env.template's MQTT_BROKER_HOST=mqtt / MQTT_BROKER_PORT=1883 already
@@ -160,6 +176,20 @@ services:
     # light (typically well under 20 MB RSS), so 48m is a generous ceiling
     # rather than a real requirement. Kept so Caddy has something to proxy to.
     mem_limit: 48m
+    # Hardening: block privilege escalation and drop ALL caps, then add back only
+    # what the stock nginx image genuinely needs — NET_BIND_SERVICE (bind :80),
+    # SETUID/SETGID (master spawns workers as the nginx user), CHOWN (master
+    # chowns its cache/temp dirs to that user at startup). If nginx fails to
+    # start after a redeploy, add DAC_OVERRIDE.
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+      - NET_BIND_SERVICE
     # No host port: caddy is the only public web entrypoint and reaches this
     # container over the internal network as 'frontend:80' (matches
     # docker-compose.tls.yml).

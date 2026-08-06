@@ -227,4 +227,51 @@ describe('loginWithToken (Google sign-in redirect)', () => {
     await waitFor(() => expect(api.get).toHaveBeenCalledWith('/api/auth/me'));
     expect(await screen.findByTestId('user')).toHaveTextContent('driver@amphive.test');
   });
+
+  // [M5 guard] An unexpected callback must not swap the signed-in account out
+  // from under someone. Refuse to silently replace a still-valid session that
+  // belongs to a DIFFERENT user (defense in depth behind the backend's
+  // nonce-binding fix).
+  it('refuses to silently replace a still-valid session belonging to a different user', async () => {
+    const existingToken = makeFakeToken({ sub: '1', email: 'existing@amphive.test', role: 'driver' });
+    localStorage.setItem('amphive_token', existingToken);
+    localStorage.setItem(
+      'amphive_user',
+      JSON.stringify({ id: 1, email: 'existing@amphive.test', role: 'driver' })
+    );
+    api.get.mockResolvedValue({ id: 1, email: 'existing@amphive.test', role: 'driver' });
+    // The unexpected callback carries a token for a DIFFERENT account.
+    googleToken = makeFakeToken({ sub: '2', email: 'attacker@amphive.test', role: 'driver' });
+
+    renderProbe();
+    await waitFor(() =>
+      expect(screen.getByTestId('user')).toHaveTextContent('existing@amphive.test')
+    );
+
+    await userEvent.click(screen.getByText('loginWithToken'));
+
+    // Session untouched — the foreign token was rejected, not adopted.
+    expect(localStorage.getItem('amphive_token')).toBe(existingToken);
+    expect(screen.getByTestId('user')).toHaveTextContent('existing@amphive.test');
+  });
+
+  it('still adopts a fresh token for the SAME user (smooth re-auth; guard does not block)', async () => {
+    const oldToken = makeFakeToken({ sub: '9', email: 'googledriver@amphive.test', role: 'driver' });
+    localStorage.setItem('amphive_token', oldToken);
+    api.get.mockResolvedValue({ id: 9, email: 'googledriver@amphive.test', role: 'driver' });
+    // New token, same subject (different string via a fresh iat) — a normal
+    // re-auth, which must proceed and replace the old token.
+    googleToken = makeFakeToken({
+      sub: '9', email: 'googledriver@amphive.test', role: 'driver', iat: 999,
+    });
+
+    renderProbe();
+    await waitFor(() =>
+      expect(screen.getByTestId('user')).toHaveTextContent('googledriver@amphive.test')
+    );
+
+    await userEvent.click(screen.getByText('loginWithToken'));
+
+    await waitFor(() => expect(localStorage.getItem('amphive_token')).toBe(googleToken));
+  });
 });
