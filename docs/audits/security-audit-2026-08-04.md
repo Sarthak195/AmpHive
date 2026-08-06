@@ -1,6 +1,6 @@
 # Security audit — 2026-08-04 (multi-model, whole codebase)
 
-Status: **REMEDIATED 2026-08-06** on branch `security/deep-audit-remediation-2026-08-06` (draft PR — not yet merged/deployed). Findings recorded 2026-08-04. See the "Remediation status" table below for per-finding disposition and operator-gated follow-ups.
+Status: **REMEDIATED + DEPLOYED 2026-08-06** — code fixes are live on prod (deployed from branch `security/deep-audit-remediation-2026-08-06` @ a23a11f via deploy.ps1; health 200, no migration drift; P1 container-hardening deferred). **PR #113 remains OPEN pending human review + merge** — prod is temporarily ahead of main until it lands. Findings recorded 2026-08-04. See the "Remediation status" table below for per-finding disposition and operator-gated follow-ups.
 
 Author: Claude (Fable 5 + Opus 4.8) — 8-surface whitebox sweep with cross-model adversarial verification.
 
