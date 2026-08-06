@@ -117,8 +117,8 @@ async def start_charging_session(
     #    simultaneous starts by the same user serialize here, so the loser
     #    counts the winner's committed session (a plain count would let both
     #    pass and exceed the cap). Lock order is user -> plug everywhere the
-    #    two are taken together (finalize goes session -> user -> plug), so
-    #    no lock cycle is possible.
+    #    two are taken together (finalize now also locks user -> session, never
+    #    the reverse), so no lock cycle is possible.
     locked_user = await db.execute(
         select(User).where(User.id == user.id).with_for_update()
     )
@@ -402,9 +402,10 @@ async def update_session_limits(
     Auth hold: changing max_kwh re-sizes this session's hold (hold_coins) with
     the same min(available, max_kwh * rate) rule the start path uses — grown so
     a raised ceiling stays covered, shrunk to free the difference when lowered.
-    Recomputed under the user-row lock (taken first; user -> session order here
-    has no cycle with finalize's session -> user). Legacy NULL-hold sessions
-    keep a NULL hold.
+    Recomputed under the user-row lock (taken first): the user -> session lock
+    order here now matches finalize_charging_session (which also locks user ->
+    session) and the walk-up start, so no AB-BA cycle is possible. Legacy
+    NULL-hold sessions keep a NULL hold.
 
     [Security] The resized hold is FLOORED at this session's already-accrued
     cost (billing.session_cost at the session's current energy_kwh — the same

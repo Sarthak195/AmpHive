@@ -74,14 +74,16 @@ describe('Login redirect target', () => {
     loginSpy.mockResolvedValue({});
     renderLogin({ pathname: '/login', state: { from: { pathname: '/', search: '?plug=42' } } });
     await submitLogin();
-    expect(await screen.findByTestId('location-probe')).toHaveTextContent('/?plug=42');
+    await screen.findByText('home page');
+    expect(screen.getByTestId('location-probe')).toHaveTextContent('/?plug=42');
   });
 
   it('falls back to the ?next= param when there is no state.from', async () => {
     loginSpy.mockResolvedValue({});
     renderLogin('/login?next=%2F%3Fplug%3D7');
     await submitLogin();
-    expect(await screen.findByTestId('location-probe')).toHaveTextContent('/?plug=7');
+    await screen.findByText('home page');
+    expect(screen.getByTestId('location-probe')).toHaveTextContent('/?plug=7');
   });
 
   it('?next= wins over state.from when both are present (contract C8)', async () => {
@@ -103,7 +105,8 @@ describe('Login redirect target', () => {
       state: { from: { pathname: '/', search: '?plug=9' } },
     });
     await submitLogin();
-    expect(await screen.findByTestId('location-probe')).toHaveTextContent('/?plug=9');
+    await screen.findByText('home page');
+    expect(screen.getByTestId('location-probe')).toHaveTextContent('/?plug=9');
   });
 
   it('falls back to Home when ?next= is protocol-relative and there is no state.from', async () => {

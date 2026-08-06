@@ -7,6 +7,7 @@ Socket.io user room. This router is the pull side (list, mark read) plus the
 push-subscription CRUD.
 """
 import logging
+import os
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, select, update
@@ -26,6 +27,16 @@ from backend.services.auth import get_current_user
 
 logger = logging.getLogger("amphive.api")
 router = APIRouter()
+
+# [L9] Per-user cap on stored Web-Push subscriptions. Each distinct browser /
+# device is one row and a benign user has only a handful; the cap bounds a
+# single authenticated user from flooding push_subscriptions with unique
+# endpoints (storage-exhaustion DoS — and every stored endpoint is later a
+# server-side POST target). Re-subscribing an already-stored endpoint updates
+# it in place and is never capped, so a user's real devices keep working.
+MAX_PUSH_SUBSCRIPTIONS_PER_USER = int(
+    os.getenv("MAX_PUSH_SUBSCRIPTIONS_PER_USER") or "20"
+)
 
 
 @router.get("/api/notifications", response_model=NotificationListResponse)
@@ -151,6 +162,23 @@ async def push_subscribe(
         existing.p256dh = req.keys.p256dh
         existing.auth = req.keys.auth
     else:
+        # Only a NEW row grows the table, so the cap is checked here (a re-own /
+        # key-refresh of an existing endpoint above is exempt). The count+insert
+        # has a benign boundary race — a user might momentarily hold cap+1 rows
+        # — which is harmless for a soft anti-DoS bound.
+        sub_count = (await db.execute(
+            select(func.count())
+            .select_from(PushSubscription)
+            .where(PushSubscription.user_id == user.id)
+        )).scalar_one()
+        if sub_count >= MAX_PUSH_SUBSCRIPTIONS_PER_USER:
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    f"Too many push subscriptions ({sub_count}); the limit is "
+                    f"{MAX_PUSH_SUBSCRIPTIONS_PER_USER}. Remove an old device first."
+                ),
+            )
         db.add(PushSubscription(
             user_id=user.id,
             endpoint=req.endpoint,

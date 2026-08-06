@@ -91,7 +91,8 @@ describe('Signup', () => {
     await userEvent.type(screen.getByLabelText('Password'), 'password123');
     await userEvent.click(screen.getByRole('button', { name: 'Create account' }));
 
-    expect(await screen.findByTestId('location-probe')).toHaveTextContent('/?plug=7');
+    await screen.findByText('home page');
+    expect(screen.getByTestId('location-probe')).toHaveTextContent('/?plug=7');
   });
 
   it('rejects an open-redirect ?next= and falls back to Home', async () => {

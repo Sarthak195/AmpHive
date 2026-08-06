@@ -12,8 +12,31 @@
 #     the VM keeps amphive.duckdns.org pointed there).
 #   - GCP firewall allows inbound tcp:80 AND tcp:443 to the VM.
 
+# Global options. trusted_proxies (M3): trust ONLY the compose private network
+# as a proxy hop, so a direct internet client cannot spoof X-Forwarded-For to
+# poison the backend's per-IP rate limiter (backend rate_limit.py). Caddy is the
+# edge, so these ranges make it write a clean XFF = the real client IP.
+{
+	# email you@example.com   # uncomment for Let's Encrypt expiry notices
+	servers {
+		trusted_proxies static 172.16.0.0/12 192.168.0.0/16 10.0.0.0/8
+	}
+}
+
 amphive.duckdns.org {
 	encode gzip
+
+	# Security response headers (P3). Caddy `header <field> <value>` SETS
+	# (replaces) the field, so these are the one authoritative copy even though
+	# the frontend nginx also emits an identical set. CSP mirrors
+	# deploy/relay/deploy-relay.sh (razorpay, self-hosted fonts, wss websockets).
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Content-Security-Policy "default-src 'self'; script-src 'self' https://*.razorpay.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' https: wss:; frame-src https://*.razorpay.com; base-uri 'self'; form-action 'self'"
+	}
 
 	# WebSocket + API + SPA all live behind the frontend nginx container, which
 	# already proxies /api and /socket.io to the backend. Caddy just terminates
@@ -27,5 +50,14 @@ amphive.duckdns.org {
 # redir once a paid/reliable domain is in place.
 http:// {
 	encode gzip
+	# Same security headers as the named site above (P3); HSTS is a harmless
+	# no-op over plain http — browsers ignore it per spec.
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Content-Security-Policy "default-src 'self'; script-src 'self' https://*.razorpay.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' https: wss:; frame-src https://*.razorpay.com; base-uri 'self'; form-action 'self'"
+	}
 	reverse_proxy frontend:80
 }

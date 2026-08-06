@@ -114,14 +114,45 @@ def test_idle_keys_are_swept():
 
 # -------------------------------------------------------------- client_ip ---
 
-def test_client_ip_uses_first_forwarded_entry():
-    req = _request(headers={"x-forwarded-for": "203.0.113.7, 172.18.0.4"})
+def test_client_ip_selects_client_by_trusted_hops_from_right():
+    # Chain the backend sees: <spoofed>, <real client>, <nginx→caddy peer>.
+    # With 2 trusted hops (Caddy + nginx append one entry each), the real client
+    # is the 2nd token from the RIGHT; the attacker-supplied leftmost entry is
+    # ignored — trusting it (the old leftmost behaviour) is exactly the M3 bug.
+    req = _request(headers={"x-forwarded-for": "9.9.9.9, 203.0.113.7, 172.18.0.4"})
     assert client_ip(req) == "203.0.113.7"
+
+
+def test_client_ip_ignores_spoofed_leftmost_prefix():
+    """Adding fabricated leftmost tokens must not change the selected client."""
+    plain = _request(headers={"x-forwarded-for": "203.0.113.7, 172.18.0.4"})
+    spoofed = _request(headers={"x-forwarded-for": "1.2.3.4, 5.6.7.8, 203.0.113.7, 172.18.0.4"})
+    assert client_ip(plain) == client_ip(spoofed) == "203.0.113.7"
 
 
 def test_client_ip_strips_whitespace():
-    req = _request(headers={"x-forwarded-for": "  203.0.113.7  "})
+    req = _request(headers={"x-forwarded-for": "  203.0.113.7 ,  172.18.0.4  "})
     assert client_ip(req) == "203.0.113.7"
+
+
+def test_client_ip_short_chain_falls_back_to_peer():
+    # Fewer entries than the trusted-hop count (here a single forwarded token):
+    # no forwarded value is trustworthy, so fall back to the real peer address.
+    req = _request(headers={"x-forwarded-for": "203.0.113.7"}, host="192.0.2.1")
+    assert client_ip(req) == "192.0.2.1"
+
+
+def test_client_ip_honours_trusted_proxy_hops_env(monkeypatch):
+    # nginx-only stack (1 trusted hop): the real client is the rightmost entry.
+    monkeypatch.setenv("TRUSTED_PROXY_HOPS", "1")
+    req = _request(headers={"x-forwarded-for": "9.9.9.9, 203.0.113.7"})
+    assert client_ip(req) == "203.0.113.7"
+
+
+def test_client_ip_bad_trusted_proxy_hops_env_uses_default(monkeypatch):
+    monkeypatch.setenv("TRUSTED_PROXY_HOPS", "not-a-number")
+    req = _request(headers={"x-forwarded-for": "9.9.9.9, 203.0.113.7, 172.18.0.4"})
+    assert client_ip(req) == "203.0.113.7"  # falls back to the default 2 hops
 
 
 def test_client_ip_falls_back_to_peer_address():
@@ -153,8 +184,9 @@ async def test_dependency_raises_429_with_retry_after():
 
 
 @pytest.mark.asyncio
-async def test_dependency_keys_by_forwarded_client_not_proxy_hop():
-    """Two clients behind the same proxy chain must not share a bucket."""
+async def test_dependency_keys_by_trusted_hop_client():
+    """Two distinct real clients (2nd token from the right, behind Caddy+nginx)
+    behind the same proxy chain must not share a bucket."""
     limiter = SlidingWindowRateLimiter(1, 60, clock=FakeClock())
     dep = rate_limit_dependency(limiter, "login")
 
@@ -163,6 +195,19 @@ async def test_dependency_keys_by_forwarded_client_not_proxy_hop():
     await dep(_request(headers={"x-forwarded-for": "203.0.113.2, 172.18.0.4"}))
     with pytest.raises(HTTPException):
         await dep(_request(headers={"x-forwarded-for": "203.0.113.1, 172.18.0.4"}))
+
+
+@pytest.mark.asyncio
+async def test_dependency_spoofed_leftmost_cannot_mint_fresh_budget():
+    """Rotating the spoofable leftmost X-Forwarded-For token must NOT let one
+    real client escape its bucket — the core M3 abuse."""
+    limiter = SlidingWindowRateLimiter(1, 60, clock=FakeClock())
+    dep = rate_limit_dependency(limiter, "login")
+
+    await dep(_request(headers={"x-forwarded-for": "203.0.113.1, 172.18.0.4"}))
+    # Same real client, a fabricated fresh leftmost token: still the same bucket.
+    with pytest.raises(HTTPException):
+        await dep(_request(headers={"x-forwarded-for": "8.8.8.8, 203.0.113.1, 172.18.0.4"}))
 
 
 # ----------------------------------------------------- account dependency ---
@@ -436,14 +481,18 @@ def test_blanket_middleware_429s_over_the_limit_with_retry_after():
     assert int(resp.headers["Retry-After"]) >= 1
 
 
-def test_blanket_middleware_keys_by_forwarded_client_not_proxy_hop():
+def test_blanket_middleware_keys_by_trusted_hop_not_spoofable_prefix():
     client = TestClient(_blanket_app())
     with _patched_blanket(SlidingWindowRateLimiter(1, 60, clock=FakeClock())):
+        # Real client = 2nd token from the right (Caddy + nginx append 2 hops).
         a = {"X-Forwarded-For": "203.0.113.1, 172.18.0.4"}
         b = {"X-Forwarded-For": "203.0.113.2, 172.18.0.4"}
         assert client.get("/api/things", headers=a).status_code == 200
         assert client.get("/api/things", headers=b).status_code == 200  # own bucket
-        assert client.get("/api/things", headers=a).status_code == 429
+        # Rotating the spoofable leftmost entry does NOT mint a fresh budget:
+        # it resolves to the same real client (203.0.113.1) and is throttled.
+        spoofed = {"X-Forwarded-For": "1.2.3.4, 203.0.113.1, 172.18.0.4"}
+        assert client.get("/api/things", headers=spoofed).status_code == 429
 
 
 def test_blanket_middleware_exempts_health_and_non_api_paths():

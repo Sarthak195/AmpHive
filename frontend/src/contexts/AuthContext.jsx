@@ -71,27 +71,57 @@ export const AuthProvider = ({ children }) => {
     return data;
   }, [refreshUser]);
 
-  // "Sign in with Google" (GoogleCallback page): the backend already did the
-  // OAuth round-trip server-side and handed back a normal app JWT (same
-  // shape/claims as login()'s) via the callback redirect's URL fragment —
-  // there's no separate token exchange to do here, just the same
-  // persist-then-restore tail login() does. The JWT payload (base64url,
-  // NOT signature-verified here — verification already happened server-side
-  // when this token was minted; get_current_user/refreshUser below are the
-  // actual trust boundary) gives an optimistic {id, email, role} to render
+  // "Sign in with Google" (GoogleCallback page): the SPA has already traded
+  // the single-use callback code for a normal app JWT (same shape/claims as
+  // login()'s) via POST /api/auth/google/exchange — this is just the same
+  // persist-then-restore tail login() does. The JWT payload (base64url, NOT
+  // signature-verified here — verification already happened server-side when
+  // this token was minted; get_current_user/refreshUser below are the actual
+  // trust boundary) gives an optimistic {id, email, role} to render
   // immediately, same spirit as login()'s optimistic data.user.
   const loginWithToken = useCallback(async (token) => {
-    localStorage.setItem('amphive_token', token);
+    // Parse the incoming (already server-verified) token for its subject +
+    // optimistic fields. Malformed → null: we skip the optimistic render but
+    // still persist + refreshUser (server is the real gate), matching the
+    // prior behavior.
+    let incoming = null;
     try {
-      const payload = JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
-      const optimisticUser = { id: Number(payload.sub), email: payload.email, role: payload.role };
+      incoming = JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
+    } catch (err) {
+      console.warn('Could not parse Google login token for optimistic user:', err.message);
+    }
+
+    // [M5 guard — defense in depth] Refuse to SILENTLY replace a still-valid
+    // session that belongs to a DIFFERENT user. The backend nonce-binding is
+    // what actually stops the planted-link login-CSRF; this guard additionally
+    // ensures an unexpected callback can't swap the signed-in account out from
+    // under someone without an explicit sign-out. A fresh login (no session)
+    // or a re-auth of the SAME user proceeds smoothly.
+    const existing = localStorage.getItem('amphive_token');
+    if (existing && existing !== token && incoming) {
+      let current = null;
+      try {
+        current = JSON.parse(atob(existing.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
+      } catch {
+        // Unparseable existing token — leave `current` null so the guard below
+        // treats it as no comparable session and the login proceeds.
+      }
+      const stillValid = current && (!current.exp || current.exp * 1000 > Date.now());
+      const differentUser = current && String(current.sub) !== String(incoming.sub);
+      if (stillValid && differentUser) {
+        const err = new Error(
+          'You are already signed in with a different account. Sign out first to switch accounts.'
+        );
+        err.code = 'already_signed_in';
+        throw err; // caller (GoogleCallback) shows a return-to-app path; session untouched
+      }
+    }
+
+    localStorage.setItem('amphive_token', token);
+    if (incoming) {
+      const optimisticUser = { id: Number(incoming.sub), email: incoming.email, role: incoming.role };
       localStorage.setItem('amphive_user', JSON.stringify(optimisticUser));
       setUser(optimisticUser);
-    } catch (err) {
-      // Malformed token payload — skip the optimistic render, refreshUser
-      // below still does the real work (and will clear the token if the
-      // server rejects it).
-      console.warn('Could not parse Google login token for optimistic user:', err.message);
     }
     await refreshUser();
   }, [refreshUser]);

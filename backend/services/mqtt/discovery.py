@@ -10,9 +10,18 @@ rather than a delegating collaborator object.
 import asyncio
 import json
 import logging
+import os
 from typing import Any, Dict
 
 logger = logging.getLogger("amphive.mqtt")
+
+# Per-gateway cap on auto-discovered plugs (defense-in-depth). A single claimed
+# gateway that announces an unbounded stream of distinct unique_ids would
+# otherwise create one Plug row per id — storage / roster-bloat DoS. A real
+# gateway fronts a handful of plugs, so the default leaves generous headroom;
+# discovery fails SAFE when the cap is hit (the new-plug announcement is
+# dropped, while updates to already-known plugs still apply). Env-tunable.
+MAX_PLUGS_PER_GATEWAY = int(os.getenv("MAX_PLUGS_PER_GATEWAY") or "64")
 
 
 class MQTTDiscoveryMixin:
@@ -47,7 +56,7 @@ class MQTTDiscoveryMixin:
 
     async def _persist_plug_discovery(self, gateway_id: str, payload: Dict[str, Any]):
         """Upsert the discovered plug by unique_id, then publish the assignment map."""
-        from sqlalchemy import select
+        from sqlalchemy import func, select
 
         from backend.database.models import Gateway, Plug
 
@@ -80,6 +89,26 @@ class MQTTDiscoveryMixin:
                 ).scalar_one_or_none()
 
                 if existing is None:
+                    # Per-gateway plug cap: bound how many rows a single
+                    # (claimed) gateway can spawn via discovery. Fail safe —
+                    # drop the announcement rather than grow the table without
+                    # limit. Only NEW plugs are gated; updates below still run.
+                    plug_count = (
+                        await session.execute(
+                            select(func.count())
+                            .select_from(Plug)
+                            .where(Plug.gateway_id == gateway_id)
+                        )
+                    ).scalar_one()
+                    if plug_count >= MAX_PLUGS_PER_GATEWAY:
+                        logger.warning(
+                            "Discovery plug cap reached for gateway; ignoring new plug",
+                            extra={
+                                "gateway_id": gateway_id, "unique_id": unique_id,
+                                "count": plug_count, "cap": MAX_PLUGS_PER_GATEWAY,
+                            },
+                        )
+                        return
                     session.add(Plug(
                         gateway_id=gateway_id, name=alias, local_ip=local_ip,
                         plug_model=model, unique_id=unique_id,

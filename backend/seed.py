@@ -15,15 +15,17 @@ Or via Docker Compose:
 
 import asyncio
 import os
+import secrets
 import sys
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlsplit
 
 # Add parent directory to sys.path so backend imports work
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from sqlalchemy import select
 
-from backend.database.db import async_session_factory, init_db
+from backend.database.db import DATABASE_URL, async_session_factory, init_db
 from backend.database.models import (
     ChargerGroup,
     ChargingSession,
@@ -41,8 +43,56 @@ from backend.database.models import (
 )
 from backend.services.auth import hash_password
 
+# Hosts we accept as a local/dev database target. AmpHive's own Compose stack
+# uses the 'db' service host for BOTH dev and prod, so this list can't fully
+# distinguish the two — the AMPHIVE_ALLOW_SEED flag is the real gate; this is a
+# backstop that still blocks the common footgun of pointing DATABASE_URL at a
+# managed/cloud DB hostname.
+_LOCAL_DB_HOSTS = frozenset(
+    {
+        "localhost",
+        "127.0.0.1",
+        "::1",
+        "0.0.0.0",
+        "host.docker.internal",
+        "db",
+        "postgres",
+        "amphive-db",
+        "amphive-db-dev",
+    }
+)
+
+
+def _require_local_dev_target() -> None:
+    """Refuse to seed unless this is an explicitly opted-in local/dev database.
+
+    This script hashes throwaway passwords and creates a platform ADMIN, so
+    running it against production would plant known test accounts. Two
+    independent gates, both required:
+
+      1. AMPHIVE_ALLOW_SEED must be truthy — a deliberate opt-in so seeding
+         never happens by accident (a stray `python seed.py`, an entrypoint).
+      2. DATABASE_URL must resolve to a recognized dev/local host (see
+         _LOCAL_DB_HOSTS) — a backstop against seeding a remote/managed DB even
+         when the flag is set.
+    """
+    if os.getenv("AMPHIVE_ALLOW_SEED", "").strip().lower() not in {"1", "true", "yes", "on"}:
+        sys.exit(
+            "[seed] Refusing to run. This creates ADMIN/CPO/DRIVER test accounts and\n"
+            "       must NEVER touch production. Set AMPHIVE_ALLOW_SEED=1 to confirm\n"
+            "       you are seeding a LOCAL/DEV database, then re-run."
+        )
+    host = (urlsplit(DATABASE_URL).hostname or "").lower()
+    if host not in _LOCAL_DB_HOSTS and not host.endswith(".local"):
+        sys.exit(
+            f"[seed] Refusing to run: DATABASE_URL host {host!r} is not a recognized\n"
+            "       dev/local target (localhost / 127.0.0.1 / db / host.docker.internal).\n"
+            "       Point DATABASE_URL at your local dev database to seed it."
+        )
+
 
 async def seed():
+    _require_local_dev_target()
     print("[*] Initializing database tables...")
     await init_db()
 
@@ -106,13 +156,17 @@ async def seed():
         ]
 
         users = {}
+        # Random, per-user passwords generated once and printed at the end —
+        # never a hardcoded, world-known value like the old "password123".
+        created_credentials: dict[str, str] = {}
         for u_data in users_to_create:
             existing = await db.execute(select(User).where(User.email == u_data["email"]))
             user = existing.scalar_one_or_none()
             if not user:
+                password = secrets.token_urlsafe(12)
                 user = User(
                     email=u_data["email"],
-                    hashed_password=hash_password("password123"),
+                    hashed_password=hash_password(password),
                     full_name=u_data["full_name"],
                     role=u_data["role"],
                     tenant_id=u_data["tenant_id"],
@@ -120,6 +174,7 @@ async def seed():
                 )
                 db.add(user)
                 await db.flush()
+                created_credentials[user.email] = password
                 print(f"✓ Created User: {user.email} ({user.role.value})")
             else:
                 print(f"  User {user.email} already exists")
@@ -127,6 +182,9 @@ async def seed():
 
         # --- 3. Charger Groups ---
         charger_groups = {}
+        # Random join code for the private group (was the static, world-known
+        # "VOLT123") — printed once at the end alongside the account passwords.
+        private_access_code = "VOLT-" + secrets.token_hex(3).upper()
         groups_to_create = [
             {
                 "name": "VoltNetwork Public Station",
@@ -138,7 +196,7 @@ async def seed():
                 "name": "VoltNetwork Corporate (Private)",
                 "tenant_id": tenants["VoltNetwork"].id,
                 "is_public": False,
-                "access_code": "VOLT123"
+                "access_code": private_access_code
             },
             {
                 "name": "GreenCharge City Hub",
@@ -346,14 +404,16 @@ async def seed():
 
         await db.commit()
         print("\n[+] Seeding successfully completed!")
-        print("-" * 50)
-        print("Default accounts for testing:")
-        print("  Admin:  admin@amphive.com    / password123")
-        print("  CPO 1:  cpo@voltnetwork.com   / password123")
-        print("  CPO 2:  cpo@greencharge.com  / password123")
-        print("  Driver: driver1@gmail.com     / password123")
-        print("  Driver: driver2@gmail.com     / password123")
-        print("-" * 50)
+        print("-" * 60)
+        if created_credentials:
+            print("Generated test-account passwords (shown ONCE — copy them now):")
+            for email, password in created_credentials.items():
+                print(f"  {email:<24} {password}")
+            print(f"\n  Private group join code: {private_access_code}")
+        else:
+            print("No new accounts created (they already existed) — passwords")
+            print("were only printed on the run that first created them.")
+        print("-" * 60)
 
 if __name__ == "__main__":
     asyncio.run(seed())

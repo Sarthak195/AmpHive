@@ -421,8 +421,14 @@ firmware/gateway simply isn't polling reproduces the incident exactly. See
 `tools/p110_sim/tests/test_plug.py`'s
 `test_manual_toggle_during_a_polling_gap_is_reflected_on_reconnect`.
 
-> **Credentials caveat:** the Tapo email/password are stored in NVS in plaintext
-> (acceptable for the prototype; a future hardening item).
+> **Credentials caveat:** in the **default** build the Tapo email/password (and
+> the Wi-Fi password, per-gateway MQTT credential, and captive-portal setup code)
+> are stored in NVS as **plaintext** — brief physical access + `esptool
+> read_flash` recovers them. New field units should ship the **encrypted-NVS
+> production build** (§6), which puts those secrets beyond `read_flash`; see
+> [deploy/docs/firmware_flash_encryption.md](../deploy/docs/firmware_flash_encryption.md).
+> Enabling encryption burns eFuses and is a one-time per-unit serial-flash step
+> at manufacture — it **cannot** be delivered by OTA.
 
 ## 5. Historical: microlink (removed 2026-08-02)
 
@@ -463,6 +469,20 @@ firmware/gateway simply isn't polling reproduces the incident exactly. See
   it means devices only accept a USB reflash. Plain-http OTA is gone
   (`CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP` removed; `ota_update_start` also refuses
   non-`https://` URLs).
+- **Encrypted-NVS production build (opt-in profile, security hardening
+  2026-08-06).** The **default** build (`sdkconfig.defaults`) ships flash
+  encryption **off** with plaintext NVS — deliberately, so dev boards and
+  existing field units keep a reversible serial re-flash. **New
+  field/manufacturing units are the standard exception:** build them with the
+  encrypted profile that layers `firmware/sdkconfig.flashenc` (flash-encryption
+  *Development* mode + `CONFIG_NVS_ENCRYPTION` + `partitions_ota_enc.csv`'s
+  `nvs_keys` partition) over the defaults —
+  `idf.py -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.flashenc" build` —
+  so the Wi-Fi/Tapo/MQTT credentials + setup code in `nvs` can't be pulled with
+  `esptool read_flash`. This burns eFuses, **cannot be delivered by OTA**, and
+  is a one-time per-unit serial-flash step; Secure Boot and anti-rollback eFuse
+  modes stay **off**. Full runbook + irreversibility caveats:
+  [deploy/docs/firmware_flash_encryption.md](../deploy/docs/firmware_flash_encryption.md).
 - Main task stack 32768.
 
 ## 7. Build & flash
@@ -598,7 +618,7 @@ the wire). Three changes:
   the gateway offline until a manual power cycle): it now redials every 10 s
   forever, with a session-safe last-resort reboot after 1 h. See §1.
 
-**Current: fw `2.5.0-direct`** (`firmware/CMakeLists.txt` `PROJECT_VER`). Fw has
+**fw `2.5.0-direct`** (previous shipped `PROJECT_VER`). Fw has
 advanced well past 1.5.0 through many small, individually-verified jumps — DNS-based
 broker addressing with legacy-IP self-migration (§1), the multi-plug refactor
 (TD#20) with a backend-pushed retained plug roster replacing captive-portal plug
@@ -614,3 +634,33 @@ build clean off the same `main/` sources, but confirm the right `set-target`
 before flashing/OTA-ing a real unit); not yet OTA'd to a fielded gateway. See
 [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for the version-by-version
 matrix and on-device verification history.
+
+**Current: fw `2.6.0-direct` — security hardening (2026-08-06, deep-audit
+remediation).** Source + docs only; **OTA to fielded units is operator-gated**
+and deferred — no field unit runs this yet. Three fixes, none of which change
+the shape described in §§1–4:
+- **KLAP response-signature verification (§4).** `klap_request_once` now
+  recomputes `SHA256(sess->sig || be32(seq) || ct)` over each plug reply and
+  constant-time-compares it against the response's 32-byte signature prefix,
+  rejecting the frame **before** AES-decrypt on any mismatch. Previously the
+  prefix was skipped unverified, so a LAN MITM could forge/corrupt a plug
+  response — e.g. mask an `overheat`/`overcurrent` status so the software safety
+  cutoff (§3) never fired.
+- **OTA anti-rollback version floor (§7).** The OTA task now compares the
+  incoming image version against the running one and aborts on a strictly-older
+  image, blocking a signed-but-stale downgrade back to a patched-out bug. This
+  is a **software** floor only — it does **not** burn the
+  `CONFIG_APP_ANTI_ROLLBACK` secure-version eFuse (irreversible,
+  operator-gated). An **opt-in** OTA host allowlist
+  (`AMPHIVE_OTA_ALLOWED_HOST_SUFFIX`, off by default so both documented hosting
+  schemes keep working) is also wired into `ota_update_start`. Signed-image +
+  TLS-bundle verification are unchanged.
+- **Encrypted-NVS production posture (§6, §4 credentials caveat).** Encrypted
+  NVS is now the documented **standard build for new field/manufacturing
+  units**, so Wi-Fi/Tapo/MQTT secrets + the setup code are no longer recoverable
+  via `esptool read_flash`. The **mainline default stays plaintext/reversible**
+  on purpose (dev boards + existing units keep a safe serial re-flash); the
+  encrypted build is a separate, layered profile. Enabling encryption burns
+  eFuses, **cannot be delivered by OTA**, and is a one-time per-unit
+  serial-flash step at manufacture —
+  [deploy/docs/firmware_flash_encryption.md](../deploy/docs/firmware_flash_encryption.md).

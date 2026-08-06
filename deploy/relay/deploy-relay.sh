@@ -230,6 +230,13 @@ printf 'user %s\ntopic readwrite amphive/#\ntopic read $SYS/#\n\npattern readwri
 sudo chown 1883:1883 "$WORKDIR/mosquitto_acl"
 sudo chmod 600 "$WORKDIR/mosquitto_acl"
 
+# IMPORTANT (P3 headers + M3 trusted_proxies): the block below only runs on the
+# FIRST deploy, when no Caddyfile exists yet — an already-deployed relay keeps
+# its hand-edited Caddyfile untouched. So the security-header / http:// fallback
+# / trusted_proxies changes here DO NOT reach the live prod Caddyfile
+# automatically: an operator must apply the same edits by hand to
+# $WORKDIR/Caddyfile on the relay and reload Caddy. See the "NEEDS OPERATOR
+# DEPLOY / VERIFY" note in the remediation report.
 if [ ! -f "$WORKDIR/Caddyfile" ]; then
   log "Generating a starter Caddyfile from .env (CADDY_DOMAIN/CADDY_CPO_DOMAIN/"
   log "ACME_EMAIL) — edit in place afterwards; re-running this script will not"
@@ -241,21 +248,36 @@ if [ ! -f "$WORKDIR/Caddyfile" ]; then
   {
     echo "# Generated once by deploy-relay.sh from .env — edits here are preserved"
     echo "# on future runs (only created when missing). Delete to regenerate."
-    if [ -n "$acme_email" ]; then
-      echo "{"
-      echo "    email $acme_email"
-      echo "}"
-      echo
-    fi
-    site() {
-      echo "$1 {"
-      echo "    encode gzip"
+    # Global options: always emitted (not only when an ACME email is set) so the
+    # trusted_proxies setting below is present regardless.
+    echo "{"
+    [ -n "$acme_email" ] && echo "    email $acme_email"
+    echo "    servers {"
+    echo "        # M3: trust ONLY the compose private network as a proxy hop, so"
+    echo "        # a direct internet client cannot spoof X-Forwarded-For to poison"
+    echo "        # the backend's per-IP rate limiter (see backend rate_limit.py)."
+    echo "        # Caddy is the edge here, so its immediate peer is the real"
+    echo "        # client; these ranges make Caddy write a clean XFF = client IP."
+    echo "        trusted_proxies static 172.16.0.0/12 192.168.0.0/16 10.0.0.0/8"
+    echo "    }"
+    echo "}"
+    echo
+    # Shared security-header block (P3). Caddy `header <field> <value>` SETS
+    # (replaces) the field, so these override whatever the frontend nginx sent —
+    # exactly one CSP per response.
+    hdr() {
       echo "    header {"
       echo "        Strict-Transport-Security \"max-age=31536000; includeSubDomains\""
       echo "        X-Content-Type-Options \"nosniff\""
       echo "        X-Frame-Options \"DENY\""
+      echo "        Referrer-Policy \"strict-origin-when-cross-origin\""
       echo "        Content-Security-Policy \"$csp\""
       echo "    }"
+    }
+    site() {
+      echo "$1 {"
+      echo "    encode gzip"
+      hdr
       echo "    reverse_proxy frontend:80"
       echo "}"
       echo
@@ -263,14 +285,19 @@ if [ ! -f "$WORKDIR/Caddyfile" ]; then
     site "$domain"
     [ -n "$cpo_domain" ] && site "$cpo_domain"
     echo "# Bare-IP / unknown-Host requests: serve rather than redirect, so the site"
-    echo "# stays reachable if DNS is mid-propagation or has an outage."
+    echo "# stays reachable if DNS is mid-propagation or has an outage. Same"
+    echo "# security headers as the named sites (P3) — HSTS is a harmless no-op"
+    echo "# over plain http, browsers ignore it per spec."
     echo "http:// {"
     echo "    encode gzip"
+    hdr
     echo "    reverse_proxy frontend:80"
     echo "}"
   } | sudo tee "$WORKDIR/Caddyfile" >/dev/null
 else
-  log "Caddyfile already present — leaving as-is."
+  log "Caddyfile already present — leaving as-is. NOTE: security-header /"
+  log "trusted_proxies changes in this script do NOT reach an existing Caddyfile"
+  log "— edit $WORKDIR/Caddyfile by hand and reload Caddy to apply them."
 fi
 
 # -----------------------------------------------------------------------------

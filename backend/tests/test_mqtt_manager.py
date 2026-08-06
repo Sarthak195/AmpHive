@@ -705,6 +705,9 @@ class _FakeResult:
     def scalar_one_or_none(self):
         return None if self._scalar == "__unset__" else self._scalar
 
+    def scalar_one(self):
+        return 0 if self._scalar == "__unset__" else self._scalar
+
     def all(self):
         return self._rows
 
@@ -786,6 +789,7 @@ async def test_persist_discovery_upserts_new_plug_and_publishes_assign_map():
     session = _FakeSession([
         _FakeResult(scalar=MagicMock()),                 # gateway exists
         _FakeResult(scalar=None),                        # plug is new
+        _FakeResult(scalar=0),                           # plug count under the per-gateway cap
         _FakeResult(rows=[("kasa:AA:BB:CC", 5)]),        # rebuilt map after commit
     ])
     mgr = MQTTManager(db_session_factory=lambda: session, event_loop=loop)
@@ -1115,7 +1119,11 @@ async def test_kwh_at_the_plausible_ceiling_is_not_dropped():
     await asyncio.sleep(0.05)
 
     assert persists == [MAX_PLAUSIBLE_KWH]
-    store.update.assert_called_once()
+    # [H1] On the DB-backed path the live-store feed now rides INSIDE
+    # _persist_telemetry (behind the plug-ownership check), which is stubbed
+    # here — so the handler itself no longer touches the store. The frame being
+    # processed is proven by it reaching the (stubbed) persist above.
+    store.update.assert_not_called()
     MQTTManager._instance = None
 
 
@@ -1153,8 +1161,10 @@ async def test_implausible_kwh_frame_does_not_block_a_following_normal_frame():
 
     # Only the normal (stop) frame made it through.
     assert persists == [0.75]
-    store.update.assert_called_once()
-    assert store.update.call_args.args[3] == 0.75  # energy_kwh positional arg
+    # [H1] The live-store feed now rides inside _persist_telemetry (stubbed
+    # here), so the handler no longer touches the store on the DB-backed path;
+    # `persists` above is the authoritative proof of what got processed.
+    store.update.assert_not_called()
     MQTTManager._instance = None
 
 
@@ -1285,6 +1295,70 @@ def _owned_plug():
     plug.local_ip = "10.0.0.5"
     plug.last_telemetry_at = None  # first frame — powered_since re-baselines
     return plug
+
+
+@pytest.mark.asyncio
+async def test_persist_telemetry_foreign_plug_does_not_feed_live_store():
+    """[H1] The live TelemetryStore must NOT be fed for a plug the publishing
+    gateway doesn't own. Otherwise any tenant with one provisioned gateway
+    could publish a victim plug_id on its OWN topic and poison that plug's
+    live snapshot — the figure the SSE stream shows, and the value the old
+    finalize billed from via max(live, persisted). The store feed rides behind
+    the same ownership check as the DB persist, so a foreign plug touches
+    neither."""
+    MQTTManager._instance = None
+    plug = MagicMock()
+    plug.gateway_id = "gw-other"   # NOT the publishing gateway
+    session = _FakeSession([_FakeResult(scalar=plug)])
+    store = MagicMock()
+    mgr = MQTTManager(db_session_factory=lambda: session, telemetry_store=store)
+
+    # A malicious max-magnitude frame aimed at another tenant's plug (id 5).
+    sample = {"plug_id": 5, "power_w": 15000.0, "energy_kwh": 1000.0,
+              "current_a": 65.0, "voltage_v": 230.0, "status": "occupied"}
+    await mgr._persist_telemetry("gw-1", 5, 15000.0, 1000.0, None, sample,
+                                 relay_on=True)
+
+    store.update.assert_not_called()
+    assert session.committed is False
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_persist_telemetry_owned_plug_feeds_live_store():
+    """[H1] For the gateway's OWN plug the live TelemetryStore IS fed — the
+    store feed rides behind the same ownership check as the DB persist, using
+    the current/voltage/status carried on the handler-built `sample`. The raw
+    frame kwh (live display value) is what the store shows."""
+    MQTTManager._instance = None
+    active = MagicMock()
+    active.id = 10
+    active.user_id = 1
+    active.energy_kwh = 0.4
+    active.peak_power_w = 0.0
+    active.energy_counter_last_raw_kwh = None
+    active.energy_reset_offset_kwh = 0.0
+    session = _FakeSession([
+        _FakeResult(scalar=_owned_plug()),
+        _FakeResult(scalar=active),
+    ])
+    store = MagicMock()
+    mgr = MQTTManager(db_session_factory=lambda: session, telemetry_store=store)
+    mgr._maybe_auto_stop_on_exhaustion = AsyncMock()
+    mgr._maybe_auto_stop_on_limits = AsyncMock()
+
+    sample = {"plug_id": 5, "power_w": 1200.0, "energy_kwh": 0.45,
+              "current_a": 5.2, "voltage_v": 231.0, "status": "occupied"}
+    with patch("backend.services.pricing.reprice_session_if_due",
+               AsyncMock(return_value=None)):
+        await mgr._persist_telemetry("gw-1", 5, 1200.0, 0.45,
+                                     session_id=10, sample=sample, relay_on=True)
+
+    store.update.assert_called_once_with(
+        plug_id=5, power_w=1200.0, current_a=5.2, energy_kwh=0.45,
+        status="charging", voltage_v=231.0, relay_on=True,
+    )
+    MQTTManager._instance = None
 
 
 @pytest.mark.asyncio

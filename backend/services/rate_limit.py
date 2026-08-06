@@ -94,20 +94,54 @@ class SlidingWindowRateLimiter:
                 del self._hits[key]
 
 
-def client_ip(request: Request) -> str:
-    """Best-effort client IP behind the Caddy → frontend-nginx chain.
+# Production request path is: client → Caddy → frontend-nginx → backend. Both
+# Caddy and frontend-nginx APPEND exactly one X-Forwarded-For entry (Caddy
+# appends the real client it peers with; nginx appends Caddy), so the real
+# client sits a fixed 2 hops from the RIGHT of the chain.
+_DEFAULT_TRUSTED_PROXY_HOPS = 2
 
-    Caddy (≥ 2.5) replaces a client-supplied X-Forwarded-For with the real
-    peer address unless the peer is a configured trusted proxy, and the nginx
-    hop appends its own upstream — so the first entry is the real client.
-    With the public :8000 firewall port closed (2026-07-11) no untrusted peer
-    reaches the backend directly; in the -NoTls rollback stack the header is
-    client-forgeable, which only lets an attacker shard their own limit.
+
+def _trusted_proxy_hops() -> int:
+    """Number of trusted reverse-proxy hops that append to X-Forwarded-For
+    between the real client and this backend (see ``client_ip``). Read per-call
+    so it can be tuned for other topologies (an nginx-only stack, an extra CDN
+    hop, the -NoTls rollback) via the TRUSTED_PROXY_HOPS env var, and overridden
+    in tests. A non-positive / unparseable value clamps to the safe minimum 1."""
+    raw = os.getenv("TRUSTED_PROXY_HOPS", str(_DEFAULT_TRUSTED_PROXY_HOPS)).strip()
+    try:
+        hops = int(raw)
+    except ValueError:
+        logger.warning(
+            "Invalid TRUSTED_PROXY_HOPS=%r (expected a positive integer); using %d",
+            raw, _DEFAULT_TRUSTED_PROXY_HOPS,
+        )
+        return _DEFAULT_TRUSTED_PROXY_HOPS
+    return hops if hops >= 1 else 1
+
+
+def client_ip(request: Request) -> str:
+    """Best-effort client IP behind the Caddy → frontend-nginx proxy chain.
+
+    X-Forwarded-For is a comma-separated chain that honest proxies APPEND to on
+    the RIGHT — each proxy adds the address it received the connection from — so
+    the LEFTMOST entry is the client-supplied, spoofable end. Trusting position
+    0 lets an attacker mint an unlimited number of fresh per-IP rate-limit
+    buckets (mailbomb forgot-password, walk past the login / register / blanket
+    API floors) just by rotating a fabricated leftmost token. We therefore never
+    trust the leftmost value.
+
+    Instead we count a FIXED number of trusted hops from the RIGHT: with the
+    Caddy + nginx stack the real client is ``chain[len - TRUSTED_PROXY_HOPS]``
+    (default 2), and everything to its left is attacker-controlled and ignored.
+    If the chain is shorter than the trusted-hop count (a direct hit on the
+    backend's :8000, or a misconfigured proxy), no forwarded token is
+    trustworthy and we fall back to the real peer address, then to "unknown".
     """
+    hops = _trusted_proxy_hops()
     fwd = request.headers.get("x-forwarded-for", "")
-    first = fwd.split(",")[0].strip()
-    if first:
-        return first
+    chain = [p.strip() for p in fwd.split(",") if p.strip()]
+    if len(chain) >= hops:
+        return chain[len(chain) - hops]
     return request.client.host if request.client else "unknown"
 
 
