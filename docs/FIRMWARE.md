@@ -502,27 +502,35 @@ artifact (68 bytes smaller) and must never be shipped.
 
 ### Publishing an OTA image
 
-**Primary path — admin-portal upload (feat/admin-dashboard, 2026-08-04).**
-The whole publish flow is UI-based: build locally, then drag the signed
+**Primary path — admin-portal upload (feat/admin-dashboard, 2026-08-04;
+publishes to GCS since 2026-08-11, PR #115).** The whole publish flow is
+UI-based: build + sign locally, then drag the signed
 `build/amphive-gateway.bin` into **Admin → Firmware Releases** (upload widget →
 `POST /api/admin/firmware-releases/upload`, raw `application/octet-stream`,
 ≤4 MiB). The backend validates the ESP image header (magic `0xE9` +
 `esp_app_desc` magic `0xABCD5432`), reads the **version and project name out
 of the binary itself** (`project_name` must be `amphive-gateway` — no typo'd
-version strings), stores the image under `FIRMWARE_IMAGE_DIR` (a docker
-volume in `docker-compose.relay.yml`), and **auto-registers** the
-`FirmwareRelease` pointing at the backend's own public image host,
-`{PUBLIC_API_ORIGIN||FRONTEND_ORIGIN}/api/firmware/images/amphive-gateway-<version>.bin`
-(`GET /api/firmware/images/{filename}`, `routers/firmware_images.py`,
-unauthenticated by design — the ECDSA app signature, §6, is the trust
-anchor, exactly as it was on the world-readable bucket). Then push from the
-version picker on any gateway page (CPO portal, or the new cross-tenant
-admin picker — `POST /api/admin/gateways/{gateway_id}/ota`).
+version strings), **publishes the bytes to the public-read GCS bucket
+`gs://amphive-fw`** (keyless — the VM's own compute service-account identity
+via ADC, no key file; `backend/services/firmware_publish.py`; a failed bucket
+write is a 502 and nothing is registered), and **auto-registers** the
+`FirmwareRelease` pointing at
+`https://storage.googleapis.com/amphive-fw/amphive-gateway-<version>.bin` —
+the same valid public-CA TLS host every historically-successful OTA fetched
+from. Then push from the version picker on any gateway page (CPO portal, or
+the cross-tenant admin picker — `POST /api/admin/gateways/{gateway_id}/ota`).
+Re-uploading a version that exists but is **deactivated** re-publishes the
+bytes, overwrites `url`/`notes`, and reactivates the release
+(`POST /api/admin/firmware-releases/{id}/reactivate` also exists as the
+direct inverse of `deactivate`). **One-time IAM prerequisite:** the VM's
+compute service account needs `roles/storage.objectCreator` on
+`gs://amphive-fw` — the exact `gcloud` command is in
+[deploy/docs/ota_image_publishing.md](../deploy/docs/ota_image_publishing.md).
 
-**Fallback path — GCS bucket.** Images can still be served from the
+**Fallback / manual path — publish to the bucket yourself.** The same
 **public-read GCS bucket `gs://amphive-fw`**
-(`https://storage.googleapis.com/amphive-fw/...`) — a valid public-CA TLS
-host the firmware's Mozilla bundle validates. Upload + trigger:
+(`https://storage.googleapis.com/amphive-fw/...`) can be filled by hand when
+the UI path is unavailable. Upload + trigger:
 
 ```bash
 gcloud storage cp firmware/build/amphive-gateway.bin \
@@ -536,9 +544,12 @@ or run `deploy/scripts/publish_firmware.ps1`, which reads the version from
 calls. Full runbook (including the one-time bucket setup that was run
 2026-07-10):
 [deploy/docs/ota_image_publishing.md](../deploy/docs/ota_image_publishing.md).
-Release rows store full URLs, so **both hosting schemes coexist** —
-already-registered bucket URLs keep working unchanged alongside
-backend-hosted `/api/firmware/images/...` ones.
+Release rows store full URLs, so hosting schemes coexist — any
+`/api/firmware/images/...` URL registered by the pre-PR-#115 self-hosted
+upload keeps resolving (`GET /api/firmware/images/{filename}`,
+`routers/firmware_images.py`, kept as legacy back-compat; unauthenticated by
+design — the ECDSA app signature, §6, is the trust anchor, exactly as on the
+world-readable bucket).
 
 **Version registry + picker (feat/ota-version-picker, 2026-08-02).** Updating
 a gateway used to mean hand-pasting this URL into the CPO portal. Now an

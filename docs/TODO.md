@@ -91,7 +91,13 @@ repeated here.*
       nor re-uploaded (stranded the 2.5.0 release; unblocked by a hand DB
       `is_active=true`).
 
-- [ ] **Startup-migration hazards (latent outage).** **(Low, preventive.)**
+- [x] **Startup-migration hazards (latent outage).** **DONE 2026-08-11:** the
+      CI single-head guard shipped in PR #110
+      (`backend/tests/test_migration_heads.py`, pure/no-DB), and the
+      writing-a-migration conventions (out-of-band backfills,
+      `CREATE INDEX CONCURRENTLY` via `autocommit_block` on hot tables,
+      single-head, least-priv grant limits) are now documented in
+      [DATA_MODEL.md](DATA_MODEL.md) §4. **(Low, preventive.)**
       `init_db` runs `alembic upgrade head` on every boot inside the single
       backend container (`backend/database/db.py:259-260`). A future slow
       migration (a big backfill `UPDATE`, or a non-`CONCURRENTLY` index on the
@@ -102,7 +108,10 @@ repeated here.*
       to run data backfills out-of-band and use `CREATE INDEX CONCURRENTLY`
       (Alembic `autocommit_block`) on hot tables; add a CI single-head check.
 
-- [ ] **Document the least-privilege role's object-class limits (latent).**
+- [x] **Document the least-privilege role's object-class limits (latent).**
+      **DONE 2026-08-11:** noted in the [DATA_MODEL.md](DATA_MODEL.md) §4
+      writing-a-migration conventions (cross-referencing
+      `_provision_runtime_role`'s in-code OBJECT-CLASS LIMIT note).
       **(Low.)** The runtime grant is `... ON ALL TABLES` + `ALTER DEFAULT
       PRIVILEGES` in schema `public` (`backend/database/db.py:201-211`). This
       covers tables/views/sequences created by the owner in `public` — but NOT
@@ -415,7 +424,19 @@ repeated here.*
       `Login` + `/forgot-password` and `/reset-password` pages. Tests:
       `backend/tests/test_password_reset.py` + the two page suites. (No
       security §; new capability.)
-- [ ] **Google login ("Sign in with Google" / OAuth2).** Social login to cut
+- [x] **Google login ("Sign in with Google" / OAuth2).** **SHIPPED 2026-08-02**
+      (backend-driven authorization-code flow in `routers/auth.py`
+      `google_login`/`google_callback` + a fragment-`code` exchange endpoint —
+      no JS SDK): the callback verifies the id_token, upserts by **verified
+      email** (linking `users.google_sub`, a nullable column with a partial
+      unique index, to an existing email/password account when one exists), and
+      issues the same app JWT the password flow does. **Live-gated:** hidden
+      everywhere (`GET /api/config` `google_login_enabled: false`,
+      `/api/auth/google/login` 503s) unless `GOOGLE_CLIENT_ID` /
+      `GOOGLE_CLIENT_SECRET` / `GOOGLE_OAUTH_REDIRECT_URI` are set. **Still
+      operator-pending:** creating the real Google Cloud OAuth client + a live
+      click-through smoke on prod. (Original ask below.)
+      Social login to cut
       onboarding friction. Add a Google OAuth2 authorization-code flow:
       `GET /api/auth/google/login` → Google consent → `GET /api/auth/google/callback`
       verifies the returned id_token, upserts a user by **verified email**
