@@ -44,11 +44,15 @@ def _db_passing_exists_check():
 
 
 @pytest.mark.asyncio
-async def test_register_normalizes_email_for_duplicate_check_and_storage():
+async def test_register_normalizes_email_for_duplicate_check_and_storage(monkeypatch):
+    # Register now mints a verification token + emails the link after creating
+    # the user (no auto-login) — stub the send so nothing hits SMTP.
+    monkeypatch.setattr(email_service, "send_email_verification", AsyncMock())
     db = _db_passing_exists_check()
 
     req = RegisterRequest(email="Driver@Example.com", password="a-valid-pw", full_name="Driver")
     await register(req, db)
+    await asyncio.sleep(0)  # let the fire-and-forget verification email run
 
     # The duplicate-check SELECT ran against the lowercased/trimmed email —
     # so a later `driver@example.com` registration attempt would collide.
@@ -56,10 +60,12 @@ async def test_register_normalizes_email_for_duplicate_check_and_storage():
     assert "driver@example.com" in str(
         lookup_stmt.compile(compile_kwargs={"literal_binds": True})
     )
-    # The stored User row itself carries the normalized email, not the
-    # as-typed mixed-case one.
-    stored_user = db.add.call_args.args[0]
+    # The stored User row (the FIRST db.add — the EmailVerificationToken is the
+    # second) carries the normalized email, not the as-typed mixed-case one,
+    # and starts UNVERIFIED.
+    stored_user = db.add.call_args_list[0].args[0]
     assert stored_user.email == "driver@example.com"
+    assert stored_user.email_verified is False
 
 
 @pytest.mark.asyncio

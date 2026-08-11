@@ -1,9 +1,11 @@
 /**
  * Signup tests: name/email/password registration, the live 8-72 char
- * password hint, client-side validation before the API is ever called, the
- * success toast + "straight in" redirect (honoring the same from/next
- * return-to-origin logic as Login so a QR deep-link funnel keeps working),
- * and API failure surfacing inline.
+ * password hint, client-side validation before the API is ever called, and
+ * the post-verification-feature success flow — registration no longer logs
+ * the driver in, so a successful sign-up flips the page to a "check your
+ * email" confirmation (with a resend control) and does NOT navigate into the
+ * app or persist an auth token. API failures (e.g. duplicate email) still
+ * surface inline on the form.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen } from '@testing-library/react';
@@ -13,12 +15,14 @@ import { MemoryRouter, Routes, Route, useLocation } from 'react-router-dom';
 import Signup from './Signup';
 import { useAuth } from '../contexts/AuthContext';
 import { useConfig } from '../contexts/ConfigContext';
+import api from '../api/client';
 
 vi.mock('../contexts/AuthContext', () => ({ useAuth: vi.fn() }));
 vi.mock('../contexts/ConfigContext', () => ({ useConfig: vi.fn() }));
-
-const toast = { ok: vi.fn(), error: vi.fn(), info: vi.fn(), warn: vi.fn() };
-vi.mock('../components/ui', () => ({ useToast: () => toast }));
+vi.mock('../api/client', () => {
+  const api = { get: vi.fn(), post: vi.fn(), put: vi.fn(), patch: vi.fn(), delete: vi.fn() };
+  return { api, default: api, apiRequest: vi.fn() };
+});
 
 const registerSpy = vi.fn();
 
@@ -38,8 +42,15 @@ const renderSignup = (initialEntry = '/signup') =>
     </MemoryRouter>
   );
 
+const fillForm = async () => {
+  await userEvent.type(screen.getByLabelText('Full name'), 'New Driver');
+  await userEvent.type(screen.getByLabelText('Email address'), 'new@amphive.test');
+  await userEvent.type(screen.getByLabelText('Password'), 'password123');
+};
+
 beforeEach(() => {
   vi.clearAllMocks();
+  localStorage.clear();
   useAuth.mockReturnValue({ register: registerSpy });
   useConfig.mockReturnValue({ google_login_enabled: false });
 });
@@ -68,55 +79,52 @@ describe('Signup', () => {
     expect(screen.getByText(/must be 8-72 characters/i)).toBeInTheDocument();
   });
 
-  it('registers, toasts success, and redirects to Home by default', async () => {
-    registerSpy.mockResolvedValue({});
+  it('on success shows the "check your email" state without navigating into the app or storing a token', async () => {
+    registerSpy.mockResolvedValue({ status: 'verification_sent', email: 'new@amphive.test' });
     renderSignup();
 
-    await userEvent.type(screen.getByLabelText('Full name'), 'New Driver');
-    await userEvent.type(screen.getByLabelText('Email address'), 'new@amphive.test');
-    await userEvent.type(screen.getByLabelText('Password'), 'password123');
+    await fillForm();
     await userEvent.click(screen.getByRole('button', { name: 'Create account' }));
 
     expect(registerSpy).toHaveBeenCalledWith('new@amphive.test', 'password123', 'New Driver');
-    expect(await screen.findByText('home page')).toBeInTheDocument();
-    expect(toast.ok).toHaveBeenCalledWith('Account created.');
+    // Confirmation state, not a redirect into the app.
+    expect(await screen.findByText(/check your email/i)).toBeInTheDocument();
+    expect(screen.getByText(/new@amphive.test/)).toBeInTheDocument();
+    expect(screen.queryByText('home page')).not.toBeInTheDocument();
+    expect(screen.getByTestId('location-probe')).toHaveTextContent('/signup');
+    // Register no longer logs the driver in — no token persisted.
+    expect(localStorage.getItem('amphive_token')).toBeNull();
+    // Resend affordance is present.
+    expect(screen.getByRole('button', { name: 'Resend email' })).toBeInTheDocument();
   });
 
-  it('honors a QR deep-link ?next= param on success', async () => {
-    registerSpy.mockResolvedValue({});
-    renderSignup('/signup?next=%2F%3Fplug%3D7');
+  it('resend action posts the email to /api/auth/resend-verification and shows a generic confirmation', async () => {
+    registerSpy.mockResolvedValue({ status: 'verification_sent', email: 'new@amphive.test' });
+    api.post.mockResolvedValue({ status: 'ok' });
+    renderSignup();
 
-    await userEvent.type(screen.getByLabelText('Full name'), 'New Driver');
-    await userEvent.type(screen.getByLabelText('Email address'), 'new@amphive.test');
-    await userEvent.type(screen.getByLabelText('Password'), 'password123');
+    await fillForm();
     await userEvent.click(screen.getByRole('button', { name: 'Create account' }));
+    await screen.findByText(/check your email/i);
 
-    await screen.findByText('home page');
-    expect(screen.getByTestId('location-probe')).toHaveTextContent('/?plug=7');
-  });
+    await userEvent.click(screen.getByRole('button', { name: 'Resend email' }));
 
-  it('rejects an open-redirect ?next= and falls back to Home', async () => {
-    registerSpy.mockResolvedValue({});
-    renderSignup('/signup?next=https%3A%2F%2Fevil.com');
-
-    await userEvent.type(screen.getByLabelText('Full name'), 'New Driver');
-    await userEvent.type(screen.getByLabelText('Email address'), 'new@amphive.test');
-    await userEvent.type(screen.getByLabelText('Password'), 'password123');
-    await userEvent.click(screen.getByRole('button', { name: 'Create account' }));
-
-    expect(await screen.findByText('home page')).toBeInTheDocument();
+    expect(api.post).toHaveBeenCalledWith('/api/auth/resend-verification', {
+      email: 'new@amphive.test',
+    });
+    expect(await screen.findByText(/a new verification link is on its way/i)).toBeInTheDocument();
   });
 
   it('surfaces an API failure (e.g. email already registered) inline', async () => {
     registerSpy.mockRejectedValue(new Error('An account with that email already exists.'));
     renderSignup();
 
-    await userEvent.type(screen.getByLabelText('Full name'), 'New Driver');
-    await userEvent.type(screen.getByLabelText('Email address'), 'new@amphive.test');
-    await userEvent.type(screen.getByLabelText('Password'), 'password123');
+    await fillForm();
     await userEvent.click(screen.getByRole('button', { name: 'Create account' }));
 
     expect(await screen.findByText('An account with that email already exists.')).toBeInTheDocument();
+    // Stays on the form — no confirmation state.
+    expect(screen.getByLabelText('Full name')).toBeInTheDocument();
   });
 
   it('links back to Login', () => {

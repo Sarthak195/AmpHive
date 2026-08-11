@@ -29,7 +29,8 @@ from backend.services.auth import (
 from backend.services.rate_limit import SlidingWindowRateLimiter
 
 
-def _user(user_id=1, email="driver@amphive.test", password="correct-horse", token_version=0, role="driver"):
+def _user(user_id=1, email="driver@amphive.test", password="correct-horse", token_version=0,
+          role="driver", email_verified=True):
     u = MagicMock()
     u.id = user_id
     u.email = email
@@ -40,6 +41,9 @@ def _user(user_id=1, email="driver@amphive.test", password="correct-horse", toke
     u.coin_balance = 0.0
     u.token_version = token_version
     u.is_disabled = False  # a bare MagicMock attr is truthy → spurious 403
+    # Default verified (a bare MagicMock attr is truthy anyway, but be explicit
+    # so the login unverified-403 gate only fires when a test asks for it).
+    u.email_verified = email_verified
     return u
 
 
@@ -150,6 +154,55 @@ async def test_login_success_returns_valid_token():
     assert payload["sub"] == str(user.id)
     assert payload["role"] == "driver"
     assert payload["tv"] == 2
+
+
+# -------------------------------------------- email-verification login gate ---
+# An UNVERIFIED account (a fresh signup that hasn't clicked its link) is refused
+# with 403 AFTER the password check — same after-password placement as the
+# disabled-account check, so it's only ever shown to the real owner (no
+# verified-status oracle for a password guesser). Grandfathered (pre-feature)
+# users are email_verified=True, so they're unaffected.
+
+
+@pytest.mark.asyncio
+async def test_login_unverified_email_rejected_403_with_correct_password():
+    user = _user(password="correct-horse", email_verified=False)
+    db = _db_returning(user)
+
+    with pytest.raises(HTTPException) as exc:
+        await login(LoginRequest(email=user.email, password="correct-horse"), db)
+
+    # 403, not a token — the credential is correct but the address is unproven.
+    assert exc.value.status_code == 403
+    assert "verify your email" in exc.value.detail.lower()
+
+
+@pytest.mark.asyncio
+async def test_login_unverified_gate_is_after_password_no_oracle():
+    """A WRONG password against an unverified account still gets the generic
+    401, never the verify-email 403 — the gate is checked only after the
+    password verifies, so it leaks no verified-status to a non-owner."""
+    user = _user(password="correct-horse", email_verified=False)
+    db = _db_returning(user)
+
+    with pytest.raises(HTTPException) as exc:
+        await login(LoginRequest(email=user.email, password="wrong-password"), db)
+
+    assert exc.value.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_login_verified_user_logs_in_normally():
+    """A verified account (incl. every grandfathered pre-feature user, which
+    migration 0037 set email_verified=true) logs in and gets a token."""
+    user = _user(user_id=9, password="correct-horse", email_verified=True)
+    db = _db_returning(user)
+
+    with patch("backend.routers.auth.check_and_speed_up_active_session", new=AsyncMock()):
+        resp = await login(LoginRequest(email=user.email, password="correct-horse"), db)
+
+    assert resp.token
+    assert decode_access_token(resp.token)["sub"] == str(user.id)
 
 
 # ------------------------------- per-account FAILURE cap (targeted-lockout) ---

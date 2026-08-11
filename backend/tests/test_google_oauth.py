@@ -352,6 +352,9 @@ async def test_callback_creates_new_driver_account(monkeypatch):
     assert created.auth_provider == "google"
     assert created.google_sub == "google-sub-1"
     assert created.full_name == "New Driver"
+    # Google asserted the verified email, so the account is verified from birth
+    # (no verify-email round-trip; /api/auth/login's unverified 403 never fires).
+    assert created.email_verified is True
     # Unusable password: services/auth._DUMMY_PASSWORD_HASH trick — a random
     # bcrypt hash nothing will ever verify against.
     assert not verify_password("password123", created.hashed_password)
@@ -434,6 +437,10 @@ async def test_callback_links_google_to_existing_password_account(monkeypatch):
 
     assert resp.status_code == 302
     assert existing.google_sub == "google-sub-2"
+    # The Google-verified owner is now the account holder — the email is marked
+    # verified in the same take-over step (an attacker's pre-registered,
+    # unverified account is both evicted AND verified for the real owner).
+    assert existing.email_verified is True
     # The pre-existing password no longer verifies — it was overwritten with a
     # fresh unusable hash, so /api/auth/login can never accept it again.
     assert not verify_password("attacker-preregistered-pw", existing.hashed_password)

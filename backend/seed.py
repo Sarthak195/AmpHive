@@ -170,7 +170,12 @@ async def seed():
                     full_name=u_data["full_name"],
                     role=u_data["role"],
                     tenant_id=u_data["tenant_id"],
-                    coin_balance=u_data["coin_balance"]
+                    coin_balance=u_data["coin_balance"],
+                    # Seeded accounts are operator-created and trusted, so they
+                    # are verified from birth — otherwise the new login gate
+                    # (email_verified) would lock them out (they never get a
+                    # verification email).
+                    email_verified=True,
                 )
                 db.add(user)
                 await db.flush()

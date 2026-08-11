@@ -196,6 +196,15 @@ class User(Base):
     # Soft lock, not a delete — balance/ledger/session history stay intact.
     # Alembic revision 0025_user_disable.
     is_disabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"), nullable=False)
+    # [Email verification] Whether this account has proven ownership of its
+    # email address. New password signups start False (register no longer
+    # auto-logs-in — it emails a single-use EmailVerificationToken; login 403s
+    # until this flips true). Google signups/links set it True (Google asserts
+    # the verified email). Every row predating this feature was GRANDFATHERED to
+    # true by migration 0037 so the live user base is never locked out. Closes
+    # the account-PRE-hijacking class at its root (an unverified email can no
+    # longer hold a usable credential). Alembic revision 0037_email_verification.
+    email_verified: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"), nullable=False)
     # [Google OAuth] Which identity provider created this account: 'password'
     # (default — every pre-existing row backfills here) or 'google'. Purely
     # informational — it does NOT gate password login by itself: a
@@ -1642,4 +1651,37 @@ class PasswordResetToken(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     # NULL = still consumable (if unexpired); set on consumption OR when a
     # newer forgot-password request supersedes this token.
+    used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class EmailVerificationToken(Base):
+    """[Email verification] A single-use, time-boxed "verify your email" token.
+
+    Mirrors PasswordResetToken exactly. The raw token (secrets.token_urlsafe)
+    is emailed to the new signup and NEVER stored — only its SHA-256 hex digest
+    lives here, so a DB leak does not hand out working verification links (same
+    rationale as storing bcrypt hashes, minus the salt: the token already has
+    ~256 bits of entropy, so a plain unsalted digest is fine and keeps lookup a
+    single indexed equality).
+
+    Lifecycle: minted by POST /api/auth/register (and re-minted by
+    POST /api/auth/resend-verification), each of which first voids the user's
+    outstanding unused tokens — at most one live link per user; consumed exactly
+    once by POST /api/auth/verify-email, which stamps used_at, flips
+    users.email_verified true, and bumps users.token_version (belt-and-braces).
+    Expired/used rows are inert — no reaper needed at this volume. No
+    relationship() back-refs, matching PasswordResetToken.
+    """
+    __tablename__ = "email_verification_tokens"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    # SHA-256 hex digest of the raw token (64 chars); unique so consumption is
+    # a single indexed lookup and a (astronomically unlikely) digest collision
+    # fails loudly at insert instead of silently crossing accounts.
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # NULL = still consumable (if unexpired); set on consumption OR when a
+    # newer register/resend request supersedes this token.
     used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
