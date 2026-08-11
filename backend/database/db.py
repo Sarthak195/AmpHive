@@ -270,13 +270,39 @@ async def init_db():
         if SEPARATION_ACTIVE:
             # Provision the least-privilege runtime role AFTER migrations so the
             # GRANT covers every existing table, then prove the runtime engine can
-            # actually connect as it before we start serving requests.
+            # actually WRITE as it — not merely connect — before serving requests.
+            # The 2026-08-04 activation incident crash-looped prod precisely
+            # because the provisioning SQL was subtly broken yet a plain "SELECT 1"
+            # boot check still passed (SELECT survived; the DML grants did not).
             async with owner_engine.begin() as conn:
                 await _provision_runtime_role(
                     conn, APP_DB_USER, _APP_DB_PASSWORD or "", _DB_NAME
                 )
+            # WRITE probe: a zero-row UPDATE against a core, always-present table.
+            # In Postgres a WHERE-false UPDATE still requires the UPDATE table
+            # privilege, so this raises "permission denied" if the grant is
+            # incomplete — but it matches no rows, so nothing is changed, and we
+            # roll back regardless so nothing can persist on success either. We
+            # deliberately avoid INSERT/nextval here: those consume a sequence
+            # value even when the transaction rolls back.
             async with engine.connect() as conn:
-                await conn.execute(text("SELECT 1"))
+                trans = await conn.begin()
+                try:
+                    await conn.execute(
+                        text("UPDATE users SET coin_balance = coin_balance WHERE 1=0")
+                    )
+                except Exception as exc:
+                    raise RuntimeError(
+                        "DB privilege separation boot check FAILED: runtime role "
+                        f"'{APP_DB_USER}' could not execute the zero-row UPDATE write "
+                        "probe (incomplete DML GRANT?). Refusing to serve requests "
+                        "with a broken least-privilege role."
+                    ) from exc
+                finally:
+                    # try/finally (not `async with conn.begin()`): the context
+                    # manager would COMMIT on success — we must ALWAYS roll back
+                    # so the probe is side-effect-free whether it passed or failed.
+                    await trans.rollback()
             logger.critical(
                 "DB privilege separation ACTIVE — requests serve as non-superuser "
                 "role '%s' (DML only; cannot DROP/ALTER tables). Migrations still "
