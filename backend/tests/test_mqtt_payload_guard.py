@@ -6,7 +6,14 @@ The device edge is untrusted: an authenticated-but-compromised gateway can
 publish anything on its own topics. These tests lock in that a single frame
 can neither memory-DoS the backend (oversized payload) nor escape into the
 paho callback thread as an unhandled exception (deeply-nested / malformed
-JSON). Mirrors the fake-msg / mocked-handler style of test_mqtt_manager.py.
+JSON, a valid-but-non-object JSON body, or a raising handler). Mirrors the
+fake-msg / mocked-handler style of test_mqtt_manager.py.
+
+Why non-object bodies matter: every JSON topic handler calls payload.get(),
+so a bare 5/[]/"x"/true/null parses fine, then raises AttributeError on the
+paho network-loop thread. paho 2.1.0 has suppress_exceptions=False, so an
+escaped exception kills that thread and freezes ALL ingestion platform-wide
+until restart. The guard + catch-all must make that impossible.
 
 DB-free: the downstream _handle_gateway_* dispatch is mocked, so no event
 loop or DB is needed.
@@ -14,8 +21,24 @@ loop or DB is needed.
 
 from unittest.mock import MagicMock
 
+import pytest
+
 from backend.services.mqtt.router import MAX_MQTT_PAYLOAD_BYTES
 from backend.services.mqtt_manager import MQTTManager
+
+# Every JSON topic type and the handler _on_message routes it to. The topic
+# strings match the gateway telemetry/status/discovery/alarm regexes compiled
+# in MQTTManager.__init__ (gateway id "gw-1").
+_JSON_TOPICS = [
+    ("amphive/gateways/gw-1/status", "_handle_gateway_status"),
+    ("amphive/gateways/gw-1/telemetry", "_handle_gateway_telemetry"),
+    ("amphive/gateways/gw-1/discovery", "_handle_gateway_plug_discovery"),
+    ("amphive/gateways/gw-1/alarms", "_handle_gateway_alarm"),
+]
+
+# Valid JSON values that are NOT objects (dicts). Each parses successfully but
+# has no .get(), so it must be rejected before dispatch.
+_NON_OBJECT_JSON = [b"5", b"[]", b'"x"', b"true", b"null", b"[1, 2, 3]"]
 
 
 class _FakeMsg:
@@ -133,6 +156,105 @@ def test_at_the_size_ceiling_is_not_dropped():
     mgr._on_message(None, None, msg)
 
     mgr._handle_gateway_telemetry.assert_called_once()
+    MQTTManager._instance = None
+
+
+# ---------------------------------------------------------------------------
+# Non-object JSON body guard (the live-exploitable availability bug): a valid
+# but non-dict JSON value reaches a handler's .get() and raises AttributeError
+# on the paho network-loop thread. _on_message must reject it before dispatch.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("topic,handler_name", _JSON_TOPICS)
+@pytest.mark.parametrize("body", _NON_OBJECT_JSON)
+def test_non_object_json_body_dropped_without_dispatch(topic, handler_name, body):
+    """A valid-but-non-object JSON body (5/[]/"x"/true/null/[1,2,3]) on ANY
+    JSON topic must be rejected before dispatch: no handler is invoked, and
+    _on_message does not raise (so nothing escapes into the paho thread)."""
+    mgr = _mgr()
+    msg = _FakeMsg(topic, body)
+
+    mgr._on_message(None, None, msg)  # must not raise
+
+    # The targeted handler (and every other) was skipped — the non-dict never
+    # reached .get().
+    _no_handler_called(mgr)
+    MQTTManager._instance = None
+
+
+def test_non_object_json_does_not_wedge_following_normal_frame():
+    """A dropped non-object frame must not stop the next well-formed dict frame
+    from dispatching normally (proves the guard drops just the one frame)."""
+    mgr = _mgr()
+
+    mgr._on_message(None, None, _FakeMsg("amphive/gateways/gw-1/telemetry", b"5"))
+
+    payload = {"plug_id": 2, "watts": 5.0, "kwh": 0.2, "status": "occupied"}
+    mgr._on_message(None, None,
+                    _FakeMsg("amphive/gateways/gw-1/telemetry", json_bytes(payload)))
+
+    mgr._handle_gateway_telemetry.assert_called_once_with("gw-1", payload)
+    MQTTManager._instance = None
+
+
+# ---------------------------------------------------------------------------
+# Catch-all backstop: an unexpected exception raised INSIDE a handler (a bug in
+# current or future handler code) must be swallowed, not propagated into the
+# paho callback thread where it would kill the network loop.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("topic,handler_name", _JSON_TOPICS)
+def test_raising_handler_does_not_propagate(topic, handler_name):
+    """If a topic handler raises an unexpected exception on a well-formed dict
+    payload, _on_message must catch it (the catch-all backstop) and NOT
+    re-raise, so ingestion for other frames/tenants keeps running."""
+    mgr = _mgr()
+    boom = getattr(mgr, handler_name)
+    boom.side_effect = RuntimeError("simulated handler bug")
+
+    # A well-formed dict body so routing reaches the (now-raising) handler.
+    body = json_bytes({"plug_id": 1, "status": "online", "unique_id": "kasa:AA",
+                       "error": "THERMAL_CUTOFF"})
+    msg = _FakeMsg(topic, body)
+
+    mgr._on_message(None, None, msg)  # must not raise — backstop swallows it
+
+    # The handler WAS reached (dict dispatched) but its exception did not escape.
+    boom.assert_called_once()
+    MQTTManager._instance = None
+
+
+def test_raising_handler_does_not_wedge_following_frame():
+    """A frame whose handler blows up must not stop a subsequent good frame
+    (routed to a healthy handler) from dispatching."""
+    mgr = _mgr()
+    mgr._handle_gateway_status.side_effect = RuntimeError("simulated handler bug")
+
+    mgr._on_message(None, None,
+                    _FakeMsg("amphive/gateways/gw-1/status", json_bytes({"status": "online"})))
+
+    payload = {"plug_id": 9, "watts": 1.0, "kwh": 0.01, "status": "available"}
+    mgr._on_message(None, None,
+                    _FakeMsg("amphive/gateways/gw-1/telemetry", json_bytes(payload)))
+
+    mgr._handle_gateway_telemetry.assert_called_once_with("gw-1", payload)
+    MQTTManager._instance = None
+
+
+def test_non_json_log_line_still_dispatches_and_is_not_dict_guarded():
+    """The logs topic carries plain-text (non-JSON) lines and is handled before
+    the JSON parse / isinstance guard — a raw log line must still reach
+    _handle_gateway_log unchanged (the dict guard must not swallow it)."""
+    mgr = _mgr()
+    line = b"E (1234) wifi: disconnected, reason=201"
+    msg = _FakeMsg("amphive/gateways/gw-1/logs", line)
+
+    mgr._on_message(None, None, msg)
+
+    mgr._handle_gateway_log.assert_called_once_with("gw-1", line.decode("utf-8"))
+    mgr._handle_gateway_telemetry.assert_not_called()
     MQTTManager._instance = None
 
 
