@@ -22,6 +22,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import HTTPException
+from fastapi.security import HTTPAuthorizationCredentials
 from sqlalchemy.exc import IntegrityError
 
 import backend.routers.auth as auth_router
@@ -30,8 +31,17 @@ from backend.routers.auth import (
     google_callback,
     google_exchange,
     google_login,
+    login,
 )
-from backend.services.auth import decode_access_token, hash_password, verify_password
+from backend.schemas import LoginRequest
+from backend.services.auth import (
+    create_access_token,
+    decode_access_token,
+    get_current_user,
+    hash_password,
+    verify_password,
+)
+from backend.services.rate_limit import SlidingWindowRateLimiter
 
 GOOGLE_ENV_VARS = ("GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_OAUTH_REDIRECT_URI")
 
@@ -401,10 +411,22 @@ async def test_callback_new_account_duplicate_race_maps_to_400(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_callback_links_google_to_existing_password_account(monkeypatch):
+    """SECURE take-over (was: account-pre-hijacking). Linking Google to a
+    pre-existing password account must EVICT the old credential, not sit
+    beside it: the stored password is replaced with an unusable hash, the
+    token epoch is bumped (kills prior sessions), and auth_provider flips to
+    'google'. This is what stops an attacker who pre-registered the victim's
+    email from keeping access after the real owner links via Google."""
     _set_google_env(monkeypatch)
     _mock_token_exchange(monkeypatch)
     _mock_verify_claims(monkeypatch, _claims(email="driver@amphive.test", sub="google-sub-2"))
-    existing = _user(email="driver@amphive.test", auth_provider="password", google_sub=None)
+    existing = _user(
+        email="driver@amphive.test",
+        auth_provider="password",
+        google_sub=None,
+        token_version=0,
+        hashed_password=hash_password("attacker-preregistered-pw"),
+    )
     db = _db_returning(existing)
     req = _FakeRequest(cookies={"google_oauth_state": "abc"}, query_params={"state": "abc", "code": "x"})
 
@@ -412,11 +434,106 @@ async def test_callback_links_google_to_existing_password_account(monkeypatch):
 
     assert resp.status_code == 302
     assert existing.google_sub == "google-sub-2"
-    # Linking adds a sign-in method — it doesn't rewrite how the account
-    # originated.
-    assert existing.auth_provider == "password"
+    # The pre-existing password no longer verifies — it was overwritten with a
+    # fresh unusable hash, so /api/auth/login can never accept it again.
+    assert not verify_password("attacker-preregistered-pw", existing.hashed_password)
+    # Token epoch bumped: every JWT/session minted before the link is revoked.
+    assert existing.token_version == 1
+    # auth_provider now reflects that Google is the only working sign-in method.
+    assert existing.auth_provider == "google"
     db.commit.assert_awaited_once()
     db.add.assert_not_called()  # no new row — this is an UPDATE, not an INSERT
+
+
+@pytest.mark.asyncio
+async def test_callback_link_invalidates_old_password_at_login(monkeypatch):
+    """After the take-over, the attacker's pre-registered password is refused
+    by the real /api/auth/login handler (401) — proving the credential was
+    genuinely invalidated end-to-end, not merely mutated on the ORM object."""
+    _set_google_env(monkeypatch)
+    _mock_token_exchange(monkeypatch)
+    _mock_verify_claims(monkeypatch, _claims(email="driver@amphive.test", sub="google-sub-2"))
+    existing = _user(
+        email="driver@amphive.test",
+        google_sub=None,
+        token_version=0,
+        hashed_password=hash_password("attacker-preregistered-pw"),
+    )
+    await google_callback(
+        _FakeRequest(cookies={"google_oauth_state": "abc"}, query_params={"state": "abc", "code": "x"}),
+        _db_returning(existing),
+    )
+
+    # Isolate the shared per-account login limiter so this failed attempt
+    # doesn't leak into other login tests (and vice versa).
+    monkeypatch.setattr(
+        auth_router, "login_account_rate_limiter", SlidingWindowRateLimiter(10, 60)
+    )
+    login_db = _db_returning(existing)  # the same (now taken-over) user row
+    with pytest.raises(HTTPException) as exc:
+        await login(
+            LoginRequest(email="driver@amphive.test", password="attacker-preregistered-pw"),
+            login_db,
+        )
+    assert exc.value.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_callback_link_bumps_token_version_revoking_prior_jwt(monkeypatch):
+    """A JWT the attacker minted BEFORE the link (carrying the old epoch tv=0)
+    is rejected by get_current_user once the owner links via Google (epoch
+    moves to 1) — their live sessions die immediately."""
+    _set_google_env(monkeypatch)
+    _mock_token_exchange(monkeypatch)
+    _mock_verify_claims(monkeypatch, _claims(email="driver@amphive.test", sub="google-sub-2"))
+    existing = _user(email="driver@amphive.test", google_sub=None, token_version=0)
+
+    pre_link_jwt = create_access_token(existing.id, existing.role.value, existing.email, 0)
+    # Sanity: valid before the link.
+    assert decode_access_token(pre_link_jwt)["tv"] == 0
+
+    await google_callback(
+        _FakeRequest(cookies={"google_oauth_state": "abc"}, query_params={"state": "abc", "code": "x"}),
+        _db_returning(existing),
+    )
+    assert existing.token_version == 1
+
+    creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials=pre_link_jwt)
+    with pytest.raises(HTTPException) as exc:
+        await get_current_user(creds, _db_returning(existing))
+    assert exc.value.status_code == 401  # "Session has been revoked."
+
+
+@pytest.mark.asyncio
+async def test_callback_link_google_sign_in_still_yields_a_working_token(monkeypatch):
+    """The Google sign-in that performed the take-over must still succeed and
+    hand back a working token — one carrying the NEW epoch, so get_current_user
+    accepts it while rejecting the attacker's pre-link JWT (test above)."""
+    _set_google_env(monkeypatch)
+    _mock_token_exchange(monkeypatch)
+    _mock_verify_claims(monkeypatch, _claims(email="driver@amphive.test", sub="google-sub-2"))
+    existing = _user(email="driver@amphive.test", google_sub=None, token_version=0)
+    db = _db_returning(existing)
+
+    resp = await google_callback(
+        _FakeRequest(cookies={"google_oauth_state": "abc"}, query_params={"state": "abc", "code": "x"}),
+        db,
+    )
+    code = resp.headers["location"].split("#code=", 1)[1]
+    nonce = _set_cookie_value(resp, auth_router.GOOGLE_EXCHANGE_COOKIE)
+
+    exch = await google_exchange(
+        GoogleExchangeRequest(code=code),
+        _FakeRequest(cookies={auth_router.GOOGLE_EXCHANGE_COOKIE: nonce}),
+    )
+    token = json.loads(bytes(exch.body).decode())["token"]
+    payload = decode_access_token(token)
+    assert payload["sub"] == str(existing.id)
+    assert payload["tv"] == existing.token_version == 1
+
+    # The freshly-minted Google token is accepted by get_current_user.
+    creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
+    assert await get_current_user(creds, _db_returning(existing)) is existing
 
 
 @pytest.mark.asyncio

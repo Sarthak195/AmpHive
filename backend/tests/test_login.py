@@ -4,6 +4,7 @@ services/auth.get_current_user.
 
 Mocked-db pattern follows backend/tests/test_token_revocation.py.
 """
+import re
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -25,6 +26,7 @@ from backend.services.auth import (
     normalize_email,
     verify_password,
 )
+from backend.services.rate_limit import SlidingWindowRateLimiter
 
 
 def _user(user_id=1, email="driver@amphive.test", password="correct-horse", token_version=0, role="driver"):
@@ -148,6 +150,85 @@ async def test_login_success_returns_valid_token():
     assert payload["sub"] == str(user.id)
     assert payload["role"] == "driver"
     assert payload["tv"] == 2
+
+
+# ------------------------------- per-account FAILURE cap (targeted-lockout) ---
+# The per-account login limit lives inside the handler as a FAILURE bucket, not
+# as a pre-handler dependency: a correct password must never be throttled (that
+# was the targeted-lockout DoS — an IP-rotating attacker flooding a victim's
+# email would 429 the real owner), while distributed wrong-password brute force
+# against one email is still capped.
+
+
+@pytest.mark.asyncio
+async def test_login_correct_password_not_locked_out_even_when_bucket_saturated(monkeypatch):
+    """A correct password SUCCEEDS even after the per-account failure bucket
+    for that email is already over the limit (as an IP-rotating attacker would
+    leave it) — the success path never consults the bucket, it only clears it.
+    This is the core targeted-lockout-DoS fix."""
+    limiter = SlidingWindowRateLimiter(3, 60, clock=lambda: 1000.0)
+    monkeypatch.setattr(auth_router, "login_account_rate_limiter", limiter)
+
+    user = _user(email="driver@amphive.test", password="correct-horse")
+    key = f"login:{normalize_email(user.email)}"
+    # Saturate the bucket with prior failed attempts from "many IPs".
+    for _ in range(10):
+        limiter.record_failure(key)
+    assert limiter.check(key) is not None  # bucket is over the limit
+
+    db = _db_returning(user)
+    with patch("backend.routers.auth.check_and_speed_up_active_session", new=AsyncMock()):
+        resp = await login(LoginRequest(email=user.email, password="correct-horse"), db)
+
+    assert resp.token  # logged in despite the saturated bucket — no lockout
+    assert key not in limiter._hits  # success cleared the account's failures
+
+
+@pytest.mark.asyncio
+async def test_login_wrong_password_429s_after_account_threshold(monkeypatch):
+    """Distributed brute force (wrong passwords) against ONE email is still
+    capped: the first few wrong attempts get the generic 401, then the
+    per-account failure bucket trips and further wrong attempts get 429 — even
+    though each could arrive from a fresh IP (the per-IP limiter can't see
+    that)."""
+    limiter = SlidingWindowRateLimiter(3, 60, clock=lambda: 1000.0)
+    monkeypatch.setattr(auth_router, "login_account_rate_limiter", limiter)
+
+    user = _user(email="driver@amphive.test", password="correct-horse")
+    db = _db_returning(user)
+
+    for _ in range(3):  # within budget → generic 401
+        with pytest.raises(HTTPException) as exc:
+            await login(LoginRequest(email=user.email, password="wrong"), db)
+        assert exc.value.status_code == 401
+        assert exc.value.detail == "Invalid email or password."
+
+    with pytest.raises(HTTPException) as exc:  # over budget → 429
+        await login(LoginRequest(email=user.email, password="wrong"), db)
+    assert exc.value.status_code == 429
+    assert re.match(r"^Too many login attempts\. Try again in \d+ s\.$", exc.value.detail)
+    assert int(exc.value.headers["Retry-After"]) >= 1
+
+
+@pytest.mark.asyncio
+async def test_login_failure_cap_is_not_an_enumeration_oracle(monkeypatch):
+    """The failure cap fires identically for a NON-existent email: same 429,
+    same generic copy, no hint that the address is unknown — so it adds no
+    account-enumeration signal beyond the pre-existing generic 401."""
+    limiter = SlidingWindowRateLimiter(3, 60, clock=lambda: 1000.0)
+    monkeypatch.setattr(auth_router, "login_account_rate_limiter", limiter)
+
+    db = _db_returning(None)  # no such account
+    for _ in range(3):
+        with pytest.raises(HTTPException) as exc:
+            await login(LoginRequest(email="nobody@amphive.test", password="x"), db)
+        assert exc.value.status_code == 401
+
+    with pytest.raises(HTTPException) as exc:
+        await login(LoginRequest(email="nobody@amphive.test", password="x"), db)
+    assert exc.value.status_code == 429
+    assert re.match(r"^Too many login attempts\. Try again in \d+ s\.$", exc.value.detail)
+    assert "nobody" not in exc.value.detail and "amphive.test" not in exc.value.detail
 
 
 @pytest.mark.asyncio

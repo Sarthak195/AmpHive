@@ -18,7 +18,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi import HTTPException
 
+import backend.routers.auth as auth_router
 from backend.routers.auth import (
+    _FORGOT_RESPONSE,
     RESET_TOKEN_TTL_MIN,
     _hash_reset_token,
     forgot_password,
@@ -61,6 +63,16 @@ def _prt(user_id=1, expires_in_min=30, used_at=None):
     prt.expires_at = _now() + timedelta(minutes=expires_in_min)
     prt.used_at = used_at
     return prt
+
+
+@pytest.fixture(autouse=True)
+def _reset_forgot_email_limiter():
+    """The per-email forgot-password limiter is a module global — clear its
+    sliding-window state around every test so buckets never leak between
+    tests (and the pre-existing tests can't be tipped into a spurious 429)."""
+    auth_router.forgot_password_email_rate_limiter._hits.clear()
+    yield
+    auth_router.forgot_password_email_rate_limiter._hits.clear()
 
 
 # --------------------------------------------------------------------------
@@ -116,6 +128,75 @@ async def test_forgot_password_unknown_email_same_response_no_email(monkeypatch)
 
     res_known = await forgot_password(ForgotPasswordRequest(email="driver@amphive.test"), known_db)
     assert res_known == res_unknown  # byte-identical bodies
+
+
+# --------------------------------------------------------------------------
+# forgot-password: per-EMAIL cap (inbox mailbomb via IP rotation)
+# --------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_forgot_password_per_email_cap_trips_regardless_of_source_ip(monkeypatch):
+    """The per-email cap is keyed on the SUBMITTED email and never reads the
+    request/IP, so an attacker rotating source IPs can't push more than N reset
+    mails into one inbox. Each call here is a distinct 'request' (fresh db);
+    after the threshold the same email is 429'd — proving the cap is source-IP
+    independent."""
+    monkeypatch.setattr(
+        auth_router, "forgot_password_email_rate_limiter",
+        SlidingWindowRateLimiter(3, 3600, clock=lambda: 1000.0),
+    )
+    monkeypatch.setattr(email_service, "send_password_reset", AsyncMock())
+
+    for _ in range(3):  # within budget → normal generic 200
+        db = _db([_scalar(_user()), MagicMock()])
+        res = await forgot_password(ForgotPasswordRequest(email="victim@amphive.test"), db)
+        assert res["status"] == "ok"
+
+    with pytest.raises(HTTPException) as exc:  # over budget → 429, same inbox
+        await forgot_password(ForgotPasswordRequest(email="victim@amphive.test"), _db([]))
+    assert exc.value.status_code == 429
+    assert int(exc.value.headers["Retry-After"]) >= 1
+
+
+@pytest.mark.asyncio
+async def test_forgot_password_per_email_cap_is_not_an_enumeration_oracle(monkeypatch):
+    """The cap is checked BEFORE the account lookup and keyed on the submitted
+    string, so it fires IDENTICALLY for an existing and a non-existing email —
+    same 429 status, byte-identical generic copy — leaking nothing about
+    whether the account exists."""
+    monkeypatch.setattr(email_service, "send_password_reset", AsyncMock())
+
+    async def _second_call_exc(email, existing):
+        monkeypatch.setattr(
+            auth_router, "forgot_password_email_rate_limiter",
+            SlidingWindowRateLimiter(1, 3600, clock=lambda: 1000.0),
+        )
+        first_db = _db([_scalar(_user()), MagicMock()]) if existing else _db([_scalar(None)])
+        await forgot_password(ForgotPasswordRequest(email=email), first_db)  # 1 allowed
+        with pytest.raises(HTTPException) as exc:  # 2nd trips the cap pre-lookup
+            await forgot_password(ForgotPasswordRequest(email=email), _db([]))
+        return exc.value
+
+    exist_exc = await _second_call_exc("real@amphive.test", existing=True)
+    ghost_exc = await _second_call_exc("ghost@amphive.test", existing=False)
+
+    assert exist_exc.status_code == ghost_exc.status_code == 429
+    assert exist_exc.detail == ghost_exc.detail  # identical copy, no existence signal
+
+
+@pytest.mark.asyncio
+async def test_forgot_password_generic_success_contract_preserved_under_the_cap(monkeypatch):
+    """A submission within the per-email budget still returns the exact same
+    generic 200 body — the added cap doesn't change the success contract."""
+    monkeypatch.setattr(
+        auth_router, "forgot_password_email_rate_limiter",
+        SlidingWindowRateLimiter(3, 3600, clock=lambda: 1000.0),
+    )
+    monkeypatch.setattr(email_service, "send_password_reset", AsyncMock())
+
+    db = _db([_scalar(_user()), MagicMock()])
+    res = await forgot_password(ForgotPasswordRequest(email="driver@amphive.test"), db)
+    assert res == _FORGOT_RESPONSE
 
 
 # --------------------------------------------------------------------------

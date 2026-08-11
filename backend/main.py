@@ -29,6 +29,7 @@ from backend.logging_config import configure_logging, set_correlation_id
 from backend.services.mqtt_manager import MQTTManager
 from backend.services.rate_limit import api_rate_limit_middleware
 from backend.services.session_reaper import SessionReaperService
+from backend.services.socketio_manager import cors_allowed_origins
 from backend.services.telemetry import COINS_PER_KWH
 from backend.services.telemetry_persistence import TelemetryPersistenceService
 
@@ -183,17 +184,15 @@ async def max_body_size_middleware(request: Request, call_next):
 
 # --- CORS Middleware ---
 # Allow the frontend (running on a different port/domain) to make API requests.
-# In production, restrict origins to the actual frontend domain.
+# The allowlist is the shared source of truth in services/socketio_manager.py:
+# the real .app domains always, plus any CORS_EXTRA_ORIGINS (empty in prod;
+# set to the localhost dev servers for local development). Localhost is NOT
+# trusted by default — with allow_credentials=True that would let a localhost
+# page ride a user's credentials against prod. Real domains use HSTS-preloaded
+# .app (https-only); duckdns origins retired 2026-07-20 after the cutover.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://localhost:3000",
-        # Real domain (2026-07-20; .app is HSTS-preloaded so https-only).
-        # duckdns origins retired 2026-07-20 after the amphive.app cutover.
-        "https://amphive.app",
-        "https://cpo.amphive.app",
-    ],
+    allow_origins=cors_allowed_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

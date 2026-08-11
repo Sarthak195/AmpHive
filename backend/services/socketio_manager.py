@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 from typing import Any, Dict
 
 import socketio
@@ -12,16 +13,44 @@ from backend.services.telemetry import TelemetryStore
 
 logger = logging.getLogger("amphive.socketio")
 
-# Create the Socket.io server.
-# cors_allowed_origins mirrors the FastAPI CORS allowlist in main.py (no
-# wildcard). Keep the two lists in sync when the frontend origin changes.
-_ALLOWED_ORIGINS = [
-    "http://localhost:5173",
-    "http://localhost:3000",
+# Production CORS allowlist — the REAL front-end domains, always allowed. This
+# is the single source of truth for both the Socket.io server (below) and the
+# FastAPI app (main.py imports cors_allowed_origins), so the two can no longer
+# drift out of sync. Note there is deliberately NO localhost here: with
+# allow_credentials=True, echoing + crediting http://localhost:* on a default
+# prod deploy would let a page served from localhost ride a logged-in user's
+# credentials against prod. Localhost is opt-in for dev only (see below).
+_PROD_ALLOWED_ORIGINS = [
     "https://amphive.app",
     "https://cpo.amphive.app",
 ]
-sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins=_ALLOWED_ORIGINS)
+
+
+def cors_allowed_origins() -> list[str]:
+    """The CORS allowlist shared by the FastAPI app and the Socket.io server.
+
+    The real domains are always present. Extra origins — typically the Vite
+    (5173) / CRA (3000) localhost dev servers — are OPT-IN via the
+    CORS_EXTRA_ORIGINS env var (comma-separated), which is EMPTY in production
+    so a default prod deploy never trusts a localhost origin. To develop
+    against a local frontend, set e.g.:
+
+        CORS_EXTRA_ORIGINS=http://localhost:5173,http://localhost:3000
+
+    Read at call time (not import-frozen) so a dev shell / test can set it
+    without reimporting. Deduped + order-preserving so an origin already in the
+    prod list can't be double-listed.
+    """
+    origins = list(_PROD_ALLOWED_ORIGINS)
+    for origin in os.getenv("CORS_EXTRA_ORIGINS", "").split(","):
+        origin = origin.strip()
+        if origin and origin not in origins:
+            origins.append(origin)
+    return origins
+
+
+# Create the Socket.io server. Same allowlist as main.py's FastAPI CORS.
+sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins=cors_allowed_origins())
 
 # Active background telemetry tasks by session_id
 active_streams: Dict[int, asyncio.Task] = {}
