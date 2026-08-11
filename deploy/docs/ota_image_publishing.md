@@ -8,11 +8,38 @@ background: [docs/FIRMWARE.md](../../docs/FIRMWARE.md) §6–§8,
 > flow is the admin portal's upload widget (Admin → Firmware Releases →
 > Upload image): it takes the signed `build/amphive-gateway.bin`, validates
 > the ESP image header, reads the version out of the embedded app
-> descriptor, stores the image on the backend volume, and auto-registers the
-> release — no gcloud or curl. See docs/FIRMWARE.md §7. The bucket flow
-> below still works (release rows store full URLs, so both hosting schemes
-> coexist) and remains useful when the backend is unreachable or for
-> pre-registry images.
+> descriptor, **publishes the image straight to `gs://amphive-fw` (keyless,
+> via the VM's own compute service account — no key file, no `gcloud`), and
+> auto-registers the bucket URL.** See docs/FIRMWARE.md §7 and
+> `backend/services/firmware_publish.py`. The manual `gcloud storage cp` flow
+> below still works (release rows store full URLs) and remains useful when the
+> backend is unreachable or for pre-registry images.
+>
+> **Why the upload endpoint publishes to GCS (not self-host):** the earlier
+> cut self-hosted the image on the backend and served it from
+> `GET /api/firmware/images/{file}`. Real devices could not finish that
+> download (the ESP32 TLS stream breaks mid-way) and the uploaded file was
+> non-persistent (`deploy.ps1` doesn't ship the `firmware_images` volume), so
+> it vanished on redeploy. Every historically-successful OTA fetched from
+> `gs://amphive-fw`, so uploads now go there. That legacy GET endpoint is
+> retained only for back-compat with any release row still pointing at a
+> self-hosted URL.
+>
+> **INFRA PREREQUISITE (apply once, BEFORE deploying the upload feature):** the
+> compute service account needs `roles/storage.objectCreator` on
+> `gs://amphive-fw`. Today it only holds that on `gs://amphive-db-backups`
+> (used by `backup_db.sh`); the VM's `devstorage.read_write` access scope is
+> already set. Grant it:
+>
+> ```bash
+> gcloud storage buckets add-iam-policy-binding gs://amphive-fw \
+>     --member=serviceAccount:930756667383-compute@developer.gserviceaccount.com \
+>     --role=roles/storage.objectCreator
+> ```
+>
+> Without this the upload endpoint returns **502 "Failed to publish firmware
+> image to the storage bucket"** (the GCS POST 403s). The bucket name is
+> overridable via the `FIRMWARE_GCS_BUCKET` env var (default `amphive-fw`).
 
 Since the 2026-07-10 hardening, an OTA image must be:
 

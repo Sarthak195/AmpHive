@@ -126,14 +126,15 @@ def test_every_admin_route_is_admin_only():
     routes = [r for r in admin_router.routes if isinstance(r, APIRoute)]
     # contract §4 + GET /api/admin/gateway-logs (TD#28) + POST/GET
     # /api/admin/gateways/inventory (feat/easy-provisioning claim-code onboarding)
-    # + POST/GET /api/admin/firmware-releases + POST .../deactivate
-    # (feat/ota-version-picker) + GET /api/admin/plugs + POST
+    # + POST/GET /api/admin/firmware-releases + POST .../deactivate + POST
+    # .../reactivate (feat/ota-version-picker; reactivate added with the
+    # 2026-08-04 OTA-to-GCS backlog) + GET /api/admin/plugs + POST
     # /api/admin/gateways/{id}/ota + POST /api/admin/firmware-releases/upload
     # (feat/admin-dashboard completion). NOTE: the public GET
     # /api/firmware/images/{filename} deliberately lives in a SEPARATE router
     # (routers/firmware_images.py), not here — it must be reachable without the
     # admin gate — so it is not counted among these admin-only routes.
-    assert len(routes) == 19
+    assert len(routes) == 20
     for route in routes:
         assert route.path.startswith("/api/admin/")
         gates = [

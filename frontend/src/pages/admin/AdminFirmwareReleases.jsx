@@ -3,16 +3,17 @@
  * maintains so the CPO OTA flow (CpoGateways "Update firmware") offers a
  * dropdown of real versions instead of a hand-pasted URL.
  *
- * This page does NOT upload/host firmware binaries — an admin still
- * publishes the image the existing way (docs/FIRMWARE.md §7 "Publishing an
- * OTA image": `gcloud storage cp` to `gs://amphive-fw`, or
- * deploy/scripts/publish_firmware.ps1) and then registers the version +
- * that already-public https URL here. Binary upload through this UI is a
- * deliberate follow-up, not part of this cut.
+ * Two ways to add a release: "Register release" points at an already-published
+ * https URL (docs/FIRMWARE.md §7 / deploy/scripts/publish_firmware.ps1), while
+ * "Upload image" streams the raw signed .bin — the backend publishes it to the
+ * public bucket gs://amphive-fw (keyless, via the VM service account) and
+ * registers the bucket URL. Deactivate/Reactivate soft-toggle a release in/out
+ * of the CPO version picker.
  *
  * Data: GET /api/admin/firmware-releases?active=, POST
- * /api/admin/firmware-releases, POST
- * /api/admin/firmware-releases/{id}/deactivate.
+ * /api/admin/firmware-releases, POST /api/admin/firmware-releases/upload, POST
+ * /api/admin/firmware-releases/{id}/deactivate, POST
+ * /api/admin/firmware-releases/{id}/reactivate.
  */
 
 import { useCallback, useState } from 'react';
@@ -159,6 +160,25 @@ export default function AdminFirmwareReleases() {
     }
   };
 
+  // ---- Reactivate ----------------------------------------------------------
+  const [reactivateTarget, setReactivateTarget] = useState(null);
+  const [reactivateBusy, setReactivateBusy] = useState(false);
+
+  const confirmReactivate = async () => {
+    if (!reactivateTarget) return;
+    setReactivateBusy(true);
+    try {
+      await api.post(`/api/admin/firmware-releases/${reactivateTarget.id}/reactivate`);
+      toast.ok(`${reactivateTarget.version} reactivated.`);
+      setReactivateTarget(null);
+      fetchReleases();
+    } catch (err) {
+      toast.error(apiErrorCopy(err));
+    } finally {
+      setReactivateBusy(false);
+    }
+  };
+
   const columns = [
     {
       key: 'version',
@@ -193,7 +213,15 @@ export default function AdminFirmwareReleases() {
           >
             Deactivate
           </button>
-        ) : null,
+        ) : (
+          <button
+            type="button"
+            className="btn btn-quiet btn-sm"
+            onClick={() => setReactivateTarget(r)}
+          >
+            Reactivate
+          </button>
+        ),
     },
   ];
 
@@ -308,8 +336,8 @@ export default function AdminFirmwareReleases() {
         <form className="stack" onSubmit={submitUpload}>
           <p className="text-2 text-sm">
             Signed build output (<code>build/amphive-gateway.bin</code>) — version is read from
-            the image itself. It&apos;s hosted and registered in one step, so there&apos;s no URL
-            to paste.
+            the image itself. It&apos;s published to <code>gs://amphive-fw</code> and registered
+            in one step, so there&apos;s no URL to paste.
           </p>
           <div className="field">
             <label className="field-label" htmlFor="fw-upload-file">
@@ -352,11 +380,23 @@ export default function AdminFirmwareReleases() {
         onClose={() => setDeactivateTarget(null)}
         onConfirm={confirmDeactivate}
         title="Deactivate this release?"
-        body={`${deactivateTarget?.version || 'This release'} will disappear from the CPO version picker immediately. It stays here for reference and can't be reactivated from this page.`}
+        body={`${deactivateTarget?.version || 'This release'} will disappear from the CPO version picker immediately. It stays here for reference and can be reactivated later from this page.`}
         confirmLabel="Deactivate"
         tone="danger"
         busy={deactivateBusy}
         busyLabel="Deactivating…"
+      />
+
+      <ConfirmDialog
+        open={Boolean(reactivateTarget)}
+        onClose={() => setReactivateTarget(null)}
+        onConfirm={confirmReactivate}
+        title="Reactivate this release?"
+        body={`${reactivateTarget?.version || 'This release'} will reappear in the CPO version picker immediately.`}
+        confirmLabel="Reactivate"
+        tone="primary"
+        busy={reactivateBusy}
+        busyLabel="Reactivating…"
       />
     </>
   );

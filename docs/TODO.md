@@ -25,7 +25,14 @@ the items below are the follow-ups so they don't recur. Security audit from the
 same day is fully remediated — see [SECURITY.md](SECURITY.md) §"2026-08-04"; not
 repeated here.*
 
-- [ ] **OTA upload feature is unreliable for real devices — keep OTA on GCS.**
+- [x] **OTA upload feature is unreliable for real devices — keep OTA on GCS.**
+      **DONE 2026-08-11** (deploy + IAM grant pending): the upload endpoint now
+      publishes the `.bin` to `gs://amphive-fw` (keyless, via the VM
+      service-account identity — `backend/services/firmware_publish.py`) and
+      registers the public `storage.googleapis.com` bucket URL, replacing the
+      self-hosted `FileResponse`. **One-time infra prereq before it works in
+      prod:** grant `roles/storage.objectCreator` on `gs://amphive-fw` to the
+      compute SA — see `deploy/docs/ota_image_publishing.md`.
       **(High — recurs on every UI upload.)** The admin firmware-**upload**
       path self-hosts images at `GET /api/firmware/images/{file}`
       (`backend/routers/firmware_images.py:46`, Caddy→nginx→FastAPI
@@ -45,8 +52,14 @@ repeated here.*
       and point releases at the bucket. (2.5.0-direct release row was repointed
       to GCS by hand as the immediate unblock.)
 
-- [ ] **Least-privilege role has no test/boot coverage — add the guardrail that
-      would have caught the crash.** **(Med — highest leverage.)** Every
+- [x] **Least-privilege role has no test/boot coverage — add the guardrail that
+      would have caught the crash.** **DONE 2026-08-11:** the boot check is now a
+      transactional zero-row `UPDATE` write-probe (rolled back — proves the DML
+      grant, changes nothing) instead of `SELECT 1`, so an incomplete grant
+      crash-loops fast; and a DB-gated live test now runs real
+      INSERT/UPDATE/DELETE + `nextval` **as** the provisioned role
+      (`backend/tests/test_privilege_separation_live.py`).
+      **(Med — highest leverage.)** Every
       DB-gated test connects as the Postgres owner/superuser (all the
       `DROP TABLE IF EXISTS alembic_version` fixtures), and the runtime-role
       boot check is only `SELECT 1` (`backend/database/db.py:271-272`), so
@@ -67,14 +80,16 @@ repeated here.*
       conf to the VM + recreate the `mqtt` container; reconcile the stale
       `deploy/k8s/mosquitto.yaml` copy.
 
-- [ ] **Firmware release "deactivate" is a one-way trap.** **(Med.)** There's a
+- [x] **Firmware release "deactivate" is a one-way trap.** **DONE 2026-08-11:**
+      added `POST /api/admin/firmware-releases/{id}/reactivate` + a Reactivate
+      button in `AdminFirmwareReleases.jsx`, and re-uploading/re-registering a
+      **deactivated** version now overwrites its url/notes and reactivates it
+      (an ACTIVE version is still a hard 400). **(Med.)** There was a
       `.../deactivate` endpoint (`backend/routers/admin.py:1379`) but no
-      reactivate, and the upload endpoint rejects any existing version even when
-      it's deactivated — so a deactivated release can neither be re-enabled nor
-      re-uploaded (stranded the 2.5.0 release; unblocked by a hand DB
-      `is_active=true`). **Fix:** add a reactivate endpoint + a Reactivate button
-      in `AdminFirmwareReleases.jsx`, and make re-uploading a deactivated version
-      overwrite-and-reactivate it (so notes-on-retry works).
+      reactivate, and the upload endpoint rejected any existing version even when
+      it was deactivated — so a deactivated release could neither be re-enabled
+      nor re-uploaded (stranded the 2.5.0 release; unblocked by a hand DB
+      `is_active=true`).
 
 - [ ] **Startup-migration hazards (latent outage).** **(Low, preventive.)**
       `init_db` runs `alembic upgrade head` on every boot inside the single

@@ -2,13 +2,21 @@
 Public (unauthenticated) OTA firmware image host —
 GET /api/firmware/images/{filename}.
 
+LEGACY / BACK-COMPAT ONLY (2026-08-04). New admin uploads (POST
+/api/admin/firmware-releases/upload) now publish the image to the public bucket
+gs://amphive-fw and register the bucket URL — the self-hosted path this router
+serves proved unreliable for real devices (the ESP32's TLS download breaks
+mid-stream) and non-persistent (deploy.ps1 doesn't ship the firmware_images
+volume, so uploads vanished on redeploy). See services/firmware_publish.py and
+docs/TODO.md "2026-08-04 reliability & integration backlog". This endpoint is
+retained so any release row still pointing at an already-registered self-hosted
+`/api/firmware/images/...` URL keeps resolving; nothing new is written here.
+
 Public by design: OTA images were already world-readable on the public GCS
 bucket (gs://amphive-fw) and are fetched by fielded gateways over plain https.
 The device authenticates the IMAGE itself via its embedded ECDSA app signature
 (signed-OTA / secure boot, firmware >= 1.4.0) — NOT the transport — so serving
-the .bin without auth adds no new exposure while letting a gateway fetch an
-admin-uploaded image (POST /api/admin/firmware-releases/upload) straight from
-the backend's own origin instead of a hand-published bucket URL.
+the .bin without auth adds no new exposure.
 
 This router deliberately lives OUTSIDE routers/admin.py: everything in that
 module is gated by require_role("admin"), and this endpoint must be reachable
