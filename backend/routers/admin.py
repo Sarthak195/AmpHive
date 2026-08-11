@@ -14,6 +14,7 @@ services/money.to_money, audit rows via services/audit.try_record_audit
 that function's session-state caveat), paginated lists return
 {"total": int, "items": [...]} with limit (cap 200, default 50) + offset.
 """
+import asyncio
 import logging
 import os
 import secrets
@@ -57,6 +58,10 @@ from backend.schemas import (
     CpoGatewayOtaRequest,
 )
 from backend.services.audit import try_record_audit
+from backend.services.firmware_publish import (
+    FirmwarePublishError,
+    upload_firmware_image,
+)
 from backend.services.money import ZERO_MONEY, to_money
 from backend.services.rbac import require_role
 from backend.services.session_lifecycle import (
@@ -1059,32 +1064,54 @@ async def admin_create_firmware_release(
     This does NOT upload/host the binary — `req.url` must already be a
     reachable published image (today: `gs://amphive-fw`, see
     docs/FIRMWARE.md §7 "Publishing an OTA image" /
-    deploy/scripts/publish_firmware.ps1). Binary upload through this
-    endpoint is a deliberate follow-up, not part of this cut.
+    deploy/scripts/publish_firmware.ps1). To upload the .bin itself, use POST
+    /api/admin/firmware-releases/upload.
+
+    Re-registering a version that exists but is DEACTIVATED overwrites its
+    url/notes and reactivates it (so a deactivated release isn't permanently
+    stranded); an ACTIVE version is a hard 400 "already registered".
     """
-    existing = await db.execute(
-        select(FirmwareRelease).where(FirmwareRelease.version == req.version)
-    )
-    if existing.scalar_one_or_none():
+    existing = (
+        await db.execute(
+            select(FirmwareRelease).where(FirmwareRelease.version == req.version)
+        )
+    ).scalar_one_or_none()
+
+    if existing is not None and existing.is_active:
         raise HTTPException(
             status_code=400,
             detail=f"Firmware release '{req.version}' is already registered.",
         )
 
-    release = FirmwareRelease(version=req.version, url=req.url, notes=req.notes, is_active=True)
-    db.add(release)
-    await db.commit()
-    await db.refresh(release)
+    if existing is not None:
+        # A DEACTIVATED release with this version is not a hard duplicate:
+        # re-registering it means "point it at this URL and turn it back on".
+        # Overwrite url/notes + reactivate instead of 400 so the release isn't
+        # permanently stranded once deactivated.
+        existing.url = req.url
+        existing.notes = req.notes
+        existing.is_active = True
+        await db.commit()
+        await db.refresh(existing)
+        release = existing
+        audit_action = "firmware_release.overwrite_reactivate"
+    else:
+        release = FirmwareRelease(version=req.version, url=req.url, notes=req.notes, is_active=True)
+        db.add(release)
+        await db.commit()
+        await db.refresh(release)
+        audit_action = "firmware_release.create"
 
     rel_id = release.id  # snapshot before the audit write (see try_record_audit's docstring)
 
-    logger.info(f"Admin registered firmware release {req.version} (id={rel_id}) by {user.email}")
+    verb = "registered" if audit_action == "firmware_release.create" else "re-registered (reactivated)"
+    logger.info(f"Admin {verb} firmware release {req.version} (id={rel_id}) by {user.email}")
 
     await try_record_audit(
         db,
         tenant_id=None,
         actor_user_id=user.id,
-        action="firmware_release.create",
+        action=audit_action,
         target_type="firmware_release",
         target_id=str(rel_id),
         detail=f"version={req.version}, url={req.url}",
@@ -1108,10 +1135,10 @@ async def admin_upload_firmware_release(
     notes: Optional[str] = None,
 ):
     """
-    Upload an OTA firmware binary directly, host it on the backend, and
-    register it as a release — the "no more hand-publishing to gs://amphive-fw"
-    flow that complements POST /api/admin/firmware-releases (register a URL you
-    published yourself).
+    Upload an OTA firmware binary directly, PUBLISH it to the public GCS
+    bucket gs://amphive-fw, and register it as a release — the "no more
+    hand-publishing with gcloud" flow that complements POST
+    /api/admin/firmware-releases (register a URL you published yourself).
 
     RAW body, NOT multipart: the request body IS the .bin (no python-multipart
     dependency). The image is validated as a genuine amphive-gateway ESP32 app
@@ -1119,11 +1146,18 @@ async def admin_upload_firmware_release(
     embedded project_name/version) before anything is stored — the version and
     filename are read out of the image itself, not trusted from the client.
 
-    The stored file is served publicly by GET /api/firmware/images/{filename};
-    `req.url` is built from PUBLIC_API_ORIGIN (or FRONTEND_ORIGIN) so a fielded
-    gateway can fetch it over https. Metadata (version/url/notes) is validated
-    by instantiating AdminFirmwareReleaseCreateRequest, reusing its exact
-    version regex + https-only rule — so a plain http:// dev origin is rejected.
+    The bytes are uploaded to gs://amphive-fw (keyless, via the VM's own
+    service-account identity — see services/firmware_publish.py) and the
+    registered `url` is the public bucket URL
+    (https://storage.googleapis.com/amphive-fw/amphive-gateway-<ver>.bin), so a
+    fielded gateway fetches it over https from the same host every historically-
+    successful OTA used. This replaced the old self-hosted path
+    (GET /api/firmware/images/{filename}), which real devices could not download
+    reliably and which vanished on redeploy (docs/TODO.md 2026-08-04 backlog).
+    Metadata (version/url/notes) is still validated by instantiating
+    AdminFirmwareReleaseCreateRequest, reusing its exact version regex +
+    https-only rule. Re-uploading a DEACTIVATED version re-publishes the bytes
+    and overwrites url/notes + reactivates it; an ACTIVE version is a 400.
     """
     body = await request.body()
 
@@ -1160,17 +1194,16 @@ async def admin_upload_firmware_release(
 
     filename = f"{_FIRMWARE_PROJECT_NAME}-{version}.bin"
 
-    base = os.getenv("PUBLIC_API_ORIGIN") or os.getenv("FRONTEND_ORIGIN")
-    if not base:
-        raise HTTPException(
-            status_code=500,
-            detail="FRONTEND_ORIGIN not configured; cannot build a public image URL.",
-        )
-    url = f"{base.rstrip('/')}/api/firmware/images/{filename}"
+    # New uploads publish to the public bucket gs://amphive-fw and register the
+    # bucket URL (the self-hosted origin URL is gone — see the docstring). The
+    # bucket name is overridable via FIRMWARE_GCS_BUCKET; the URL is
+    # deterministic, so we build it here to validate the metadata BEFORE
+    # spending a network round-trip on the upload.
+    bucket = os.getenv("FIRMWARE_GCS_BUCKET", "amphive-fw")
+    url = f"https://storage.googleapis.com/{bucket}/{filename}"
 
     # Reuse the create endpoint's schema so the version regex + https-only URL
-    # rule are enforced identically. A plain http:// origin therefore fails
-    # here — the URL must be https.
+    # rule are enforced identically before we publish anything.
     try:
         validated = AdminFirmwareReleaseCreateRequest(version=version, url=url, notes=notes)
     except ValidationError as exc:
@@ -1179,56 +1212,72 @@ async def admin_upload_firmware_release(
             status_code=400,
             detail=(
                 f"Rejected firmware metadata ({first.get('loc', ['?'])[-1]}): "
-                f"{first.get('msg', 'invalid')}. Parsed version={version!r}, url={url!r} — "
-                f"note a plain http:// dev origin is rejected (the image URL must be https)."
+                f"{first.get('msg', 'invalid')}. Parsed version={version!r}, url={url!r}."
             ),
         )
 
-    # Duplicate-version guard, same as admin_create_firmware_release.
-    existing = await db.execute(
-        select(FirmwareRelease).where(FirmwareRelease.version == validated.version)
-    )
-    if existing.scalar_one_or_none():
+    # Duplicate-version guard. An ACTIVE release with this version is a hard
+    # 400 (already registered) and we publish nothing. A DEACTIVATED one is
+    # overwritten-and-reactivated below (re-publish the bytes + re-enable) so a
+    # deactivated release isn't permanently stranded.
+    existing = (
+        await db.execute(
+            select(FirmwareRelease).where(FirmwareRelease.version == validated.version)
+        )
+    ).scalar_one_or_none()
+    if existing is not None and existing.is_active:
         raise HTTPException(
             status_code=400,
             detail=f"Firmware release '{validated.version}' is already registered.",
         )
 
-    # Persist the image atomically: write a .tmp then os.replace so a
-    # concurrent GET never sees a half-written file, and a crash mid-write
-    # leaves only a stray .tmp, never a corrupt .bin.
-    store_dir = os.getenv("FIRMWARE_IMAGE_DIR", "data/firmware-images")
-    os.makedirs(store_dir, exist_ok=True)
-    dest_path = os.path.join(store_dir, filename)
-    tmp_path = f"{dest_path}.tmp"
-    with open(tmp_path, "wb") as fh:
-        fh.write(body)
-    os.replace(tmp_path, dest_path)
+    # Publish the bytes to gs://amphive-fw. upload_firmware_image is a
+    # synchronous, blocking HTTP call (keyless ADC + requests), so offload it
+    # off the event loop — same asyncio.to_thread pattern used for smtplib /
+    # razorpay elsewhere in the backend.
+    try:
+        public_url = await asyncio.to_thread(upload_firmware_image, filename, body)
+    except FirmwarePublishError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to publish firmware image to the storage bucket: {exc}",
+        )
 
     size_bytes = len(body)
 
-    release = FirmwareRelease(
-        version=validated.version, url=validated.url, notes=validated.notes, is_active=True
-    )
-    db.add(release)
-    await db.commit()
-    await db.refresh(release)
+    if existing is not None:
+        # DEACTIVATED existing release: overwrite url/notes + reactivate.
+        existing.url = public_url
+        existing.notes = validated.notes
+        existing.is_active = True
+        await db.commit()
+        await db.refresh(existing)
+        release = existing
+        audit_action = "firmware_release.reupload_reactivate"
+    else:
+        release = FirmwareRelease(
+            version=validated.version, url=public_url, notes=validated.notes, is_active=True
+        )
+        db.add(release)
+        await db.commit()
+        await db.refresh(release)
+        audit_action = "firmware_release.upload"
 
     rel_id = release.id  # snapshot before the audit write (see try_record_audit's docstring)
 
     logger.info(
-        f"Admin uploaded firmware release {validated.version} "
-        f"(id={rel_id}, {size_bytes} bytes -> {dest_path}) by {user.email}"
+        f"Admin published firmware release {validated.version} "
+        f"(id={rel_id}, {size_bytes} bytes -> {public_url}, action={audit_action}) by {user.email}"
     )
 
     await try_record_audit(
         db,
         tenant_id=None,
         actor_user_id=user.id,
-        action="firmware_release.upload",
+        action=audit_action,
         target_type="firmware_release",
         target_id=str(rel_id),
-        detail=f"version={validated.version}, size={size_bytes} bytes",
+        detail=f"version={validated.version}, size={size_bytes} bytes, url={public_url}",
     )
 
     return {
@@ -1410,6 +1459,42 @@ async def admin_deactivate_firmware_release(
     )
 
     return {"status": "deactivated", "id": release_id, "version": release.version}
+
+
+@router.post("/api/admin/firmware-releases/{release_id}/reactivate")
+async def admin_reactivate_firmware_release(
+    release_id: int,
+    user: User = Depends(require_role("admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Re-enable a soft-deactivated firmware release: it reappears in the CPO
+    version picker (GET /api/cpo/firmware-releases) immediately. The inverse of
+    POST .../deactivate — deactivation is no longer a one-way trap. Idempotent:
+    reactivating an already-active release just confirms the state rather than
+    erroring.
+    """
+    result = await db.execute(select(FirmwareRelease).where(FirmwareRelease.id == release_id))
+    release = result.scalar_one_or_none()
+    if release is None:
+        raise HTTPException(status_code=404, detail="Firmware release not found.")
+
+    release.is_active = True
+    await db.commit()
+
+    logger.info(f"Admin reactivated firmware release {release.version} (id={release_id}) by {user.email}")
+
+    await try_record_audit(
+        db,
+        tenant_id=None,
+        actor_user_id=user.id,
+        action="firmware_release.reactivate",
+        target_type="firmware_release",
+        target_id=str(release_id),
+        detail=f"version={release.version}",
+    )
+
+    return {"status": "reactivated", "id": release_id, "version": release.version}
 
 
 @router.get("/api/admin/gateway-logs")

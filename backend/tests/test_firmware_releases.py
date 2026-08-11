@@ -23,6 +23,7 @@ from backend.routers.admin import (
     admin_create_firmware_release,
     admin_deactivate_firmware_release,
     admin_list_firmware_releases,
+    admin_reactivate_firmware_release,
 )
 from backend.schemas import AdminFirmwareReleaseCreateRequest
 from backend.services.versioning import is_newer_version, version_sort_key
@@ -122,8 +123,8 @@ async def test_create_release_registers_a_new_row():
 
 
 @pytest.mark.asyncio
-async def test_create_release_rejects_duplicate_version():
-    db = _db(_result(_release_row()))  # uniqueness check finds an existing row
+async def test_create_release_rejects_duplicate_active_version():
+    db = _db(_result(_release_row(is_active=True)))  # existing ACTIVE row
     with pytest.raises(HTTPException) as exc:
         await admin_create_firmware_release(
             AdminFirmwareReleaseCreateRequest(
@@ -134,6 +135,36 @@ async def test_create_release_rejects_duplicate_version():
         )
     assert exc.value.status_code == 400
     db.add.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_create_release_overwrites_and_reactivates_deactivated_version():
+    """Re-registering a DEACTIVATED version isn't a hard duplicate: overwrite
+    its url/notes and flip it back to active instead of 400."""
+    existing = _release_row(release_id=5, version="2.3.0-direct", is_active=False)
+    existing.url = "https://storage.googleapis.com/amphive-fw/old.bin"
+    existing.notes = "old"
+    db = _db(_result(existing))
+
+    res = await admin_create_firmware_release(
+        AdminFirmwareReleaseCreateRequest(
+            version="2.3.0-direct",
+            url="https://storage.googleapis.com/amphive-fw/new.bin",
+            notes="new notes",
+        ),
+        _admin_user(), db,
+    )
+
+    assert res["id"] == 5
+    assert res["is_active"] is True
+    assert res["url"] == "https://storage.googleapis.com/amphive-fw/new.bin"
+    assert existing.is_active is True
+    assert existing.url == "https://storage.googleapis.com/amphive-fw/new.bin"
+    assert existing.notes == "new notes"
+    # Overwritten in place — no new FirmwareRelease row, only the audit row.
+    assert db.add.call_count == 1
+    audit_added = db.add.call_args_list[0][0][0]
+    assert audit_added.action == "firmware_release.overwrite_reactivate"
 
 
 def test_create_release_request_rejects_plain_http_url():
@@ -187,6 +218,34 @@ async def test_deactivate_release_is_idempotent():
     res = await admin_deactivate_firmware_release(release.id, _admin_user(), db)
     assert res["status"] == "deactivated"
     assert release.is_active is False
+
+
+@pytest.mark.asyncio
+async def test_reactivate_release_flips_the_flag():
+    release = _release_row(is_active=False)
+    db = _db(_result(release))
+    res = await admin_reactivate_firmware_release(release.id, _admin_user(), db)
+    assert res["status"] == "reactivated"
+    assert res["version"] == release.version
+    assert release.is_active is True
+
+
+@pytest.mark.asyncio
+async def test_reactivate_release_404_when_missing():
+    db = _db(_result(None))
+    with pytest.raises(HTTPException) as exc:
+        await admin_reactivate_firmware_release(999, _admin_user(), db)
+    assert exc.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_reactivate_release_is_idempotent():
+    """Reactivating an already-active release just confirms the state."""
+    release = _release_row(is_active=True)
+    db = _db(_result(release))
+    res = await admin_reactivate_firmware_release(release.id, _admin_user(), db)
+    assert res["status"] == "reactivated"
+    assert release.is_active is True
 
 
 # NOTE: RBAC gating for these routes (require_role("admin"), and the exact
@@ -290,6 +349,19 @@ async def test_register_list_deactivate_end_to_end(factory):
             await db.execute(select(FirmwareRelease).where(FirmwareRelease.id == res3["id"]))
         ).scalar_one()
         assert deactivated.is_active is False
+
+    # Reactivate it: it returns to the CPO picker (deactivate is not a one-way trap).
+    async with factory() as db:
+        admin = (await db.execute(select(User).where(User.id == admin_id))).scalar_one()
+        react = await admin_reactivate_firmware_release(res3["id"], admin, db)
+        assert react["status"] == "reactivated"
+
+    async with factory() as db:
+        admin = (await db.execute(select(User).where(User.id == admin_id))).scalar_one()
+        cpo_view_reactivated = await cpo_list_firmware_releases(admin, db)
+    assert [r["version"] for r in cpo_view_reactivated] == [
+        "2.10.0-direct", "2.9.0-direct", "2.2.0-direct",
+    ]
 
 
 @requires_db
