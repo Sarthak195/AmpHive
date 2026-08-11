@@ -25,10 +25,11 @@ These are layered ON TOP of the per-IP limiters, not a replacement:
   SESSION_STOP_ACCOUNT_RATE_LIMIT          (default 20/60 — 20 session stops per minute per account)
   PAYMENTS_CREATE_ORDER_ACCOUNT_RATE_LIMIT (default 10/60 — 10 payment orders per minute per account)
   CPO_TOPUP_ACCOUNT_RATE_LIMIT             (default 20/60 — 20 offline top-ups per minute per CPO actor)
-  LOGIN_ACCOUNT_RATE_LIMIT                 (default 10/60 — 10 login attempts per minute per account/email)
+  LOGIN_ACCOUNT_RATE_LIMIT                 (default 10/60 — 10 FAILED login attempts per minute per email; a correct password never counts and clears the bucket)
   CPO_GATEWAY_CLAIM_ACCOUNT_RATE_LIMIT     (default 10/60 — 10 gateway-claim attempts per minute per CPO actor)
   GROUP_JOIN_ACCOUNT_RATE_LIMIT            (default 10/60 — 10 group-join attempts per minute per account)
   CPO_SETUP_ACCOUNT_RATE_LIMIT             (default 5/300 — 5 workspace-setup attempts per 5 minutes per account)
+  FORGOT_PASSWORD_EMAIL_RATE_LIMIT         (default 3/3600 — 3 reset emails per hour per SUBMITTED email, across all source IPs)
 """
 import logging
 import os
@@ -39,8 +40,7 @@ from fastapi import Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from backend.database.models import User
-from backend.schemas import LoginRequest
-from backend.services.auth import get_current_user, normalize_email
+from backend.services.auth import get_current_user
 
 logger = logging.getLogger("amphive.rate_limit")
 
@@ -78,6 +78,28 @@ class SlidingWindowRateLimiter:
         dq.append(now)
         self._maybe_sweep(now)
         return None
+
+    def record_failure(self, key: str):
+        """Record a FAILED attempt for `key` and report whether it is now over
+        budget. Same contract as ``check`` — None while within budget (the
+        failure is counted, caller proceeds with the normal error), else the
+        seconds until the oldest counted failure ages out (caller should 429).
+
+        Named for its call site: unlike a pre-handler ``check``, this runs ONLY
+        after a credential check has already FAILED, so a correct password never
+        reaches it and can never be throttled. Over-budget failures are not
+        re-recorded (inherited from ``check``), so the block lifts window_sec
+        after the max_attempts-th failure and the per-key deque stays bounded.
+        """
+        return self.check(key)
+
+    def reset(self, key: str) -> None:
+        """Forget every recorded attempt for `key`. Called on a SUCCESSFUL
+        login so a legitimate owner who mistyped a few times (or whose email an
+        IP-rotating attacker was flooding with wrong passwords) is never locked
+        out — the account bucket only ever reflects failures since the last
+        success."""
+        self._hits.pop(key, None)
 
     def _maybe_sweep(self, now):
         # Drop idle keys so the map can't grow without bound under an
@@ -213,42 +235,15 @@ def account_rate_limit_dependency(limiter: SlidingWindowRateLimiter, action: str
     return dependency
 
 
-def login_account_rate_limit_dependency(limiter: SlidingWindowRateLimiter):
-    """FastAPI dependency enforcing `limiter` per normalized login email —
-    layered ON TOP of the existing per-IP login dependency, not a replacement
-    for it. Closes the "one account, rotating IPs" gap for credential
-    stuffing/brute force targeted at a single account.
-
-    There is no authenticated user yet at /login, so this keys off the
-    request body instead of get_current_user. It takes the body as `req:
-    LoginRequest` — the SAME parameter name and type the route itself
-    declares. FastAPI's dependency resolver merges body parameters that share
-    a name across a route and its sub-dependencies into a single parsed body
-    ("more than one dependency could have the same field... count them by
-    name" — fastapi.dependencies.utils._should_embed_body_fields) instead of
-    embedding each under its own key, so this does not change the request
-    shape or double-parse the body. See test_rate_limiting.py for a wiring
-    test that calls the route through FastAPI's own dependency resolution
-    (TestClient) to prove it. (If this dependency's parameter were named
-    anything other than `req`, FastAPI would instead require the client to
-    send `{"req": {...}, "<other-name>": {...}}` and every existing login
-    caller would start getting 422s — the matching name is load-bearing.)
-
-    The 429 copy is deliberately IDENTICAL in shape to the per-IP login
-    limiter's generic message — it must never let a caller distinguish "this
-    email doesn't exist" from "this email is rate-limited" (no account
-    enumeration oracle).
-    """
-    async def dependency(req: LoginRequest) -> None:
-        retry_after = limiter.check(f"login:{normalize_email(req.email)}")
-        if retry_after is not None:
-            seconds = int(retry_after) + 1
-            raise HTTPException(
-                status_code=429,
-                detail=f"Too many login attempts. Try again in {seconds} s.",
-                headers={"Retry-After": str(seconds)},
-            )
-    return dependency
+# NOTE: the per-account login limit is NOT a pre-handler dependency. Keying a
+# hard pre-check on the VICTIM's email (as an earlier design did) let an
+# IP-rotating attacker 429 a victim BEFORE the password was ever checked —
+# locking the real owner out with the correct password (a targeted-lockout
+# DoS). It now lives inside routers/auth.login: credentials are verified first,
+# a SUCCESS clears the account's failure bucket (login_account_rate_limiter),
+# and only FAILURES are counted — so a correct password is never rate-limited
+# while distributed wrong-password brute force is still capped per email. See
+# SlidingWindowRateLimiter.record_failure / .reset.
 
 
 # Health probes (Docker healthcheck, uptime monitors, the deploy smoke) must
@@ -297,6 +292,16 @@ register_rate_limiter = SlidingWindowRateLimiter(*_rule_from_env("REGISTER_RATE_
 # though the 256-bit token makes brute force academic anyway.
 forgot_password_rate_limiter = SlidingWindowRateLimiter(*_rule_from_env("FORGOT_PASSWORD_RATE_LIMIT", "5/3600"))
 reset_password_rate_limiter = SlidingWindowRateLimiter(*_rule_from_env("RESET_PASSWORD_RATE_LIMIT", "10/3600"))
+# Per-EMAIL forgot-password cap (routers/auth.forgot_password), layered ON TOP
+# of the per-IP forgot_password_rate_limiter above. The per-IP limiter alone
+# lets an attacker with an IP pool send 5×N genuine reset mails/hour to one
+# victim's inbox (mailbomb + SMTP-reputation risk). Keyed on the SUBMITTED
+# email and checked BEFORE the account lookup, so it fires identically whether
+# or not the account exists — no enumeration oracle. In-process/per-worker,
+# same caveat as the rest of this module.
+forgot_password_email_rate_limiter = SlidingWindowRateLimiter(
+    *_rule_from_env("FORGOT_PASSWORD_EMAIL_RATE_LIMIT", "3/3600")
+)
 # Public, unauthenticated discovery map (GET /api/plugs/public). Generous — a
 # browsing visitor may refresh/poll live availability — but bounded so the
 # open endpoint can't be hammered to enumerate/scrape or exhaust the DB.
@@ -315,6 +320,11 @@ payments_create_order_account_rate_limiter = SlidingWindowRateLimiter(
 cpo_topup_account_rate_limiter = SlidingWindowRateLimiter(
     *_rule_from_env("CPO_TOPUP_ACCOUNT_RATE_LIMIT", "20/60")
 )
+# Per-EMAIL login FAILURE bucket (routers/auth.login). Counts only failed
+# credential checks; a correct password clears it (.reset) and is never
+# throttled — so this caps distributed (IP-rotating) brute force against one
+# account WITHOUT ever locking out the real owner. Multi-worker caveat: like
+# every limiter here it is in-process, so the effective cap is per worker.
 login_account_rate_limiter = SlidingWindowRateLimiter(
     *_rule_from_env("LOGIN_ACCOUNT_RATE_LIMIT", "10/60")
 )

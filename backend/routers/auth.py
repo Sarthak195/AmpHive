@@ -45,8 +45,8 @@ from backend.services.auth import (
     verify_password,
 )
 from backend.services.rate_limit import (
+    forgot_password_email_rate_limiter,
     forgot_password_rate_limiter,
-    login_account_rate_limit_dependency,
     login_account_rate_limiter,
     login_rate_limiter,
     rate_limit_dependency,
@@ -126,17 +126,20 @@ async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
     response_model=AuthResponse,
     dependencies=[
         Depends(rate_limit_dependency(login_rate_limiter, "login")),
-        Depends(login_account_rate_limit_dependency(login_account_rate_limiter)),
     ],
 )
 async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
     """
     Authenticate a user with email and password.
     Returns a JWT token on success.
-    Rate-limited per client IP (LOGIN_RATE_LIMIT) against brute force, layered
-    with a per-account limit keyed on the normalized email
-    (LOGIN_ACCOUNT_RATE_LIMIT) so rotating IPs against one account doesn't
-    bypass the limit; attempts count regardless of outcome.
+    Rate-limited per client IP (LOGIN_RATE_LIMIT) against single-source brute
+    force, layered with a per-account FAILURE cap keyed on the normalized email
+    (LOGIN_ACCOUNT_RATE_LIMIT) so an IP-rotating attacker can't brute-force one
+    account past the per-IP gate. That per-account cap counts ONLY failed
+    attempts and is enforced INSIDE this handler (never as a pre-handler
+    dependency): a correct password is verified first, clears the bucket, and
+    is never rate-limited — so an attacker flooding a victim's email with wrong
+    passwords can't lock the real owner out (targeted-lockout DoS).
     Email lookup is case-insensitive (canonicalized to lowercase — see
     normalize_email) so an account registered as `Driver@x.com` still
     matches a login attempt for `driver@x.com`.
@@ -155,8 +158,29 @@ async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
         verify_password(req.password, _DUMMY_PASSWORD_HASH)
         password_ok = False
 
+    # Per-account FAILURE cap, keyed on the SUBMITTED email — applied
+    # identically whether or not the account exists, so it adds no enumeration
+    # oracle (the 429 copy matches the per-IP limiter's, and record_failure is
+    # called the same way in both branches). A correct password never reaches
+    # here, so a legitimate owner is never throttled regardless of how many
+    # failures an IP-rotating attacker piled up. (In-process/per-worker — see
+    # rate_limit.py; the effective cap is per worker in a multi-worker deploy.)
+    account_key = f"login:{email}"
     if not user or not password_ok:
+        retry_after = login_account_rate_limiter.record_failure(account_key)
+        if retry_after is not None:
+            seconds = int(retry_after) + 1
+            raise HTTPException(
+                status_code=429,
+                detail=f"Too many login attempts. Try again in {seconds} s.",
+                headers={"Retry-After": str(seconds)},
+            )
         raise HTTPException(status_code=401, detail="Invalid email or password.")
+
+    # Correct password → clear the account's failure bucket. This is what
+    # guarantees a legitimate user is never locked out: a successful login
+    # wipes any failures an IP-rotating attacker accumulated against this email.
+    login_account_rate_limiter.reset(account_key)
 
     # [Admin] Disabled accounts can't sign in. Checked AFTER the password so
     # this response is only ever shown to the account's real owner (no
@@ -516,10 +540,46 @@ async def google_callback(request: Request, db: AsyncSession = Depends(get_db)):
             extra={"user_id": user.id, "email": user.email},
         )
     elif user.google_sub is None:
-        # Existing password account, first-time Google link. auth_provider
-        # stays 'password' — linking adds a sign-in method, it doesn't
-        # rewrite how the account originated.
+        # First-time Google link to a PRE-EXISTING local/password account.
+        # Google has cryptographically verified (email_verified, above) that
+        # the person signing in owns this email RIGHT NOW, so we securely TAKE
+        # OVER the credential instead of merely bolting Google on beside the
+        # existing password:
+        #
+        #   * Invalidate the stored password. users.hashed_password is NOT
+        #     NULL, so we can't null it — overwrite it with a fresh random
+        #     unusable hash (valid shape, unmatchable; the same trick used for
+        #     Google-only signups above and services.auth._DUMMY_PASSWORD_HASH).
+        #     verify_password can never match it, so /api/auth/login refuses
+        #     the old password forever after.
+        #   * Bump token_version to revoke every JWT/session minted before the
+        #     link (get_current_user and the socket layer both gate on tv).
+        #   * Flip auth_provider to 'google' — Google is now the only working
+        #     sign-in method, so the field stays consistent.
+        #
+        # Together these defeat the account-PRE-hijacking class: an attacker
+        # who pre-registered the victim's (unverified) email with their OWN
+        # password is fully evicted the instant the real owner links via
+        # Google — the attacker's password stops working AND their live
+        # sessions die. The owner can still set a password later via the normal
+        # forgot/reset-password flow (which writes a fresh hash by email and
+        # never checks the old one).
+        #
+        # NOTE: the COMPLETE fix for this class is email-ownership verification
+        # AT REGISTRATION (so an unverified email can't hold a usable
+        # credential in the first place). That is out of scope here and tracked
+        # separately — this take-over closes the federated-merge half only.
+        #
+        # ORM-level mutations (not a DB-side UPDATE) mirror the google_sub
+        # write this branch already did, so the whole take-over lands in the
+        # single commit below. First-time linking is not a high-concurrency
+        # path; even if two concurrent links collapsed the tv bump to +1
+        # instead of +2, the pre-existing epoch is still invalidated (the
+        # security goal holds).
         user.google_sub = google_sub
+        user.hashed_password = hash_password(secrets.token_urlsafe(32))
+        user.token_version = user.token_version + 1
+        user.auth_provider = "google"
         try:
             await db.commit()
         except IntegrityError:
@@ -533,7 +593,8 @@ async def google_callback(request: Request, db: AsyncSession = Depends(get_db)):
             )
         await db.refresh(user)
         logger.info(
-            "Linked Google identity to existing account",
+            "Linked Google identity to existing account "
+            "(pre-existing password credential taken over, prior sessions revoked)",
             extra={"user_id": user.id, "email": user.email},
         )
     elif user.google_sub != google_sub:
@@ -647,7 +708,10 @@ async def forgot_password(req: ForgotPasswordRequest, db: AsyncSession = Depends
     account — no account enumeration (unlike /register, which legitimately
     reveals duplicates, this endpoint takes arbitrary input from anyone).
     Rate-limited per client IP (FORGOT_PASSWORD_RATE_LIMIT) since each allowed
-    call with a real account triggers an outbound email.
+    call with a real account triggers an outbound email, AND per submitted
+    email (FORGOT_PASSWORD_EMAIL_RATE_LIMIT) so an attacker with an IP pool
+    can't mailbomb one victim's inbox by rotating source addresses past the
+    per-IP gate.
 
     Only the SHA-256 digest of the token is stored (PasswordResetToken);
     outstanding unused tokens for the user are voided first, so at most one
@@ -660,6 +724,24 @@ async def forgot_password(req: ForgotPasswordRequest, db: AsyncSession = Depends
     registered with still finds their account.
     """
     email = normalize_email(req.email)
+
+    # Per-EMAIL cap (layered on top of the per-IP dependency): keyed on the
+    # SUBMITTED email and checked BEFORE the account lookup, so it fires
+    # identically whether or not the account exists — it adds NO enumeration
+    # oracle (the transition to 429 depends only on how many times THIS email
+    # string was submitted, which is attacker-controlled, never on existence).
+    # This bounds how many reset mails any single inbox can be made to receive
+    # from all sources combined. In-process/per-worker, same caveat as the
+    # rest of rate_limit.py.
+    retry_after = forgot_password_email_rate_limiter.check(f"forgot:{email}")
+    if retry_after is not None:
+        seconds = int(retry_after) + 1
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many password reset requests for this email. Try again in {seconds} s.",
+            headers={"Retry-After": str(seconds)},
+        )
+
     result = await db.execute(select(User).where(func.lower(User.email) == email))
     user = result.scalar_one_or_none()
     if user is None:
