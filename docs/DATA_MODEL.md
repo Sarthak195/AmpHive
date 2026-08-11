@@ -293,15 +293,17 @@ full column list of each:
   OTA flow; ordering everywhere is semver-aware
   (`services/versioning.version_sort_key`), never a raw string sort. Backs
   `POST/GET /api/admin/firmware-releases` + `POST
-  /api/admin/firmware-releases/{id}/deactivate` + `GET
+  /api/admin/firmware-releases/{id}/deactivate` (and its inverse
+  `.../reactivate`, 2026-08-11 PR #115) + `GET
   /api/cpo/firmware-releases` (active only). The table itself still stores
-  only URLs, never binary blobs — but since feat/admin-dashboard
-  (2026-08-04) `POST /api/admin/firmware-releases/upload` stores uploaded
-  `.bin` images **on the backend volume** (`FIRMWARE_IMAGE_DIR`, default
-  `data/firmware-images`; served by the public
-  `GET /api/firmware/images/{filename}`) and auto-registers a row whose
-  `url` points there. Rows registered against GCS-hosted images are
-  unchanged and coexist.
+  only URLs, never binary blobs — since feat/admin-dashboard (2026-08-04)
+  `POST /api/admin/firmware-releases/upload` accepts the `.bin` itself and
+  auto-registers a row; since 2026-08-11 (PR #115) that upload **publishes
+  the bytes to `gs://amphive-fw`** and registers the bucket URL (the
+  2026-08-04 backend-volume host `GET /api/firmware/images/{filename}` is
+  kept only as legacy back-compat for URLs registered before the switch).
+  Re-uploading/re-registering a **deactivated** version overwrites
+  `url`/`notes` and reactivates the row; an active duplicate stays a 400.
 
 The live schema is now **25 tables** (up from the 15 documented in the
 sections above), all applied via Alembic per §4 below.
@@ -345,6 +347,31 @@ joined via `access_code`.
 - **Startup** applies `upgrade head` automatically; a database predating
   Alembic (built by the old `create_all` path) is detected (tables exist, no
   `alembic_version`) and stamped at the baseline first.
+- **Writing-a-migration conventions (2026-08-11).** Because `init_db()` runs
+  `alembic upgrade head` on **every boot of the single backend container**, a
+  slow migration is a startup stall — i.e. **downtime** — and a broken revision
+  graph wedges boot entirely. Hence:
+  - **No inline data backfills on large tables.** A backfill
+    (`UPDATE ... SET` across many rows) runs **out-of-band** — a one-off
+    script/management command executed after deploy — never inside the
+    migration itself. `telemetry_readings` is the hot table to worry about.
+  - **Index creation on hot tables** uses `CREATE INDEX CONCURRENTLY`, which
+    can't run in Alembic's usual transaction — wrap it in
+    `op.get_context().autocommit_block()`. A plain `CREATE INDEX` on
+    `telemetry_readings` takes a lock *and* blocks boot for the duration.
+  - **Exactly one head.** Two parallel branches each adding a revision produce
+    two heads, which makes `upgrade head` ambiguous and **wedges startup**
+    until someone hand-merges. CI enforces single-head
+    (`backend/tests/test_migration_heads.py`, PR #110, pure/no-DB) — rebase the
+    revision chain into a single line rather than `alembic merge` where
+    possible.
+  - **Least-privilege role grants have an object-class limit.** The runtime
+    role's grants (see `_provision_runtime_role` in `backend/database/db.py`,
+    which documents this) cover tables/views/sequences created by the owner in
+    schema `public` only — a migration that adds a **materialized view**, a
+    **new schema**, or objects owned by a **different role** must `GRANT` to
+    `APP_DB_USER` explicitly, or the app gets runtime "permission denied"
+    that CI (running as the owner) never sees.
 - The old `schema.sql`/`schema_v2.sql` reference files are deleted. Two
   constraints they described were never in the ORM and therefore do **not**
   exist in any real database (still true today — add as revisions if wanted):

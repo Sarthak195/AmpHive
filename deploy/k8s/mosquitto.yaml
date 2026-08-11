@@ -39,6 +39,10 @@ data:
     require_certificate false
     tls_version tlsv1.2
 
+    # Per-message payload cap (untrusted device edge) — stops an authenticated-
+    # but-hostile client publishing multi-megabyte frames; real frames are ~200 B.
+    message_size_limit 8192
+
     persistence true
     persistence_location /mosquitto/data/
 
