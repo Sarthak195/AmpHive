@@ -278,6 +278,7 @@ def _login_user(user_id=7, email="driver@amphive.test", password="correct-horse"
     u.coin_balance = 0.0
     u.token_version = 0
     u.is_disabled = False  # bare MagicMock attr is truthy -> spurious 403
+    u.email_verified = True  # verified so the login unverified-403 gate passes
     return u
 
 

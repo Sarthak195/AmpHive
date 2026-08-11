@@ -276,6 +276,20 @@ full column list of each:
   single-use, SHA-256-digest-only "forgot password" token
   (`PasswordResetToken`). Backs `POST /api/auth/forgot-password` +
   `POST /api/auth/reset-password`.
+- **`email_verification_tokens`** (`0037_email_verification.py`) — a
+  single-use, SHA-256-digest-only "verify your email" token
+  (`EmailVerificationToken`), an exact mirror of `password_reset_tokens`.
+  Paired with the new **`users.email_verified`** BOOLEAN NOT NULL DEFAULT
+  false: `POST /api/auth/register` now creates an UNVERIFIED account and emails
+  a link instead of auto-logging-in, `POST /api/auth/verify-email` consumes the
+  token and flips the flag, `POST /api/auth/login` 403s until it's true, and
+  Google sign-ins/links set it true (Google asserts the verified email). The
+  `0037` migration **GRANDFATHERED every pre-existing row to `true`**
+  (`UPDATE users SET email_verified = true` right after adding the column) so
+  the live prod user base is never locked out — only signups made after the
+  migration, through the app, start `false`. Closes the account-PRE-hijacking
+  class at its root. Backs `POST /api/auth/register` + `verify-email` +
+  `resend-verification`.
 - **`offline_topups`** (`0026_offline_topups.py`) — a CPO's cash top-up of a
   driver's coin wallet, funded from the tenant's own unsettled net earnings
   (`OfflineTopup`; `actor_user_id`/`driver_user_id` nullable + SET NULL, same
@@ -305,7 +319,7 @@ full column list of each:
   Re-uploading/re-registering a **deactivated** version overwrites
   `url`/`notes` and reactivates the row; an active duplicate stays a 400.
 
-The live schema is now **25 tables** (up from the 15 documented in the
+The live schema is now **26 tables** (up from the 15 documented in the
 sections above), all applied via Alembic per §4 below.
 
 ## 3. Relationships
@@ -340,7 +354,7 @@ joined via `access_code`.
   arrived via `0005_gateway_events` (2026-07-10), `audit_logs` via
   `0007_audit_log` (2026-07-12), and `notifications` + `push_subscriptions`
   via `0008_notifications` (2026-07-11, renumbered from 0007 at merge); it's
-  **24 tables** today — see "Tables added since" in §2 above for the rest.)
+  **26 tables** today — see "Tables added since" in §2 above for the rest.)
 - **New schema change** = new revision: `alembic -c backend/alembic.ini
   revision --autogenerate -m "..."` (autogenerate needs a reachable database —
   use the CI postgres or the VM; dev boxes run no DB by policy).

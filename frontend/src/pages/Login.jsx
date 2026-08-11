@@ -19,6 +19,7 @@ import { Link, useNavigate, useLocation } from 'react-router-dom';
 import { Eye, EyeOff } from 'lucide-react';
 import AuthShell from '../components/AuthShell';
 import GoogleSignInButton from '../components/GoogleSignInButton';
+import ResendVerification from '../components/ResendVerification';
 import { useAuth } from '../contexts/AuthContext';
 import { apiErrorCopy } from '../utils/statusCopy';
 import { isSafeInternalPath } from '../utils/safePath';
@@ -33,10 +34,14 @@ const Login = () => {
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  // A 403 means the account exists but its email is unverified — a distinct
+  // state from the 401 "wrong credentials" error, with a resend affordance.
+  const [unverified, setUnverified] = useState(false);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError('');
+    setUnverified(false);
     setBusy(true);
 
     try {
@@ -49,7 +54,12 @@ const Login = () => {
       const target = (next && isSafeInternalPath(next) ? next : null) || fromTarget || '/';
       navigate(target, { replace: true });
     } catch (err) {
-      setError(apiErrorCopy(err));
+      if (err?.status === 403) {
+        // Unverified email — show the verify/resend state, not a red error.
+        setUnverified(true);
+      } else {
+        setError(apiErrorCopy(err));
+      }
     } finally {
       setBusy(false);
     }
@@ -115,10 +125,21 @@ const Login = () => {
           </div>
         )}
 
+        {unverified && (
+          <div className="banner banner-warn" role="alert">
+            <p>
+              Please verify your email address before signing in. Check your
+              inbox for the verification link, or resend it below.
+            </p>
+          </div>
+        )}
+
         <button type="submit" className="btn btn-primary btn-lg btn-full" disabled={busy}>
           {busy ? 'Signing in…' : 'Sign in'}
         </button>
       </form>
+
+      {unverified && <ResendVerification email={email} label="Resend verification email" />}
 
       <GoogleSignInButton />
     </AuthShell>

@@ -11,6 +11,8 @@ Rules are env-configurable as "<attempts>/<window seconds>":
   REGISTER_RATE_LIMIT        (default 10/3600 — 10 registrations per hour per IP)
   FORGOT_PASSWORD_RATE_LIMIT (default 5/3600  — 5 reset emails per hour per IP)
   RESET_PASSWORD_RATE_LIMIT  (default 10/3600 — 10 token submissions per hour per IP)
+  VERIFY_EMAIL_RATE_LIMIT    (default 10/3600 — 10 verify-email submissions per hour per IP)
+  RESEND_VERIFICATION_RATE_LIMIT (default 5/3600 — 5 resend-verification requests per hour per IP)
 
 A blanket per-IP window additionally covers EVERY /api route (middleware, not a
 per-route dependency) as the defense-in-depth floor under the dedicated rules:
@@ -30,6 +32,7 @@ These are layered ON TOP of the per-IP limiters, not a replacement:
   GROUP_JOIN_ACCOUNT_RATE_LIMIT            (default 10/60 — 10 group-join attempts per minute per account)
   CPO_SETUP_ACCOUNT_RATE_LIMIT             (default 5/300 — 5 workspace-setup attempts per 5 minutes per account)
   FORGOT_PASSWORD_EMAIL_RATE_LIMIT         (default 3/3600 — 3 reset emails per hour per SUBMITTED email, across all source IPs)
+  RESEND_VERIFICATION_EMAIL_RATE_LIMIT     (default 3/3600 — 3 verification emails per hour per SUBMITTED email, across all source IPs)
 """
 import logging
 import os
@@ -301,6 +304,31 @@ reset_password_rate_limiter = SlidingWindowRateLimiter(*_rule_from_env("RESET_PA
 # same caveat as the rest of this module.
 forgot_password_email_rate_limiter = SlidingWindowRateLimiter(
     *_rule_from_env("FORGOT_PASSWORD_EMAIL_RATE_LIMIT", "3/3600")
+)
+# [Email verification] Per-IP cap on verify-email token submissions
+# (routers/auth.verify_email). The 256-bit token makes online brute force
+# academic, but this mirrors reset-password (which is rate-limited on the same
+# reasoning) so an unauthenticated endpoint can't be hammered freely.
+verify_email_rate_limiter = SlidingWindowRateLimiter(
+    *_rule_from_env("VERIFY_EMAIL_RATE_LIMIT", "10/3600")
+)
+# [Email verification] Per-IP cap on resend-verification requests
+# (routers/auth.resend_verification) — each allowed call with a real
+# unverified account triggers an outbound email, so this is tighter than the
+# submission limiters, exactly like forgot_password_rate_limiter.
+resend_verification_rate_limiter = SlidingWindowRateLimiter(
+    *_rule_from_env("RESEND_VERIFICATION_RATE_LIMIT", "5/3600")
+)
+# [Email verification] Per-EMAIL resend cap, layered ON TOP of the per-IP
+# resend_verification_rate_limiter above (exact analogue of
+# forgot_password_email_rate_limiter). Keyed on the normalized SUBMITTED email
+# and checked BEFORE the account lookup, so it fires identically whether or not
+# the account exists / is already verified — no enumeration oracle. Bounds how
+# many verification mails any single inbox can be made to receive from all
+# source IPs combined. In-process/per-worker, same caveat as the rest of this
+# module.
+resend_verification_email_rate_limiter = SlidingWindowRateLimiter(
+    *_rule_from_env("RESEND_VERIFICATION_EMAIL_RATE_LIMIT", "3/3600")
 )
 # Public, unauthenticated discovery map (GET /api/plugs/public). Generous — a
 # browsing visitor may refresh/poll live availability — but bounded so the

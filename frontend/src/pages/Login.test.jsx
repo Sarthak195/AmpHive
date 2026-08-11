@@ -16,9 +16,14 @@ import { MemoryRouter, Routes, Route, useLocation } from 'react-router-dom';
 import Login from './Login';
 import { useAuth } from '../contexts/AuthContext';
 import { useConfig } from '../contexts/ConfigContext';
+import api from '../api/client';
 
 vi.mock('../contexts/AuthContext', () => ({ useAuth: vi.fn() }));
 vi.mock('../contexts/ConfigContext', () => ({ useConfig: vi.fn() }));
+vi.mock('../api/client', () => {
+  const api = { get: vi.fn(), post: vi.fn(), put: vi.fn(), patch: vi.fn(), delete: vi.fn() };
+  return { api, default: api, apiRequest: vi.fn() };
+});
 
 const loginSpy = vi.fn();
 
@@ -128,6 +133,49 @@ describe('Login redirect target', () => {
     renderLogin('/login');
     expect(screen.getByRole('link', { name: 'Create an account' })).toHaveAttribute('href', '/signup');
     expect(screen.getByRole('link', { name: 'Forgot password?' })).toHaveAttribute('href', '/forgot-password');
+  });
+});
+
+describe('Login unverified-email (403) handling', () => {
+  const submitUnverified = async () => {
+    const err = new Error('Please verify your email address. Check your inbox for the link.');
+    err.status = 403;
+    loginSpy.mockRejectedValue(err);
+    renderLogin('/login');
+    await submitLogin();
+  };
+
+  it('shows the verify/resend affordance on a 403 (distinct from the 401 error)', async () => {
+    await submitUnverified();
+
+    expect(await screen.findByText(/please verify your email address/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Resend verification email' })).toBeInTheDocument();
+    // Stays on the page.
+    expect(screen.getByLabelText('Email address')).toBeInTheDocument();
+  });
+
+  it('resend posts the typed email to /api/auth/resend-verification with a generic confirmation', async () => {
+    api.post.mockResolvedValue({ status: 'ok' });
+    await submitUnverified();
+    await screen.findByRole('button', { name: 'Resend verification email' });
+
+    await userEvent.click(screen.getByRole('button', { name: 'Resend verification email' }));
+
+    expect(api.post).toHaveBeenCalledWith('/api/auth/resend-verification', {
+      email: 'driver@amphive.test',
+    });
+    expect(await screen.findByText(/a new verification link is on its way/i)).toBeInTheDocument();
+  });
+
+  it('still shows the normal credential error on a 401 (no resend affordance)', async () => {
+    const err = new Error('Incorrect email or password.');
+    err.status = 401;
+    loginSpy.mockRejectedValue(err);
+    renderLogin('/login');
+    await submitLogin();
+
+    expect(await screen.findByText('Incorrect email or password.')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Resend verification email' })).not.toBeInTheDocument();
   });
 });
 

@@ -433,9 +433,18 @@ repeated here.*
       issues the same app JWT the password flow does. **Live-gated:** hidden
       everywhere (`GET /api/config` `google_login_enabled: false`,
       `/api/auth/google/login` 503s) unless `GOOGLE_CLIENT_ID` /
-      `GOOGLE_CLIENT_SECRET` / `GOOGLE_OAUTH_REDIRECT_URI` are set. **Still
-      operator-pending:** creating the real Google Cloud OAuth client + a live
-      click-through smoke on prod. (Original ask below.)
+      `GOOGLE_CLIENT_SECRET` / `GOOGLE_OAUTH_REDIRECT_URI` are set. **LIVE IN
+      PROD (verified 2026-08-11):** the real Google Cloud OAuth client is
+      configured — all three `GOOGLE_*` are set on the VM, `/api/config`
+      reports `google_login_enabled: true`, and `/api/auth/google/login` 302s
+      to `accounts.google.com` with the real client id + registered
+      `redirect_uri=https://amphive.app/api/auth/google/callback`. Only residual
+      is a full interactive click-through smoke (needs a real Google account;
+      the front leg is confirmed). NOTE: because Google login is live, the
+      OAuth account-pre-hijacking hole was a LIVE takeover — closed 2026-08-11
+      (PR #118: link evicts the old password + bumps `token_version`), and the
+      complete fix (email verification at registration) shipped 2026-08-11 too.
+      (Original ask below.)
       Social login to cut
       onboarding friction. Add a Google OAuth2 authorization-code flow:
       `GET /api/auth/google/login` → Google consent → `GET /api/auth/google/callback`

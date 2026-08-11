@@ -4,30 +4,29 @@
  * Split out of the old combined Login/register toggle. Password is enforced
  * 8-72 chars client-side (mirrors the backend rule — see ResetPassword) with
  * a live hint under the field. No terms/consent checkbox — none exist to
- * link to, so none is invented here. On success: toast "Account created",
- * then straight in (register() already logs the driver in) honoring the same
- * from/next return-to-origin logic as Login, so a QR deep-link funnel
- * (`/signup?next=/?plug=7`) still lands back where it should.
+ * link to, so none is invented here.
+ *
+ * Registration no longer logs the driver in: the backend now returns
+ * 200 { status: 'verification_sent', email } and emails a verification link.
+ * On success this page flips to a "check your email" confirmation with a
+ * ResendVerification control — the account stays inert until the emailed
+ * /verify-email?token=... link is opened (that page mints the JWT).
  */
 
 import { useState } from 'react';
-import { Link, useNavigate, useLocation } from 'react-router-dom';
+import { Link } from 'react-router-dom';
 import { Eye, EyeOff } from 'lucide-react';
 import AuthShell from '../components/AuthShell';
 import GoogleSignInButton from '../components/GoogleSignInButton';
-import { useToast } from '../components/ui';
+import ResendVerification from '../components/ResendVerification';
 import { useAuth } from '../contexts/AuthContext';
 import { apiErrorCopy } from '../utils/statusCopy';
-import { isSafeInternalPath } from '../utils/safePath';
 
 const MIN_LEN = 8;
 const MAX_LEN = 72;
 
 const Signup = () => {
   const { register } = useAuth();
-  const navigate = useNavigate();
-  const location = useLocation();
-  const toast = useToast();
 
   const [fullName, setFullName] = useState('');
   const [email, setEmail] = useState('');
@@ -35,6 +34,9 @@ const Signup = () => {
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  // Set to the registered address once the backend accepts the sign-up —
+  // flips the page to its "check your email" confirmation.
+  const [sentTo, setSentTo] = useState('');
 
   const passwordTouched = password.length > 0;
   const passwordValid = password.length >= MIN_LEN && password.length <= MAX_LEN;
@@ -54,20 +56,42 @@ const Signup = () => {
 
     setBusy(true);
     try {
-      await register(email, password, fullName);
-      toast.ok('Account created.');
-      const from = location.state?.from;
-      const next = new URLSearchParams(location.search).get('next');
-      const target = from
-        ? `${from.pathname}${from.search || ''}${from.hash || ''}`
-        : (next && isSafeInternalPath(next) ? next : '/');
-      navigate(target, { replace: true });
+      const data = await register(email, password, fullName);
+      // Prefer the email the backend echoes back; fall back to what was typed.
+      setSentTo(data?.email || email);
     } catch (err) {
       setError(apiErrorCopy(err));
     } finally {
       setBusy(false);
     }
   };
+
+  if (sentTo) {
+    return (
+      <AuthShell
+        title="Check your email"
+        footer={
+          <>
+            Already verified? <Link to="/login">Sign in</Link>
+          </>
+        }
+      >
+        <div className="stack">
+          <div className="banner banner-ok" role="status">
+            <p>
+              We've sent a verification link to <strong>{sentTo}</strong>. Open
+              it to activate your account and sign in. The link expires after a
+              short while.
+            </p>
+          </div>
+          <p className="auth-body">
+            Didn't get it? Check your spam folder, or resend the email.
+          </p>
+          <ResendVerification email={sentTo} label="Resend email" />
+        </div>
+      </AuthShell>
+    );
+  }
 
   return (
     <AuthShell

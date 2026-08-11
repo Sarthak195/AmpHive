@@ -88,3 +88,20 @@ async def send_password_reset(to_addr: str, reset_link: str, ttl_min: int) -> No
         "password is unchanged."
     )
     await asyncio.to_thread(send_email, to_addr, subject, body)
+
+
+async def send_email_verification(to_addr: str, verify_link: str) -> None:
+    """Email an address-verification link (or log it when SMTP is
+    unconfigured). Mirrors send_password_reset — the whole registration flow
+    must work without a provider, so the link is logged at WARNING as the
+    console fallback when SMTP_HOST is unset."""
+    subject = "Verify your AmpHive email address"
+    body = (
+        "Welcome to AmpHive! Please confirm this is your email address to "
+        "finish creating your account.\n\n"
+        "Verify your email here (single use):\n\n"
+        f"{verify_link}\n\n"
+        "If you didn't create an AmpHive account, you can safely ignore this "
+        "email."
+    )
+    await asyncio.to_thread(send_email, to_addr, subject, body)

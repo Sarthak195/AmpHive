@@ -126,21 +126,20 @@ export const AuthProvider = ({ children }) => {
     await refreshUser();
   }, [refreshUser]);
 
+  // Register no longer logs the driver in. The backend now returns
+  // 200 { status: 'verification_sent', email } and sends a verification
+  // email instead of a token — the account is inert until the emailed
+  // /verify-email?token=... link is opened (that page's verify-email call is
+  // what mints the JWT, via loginWithToken). So this just POSTs and hands the
+  // response back to the caller (Signup) to render its "check your email"
+  // state; NO token/user is persisted here.
   const register = useCallback(async (email, password, fullName) => {
-    const data = await api.post('/api/auth/register', {
+    return api.post('/api/auth/register', {
       email,
       password,
       full_name: fullName,
     });
-    // Save JWT token and user data to localStorage
-    localStorage.setItem('amphive_token', data.token);
-    localStorage.setItem('amphive_user', JSON.stringify(data.user));
-    // Optimistic set for responsiveness, then refresh from /me — same as
-    // login (see comment there).
-    setUser(data.user);
-    await refreshUser();
-    return data;
-  }, [refreshUser]);
+  }, []);
 
   const logout = useCallback(async () => {
     // Revoke the token server-side (bumps token_version → all this user's

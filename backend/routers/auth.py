@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database.db import get_db
 from backend.database.models import (
+    EmailVerificationToken,
     PasswordResetToken,
     User,
     UserRole,
@@ -32,8 +33,11 @@ from backend.schemas import (
     ForgotPasswordRequest,
     LoginRequest,
     RegisterRequest,
+    RegisterResponse,
+    ResendVerificationRequest,
     ResetPasswordRequest,
     UserResponse,
+    VerifyEmailRequest,
 )
 from backend.services import email as email_service
 from backend.services.auth import (
@@ -51,7 +55,10 @@ from backend.services.rate_limit import (
     login_rate_limiter,
     rate_limit_dependency,
     register_rate_limiter,
+    resend_verification_email_rate_limiter,
+    resend_verification_rate_limiter,
     reset_password_rate_limiter,
+    verify_email_rate_limiter,
 )
 from backend.services.session_lifecycle import (
     check_and_speed_up_active_session,
@@ -62,21 +69,85 @@ logger = logging.getLogger("amphive.api")
 router = APIRouter()
 
 # ===========================================================================
+# Email verification (address ownership proven at registration)
+# ===========================================================================
+#
+# Closes the account-PRE-hijacking class at its root: register no longer
+# auto-logs-in, it creates an UNVERIFIED account and emails a single-use link;
+# /api/auth/login 403s until the address is verified. Mirrors the
+# password-reset token machinery exactly (SHA-256-digest-only, single-use,
+# TTL-boxed, at most one live link per account).
+
+# How long an emailed verification link stays valid. Longer than the reset TTL
+# (24 h default) on purpose — a new user may not click immediately.
+EMAIL_VERIFICATION_TTL_MIN = int(os.getenv("EMAIL_VERIFICATION_TTL_MIN", "1440"))
+
+
+def _hash_email_verification_token(token: str) -> str:
+    """SHA-256 hex digest — what email_verification_tokens.token_hash stores
+    (same scheme as _hash_reset_token)."""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+async def _issue_email_verification(db: AsyncSession, user: User) -> None:
+    """Void the user's outstanding unused verification tokens, mint a fresh
+    single-use token, persist ONLY its SHA-256 digest (EmailVerificationToken,
+    EMAIL_VERIFICATION_TTL_MIN expiry), commit, and email the link.
+
+    Mirrors forgot-password issuance: at most one live link per account, and
+    the email is dispatched fire-and-forget (send_email_verification never
+    raises — SMTP failures are logged) so the request never blocks on SMTP and
+    resend-verification stays timing-uniform. Shared by register + resend.
+    """
+    now = datetime.now(timezone.utc)
+    token = secrets.token_urlsafe(32)
+    # Supersede any outstanding unused links — at most one live link per user.
+    await db.execute(
+        update(EmailVerificationToken)
+        .where(
+            EmailVerificationToken.user_id == user.id,
+            EmailVerificationToken.used_at.is_(None),
+        )
+        .values(used_at=now)
+        .execution_options(synchronize_session=False)
+    )
+    db.add(EmailVerificationToken(
+        user_id=user.id,
+        token_hash=_hash_email_verification_token(token),
+        expires_at=now + timedelta(minutes=EMAIL_VERIFICATION_TTL_MIN),
+    ))
+    await db.commit()
+
+    verify_link = f"{email_service.frontend_origin()}/verify-email?token={token}"
+    asyncio.get_running_loop().create_task(
+        email_service.send_email_verification(user.email, verify_link)
+    )
+
+
+# ===========================================================================
 # Authentication Endpoints
 # ===========================================================================
 
 @router.post(
     "/api/auth/register",
-    response_model=AuthResponse,
+    response_model=RegisterResponse,
     dependencies=[Depends(rate_limit_dependency(register_rate_limiter, "registration"))],
 )
 async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
     """
-    Register a new driver account.
-    Creates the user with a hashed password and returns a JWT token.
-    New users start with 0 coin balance and the 'driver' role.
-    Rate-limited per client IP (REGISTER_RATE_LIMIT) against bulk
-    account creation / email enumeration.
+    Register a new driver account — UNVERIFIED, and it does NOT log the user in.
+
+    Creates the user (0 coin balance, 'driver' role, hashed password) with
+    email_verified=False, then mints a single-use verification token and emails
+    the link (services/email.py — SMTP if configured, else the link is logged
+    at WARNING). The caller gets `{status:"verification_sent", email}` and NO
+    JWT: /api/auth/login refuses the account with a 403 until the address is
+    verified via /api/auth/verify-email. This is what closes the
+    account-PRE-hijacking class — an unverified email can no longer hold a
+    usable credential.
+
+    Rate-limited per client IP (REGISTER_RATE_LIMIT) against bulk account
+    creation / email enumeration.
     """
     # Canonicalize (trim + lowercase) so `Driver@x.com` and `driver@x.com`
     # are the same account — both for the duplicate check below and for what
@@ -90,13 +161,14 @@ async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
     if result.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="An account with this email already exists.")
 
-    # Create the user with hashed password
+    # Create the user with hashed password — UNVERIFIED (login is gated on it).
     user = User(
         email=email,
         hashed_password=hash_password(req.password),
         full_name=req.full_name,
         role=UserRole.DRIVER,
         coin_balance=0.0,
+        email_verified=False,
     )
     db.add(user)
     try:
@@ -107,18 +179,138 @@ async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=400, detail="An account with this email already exists.")
     await db.refresh(user)
 
-    # Generate JWT token
-    token = create_access_token(user.id, user.role.value, user.email, user.token_version)
+    # Mint + email a single-use verification token (voids any outstanding ones
+    # first — none yet for a brand-new account, but keep the pattern). No JWT is
+    # issued: the user proves ownership via /api/auth/verify-email.
+    await _issue_email_verification(db, user)
     logger.info(
-        "New user registered",
+        "New user registered (verification email sent)",
         extra={"user_id": user.id, "email": user.email},
     )
 
+    return RegisterResponse(status="verification_sent", email=user.email)
+
+
+@router.post(
+    "/api/auth/verify-email",
+    response_model=AuthResponse,
+    dependencies=[Depends(rate_limit_dependency(verify_email_rate_limiter, "email verification"))],
+)
+async def verify_email(req: VerifyEmailRequest, db: AsyncSession = Depends(get_db)):
+    """
+    Consume an email-verification token: flip users.email_verified true, stamp
+    the token used_at, bump users.token_version (belt-and-braces), and issue a
+    JWT so clicking the link logs the user in (returns AuthResponse).
+
+    Unknown, expired, and already-used tokens all get the same generic 400 (no
+    oracle on which it was) — same shape as reset-password. Rate-limited per
+    client IP (VERIFY_EMAIL_RATE_LIMIT); the 256-bit token makes online brute
+    force academic, but this matches reset-password.
+    """
+    now = datetime.now(timezone.utc)
+    result = await db.execute(
+        select(EmailVerificationToken).where(
+            EmailVerificationToken.token_hash == _hash_email_verification_token(req.token)
+        )
+    )
+    evt = result.scalar_one_or_none()
+    if evt is None or evt.used_at is not None or evt.expires_at <= now:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid or expired verification link.",
+        )
+
+    # Single-use, race-safe: the conditional UPDATE is the consumption point —
+    # two concurrent submissions of the same token both pass the SELECT above,
+    # but only one can win this row (WHERE used_at IS NULL). Mirrors
+    # reset-password exactly.
+    consumed = await db.execute(
+        update(EmailVerificationToken)
+        .where(
+            EmailVerificationToken.id == evt.id,
+            EmailVerificationToken.used_at.is_(None),
+        )
+        .values(used_at=now)
+        .execution_options(synchronize_session=False)
+    )
+    if consumed.rowcount == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid or expired verification link.",
+        )
+    # Mark verified + revoke any pre-verification tokens (belt-and-braces),
+    # DB-side atomic epoch bump (same lost-update rationale as /logout).
+    await db.execute(
+        update(User)
+        .where(User.id == evt.user_id)
+        .values(email_verified=True, token_version=User.token_version + 1)
+        .execution_options(synchronize_session=False)
+    )
+    await db.commit()
+
+    # Reload the now-verified user (fresh token_version) to mint a JWT carrying
+    # the new epoch — the click logs them in.
+    result = await db.execute(select(User).where(User.id == evt.user_id))
+    user = result.scalar_one()
+    token = create_access_token(user.id, user.role.value, user.email, user.token_version)
+    logger.info(
+        "Email verified (user logged in)",
+        extra={"user_id": user.id, "email": user.email},
+    )
     return AuthResponse(
         token=token,
         user={"id": user.id, "email": user.email, "full_name": user.full_name,
               "role": user.role.value, "coin_balance": user.coin_balance},
     )
+
+
+# The generic body resend-verification always returns (enumeration-safe).
+_RESEND_VERIFICATION_RESPONSE = {"status": "ok"}
+
+
+@router.post(
+    "/api/auth/resend-verification",
+    dependencies=[
+        Depends(rate_limit_dependency(resend_verification_rate_limiter, "verification resend")),
+    ],
+)
+async def resend_verification(req: ResendVerificationRequest, db: AsyncSession = Depends(get_db)):
+    """
+    Re-send a verification link. ALWAYS returns the same generic 200
+    `{status:"ok"}`, whether or not the email matches an account and whether or
+    not it's already verified — no account enumeration.
+
+    Rate-limited per client IP (RESEND_VERIFICATION_RATE_LIMIT) since each
+    allowed call with a real unverified account triggers an outbound email, AND
+    per submitted email (RESEND_VERIFICATION_EMAIL_RATE_LIMIT) so an attacker
+    with an IP pool can't mailbomb one victim's inbox by rotating source
+    addresses past the per-IP gate. The per-email cap is keyed on the
+    normalized email and checked BEFORE the account lookup, so it fires
+    identically whether or not the account exists — no enumeration oracle
+    (mirrors forgot-password exactly).
+    """
+    email = normalize_email(req.email)
+
+    retry_after = resend_verification_email_rate_limiter.check(f"resend_verify:{email}")
+    if retry_after is not None:
+        seconds = int(retry_after) + 1
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many verification requests for this email. Try again in {seconds} s.",
+            headers={"Retry-After": str(seconds)},
+        )
+
+    result = await db.execute(select(User).where(func.lower(User.email) == email))
+    user = result.scalar_one_or_none()
+    # Only existing AND still-unverified accounts get a new link. A missing or
+    # already-verified account does nothing but still returns the same 200.
+    if user is not None and not user.email_verified:
+        await _issue_email_verification(db, user)
+        logger.info(
+            "Verification email re-sent",
+            extra={"user_id": user.id, "email": user.email},
+        )
+    return _RESEND_VERIFICATION_RESPONSE
 
 
 @router.post(
@@ -188,6 +380,18 @@ async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
     # detail is deliberate — the frontend maps it to friendly copy.
     if user.is_disabled:
         raise HTTPException(status_code=403, detail="account_disabled")
+
+    # [Email verification] Unverified accounts can't sign in. Checked AFTER the
+    # password (same placement rationale as the disabled-account check above) so
+    # verified-status is only ever revealed to the account's real owner — never
+    # a verified-account oracle for someone guessing passwords. Grandfathered
+    # (pre-feature) users are email_verified=True, so they're unaffected; only a
+    # freshly-registered account that hasn't clicked its link lands here.
+    if not user.email_verified:
+        raise HTTPException(
+            status_code=403,
+            detail="Please verify your email address. Check your inbox for the verification link.",
+        )
 
     token = create_access_token(user.id, user.role.value, user.email, user.token_version)
     logger.info(
@@ -522,6 +726,10 @@ async def google_callback(request: Request, db: AsyncSession = Depends(get_db)):
             full_name=full_name,
             role=UserRole.DRIVER,
             coin_balance=0.0,
+            # Google cryptographically asserted this email (email_verified claim
+            # checked above), so the account is verified from birth — no
+            # separate verify-email round-trip.
+            email_verified=True,
             auth_provider="google",
             google_sub=google_sub,
         )
@@ -580,6 +788,10 @@ async def google_callback(request: Request, db: AsyncSession = Depends(get_db)):
         user.hashed_password = hash_password(secrets.token_urlsafe(32))
         user.token_version = user.token_version + 1
         user.auth_provider = "google"
+        # Google-verified owner is now the account holder — mark the email
+        # verified (an attacker's pre-registered unverified account is taken
+        # over AND becomes verified in the same step).
+        user.email_verified = True
         try:
             await db.commit()
         except IntegrityError:

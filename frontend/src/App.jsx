@@ -47,6 +47,7 @@ const Login = lazy(() => import('./pages/Login'));
 const Signup = lazy(() => import('./pages/Signup'));
 const ForgotPassword = lazy(() => import('./pages/ForgotPassword'));
 const ResetPassword = lazy(() => import('./pages/ResetPassword'));
+const VerifyEmail = lazy(() => import('./pages/VerifyEmail'));
 const GoogleCallback = lazy(() => import('./pages/GoogleCallback'));
 // Console (CPO) pages
 const CpoSetup = lazy(() => import('./pages/cpo/CpoSetup'));
@@ -102,12 +103,15 @@ const DriverShell = () => {
   );
 };
 
-/** Password reset — public on every host (operators forget passwords too);
-    the emailed link lands on /reset-password?token=... */
+/** Public token-landing pages — registered on every host (operators forget
+    passwords too, and any user may need to verify). The emailed links land on
+    /reset-password?token=... and /verify-email?token=..., both PUBLIC (no auth
+    guard — verifying an email is precisely what mints the first session). */
 const passwordResetRoutes = (
   <>
     <Route path="/forgot-password" element={<ForgotPassword />} />
     <Route path="/reset-password" element={<ResetPassword />} />
+    <Route path="/verify-email" element={<VerifyEmail />} />
   </>
 );
 

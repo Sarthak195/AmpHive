@@ -40,9 +40,29 @@ class ResetPasswordRequest(BaseModel):
     # Same 8-72 rule as RegisterRequest (bcrypt truncates at 72 bytes).
     password: str = Field(min_length=8, max_length=72)
 
+class VerifyEmailRequest(BaseModel):
+    # The raw verification token from the emailed link
+    # (FRONTEND_ORIGIN/verify-email?token=...). Plain str like
+    # ResetPasswordRequest.token — an opaque secrets.token_urlsafe value.
+    token: str
+
+class ResendVerificationRequest(BaseModel):
+    # Plain `str` (not EmailStr) on purpose, matching ForgotPasswordRequest:
+    # the endpoint answers the same generic 200 for ANY input (no account
+    # enumeration), and pre-EmailStr accounts must be resendable too.
+    email: str
+
 class AuthResponse(BaseModel):
     token: str
     user: dict
+
+class RegisterResponse(BaseModel):
+    # [Email verification] Registration no longer auto-logs-in — it creates an
+    # UNVERIFIED account and emails a verification link, so it returns this
+    # instead of AuthResponse (no JWT). The frontend routes the user to a
+    # "check your inbox" screen. `status` is always "verification_sent".
+    status: str
+    email: str
 
 class UserResponse(BaseModel):
     id: int
