@@ -181,4 +181,34 @@ esp_err_t tapo_plug_get_telemetry(tapo_plug_t *plug, tapo_telemetry_t *out_telem
 esp_err_t tapo_plug_reconcile_idle_baseline(tapo_plug_t *plug, float today_kwh, float month_kwh,
                                              bool can_report, tapo_energy_reconcile_t *out);
 
+/**
+ * @brief Advance the idle-consumption baseline over energy a BILLED session is
+ *        already accounting for.
+ *
+ * Call once per telemetry sweep for a plug WITH an active AmpHive session
+ * (main.c's telemetry_task session branch), passing the same today/month
+ * readings tapo_plug_get_telemetry just returned.
+ *
+ * tapo_plug_reconcile_idle_baseline() is the only other writer of the baseline
+ * and it only runs on the idle branch, so without this the baseline froze at
+ * its pre-session value for the whole session — and the first idle poll after
+ * the session ended saw a delta equal to everything the driver had just legally
+ * charged, and reported it as UNMETERED_CONSUMPTION. (Observed on every session
+ * ≥ the threshold; e.g. session 80 on 2026-08-13 raised a 1.845 kWh "unmetered"
+ * alarm 2 s after a normal stop.) Keeping the baseline moving in lockstep with
+ * metered energy means only energy delivered OUTSIDE a session can ever show up
+ * as a delta.
+ *
+ * Never reports and never detects: it just moves the reference forward (NVS
+ * flush throttled by BASELINE_PERSIST_THRESHOLD_KWH, as elsewhere). A <0
+ * reading (plug/firmware doesn't report that counter) is a no-op, so the
+ * baseline is never poisoned with a fabricated value.
+ *
+ * @param plug       Per-plug driver context
+ * @param today_kwh  Plug's current today_energy reading (kWh); <0 = not reported
+ * @param month_kwh  Plug's current month_energy reading (kWh); <0 = not reported
+ * @return ESP_OK on success
+ */
+esp_err_t tapo_plug_advance_metered_baseline(tapo_plug_t *plug, float today_kwh, float month_kwh);
+
 #endif // TAPO_PROTOCOL_H

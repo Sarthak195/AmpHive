@@ -779,3 +779,22 @@ esp_err_t tapo_plug_reconcile_idle_baseline(tapo_plug_t *plug, float today_kwh, 
     xSemaphoreGive(plug->mutex);
     return ESP_OK;
 }
+
+esp_err_t tapo_plug_advance_metered_baseline(tapo_plug_t *plug, float today_kwh, float month_kwh) {
+    if (!plug) return ESP_ERR_INVALID_ARG;
+    if (today_kwh < 0.0f || month_kwh < 0.0f) return ESP_OK;  /* plug didn't report them this poll */
+
+    xSemaphoreTake(plug->mutex, portMAX_DELAY);
+    /* Energy delivered under a live session is accounted for by that session's
+       own billing, so it must never later read as an unmetered delta. Move the
+       reference forward unconditionally -- including the first-ever reading,
+       which seeds it exactly as the idle path's BASELINE_UNSET branch does. */
+    plug->baseline_today_kwh = today_kwh;
+    plug->baseline_month_kwh = month_kwh;
+    if (plug->baseline_persisted_month_kwh < 0.0f ||
+        fabsf(plug->baseline_month_kwh - plug->baseline_persisted_month_kwh) >= BASELINE_PERSIST_THRESHOLD_KWH) {
+        baseline_persist_nvs(plug);
+    }
+    xSemaphoreGive(plug->mutex);
+    return ESP_OK;
+}
