@@ -1708,7 +1708,16 @@ static void telemetry_task(void *pvParameters) {
                must run OUTSIDE plugs_mutex (already released above). */
             bool  unmetered_alarm = false;
             float unmetered_kwh = 0.0f, unmetered_today_kwh = 0.0f, unmetered_month_kwh = 0.0f;
-            if (!sess_active) {
+            if (sess_active) {
+                /* Energy delivered under a live session is billed by that session,
+                   so walk the idle baseline forward with it. Without this the
+                   baseline froze at its pre-session value (reconcile below is the
+                   only other writer and runs on the idle branch alone), and the
+                   first idle poll after the driver stopped reported the WHOLE
+                   session as unmetered consumption. */
+                tapo_plug_advance_metered_baseline(t, telemetry.today_energy_kwh,
+                                                   telemetry.month_energy_kwh);
+            } else {
                 tapo_energy_reconcile_t recon;
                 if (tapo_plug_reconcile_idle_baseline(t, telemetry.today_energy_kwh, telemetry.month_energy_kwh,
                                                        mqtt_connected, &recon) == ESP_OK &&

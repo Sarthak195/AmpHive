@@ -7,7 +7,42 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 
 ---
 
-## 0. Latest — 2026-08-04 admin console completion: cross-tenant chargers view, admin OTA, UI-based firmware publishing
+## 0. Latest — 2026-08-13 billing correctness: counter-dip double-count + false unmetered alarms
+
+Owner ran a real 4-hour charge (prod session 80, plug 1) and hit both halves
+of the same underlying assumption — that a drop in the firmware's
+session-relative kWh counter means the counter restarted at zero.
+
+**Overbilled 1.2725 kWh (backend, deployed).** At 12:13:46 the gateway
+reconnected mid-session. The firmware persists its energy meter to NVS only
+every `ENERGY_PERSIST_THRESHOLD_WH` (50 Wh), so the restored meter came back
+**47.9 Wh behind** (raw 1.2725 → 1.2246) and kept climbing from there — it did
+not reset. REC-01's reset handler
+(`services/mqtt/telemetry.py` `_persist_telemetry`) fires on any drop past
+`ENERGY_COUNTER_RESET_DROP_KWH` (5 Wh) and banked the **entire** pre-drop
+reading into `energy_reset_offset_kwh`, so the 1.2725 kWh the counter went on
+to re-report was billed twice: `energy_kwh` finalized at **3.0626** for
+**1.838** actually delivered, charging 33.78 coins instead of 19.08.
+With a 5 Wh trigger against 50 Wh of NVS granularity, this fired on
+essentially every mid-session gateway reboot. Fix: bank the **drop**
+(`last_raw - kwh`), not `last_raw` — correct for both shapes, since a genuine
+reset to ~0 banks `last_raw - ~0` exactly as before, while a partial dip banks
+only the lost slice and keeps `offset + kwh` continuous. Session 80 was
+re-billed and the driver refunded.
+
+**False `UNMETERED_CONSUMPTION` after every session (firmware 2.7.0-direct).**
+Two seconds after that session stopped, the CPO portal warned of 1.845 kWh
+"consumed with no billed session covering it" — the driver's own charge.
+`tapo_plug_reconcile_idle_baseline` is the only writer of the plug's idle
+baseline and `telemetry_task` only calls it on the idle branch, so the
+baseline froze for the whole session and the first idle poll after the stop
+measured all of it as a delta. Fix: the session branch now calls
+`tapo_plug_advance_metered_baseline()` once per sweep. See
+[FIRMWARE.md](FIRMWARE.md) §4a.
+
+---
+
+## 0.001 — 2026-08-04 admin console completion: cross-tenant chargers view, admin OTA, UI-based firmware publishing
 
 Trigger: the platform operator logged into the CPO portal with the admin
 account and found it empty — the admin console at `/admin` now covers the

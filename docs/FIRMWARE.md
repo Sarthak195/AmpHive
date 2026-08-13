@@ -397,6 +397,17 @@ by definition, unbilled):
   larger) delta against the same pre-gap reference — the report waits for
   connectivity instead of silently evaporating the moment MQTT reconnects.
 
+**Keeping the baseline moving under a session (fw ≥ 2.7.0-direct):** because
+`tapo_plug_reconcile_idle_baseline` is the only writer of the baseline and only
+runs on the idle branch, the reference used to freeze for the duration of a
+session — so the first idle poll after a normal stop measured the whole
+session as a delta and alarmed on it (every session ≥ the 10 Wh floor). The
+session branch now calls `tapo_plug_advance_metered_baseline(plug, today_kwh,
+month_kwh)` once per sweep, which moves the baseline (same throttled NVS
+flush) without ever reporting or detecting. Energy under a live session is
+billed by that session; only energy delivered outside one can now show up as a
+delta.
+
 `main.c`'s `telemetry_task` calls this once per idle plug per sweep and, on
 `unmetered_detected`, publishes `publish_unmetered_alarm()` →
 `{"error":"UNMETERED_CONSUMPTION","plug_id":N,"kwh":<estimate>,
@@ -675,3 +686,22 @@ the shape described in §§1–4:
   eFuses, **cannot be delivered by OTA**, and is a one-time per-unit
   serial-flash step at manufacture —
   [deploy/docs/firmware_flash_encryption.md](../deploy/docs/firmware_flash_encryption.md).
+
+**Current: fw `2.7.0-direct` — false `UNMETERED_CONSUMPTION` after every
+session (2026-08-13).** Ships everything in 2.6.0 (which was never built or
+released) plus one fix, and is the first of these actually OTA'd to the field.
+
+The idle baseline was only ever advanced inside
+`tapo_plug_reconcile_idle_baseline`, which `telemetry_task` only calls on the
+**idle** branch. So it froze at its pre-session value for a whole session, and
+the first idle poll after the driver stopped saw a delta equal to everything
+they had just legally charged — and reported it as unmetered use. Prod session
+80 (2026-08-13) raised a 1.845 kWh `UNMETERED_CONSUMPTION` event two seconds
+after a normal stop; sessions 79 and earlier did the same. The alarm was
+useless as an accountability signal because it fired on every session.
+
+Fix: the session branch now calls
+`tapo_plug_advance_metered_baseline(plug, today_kwh, month_kwh)` once per
+sweep, walking the baseline forward over energy a billed session is already
+accounting for (same NVS-flush throttle, never reports, never detects). Only
+energy delivered **outside** a session can produce a delta now. See §4a.

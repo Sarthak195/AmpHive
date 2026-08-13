@@ -510,11 +510,14 @@ class MQTTTelemetryMixin:
                     # ESP32 losing its NVS baseline resets its session-relative
                     # counter near 0) rather than rounding jitter — see
                     # ENERGY_COUNTER_RESET_DROP_KWH above. When detected, the
-                    # pre-reset raw value is banked into energy_reset_offset_kwh
-                    # so billed energy keeps climbing instead of freezing at
-                    # the pre-reset peak until the raw counter climbs back past
-                    # it (the old gap: energy delivered in between went
-                    # unbilled). Only a LIVE frame can be trusted to detect
+                    # LOST SLICE (how far the counter fell back) is banked into
+                    # energy_reset_offset_kwh so billed energy keeps climbing
+                    # instead of freezing at the pre-reset peak until the raw
+                    # counter climbs back past it (the old gap: energy delivered
+                    # in between went unbilled) — and, equally, so a counter that
+                    # only PARTIALLY fell back isn't billed twice for the energy
+                    # it re-reports (see the banking block below). Only a LIVE
+                    # frame can be trusted to detect
                     # this: an offline-resync frame (is_offline) legitimately
                     # replays older buffered readings out of order, so it must
                     # never be mistaken for a reset — it skips detection
@@ -523,9 +526,25 @@ class MQTTTelemetryMixin:
                     if not is_offline:
                         last_raw = active_session.energy_counter_last_raw_kwh
                         if last_raw is not None and kwh < last_raw - ENERGY_COUNTER_RESET_DROP_KWH:
+                            # Bank only the DROP (last_raw - kwh), never the whole
+                            # last_raw. A drop is not proof the counter restarted at
+                            # zero: the firmware persists its meter to NVS only every
+                            # ENERGY_PERSIST_THRESHOLD_WH (50 Wh — firmware/main/
+                            # tapo_protocol.c), so a mid-session gateway reboot
+                            # restores a meter up to 50 Wh BEHIND where it was and
+                            # then keeps climbing from there. Banking last_raw in
+                            # that case re-adds energy the counter goes on to report
+                            # again — the double-count that billed session 80
+                            # (2026-08-13) 3.0626 kWh for 1.7901 kWh actually
+                            # delivered, after a 47.9 Wh dip across a reconnect.
+                            # Banking the drop is correct for BOTH shapes: a genuine
+                            # reset to ~0 banks last_raw - ~0 (what the old rule
+                            # did), and a partial dip banks exactly the lost slice,
+                            # so offset + kwh is continuous across the regression.
+                            drop = last_raw - kwh
                             active_session.energy_reset_offset_kwh = (
                                 active_session.energy_reset_offset_kwh or 0.0
-                            ) + last_raw
+                            ) + drop
                             logger.warning(
                                 "Energy counter regression detected -- re-baselining session energy",
                                 extra={
@@ -533,7 +552,8 @@ class MQTTTelemetryMixin:
                                     "plug_id": plug_id,
                                     "prior_raw_kwh": last_raw,
                                     "new_raw_kwh": kwh,
-                                    "banked_offset_kwh": active_session.energy_reset_offset_kwh,
+                                    "banked_drop_kwh": drop,
+                                    "total_offset_kwh": active_session.energy_reset_offset_kwh,
                                 },
                             )
                         active_session.energy_counter_last_raw_kwh = kwh
