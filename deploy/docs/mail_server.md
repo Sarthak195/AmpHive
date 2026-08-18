@@ -1163,6 +1163,69 @@ learning build and the gaps are as instructive as the working parts.
 
 ---
 
+
+## Day-to-day operations
+
+### Adding a mailbox
+
+    gcloud compute ssh amphive-relay --zone=us-west1-a
+    sudo add-mailbox.sh sales@amphive.app             # random password, printed once
+    sudo add-mailbox.sh sales@amphive.app 'chosen-pw' # or set one explicitly
+
+`/usr/local/bin/add-mailbox.sh` exists because TWO files have to agree and
+forgetting either fails in a confusing way:
+
+| File | Controls | Symptom if missed |
+|------|----------|-------------------|
+| `/etc/dovecot/users` | who can log in, where mail is stored | mail accepted, then rejected at delivery -> bounce to a usually-forged sender (backscatter) |
+| `/etc/postfix/vmailbox` | who Postfix accepts mail FOR at RCPT TO | sender gets `550 unknown recipient` |
+
+The script writes both, runs `postmap`, and reloads Postfix + Dovecot.
+
+### Adding an alias (forwarding, no mailbox)
+
+Edit `/etc/postfix/virtual`, then `postmap /etc/postfix/virtual` and
+`systemctl reload postfix`:
+
+    info@amphive.app        support@amphive.app
+
+`postmaster@`, `abuse@` and `dmarc@` are already aliased to `support@`.
+
+### Reading and sending from a mail client
+
+| | Value |
+|---|---|
+| Incoming (IMAP) | `mail.amphive.app`, port **993**, SSL/TLS |
+| Outgoing (SMTP) | `mail.amphive.app`, port **587**, STARTTLS |
+| Username | the FULL address, e.g. `support@amphive.app` |
+| Password | the mailbox password |
+
+Works in Thunderbird, Apple Mail, the iOS/Android mail apps, K-9. POP3 and
+plaintext IMAP are deliberately disabled (`port = 0`), so a client offering
+"port 143, no encryption" will fail by design.
+
+### THE GOTCHA when adding sending addresses
+
+Receiving works for a new address the moment `add-mailbox.sh` runs. **Sending
+does not.**
+
+Outbound relays through a consumer Gmail account, and Gmail rewrites the `From`
+header to the authenticated account unless that address is a verified "Send
+mail as" alias on it. `support@amphive.app` is verified; a newly-created
+`sales@amphive.app` is not, so mail from it would silently go out as
+`sjgotnfts1@gmail.com`.
+
+Two options per new sending address:
+
+1. **Verify it in Gmail** (free): Gmail -> Settings -> Accounts and Import ->
+   "Send mail as" -> add the address, SMTP server `mail.amphive.app`, port 587,
+   the mailbox's own credentials. The confirmation link arrives in that
+   mailbox on this server.
+2. **Move the relay to a transactional provider** whose domain verification
+   covers every address at once - the right answer if this ever grows past a
+   couple of addresses.
+
+
 ## 13. Verified vs. assumed
 
 In keeping with the rest of `deploy/docs/`, an explicit account of what this
