@@ -1133,18 +1133,38 @@ learning build and the gaps are as instructive as the working parts.
    is key-only so repeated failures are bots rather than the operator, but the
    cost of a false positive is losing access to the machine.
 
-   Still absent, and worth knowing the difference: fail2ban reacts *after* a
-   pattern of failures appears in the log, whereas Postfix's own
-   `smtpd_client_connection_rate_limit` / `anvil` controls would refuse the
-   51st connection in the same second. Nothing here does the latter. `smtpd_recipient_restrictions` and `smtpd_sender_restrictions`
-   are both empty (verified), so there is no DNSBL check, no
+   **Connection rate limiting was added afterwards** and closes the other half.
+   fail2ban reacts *after* a pattern of failures appears in the log; Postfix's
+   `anvil` refuses the next connection in the same minute. They are
+   complementary, and the day-one attacker demonstrated why both are wanted:
+   52 connections in 18 seconds, every one refused, none throttled. Now set:
+
+   | Setting | Value |
+   |---|---|
+   | `anvil_rate_time_unit` | 60s |
+   | `smtpd_client_connection_rate_limit` | 30 |
+   | `smtpd_client_message_rate_limit` | 60 |
+   | `smtpd_client_recipient_rate_limit` | 100 |
+   | `smtpd_client_connection_count_limit` | 20 |
+   | `smtpd_client_event_limit_exceptions` | `$mynetworks` |
+
+   Loopback is exempt so local injection and the app can never be throttled,
+   and the authenticated submission service (587) overrides both rate limits to
+   `0` — limits there could only ever punish us, never an attacker, since the
+   service requires SASL first.
+
+   **Still absent:** `smtpd_recipient_restrictions` and
+   `smtpd_sender_restrictions` are both empty, so there is no DNSBL check, no
    `reject_unknown_reverse_client_hostname`, and no HELO validation beyond
-   requiring that HELO be sent at all. Postfix's own `anvil` is collecting rate
-   statistics but no limits are enforced.
-6. **No backups of the mail store.** `/var/mail/vhosts/` is not covered by the
-   existing `backup_db.sh` regime, which handles Postgres only. A VM loss loses
-   all mail. `/etc/dovecot/users` — the only copy of the mailbox credentials — is
-   likewise unbacked.
+   requiring that HELO be sent at all.
+6. ~~**No backups of the mail store.**~~ **CLOSED.** `backup_db.sh` now tars
+   `/var/mail/vhosts` alongside the Postgres dump and the ops-config archive,
+   uploads all three to `gs://amphive-db-backups`, and prunes them on the same
+   3-generation local retention. Verified with a real run:
+   `maildir-20260818-115352.tar.gz` (28K) uploaded successfully.
+   `/etc/dovecot/users` — the only copy of the mailbox credentials — rides
+   along in the existing config tarball, since that already captures `/etc`
+   material the VM alone holds.
 7. **No monitoring or alerting.** Nothing watches queue depth, service liveness,
    certificate expiry, or the `abuse@` mailbox. If Postfix stops, the first
    symptom is silence, and silence is indistinguishable from "nobody emailed me".
@@ -1152,10 +1172,12 @@ learning build and the gaps are as instructive as the working parts.
    ironic gap on the list.
 8. **Reverse DNS is the GCP default** (§7). Low priority precisely because
    outbound must go via a smarthost, whose IP is the one that gets judged.
-9. **Single mailbox, single domain.** One account (`support@amphive.app`). The
-   KeyTable/SigningTable and virtual-user structure were chosen so that growing
-   past this is a data change rather than a redesign, but that has never been
-   exercised.
+9. ~~**Single mailbox, single domain.**~~ **Partly closed.** Two mailboxes now
+   exist (`support@`, `hello@`), the second created entirely through
+   `add-mailbox.sh`, so the "growing past one is a data change, not a redesign"
+   claim is no longer theoretical — it has been exercised. Still one *domain*;
+   the KeyTable/SigningTable structure means a second would be two lines plus a
+   key, but that remains untested.
 10. **Port 465 (implicit TLS submission) not offered** (§5) — some clients
     prefer it.
 11. **No Sieve filtering.** Pigeonhole 0.5.19 is present on the box (it ships
@@ -1163,6 +1185,78 @@ learning build and the gaps are as instructive as the working parts.
 
 ---
 
+
+## Two reverted changes, and why they are recorded
+
+Both were mine, both were wrong, and both are written down because the reasoning
+is more useful than the outcome.
+
+### The bcc-to-Gmail rule (added, then removed)
+
+To get mail visible somewhere replies could be written, `recipient_bcc_maps` was
+set to copy everything for `support@` and `hello@` to the operator's Gmail. It
+worked, and it was the wrong mechanism: the operator's Gmail is also a frequent
+*sender* to `support@`, so the server dutifully bcc'd their own outgoing mail
+straight back at them. Every message they sent appeared twice.
+
+A bcc is right when the copy target is a third party. It is wrong when the
+target is on both ends of the conversation. Removed;
+`recipient_bcc_maps` is empty again.
+
+(The bcc was chosen over a `virtual_alias_maps` forward deliberately, and that
+part was sound: an alias *replaces* local delivery, so the maildir — the copy
+that is in the backups — would have stopped being the record. Aliasing an
+address to itself to keep both is also a classic way to build a mail loop.)
+
+### POP3 (enabled, then removed)
+
+Gmail's "Check mail from other accounts" fetcher speaks **POP3 only** — it
+cannot fetch over IMAP. POP3S was enabled on 995 to allow it, then reverted
+when that route was not adopted. Port 995 is closed at the GCP firewall, both
+POP3 listeners are back to `port = 0`, and `dovecot-pop3d` is purged.
+
+**The mistake worth remembering:** `protocols = imap pop3 lmtp` was set *before*
+`dovecot-pop3d` was installed. Dovecot refuses to start at all when a listed
+protocol's binary is missing —
+`service(pop3) access(/usr/lib/dovecot/pop3) failed` — so this took the whole
+mail service down for about a minute, LMTP included. Nothing was lost (the
+queue was empty and no mail arrived during the window), but the general rule
+is: **install the package, then enable the protocol, and run `doveconf -n`
+before `systemctl restart` rather than after.**
+
+## What the relay does to your `From`, demonstrated
+
+Four messages sent within the same second, two locally and two out through the
+relay and back via our own MX:
+
+| | Route | `From:` on arrival |
+|---|---|---|
+| A | `support@` -> `hello@` (local) | `support@amphive.app` |
+| B | `hello@` -> `support@` (local) | `hello@amphive.app` |
+| C | `hello@` -> `support@` **via relay** | `sjgotnfts1@gmail.com`, with `X-Google-Original-From: hello@amphive.app` |
+| D | `support@` -> `support@` **via relay** | `support@amphive.app` |
+
+C and D are the same path, the same credentials, the same moment. The only
+difference is that `support@` is a verified Gmail "Send mail as" alias and
+`hello@` is not. That is the whole rule, in one controlled experiment:
+
+* **Locally, any address works** — local delivery never touches Google.
+* **Leaving the server, only verified addresses keep their identity.** An
+  unverified one is silently rewritten to the relay account, and the recipient
+  sees a personal Gmail address rather than the domain.
+
+## The app sends through this server
+
+`SMTP_HOST`/`SMTP_USER`/`SMTP_FROM` in the VM's `.env` were repointed from
+`smtp.gmail.com` / a personal Gmail address to `mail.amphive.app:587` /
+`support@amphive.app`. Verified end to end on a real password-reset:
+the app authenticated to submission (`sasl_method=PLAIN`), OpenDKIM signed it
+(`DKIM-Signature field added (s=mail, d=amphive.app)`), and it relayed out.
+
+The tradeoff to know: the app's mail now depends on this mail server being up.
+That is a smaller change than it sounds — both run on the same VM, so anything
+that takes the mail server down takes the app with it — but it is one more
+service in the path than "talk straight to Gmail" was.
 
 ## Day-to-day operations
 
