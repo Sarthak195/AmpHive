@@ -549,7 +549,6 @@ export default function CpoGroups() {
               value={createForm.name}
               onChange={(e) => setCreateForm((f) => ({ ...f, name: e.target.value }))}
               placeholder="e.g. Sunrise Apartments"
-              autoFocus
               required
             />
           </div>

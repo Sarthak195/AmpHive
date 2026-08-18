@@ -250,3 +250,17 @@ def test_socketio_client_ip_ignores_the_spoofable_left_of_the_chain(monkeypatch)
     # chain shorter than the trusted hop count => nothing forwarded is trusted
     assert client_ip_from_forwarded("9.9.9.9", "172.18.0.9") == "172.18.0.9"
     assert client_ip_from_forwarded("", None) == "unknown"
+
+
+def test_html_responses_get_a_document_csp_not_the_json_one():
+    """The printable GST invoice (services/invoices.py) is an HTMLResponse with
+    an inline <style> block. The JSON policy (`default-src 'none'`) would blank
+    its styling if it were ever opened as a top-level document, so HTML
+    responses get their own correct policy — same-origin, inline styles, and NO
+    scripts, which is tighter for that document than the app-wide CSP."""
+    from backend.main import _HTML_CSP
+
+    assert "style-src 'unsafe-inline'" in _HTML_CSP
+    assert "script-src" not in _HTML_CSP  # covered by default-src 'none'
+    assert "default-src 'none'" in _HTML_CSP
+    assert "frame-ancestors 'none'" in _HTML_CSP

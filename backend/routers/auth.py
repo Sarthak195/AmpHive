@@ -30,6 +30,7 @@ from backend.database.models import (
 )
 from backend.schemas import (
     AuthResponse,
+    DeleteAccountRequest,
     ForgotPasswordRequest,
     LoginRequest,
     RegisterRequest,
@@ -40,6 +41,11 @@ from backend.schemas import (
     VerifyEmailRequest,
 )
 from backend.services import email as email_service
+from backend.services.account_closure import (
+    AccountClosureRefused,
+    close_account,
+)
+from backend.services.audit import try_record_audit
 from backend.services.auth import (
     _DUMMY_PASSWORD_HASH,
     create_access_token,
@@ -48,7 +54,11 @@ from backend.services.auth import (
     normalize_email,
     verify_password,
 )
+from backend.services.data_export import build_export
 from backend.services.rate_limit import (
+    account_rate_limit_dependency,
+    data_export_account_rate_limiter,
+    delete_account_account_rate_limiter,
     forgot_password_email_rate_limiter,
     forgot_password_rate_limiter,
     login_account_rate_limiter,
@@ -460,6 +470,108 @@ async def logout(
         extra={"user_id": user.id, "email": user.email, "token_version": new_epoch},
     )
     return {"status": "logged_out"}
+
+
+# ===========================================================================
+# Self-service data rights (export + closure)
+# ===========================================================================
+#
+# The platform stores a person's name, email, charging history, payment
+# references and location-bearing session records. Both of the rights that
+# implies — get a copy, and close the account — are self-service here rather
+# than a "email us and we'll do it" promise.
+
+# The exact phrase the client must send to close an account. Typed, not a
+# checkbox: closure is irreversible and forfeits any remaining credit.
+DELETE_ACCOUNT_CONFIRM_PHRASE = "DELETE MY ACCOUNT"
+
+
+@router.get(
+    "/api/auth/me/export",
+    dependencies=[
+        Depends(account_rate_limit_dependency(data_export_account_rate_limiter, "data export"))
+    ],
+)
+async def export_my_data(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Download everything AmpHive holds about the calling account, as JSON.
+
+    Strictly self-scoped: services/data_export.py filters every collection on
+    the authenticated user's own id, excludes credentials (password hash, token
+    digests, push keys), and caps each collection with an explicit
+    `truncated_collections` list rather than silently cutting rows.
+    """
+    document = await build_export(db, user)
+    filename = f"amphive-data-export-{user.id}.json"
+    logger.info("User data export generated", extra={"user_id": user.id})
+    return JSONResponse(
+        content=document,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.delete(
+    "/api/auth/me",
+    dependencies=[
+        Depends(account_rate_limit_dependency(delete_account_account_rate_limiter, "account closure"))
+    ],
+)
+async def delete_my_account(
+    req: DeleteAccountRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Close the calling account: purge personal rows, forfeit any remaining
+    charging credit, anonymise the account row, revoke every token.
+
+    Financial records (charging sessions, wallet ledger, GST invoices) are
+    RETAINED against an anonymised tombstone — they are the operator's tax
+    records and feed the CPO's earnings and payout watermark, and every
+    `user_id` FK is ON DELETE CASCADE so a real row delete would destroy them.
+    See services/account_closure.py for the full rationale.
+    """
+    if req.confirm.strip() != DELETE_ACCOUNT_CONFIRM_PHRASE:
+        raise HTTPException(
+            status_code=400,
+            detail=f'To close your account, send confirm="{DELETE_ACCOUNT_CONFIRM_PHRASE}".',
+        )
+
+    # Re-authenticate password accounts. A Google-only account's stored hash is
+    # a deliberately unusable random value (routers/auth.py google_callback), so
+    # no password could ever verify — the bearer token is the proof of identity
+    # there, as it is on every other authenticated route.
+    if user.auth_provider != "google":
+        if not req.password or not verify_password(req.password, user.hashed_password):
+            raise HTTPException(status_code=403, detail="Password is incorrect.")
+
+    try:
+        summary = await close_account(db, user)
+    except AccountClosureRefused as refused:
+        raise HTTPException(status_code=409, detail=refused.reason) from refused
+
+    # Audited AFTER the commit and best-effort (try_record_audit never breaks
+    # its caller): the closure itself must not be undone by an audit failure.
+    await try_record_audit(
+        db,
+        tenant_id=user.tenant_id,
+        actor_user_id=None,  # the actor no longer exists as an identifiable person
+        action="account.close",
+        target_type="user",
+        target_id=str(summary["user_id"]),
+        detail=f"forfeited_coins={summary['forfeited_coins']}",
+    )
+
+    return {
+        "status": "closed",
+        "forfeited_coins": summary["forfeited_coins"],
+        "detail": (
+            "Your account is closed and your personal details have been removed. "
+            "Billing records for past charging sessions are kept as required for "
+            "tax and accounting."
+        ),
+    }
 
 
 # ===========================================================================

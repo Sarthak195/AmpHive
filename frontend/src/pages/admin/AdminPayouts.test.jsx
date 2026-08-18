@@ -72,7 +72,7 @@ describe('AdminPayouts list', () => {
     const lastUrl = api.get.mock.calls.at(-1)[0];
     expect(lastUrl).toContain('status=requested');
     expect(screen.getByRole('button', { name: 'Requested' })).toHaveAttribute(
-      'aria-selected',
+      'aria-pressed',
       'true'
     );
   });

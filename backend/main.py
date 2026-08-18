@@ -271,12 +271,29 @@ _SECURITY_HEADERS = {
 }
 
 
+# One route returns a DOCUMENT rather than JSON: the printable GST invoice
+# (GET /api/sessions/{id}/invoice?format=html -> HTMLResponse with an inline
+# <style> block, services/invoices.py). The JSON policy above would blank its
+# styling if it were ever opened as a top-level document. The frontend fetches
+# it as a blob today (so it inherits the app's CSP, not this one), but "it only
+# works because nobody opens the URL directly" is not a policy. Give HTML
+# responses their own correct policy instead: same-origin only, inline styles
+# permitted, and NO scripts at all — which is a tighter guarantee for that
+# document than the app-wide CSP gives it.
+_HTML_CSP = (
+    "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; "
+    "frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+)
+
+
 @app.middleware("http")
 async def security_headers_middleware(request: Request, call_next):
     response = await call_next(request)
     for header, value in _SECURITY_HEADERS.items():
         if header not in response.headers:
             response.headers[header] = value
+    if response.headers.get("content-type", "").startswith("text/html"):
+        response.headers["Content-Security-Policy"] = _HTML_CSP
     return response
 
 

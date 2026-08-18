@@ -42,18 +42,41 @@ describe('Tabs', () => {
   it('moves selection with arrow keys and wraps at the ends', () => {
     const onChange = vi.fn();
     render(<Tabs tabs={tabs} active="disputes" onChange={onChange} ariaLabel="History views" />);
-    const tablist = screen.getByRole('tablist');
+    // Keys are dispatched at the selected tab, which is where the roving
+    // tabindex puts focus in a real browser — the handler lives there.
+    const focused = screen.getByRole('tab', { name: /Disputes/ });
 
     // ArrowRight from the last tab wraps to the first.
-    fireEvent.keyDown(tablist, { key: 'ArrowRight' });
+    fireEvent.keyDown(focused, { key: 'ArrowRight' });
     expect(onChange).toHaveBeenLastCalledWith('sessions');
 
     // ArrowLeft steps back.
-    fireEvent.keyDown(tablist, { key: 'ArrowLeft' });
+    fireEvent.keyDown(focused, { key: 'ArrowLeft' });
     expect(onChange).toHaveBeenLastCalledWith('ledger');
 
     // Home/End jump to the edges.
-    fireEvent.keyDown(tablist, { key: 'Home' });
+    fireEvent.keyDown(focused, { key: 'Home' });
     expect(onChange).toHaveBeenLastCalledWith('sessions');
+  });
+
+  it('wires the selected tab to the panel it controls', () => {
+    render(
+      <Tabs tabs={tabs} active="ledger" onChange={vi.fn()} ariaLabel="History views">
+        <p>Ledger rows</p>
+      </Tabs>,
+    );
+
+    // The panel is named by its tab, so a screen reader reaching it announces
+    // "Ledger, tab panel" rather than an anonymous region.
+    const panel = screen.getByRole('tabpanel', { name: 'Ledger' });
+    expect(panel).toHaveTextContent('Ledger rows');
+
+    // ...and the tab points back at that exact panel.
+    const selected = screen.getByRole('tab', { name: 'Ledger' });
+    expect(selected).toHaveAttribute('aria-controls', panel.getAttribute('id'));
+
+    // Inactive tabs must NOT claim to control it — their panel isn't mounted,
+    // so an aria-controls here would be a dangling reference.
+    expect(screen.getByRole('tab', { name: /Sessions/ })).not.toHaveAttribute('aria-controls');
   });
 });

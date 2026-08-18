@@ -1,5 +1,6 @@
 import js from '@eslint/js'
 import globals from 'globals'
+import jsxA11y from 'eslint-plugin-jsx-a11y'
 import reactHooks from 'eslint-plugin-react-hooks'
 import reactRefresh from 'eslint-plugin-react-refresh'
 import { defineConfig, globalIgnores } from 'eslint/config'
@@ -14,6 +15,7 @@ export default defineConfig([
     files: ['**/*.{js,jsx}'],
     extends: [
       js.configs.recommended,
+      jsxA11y.flatConfigs.recommended,
       reactHooks.configs.flat.recommended,
       reactRefresh.configs.vite,
     ],
@@ -34,6 +36,15 @@ export default defineConfig([
       // This new react-hooks v7 rule flags all of them; it's a perf hint,
       // not a correctness bug. Revisit alongside a data-fetching refactor.
       'react-hooks/set-state-in-effect': 'off',
+    },
+  },
+  {
+    // Vitest specs and the Vite config run in Node, not the browser: without
+    // this they trip no-undef on `process` (see nginxRoutes.test.js, which
+    // walks up from process.cwd() to find nginx.conf).
+    files: ['**/*.test.{js,jsx}', 'src/test-setup.js', '*.config.js'],
+    languageOptions: {
+      globals: { ...globals.browser, ...globals.node },
     },
   },
   {

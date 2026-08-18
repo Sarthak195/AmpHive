@@ -21,7 +21,13 @@ vi.mock('../contexts/TenantContext', () => ({
 }));
 vi.mock('./NotificationBell', () => ({ default: () => <div data-testid="bell" /> }));
 vi.mock('./CpoAlerts', () => ({ default: () => <div data-testid="alerts" /> }));
-vi.mock('../utils/appHost', () => ({ driverOrigin: () => 'https://amphive.app' }));
+// isCpoHost is needed by SiteFooter (rendered at the bottom of the console
+// content column) to decide between in-app <Link>s and absolute links back
+// to the driver origin — this shell renders on the console host.
+vi.mock('../utils/appHost', () => ({
+  driverOrigin: () => 'https://amphive.app',
+  isCpoHost: () => true,
+}));
 
 const logout = vi.fn();
 

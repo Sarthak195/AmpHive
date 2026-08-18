@@ -93,6 +93,11 @@ const CpoSetup = () => {
 
           <form className="stack" onSubmit={handleSubmit}>
             <div className="field">
+              {/* eslint-disable jsx-a11y/no-autofocus -- the "become a host"
+                  page is this single field plus a submit button, so focusing
+                  it on arrival is the expected behaviour rather than focus
+                  being stolen from other content. Pre-existing; kept
+                  deliberately when jsx-a11y was switched on. */}
               <label className="field-label" htmlFor="tenant-name">
                 Organization name
               </label>
@@ -106,6 +111,7 @@ const CpoSetup = () => {
                 maxLength={100}
                 autoFocus
               />
+              {/* eslint-enable jsx-a11y/no-autofocus */}
             </div>
 
             {error && (

@@ -28,6 +28,9 @@ import ErrorBoundary from './components/ErrorBoundary';
 import AdminLayout from './components/AdminLayout';
 import { ProtectedRoute, CpoProtectedRoute, AdminProtectedRoute } from './components/ProtectedRoutes';
 import { ExternalRedirect, CpoLanding } from './components/HostRouting';
+import SiteFooter from './components/SiteFooter';
+import SkipLink from './components/SkipLink';
+import RouteAnnouncer from './components/RouteAnnouncer';
 import { useAuth } from './contexts/AuthContext';
 import { isCpoHost, isSplitHost, cpoOrigin, driverOrigin } from './utils/appHost';
 
@@ -43,6 +46,11 @@ const Activity = lazy(() => import('./pages/Activity'));
 const Groups = lazy(() => import('./pages/Groups'));
 const Account = lazy(() => import('./pages/Account'));
 const Terms = lazy(() => import('./pages/Terms'));
+const ChargingCreditTerms = lazy(() => import('./pages/ChargingCreditTerms'));
+const Privacy = lazy(() => import('./pages/Privacy'));
+const Refunds = lazy(() => import('./pages/Refunds'));
+const Contact = lazy(() => import('./pages/Contact'));
+const NotFound = lazy(() => import('./pages/NotFound'));
 const Login = lazy(() => import('./pages/Login'));
 const Signup = lazy(() => import('./pages/Signup'));
 const ForgotPassword = lazy(() => import('./pages/ForgotPassword'));
@@ -98,6 +106,11 @@ const DriverShell = () => {
     <div className={user ? 'has-tabbar' : undefined}>
       <AppBar />
       <Outlet />
+      {/* Legal links must be reachable from every signed-in page, not just the
+          anonymous marketing homepage (which is the only place they lived
+          before). Marketing renders its own richer footer, so this one is
+          suppressed there to avoid two stacked footers. */}
+      {user && <SiteFooter />}
       {user && <MobileTabBar />}
     </div>
   );
@@ -143,6 +156,10 @@ const driverRoutes = (
       <Route path="/map" element={<MapPage />} />
       {/* Public charging-credit terms — no account needed. */}
       <Route path="/terms" element={<Terms />} />
+      <Route path="/charging-credit-terms" element={<ChargingCreditTerms />} />
+      <Route path="/privacy" element={<Privacy />} />
+      <Route path="/refunds" element={<Refunds />} />
+      <Route path="/contact" element={<Contact />} />
       <Route path="/session" element={
         <ProtectedRoute><Session /></ProtectedRoute>
       } />
@@ -249,13 +266,21 @@ const CpoHostRoutes = () => (
     {cpoDashboardRoutes}
     {adminRoutes}
 
-    {/* Driver-only routes → driver origin (same path preserved). */}
-    {['/map', '/terms', '/session', '/credit', '/wallet', '/activity', '/groups', '/account', '/signup', '/topup', '/history'].map((path) => (
+    {/* Driver-only routes → driver origin (same path preserved). The legal
+        pages live on the driver origin, so an operator who types one on the
+        console host gets bounced there rather than a 404 — SiteFooter already
+        links them as absolute driver-origin hrefs, but a typed or pasted URL
+        has no such help. Keep this list in sync with driverRoutes above. */}
+    {['/map', '/terms', '/charging-credit-terms', '/privacy', '/refunds', '/contact',
+      '/session', '/credit', '/wallet', '/activity', '/groups', '/account',
+      '/signup', '/topup', '/history'].map((path) => (
       <Route key={path} path={path} element={<ExternalRedirect origin={driverOrigin()} />} />
     ))}
 
-    {/* Catch-all — redirect to the portal landing. */}
-    <Route path="*" element={<Navigate to="/" replace />} />
+    {/* Catch-all — a real "not found" page, not a silent bounce to the
+        landing screen. See pages/NotFound.jsx and the nginx location that
+        gives it a genuine 404 status. */}
+    <Route path="*" element={<NotFound />} />
   </Routes>
 );
 
@@ -271,8 +296,10 @@ const DriverHostRoutes = () => (
     <Route path="/admin/*" element={<ExternalRedirect origin={cpoOrigin()} />} />
     <Route path="/admin" element={<ExternalRedirect origin={cpoOrigin()} />} />
 
-    {/* Catch-all — redirect to home */}
-    <Route path="*" element={<Navigate to="/" replace />} />
+    {/* Catch-all — a real "not found" page (see pages/NotFound.jsx). */}
+    <Route element={<DriverShell />}>
+      <Route path="*" element={<NotFound />} />
+    </Route>
   </Routes>
 );
 
@@ -287,7 +314,7 @@ const UnsplitRoutes = () => (
     } />
     {cpoDashboardRoutes}
     {adminRoutes}
-    <Route path="*" element={<Navigate to="/" replace />} />
+    <Route path="*" element={<NotFound />} />
   </Routes>
 );
 
@@ -301,6 +328,12 @@ function App() {
   return (
     <Router>
       <ErrorBoundary>
+        {/* Keyboard users must be able to jump past the AppBar / console
+            sidebar (14+ links) on every navigation, and screen readers need
+            to be told the page changed — an SPA route change is silent
+            otherwise. Both live inside Router because they read the location. */}
+        <SkipLink />
+        <RouteAnnouncer />
         <Suspense fallback={<BootSplash />}>
           {!isSplitHost() ? <UnsplitRoutes />
             : isCpoHost() ? <CpoHostRoutes /> : <DriverHostRoutes />}

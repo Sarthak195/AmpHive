@@ -200,23 +200,23 @@ export default function CpoPlugReports() {
         active={statusFilter}
         onChange={setStatusFilter}
         ariaLabel="Filter plug reports by status"
-      />
-
-      <DataTable
-        columns={columns}
-        rows={reports}
-        loading={loading}
-        error={error}
-        onRetry={fetchReports}
-        emptyIcon={Flag}
-        emptyTitle={statusFilter === 'open' ? 'No open reports' : 'No reports'}
-        emptyBody={
-          statusFilter === 'open'
-            ? "Nice and quiet — nothing's been flagged right now."
-            : 'Driver-flagged charger problems show up here.'
-        }
-        collapse
-      />
+      >
+        <DataTable
+          columns={columns}
+          rows={reports}
+          loading={loading}
+          error={error}
+          onRetry={fetchReports}
+          emptyIcon={Flag}
+          emptyTitle={statusFilter === 'open' ? 'No open reports' : 'No reports'}
+          emptyBody={
+            statusFilter === 'open'
+              ? "Nice and quiet — nothing's been flagged right now."
+              : 'Driver-flagged charger problems show up here.'
+          }
+          collapse
+        />
+      </Tabs>
 
       {/* Resolve: acknowledge (no close) / resolve (closes it out) */}
       <ConfirmDialog

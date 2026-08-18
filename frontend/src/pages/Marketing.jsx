@@ -29,6 +29,7 @@ import { StatusDot } from '../components/ui';
 import { getPlugAvailability } from '../utils/plugAvailability';
 import { formatINR } from '../utils/money';
 import { cpoOrigin } from '../utils/appHost';
+import useDocumentMeta from '../hooks/useDocumentMeta';
 import './Marketing.css';
 
 const NETWORK_POLL_MS = 60_000;
@@ -343,6 +344,22 @@ const MktFooter = () => {
           <p className="text-3 text-sm">
             Shared EV charging on the plug points India already has.
           </p>
+          {/* Legal lives inside the brand cell rather than as a fifth grid
+              child: .mkt-footer-grid declares exactly four columns, so a
+              fifth <nav> would be placed into an implicit second row, sitting
+              under the brand separated by a full row's height. Nesting puts
+              it in the same place visually, at the grid's own sp-3 rhythm,
+              without touching Marketing.css. */}
+          <nav aria-label="Legal">
+            <h3 className="mkt-footer-h">Legal</h3>
+            <ul>
+              <li><Link to="/terms">Terms of Service</Link></li>
+              <li><Link to="/privacy">Privacy Policy</Link></li>
+              <li><Link to="/refunds">Refunds</Link></li>
+              <li><Link to="/charging-credit-terms">Charging credit terms</Link></li>
+              <li><Link to="/contact">Contact</Link></li>
+            </ul>
+          </nav>
         </div>
         <nav aria-label="Drivers">
           <h3 className="mkt-footer-h">Drivers</h3>
@@ -350,7 +367,6 @@ const MktFooter = () => {
             <li><Link to="/map">Find a charger</Link></li>
             <li><Link to="/credit">Charging credit</Link></li>
             <li><Link to="/activity">Activity</Link></li>
-            <li><Link to="/terms">Charging credit terms</Link></li>
           </ul>
         </nav>
         <nav aria-label="Hosts">
@@ -377,6 +393,19 @@ const MktFooter = () => {
 const Marketing = () => {
   const location = useLocation();
   const deepLinkPlug = new URLSearchParams(location.search).get('plug');
+
+  // The landing page is the surface that SHOULD rank, so it opts in to
+  // indexing (useDocumentMeta noindexes by default — every authenticated
+  // route relies on that). `path: '/'` pins the canonical to the driver
+  // origin, which matters because the console host serves byte-identical HTML
+  // and would otherwise be a duplicate of this page.
+  useDocumentMeta({
+    title: 'Shared EV charging near you',
+    description:
+      'Find an EV charger on a plug point near you, start it from your phone, and pay only for the energy you use. Own a plug point? List it on AmpHive and earn from it.',
+    path: '/',
+    index: true,
+  });
 
   return (
     <main className="mkt">

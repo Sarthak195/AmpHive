@@ -8,7 +8,7 @@
  * surface inline on the form.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Routes, Route, useLocation } from 'react-router-dom';
 
@@ -130,6 +130,33 @@ describe('Signup', () => {
   it('links back to Login', () => {
     renderSignup();
     expect(screen.getByRole('link', { name: 'Sign in' })).toHaveAttribute('href', '/login');
+  });
+
+  it('states consent to the Terms and the Privacy Policy at the point of submission', () => {
+    renderSignup();
+
+    const form = screen.getByRole('button', { name: 'Create account' }).closest('form');
+    // The consent line lives inside the form, next to the button that acts on
+    // it — not in a footer somebody scrolls past.
+    expect(within(form).getByText(/by creating an account you agree/i)).toBeInTheDocument();
+    expect(within(form).getByRole('link', { name: 'Terms of Service' })).toHaveAttribute(
+      'href',
+      '/terms'
+    );
+    expect(within(form).getByRole('link', { name: 'Privacy Policy' })).toHaveAttribute(
+      'href',
+      '/privacy'
+    );
+  });
+
+  it('does not gate submission on a consent checkbox', async () => {
+    registerSpy.mockResolvedValue({ status: 'verification_sent', email: 'new@amphive.test' });
+    renderSignup();
+
+    expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
+    await fillForm();
+    await userEvent.click(screen.getByRole('button', { name: 'Create account' }));
+    expect(registerSpy).toHaveBeenCalled();
   });
 });
 

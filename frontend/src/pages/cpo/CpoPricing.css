@@ -8,6 +8,9 @@
 
 /* ---- Simple/Advanced mode tabs ------------------------------------------- */
 
+/* Sits on the .tabs strip itself, not a wrapper: Tabs now renders its own
+   tabpanel as a sibling of the tablist, so a wrapper div would have swallowed
+   the panel too. Same spacing either way — the wrapper carried nothing else. */
 .pricing-mode-tabs {
   margin-bottom: var(--sp-4);
 }

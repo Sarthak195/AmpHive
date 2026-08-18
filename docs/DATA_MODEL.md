@@ -24,7 +24,7 @@ ORM: SQLAlchemy 2.0 `DeclarativeBase` with `mapped_column`. Enums use
 | `GatewayStatus` (`gateway_status`) | `online`, `offline` |
 | `PlugStatus` (`plug_status`) | `available`, `occupied`, `offline`, `maintenance` |
 | `SessionStatus` (`session_status`) | `active`, `completed`, `paid`, `cancelled` |
-| `TransactionType` (`tx_type`) | `topup`, `session_debit`, `refund`, `cpo_topup` (2026-07-21, `0026_offline_topups` — first migration in this repo to `ALTER TYPE ... ADD VALUE` an existing enum rather than create one) |
+| `TransactionType` (`tx_type`) | `topup`, `session_debit`, `refund`, `cpo_topup` (2026-07-21, `0026_offline_topups` — first migration in this repo to `ALTER TYPE ... ADD VALUE` an existing enum rather than create one), `account_closure` (2026-08-18, `0038_account_closure`, same `ALTER TYPE` idiom — the forfeit line written when a closing account's remaining charging credit is zeroed, so the running balance stays reconcilable by summing `amount`) |
 | `ReservationStatus` (`reservation_status`) | `booked`, `cancelled`, `fulfilled`, `expired` (2026-07-12, `0016_reservations`) |
 
 ## 2. Tables
@@ -40,9 +40,29 @@ Owns users, gateways, sessions, charger_groups (cascade delete-orphan).
 `token_version` INTEGER (default 0; JWT-revocation epoch, embedded as the
 `tv` claim and re-checked per request — revision `0003_token_version`,
 2026-07-08) · `created_at`.
+`deleted_at` TIMESTAMPTZ nullable (revision `0038_account_closure`,
+2026-08-18) — when the holder closed the account; NULL while live.
 CHECK `ck_users_coin_balance_non_negative` (`coin_balance >= 0`, revision
 `0002_wallet_non_negative`, 2026-07-07) — the DB-level backstop behind the
 row-locked, clamped wallet debits.
+
+**Account closure ANONYMISES this row; it does not delete it.** Every
+`user_id` foreign key in this document is `ON DELETE CASCADE`, so
+`DELETE FROM users` would take the account's `charging_sessions`,
+`ledger_transactions` and GST `invoices` with it — records the operator is
+required to keep, and the inputs to the CPO earnings / payout-watermark maths.
+So `DELETE /api/auth/me` (`services/account_closure.py`) purges only the rows
+that are purely the person (push subscriptions, notifications, favourites,
+watches, group memberships, capacity requests, outstanding reset/verification
+tokens), cancels BOOKED reservations and WAITING queued charges, forfeits any
+remaining credit as an `account_closure` ledger line, and then scrubs THIS row
+into a tombstone: `email` -> `deleted-user-{id}@deleted.amphive.invalid`
+(RFC 2606 reserved TLD — undeliverable, and can never collide with a real
+signup while still satisfying the unique index), `full_name` -> `Deleted
+user`, an unusable random `hashed_password`, `google_sub` NULL,
+`auth_provider` `deleted`, `is_disabled` true, `email_verified` false,
+`token_version` bumped (every outstanding JWT dies on its next request).
+The financial rows survive, pointing at a row that identifies nobody.
 
 ### `gateways`
 `id` **VARCHAR(50) PK** (caller-supplied MAC/UUID) · `tenant_id` → tenants

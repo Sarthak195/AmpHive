@@ -70,6 +70,67 @@ repeated here.*
       Postgres and then does INSERT+UPDATE+DELETE+`nextval` **as `amphive_app`**;
       change the boot check to a transactional write-then-rollback.
 
+## OPEN — 2026-08-18 production-readiness audit follow-ups
+
+*Everything the audit could safely fix in code is done (see
+[SECURITY.md](SECURITY.md) §"2026-08-18"). These are the residue: operator
+actions, and two deliberate deferrals.*
+
+- [ ] **Hand-edit the live Caddyfile** — `deploy/relay/deploy-relay.sh`
+      generates it on FIRST deploy only and never updates an existing one, so
+      the new `Permissions-Policy`, the CSP additions
+      (`frame-ancestors`/`object-src`) and the http->https redirect for the
+      named domains do NOT reach prod until an operator edits
+      `~/amphive-relay/Caddyfile` and runs `caddy reload`. The generator now
+      says so in its skip branch. (Carried over from the 2026-08-04
+      operator-deferred list, now with more to apply.)
+- [ ] **Verify a real password-reset / verification email still arrives.** The
+      no-SMTP console fallback now REDACTS the message body by default (it was
+      printing live single-use account-takeover tokens into the logs). Prod has
+      `SMTP_HOST` set so nothing should change, but confirm a real send after
+      deploying rather than assuming.
+- [ ] **Containers still run as root.** DEFERRED, not forgotten: the 2026-08-04
+      batch built non-root + `cap_drop` and reverted it because `deploy.ps1`
+      ships only source (it cannot apply the compose half) and the live
+      root-owned `firmware_images` volume must be chowned first. Needs a
+      dedicated infra deploy, not a bundle. (`backend/Dockerfile`,
+      `agent/Dockerfile` still have no `USER`.)
+- [ ] **`python-jose` -> PyJWT.** The one remaining dependency advisory is
+      `ecdsa` PYSEC-2026-1325, which has NO upstream fix, arrives transitively
+      via python-jose, and is unreachable here (ES*-only; `JWT_ALGORITHM` pins
+      HS256 on both encode and decode). CI ignores exactly that ID with a
+      written justification. Migrating off python-jose would remove it
+      entirely, but an auth-path swap did not belong in this batch.
+- [ ] **`users.email` uniqueness is byte-exact, not case-insensitive.**
+      `models.py` has a plain `unique=True` while every lookup uses
+      `func.lower(User.email)`. Application code has normalised to lowercase
+      since early on, so a case-variant duplicate almost certainly does not
+      exist — but if one did, `scalar_one_or_none()` on login would raise
+      `MultipleResultsFound` -> 500. Deliberately NOT fixed here: the correct
+      fix is a functional unique index, expression indexes reflect poorly
+      through `compare_metadata` (which `test_migrations.py` gates on), and a
+      migration that can fail on real data is exactly the startup-migration
+      hazard this file warns about below. Check first with:
+      `SELECT lower(email), count(*) FROM users GROUP BY 1 HAVING count(*) > 1;`
+- [ ] **Gateway-ID squatting is still possible on the legacy manual path.**
+      `POST /api/cpo/gateways` lets any CPO register any not-yet-registered
+      `gateway_id`, and a MAC is not a secret. Severity is limited because the
+      squatter still receives no telemetry unless an operator also provisions
+      that gateway's broker credentials to them (`add_gateway_user.ps1`), and
+      the claim-code path is enumeration-safe by design. The fix — retire the
+      manual path in favour of claim codes — is a product decision, not a bug
+      fix.
+- [ ] **Backups have no alerting.** The nightly cron writes only to
+      `~/amphive-relay/backup.log`. This batch made it resolve the DB container
+      instead of hardcoding a name that depends on which compose file the VM
+      runs (it would otherwise have failed silently every night after a rebuild
+      from the repo compose file) and made it stamp
+      `backups/LAST_SUCCESS`, so staleness is one `ls -l` away — but a
+      silently-failing cron is still a backup you do not have. Verified live
+      2026-08-18: backups are current.
+
+---
+
 - [ ] **`mosquitto message_size_limit` is repo-only, not on the prod broker.**
       **(Low, quick.)** `backend/services/mqtt/router.py:16-23` comments that the
       broker's `message_size_limit 8192` (`deploy/config/mosquitto.conf:45`) is

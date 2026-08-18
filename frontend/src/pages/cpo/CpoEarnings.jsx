@@ -511,7 +511,6 @@ export default function CpoEarnings() {
               value={creditForm.driver_email}
               onChange={(e) => setCreditForm((f) => ({ ...f, driver_email: e.target.value }))}
               placeholder="driver@example.com"
-              autoFocus
               required
             />
           </div>

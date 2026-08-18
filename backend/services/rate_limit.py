@@ -357,6 +357,20 @@ socketio_connect_rate_limiter = SlidingWindowRateLimiter(
     *_rule_from_env("SOCKETIO_CONNECT_RATE_LIMIT", "60/60")
 )
 
+# Data export (GET /api/auth/me/export) reads a dozen tables for one user
+# and materialises the result in memory, so it is the most expensive
+# self-service endpoint. Per ACCOUNT, since a legitimate user needs it
+# rarely and an abusive one is authenticated by definition.
+data_export_account_rate_limiter = SlidingWindowRateLimiter(
+    *_rule_from_env("DATA_EXPORT_ACCOUNT_RATE_LIMIT", "5/3600")
+)
+
+# Account closure. Irreversible, so the cap exists to bound repeated
+# password-guessing against the re-auth check rather than to bound cost.
+delete_account_account_rate_limiter = SlidingWindowRateLimiter(
+    *_rule_from_env("DELETE_ACCOUNT_ACCOUNT_RATE_LIMIT", "5/3600")
+)
+
 # --- Per-account limiters (layered on top of the per-IP limiters above) ---
 session_start_account_rate_limiter = SlidingWindowRateLimiter(
     *_rule_from_env("SESSION_START_ACCOUNT_RATE_LIMIT", "20/60")

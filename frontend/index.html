@@ -8,7 +8,13 @@
          without this the env() vars just resolve to 0. -->
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>AmpHive — Shared EV charging</title>
-    <meta name="description" content="AmpHive is a shared EV charging platform. Find a charger nearby, plug in, and pay from your wallet — or host your own chargers and earn." />
+    <!-- Kept verbatim in sync with SITE_DESCRIPTION in src/utils/legal.js (which
+         is what useDocumentMeta.js writes over this tag once JS runs) and with
+         the og:/twitter: copies below. It also says "charging credit", not
+         "wallet": the closed-loop reframe renamed the product surface
+         deliberately, and this static string is the one a non-JS crawler
+         quotes in a search snippet. -->
+    <meta name="description" content="AmpHive is a shared EV charging platform. Find a charger nearby, plug in, and pay from your charging credit — or host your own chargers and earn." />
     <meta name="theme-color" content="#FAF7EF" />
     <link rel="manifest" href="/manifest.webmanifest" />
     <!-- iOS "Add to Home Screen" reads these instead of the manifest. -->
@@ -16,6 +22,94 @@
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <meta name="apple-mobile-web-app-title" content="AmpHive" />
+
+    <!-- ==== Canonical + share cards ==========================================
+         The driver app (https://amphive.app) and the operator console
+         (https://cpo.amphive.app) serve the BYTE-IDENTICAL bundle, so every
+         URL exists twice. The static canonical below names the driver origin
+         as the authoritative one; src/hooks/useDocumentMeta.js then overwrites
+         `canonical` / `og:url` / `og:title` / `og:description` per route on
+         mount, so this file only has to be right for the one page a
+         non-JS-executing consumer sees first: "/".
+
+         Everything else here (og:image, og:type, og:site_name, twitter:card,
+         og:locale) is deliberately NOT touched by the hook — those are
+         site-level facts, and the crawlers that matter most for this app are
+         the ones that DON'T run JS: WhatsApp, Slack, Signal and Telegram
+         unfurl from the raw HTML only, and WhatsApp sharing is the main
+         distribution channel for an India-market consumer app. If the share
+         card is not in this static head, it does not exist for them. -->
+    <link rel="canonical" href="https://amphive.app/" />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="AmpHive" />
+    <meta property="og:title" content="AmpHive — Shared EV charging" />
+    <meta property="og:description" content="AmpHive is a shared EV charging platform. Find a charger nearby, plug in, and pay from your charging credit — or host your own chargers and earn." />
+    <meta property="og:url" content="https://amphive.app/" />
+    <!-- Absolute URL is mandatory: WhatsApp/Slack/Twitter fetch og:image out of
+         band, with no document base to resolve a relative path against. 1200x630
+         is the 1.91:1 ratio Facebook/LinkedIn/WhatsApp all render large; the
+         explicit width/height let a scraper reserve the right box before the
+         image lands (and stop WhatsApp falling back to the small square card).
+         The file is generated from real brand assets only — the shipped app
+         icon, tokens.css colours and the description string above. -->
+    <meta property="og:image" content="https://amphive.app/og-image.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="AmpHive — shared EV charging. Find a charger nearby, plug in, and pay from your charging credit." />
+    <meta property="og:locale" content="en_IN" />
+
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="AmpHive — Shared EV charging" />
+    <meta name="twitter:description" content="AmpHive is a shared EV charging platform. Find a charger nearby, plug in, and pay from your charging credit — or host your own chargers and earn." />
+    <meta name="twitter:image" content="https://amphive.app/og-image.png" />
+
+    <!-- ==== Structured data ==================================================
+         Two nodes only, and every field is something we can actually stand
+         behind: the name, the origin, the shipped logo, the same description
+         used everywhere else, and the support mailbox from
+         src/utils/legal.js (SUPPORT_EMAIL — a real monitored address).
+
+         DELIBERATELY ABSENT, and please keep them absent unless they become
+         true and verifiable: postalAddress, telephone, foundingDate, sameAs
+         social profiles, aggregateRating, and any LocalBusiness/Place node.
+         Google treats structured data as a claim about the business; an
+         invented address or a rating nobody left is a manual-action risk, not
+         a rich-result win.
+
+         An application/ld+json block is a CSP "data block", not an executable
+         script, so `script-src 'self'` (frontend/nginx.conf) does not block it. -->
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@graph": [
+          {
+            "@type": "Organization",
+            "@id": "https://amphive.app/#organization",
+            "name": "AmpHive",
+            "url": "https://amphive.app/",
+            "logo": "https://amphive.app/icon-512.png",
+            "image": "https://amphive.app/og-image.png",
+            "description": "AmpHive is a shared EV charging platform. Find a charger nearby, plug in, and pay from your charging credit — or host your own chargers and earn.",
+            "contactPoint": {
+              "@type": "ContactPoint",
+              "contactType": "customer support",
+              "email": "support@amphive.app",
+              "url": "https://amphive.app/contact"
+            }
+          },
+          {
+            "@type": "WebSite",
+            "@id": "https://amphive.app/#website",
+            "url": "https://amphive.app/",
+            "name": "AmpHive",
+            "description": "AmpHive is a shared EV charging platform. Find a charger nearby, plug in, and pay from your charging credit — or host your own chargers and earn.",
+            "inLanguage": "en",
+            "publisher": { "@id": "https://amphive.app/#organization" }
+          }
+        ]
+      }
+    </script>
     <!-- Fonts are self-hosted via @fontsource imports in src/main.jsx; their
          woff2 URLs are content-hashed by Vite at build time, so static
          <link rel="preload"> tags here would 404 — deliberately omitted. -->

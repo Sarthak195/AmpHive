@@ -100,6 +100,11 @@ const ResetPassword = () => {
     <AuthShell title="Reset password">
       <form onSubmit={handleSubmit} className="stack">
         <div className="field">
+          {/* eslint-disable jsx-a11y/no-autofocus -- this page exists solely
+              for this one form, so focusing its first field on arrival is the
+              expected behaviour rather than focus being stolen from other
+              content. Pre-existing; kept deliberately when jsx-a11y was
+              switched on. */}
           <label className="field-label" htmlFor="password">New password</label>
           <input
             id="password"
@@ -114,6 +119,7 @@ const ResetPassword = () => {
             autoComplete="new-password"
             autoFocus
           />
+          {/* eslint-enable jsx-a11y/no-autofocus */}
         </div>
 
         <div className="field">

@@ -106,6 +106,23 @@ class ResendVerificationRequest(BaseModel):
     # enumeration), and pre-EmailStr accounts must be resendable too.
     email: str = Field(max_length=MAX_EMAIL_LEN)
 
+class DeleteAccountRequest(BaseModel):
+    """Body for DELETE /api/auth/me.
+
+    `confirm` is a typed phrase, not a checkbox: closure forfeits any
+    remaining charging credit and cannot be undone, so it must be
+    impossible to trigger by a mis-click or a replayed request.
+
+    `password` re-authenticates the caller. It is REQUIRED for accounts
+    that can sign in with a password, and ignored for Google-only accounts
+    (whose stored hash is deliberately unusable) — those are proven by the
+    bearer token alone, exactly as every other authenticated route treats
+    them.
+    """
+    confirm: str = Field(max_length=64)
+    password: Optional[str] = Field(default=None, max_length=MAX_LOGIN_PASSWORD_LEN)
+
+
 class AuthResponse(BaseModel):
     token: str
     user: dict

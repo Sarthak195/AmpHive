@@ -1,0 +1,61 @@
+/* SiteFooter — the legal/nav footer shown on every surface.
+ *
+ * Deliberately quiet: it sits under every page including the charging monitor,
+ * so it must read as chrome, never compete with content. Semantic tokens only
+ * (see styles/tokens.css) so it inherits both the day and volt atmospheres
+ * without a single theme-specific rule. */
+
+.site-footer {
+  margin-top: var(--sp-10);
+  padding: var(--sp-6) var(--sp-4) calc(var(--sp-6) + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  align-items: center;
+  text-align: center;
+}
+
+.site-footer-compact {
+  margin-top: var(--sp-6);
+  padding-top: var(--sp-4);
+  padding-bottom: calc(var(--sp-4) + env(safe-area-inset-bottom));
+}
+
+.site-footer-links {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
+  gap: var(--sp-2) var(--sp-4);
+}
+
+.site-footer-links a {
+  color: var(--ink-3);
+  font-size: var(--text-sm);
+  text-decoration: none;
+  /* 44px tap target on touch devices without inflating the visual row on a
+     pointer device — the link text itself stays small either way. */
+  padding: var(--sp-2) 0;
+}
+
+.site-footer-links a:hover,
+.site-footer-links a:focus-visible {
+  color: var(--ink);
+  text-decoration: underline;
+}
+
+.site-footer-note {
+  font-size: var(--text-xs);
+  margin: 0;
+  max-width: 42rem;
+}
+
+/* The driver app has a fixed bottom tab bar on small screens; `.has-tabbar`
+   already pads the page for it, but the footer is the last thing above it and
+   would otherwise sit flush against the bar. */
+@media (max-width: 720px) {
+  .site-footer {
+    padding-bottom: calc(var(--sp-8) + env(safe-area-inset-bottom));
+  }
+}

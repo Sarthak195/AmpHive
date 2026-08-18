@@ -18,9 +18,14 @@
 param(
     [Parameter(Mandatory = $true)][string]$GatewayId,
     [Parameter(Mandatory = $true)][string]$Password,
-    [string]$VmName = "amphive-vm-in",
-    [string]$VmZone = "asia-south1-a",
-    [string]$RemoteDir = "/home/Sarthak/amphive"
+    # Defaults match deploy/scripts/deploy.ps1 ($VM_NAME/$VM_ZONE/$REMOTE_DIR).
+    # They previously still named `amphive-vm-in` in `asia-south1-a`, a VM
+    # DELETED in the 2026-07-27 consolidation — so running this tool (the one
+    # that provisions a gateway's broker credentials) with its defaults
+    # targeted a machine that no longer exists.
+    [string]$VmName = "amphive-relay",
+    [string]$VmZone = "us-west1-a",
+    [string]$RemoteDir = "/home/Sarthak/amphive-relay"
 )
 
 # Same alphanumeric policy deploy.ps1 enforces for the managed accounts — the

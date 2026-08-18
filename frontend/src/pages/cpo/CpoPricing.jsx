@@ -657,244 +657,246 @@ const CpoPricing = () => {
         </div>
       ) : (
         <>
-          <div className="pricing-mode-tabs">
-            <Tabs
-              tabs={[
-                { id: 'simple', label: 'Simple' },
-                { id: 'advanced', label: 'Advanced' },
-              ]}
-              active={mode}
-              onChange={setMode}
-              ariaLabel="Pricing editor mode"
-            />
-          </div>
-
-          {mode === 'simple' ? (
-            <CpoPricingSimple
-              pricingSummary={pricingSummary}
-              seedPrice={simpleSeedPrice}
-              coinInrRate={config.coin_inr_rate}
-              busy={simpleBusy}
-              error={simpleError}
-              onSave={applySimplePrice}
-              onSwitchToAdvanced={() => setMode('advanced')}
-            />
-          ) : (
-            <>
-              <section className="stack pricing-section">
-                <h2>Tariffs</h2>
-                <DataTable
-                  columns={tariffColumns}
-                  rows={tariffs}
-                  emptyIcon={Tags}
-                  emptyTitle="No tariffs yet"
-                  emptyBody="Create a pricing plan to set your rate per kWh, then assign it below."
-                  emptyAction={
-                    <button type="button" className="btn btn-primary" onClick={openCreate}>
-                      New tariff
-                    </button>
-                  }
-                />
-              </section>
-
-              {selectedTariff && (
-                <section className="card pricing-slot-editor">
-                  <div className="row-between">
-                    <h2>{selectedTariff.name} — time-of-day slots</h2>
-                    <button
-                      type="button"
-                      className="btn btn-quiet btn-sm"
-                      onClick={() => setSelectedTariffId(null)}
-                    >
-                      Close
-                    </button>
-                  </div>
-                  <p className="text-2 text-sm">
-                    A window overrides the base rate during those hours; outside every slot, the base
-                    rate (<Money coins={selectedTariff.price_per_kwh} rate={config.coin_inr_rate} />
-                    /kWh) applies.
-                  </p>
-
-                  <form className="pricing-slot-form" onSubmit={submitSlot}>
-                    <div className="field">
-                      <label className="field-label" htmlFor="slot-start">
-                        From
-                      </label>
-                      <input
-                        id="slot-start"
-                        type="time"
-                        className="input"
-                        value={slotStart}
-                        onChange={(e) => setSlotStart(e.target.value)}
-                        required
-                      />
-                    </div>
-                    <div className="field">
-                      <label className="field-label" htmlFor="slot-end">
-                        To
-                      </label>
-                      <input
-                        id="slot-end"
-                        type="time"
-                        className="input"
-                        value={slotEnd}
-                        onChange={(e) => setSlotEnd(e.target.value)}
-                        required
-                      />
-                    </div>
-                    <div className="field">
-                      <label className="field-label" htmlFor="slot-price">
-                        Rate (coins/kWh)
-                      </label>
-                      <input
-                        id="slot-price"
-                        type="number"
-                        step="0.01"
-                        min="0.01"
-                        max="1000"
-                        className="input"
-                        value={slotPrice}
-                        onChange={(e) => setSlotPrice(e.target.value)}
-                        required
-                      />
-                    </div>
-                    <div className="field">
-                      <span className="field-label">Days</span>
-                      <div className="row" role="group" aria-label="Days of week">
-                        {WEEKDAYS.map(([label, bit]) => {
-                          const on = Boolean((slotDays >> bit) & 1);
-                          return (
-                            <button
-                              key={label}
-                              type="button"
-                              className="chip pricing-day-chip"
-                              aria-pressed={on}
-                              onClick={() => setSlotDays((d) => d ^ (1 << bit))}
-                            >
-                              {label}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
-                    {slotFormError && (
-                      <p className="field-error" role="alert">
-                        {slotFormError}
-                      </p>
-                    )}
-                    <button type="submit" className="btn btn-primary btn-sm" disabled={slotBusy}>
-                      {slotBusy ? 'Adding…' : 'Add slot'}
-                    </button>
-                  </form>
-
+          {/* Tabs owns the role="tabpanel" wrapper, so the editor body is its
+              child rather than a sibling; the old wrapper div only carried
+              .pricing-mode-tabs' bottom margin, which now rides the tablist. */}
+          <Tabs
+            tabs={[
+              { id: 'simple', label: 'Simple' },
+              { id: 'advanced', label: 'Advanced' },
+            ]}
+            active={mode}
+            onChange={setMode}
+            ariaLabel="Pricing editor mode"
+            className="pricing-mode-tabs"
+          >
+            {mode === 'simple' ? (
+              <CpoPricingSimple
+                pricingSummary={pricingSummary}
+                seedPrice={simpleSeedPrice}
+                coinInrRate={config.coin_inr_rate}
+                busy={simpleBusy}
+                error={simpleError}
+                onSave={applySimplePrice}
+                onSwitchToAdvanced={() => setMode('advanced')}
+              />
+            ) : (
+              <>
+                <section className="stack pricing-section">
+                  <h2>Tariffs</h2>
                   <DataTable
-                    columns={slotColumns}
-                    rows={slots}
-                    loading={slotsLoading}
-                    error={slotsError}
-                    onRetry={() => loadSlots(selectedTariffId)}
-                    emptyTitle="No time-of-day slots"
-                    emptyBody="This tariff charges its base rate around the clock."
+                    columns={tariffColumns}
+                    rows={tariffs}
+                    emptyIcon={Tags}
+                    emptyTitle="No tariffs yet"
+                    emptyBody="Create a pricing plan to set your rate per kWh, then assign it below."
+                    emptyAction={
+                      <button type="button" className="btn btn-primary" onClick={openCreate}>
+                        New tariff
+                      </button>
+                    }
                   />
+                </section>
 
-                  {!slotsLoading && !slotsError && (
-                    <>
-                      <div className="pricing-grid-wrap">
-                        <div
-                          className="pricing-grid"
-                          role="table"
-                          aria-label={`Weekly price coverage for ${selectedTariff.name}`}
-                        >
-                          <div className="pricing-grid-row pricing-grid-header" role="row">
-                            <div className="pricing-grid-corner" role="columnheader" aria-hidden="true" />
-                            {Array.from({ length: 24 }, (_, h) => (
-                              <div key={h} className="pricing-grid-hour" role="columnheader">
-                                {h % 3 === 0 ? h : ''}
+                {selectedTariff && (
+                  <section className="card pricing-slot-editor">
+                    <div className="row-between">
+                      <h2>{selectedTariff.name} — time-of-day slots</h2>
+                      <button
+                        type="button"
+                        className="btn btn-quiet btn-sm"
+                        onClick={() => setSelectedTariffId(null)}
+                      >
+                        Close
+                      </button>
+                    </div>
+                    <p className="text-2 text-sm">
+                      A window overrides the base rate during those hours; outside every slot, the base
+                      rate (<Money coins={selectedTariff.price_per_kwh} rate={config.coin_inr_rate} />
+                      /kWh) applies.
+                    </p>
+
+                    <form className="pricing-slot-form" onSubmit={submitSlot}>
+                      <div className="field">
+                        <label className="field-label" htmlFor="slot-start">
+                          From
+                        </label>
+                        <input
+                          id="slot-start"
+                          type="time"
+                          className="input"
+                          value={slotStart}
+                          onChange={(e) => setSlotStart(e.target.value)}
+                          required
+                        />
+                      </div>
+                      <div className="field">
+                        <label className="field-label" htmlFor="slot-end">
+                          To
+                        </label>
+                        <input
+                          id="slot-end"
+                          type="time"
+                          className="input"
+                          value={slotEnd}
+                          onChange={(e) => setSlotEnd(e.target.value)}
+                          required
+                        />
+                      </div>
+                      <div className="field">
+                        <label className="field-label" htmlFor="slot-price">
+                          Rate (coins/kWh)
+                        </label>
+                        <input
+                          id="slot-price"
+                          type="number"
+                          step="0.01"
+                          min="0.01"
+                          max="1000"
+                          className="input"
+                          value={slotPrice}
+                          onChange={(e) => setSlotPrice(e.target.value)}
+                          required
+                        />
+                      </div>
+                      <div className="field">
+                        <span className="field-label">Days</span>
+                        <div className="row" role="group" aria-label="Days of week">
+                          {WEEKDAYS.map(([label, bit]) => {
+                            const on = Boolean((slotDays >> bit) & 1);
+                            return (
+                              <button
+                                key={label}
+                                type="button"
+                                className="chip pricing-day-chip"
+                                aria-pressed={on}
+                                onClick={() => setSlotDays((d) => d ^ (1 << bit))}
+                              >
+                                {label}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                      {slotFormError && (
+                        <p className="field-error" role="alert">
+                          {slotFormError}
+                        </p>
+                      )}
+                      <button type="submit" className="btn btn-primary btn-sm" disabled={slotBusy}>
+                        {slotBusy ? 'Adding…' : 'Add slot'}
+                      </button>
+                    </form>
+
+                    <DataTable
+                      columns={slotColumns}
+                      rows={slots}
+                      loading={slotsLoading}
+                      error={slotsError}
+                      onRetry={() => loadSlots(selectedTariffId)}
+                      emptyTitle="No time-of-day slots"
+                      emptyBody="This tariff charges its base rate around the clock."
+                    />
+
+                    {!slotsLoading && !slotsError && (
+                      <>
+                        <div className="pricing-grid-wrap">
+                          <div
+                            className="pricing-grid"
+                            role="table"
+                            aria-label={`Weekly price coverage for ${selectedTariff.name}`}
+                          >
+                            <div className="pricing-grid-row pricing-grid-header" role="row">
+                              <div className="pricing-grid-corner" role="columnheader" aria-hidden="true" />
+                              {Array.from({ length: 24 }, (_, h) => (
+                                <div key={h} className="pricing-grid-hour" role="columnheader">
+                                  {h % 3 === 0 ? h : ''}
+                                </div>
+                              ))}
+                            </div>
+                            {WEEKDAYS.map(([label], dayIdx) => (
+                              <div key={label} className="pricing-grid-row" role="row">
+                                <div className="pricing-grid-daylabel" role="rowheader">
+                                  {label}
+                                </div>
+                                {coverage.byDay[dayIdx].map((cell, h) => (
+                                  <div
+                                    key={h}
+                                    className={`pricing-grid-cell${
+                                      cell ? ` pricing-grid-cell--${cell.tint}` : ' pricing-grid-cell--base'
+                                    }`}
+                                    role="cell"
+                                    title={
+                                      cell
+                                        ? `${label} ${fmtMinutes(h * 60)}–${fmtMinutes((h + 1) * 60)} · ${cell.slot.price_per_kwh}/kWh`
+                                        : `${label} ${fmtMinutes(h * 60)}–${fmtMinutes((h + 1) * 60)} · base ${selectedTariff.price_per_kwh}/kWh`
+                                    }
+                                  />
+                                ))}
                               </div>
                             ))}
                           </div>
-                          {WEEKDAYS.map(([label], dayIdx) => (
-                            <div key={label} className="pricing-grid-row" role="row">
-                              <div className="pricing-grid-daylabel" role="rowheader">
-                                {label}
-                              </div>
-                              {coverage.byDay[dayIdx].map((cell, h) => (
-                                <div
-                                  key={h}
-                                  className={`pricing-grid-cell${
-                                    cell ? ` pricing-grid-cell--${cell.tint}` : ' pricing-grid-cell--base'
-                                  }`}
-                                  role="cell"
-                                  title={
-                                    cell
-                                      ? `${label} ${fmtMinutes(h * 60)}–${fmtMinutes((h + 1) * 60)} · ${cell.slot.price_per_kwh}/kWh`
-                                      : `${label} ${fmtMinutes(h * 60)}–${fmtMinutes((h + 1) * 60)} · base ${selectedTariff.price_per_kwh}/kWh`
-                                  }
-                                />
-                              ))}
-                            </div>
+                        </div>
+
+                        <div className="pricing-legend">
+                          <span className="pricing-legend-item">
+                            <span className="pricing-legend-swatch pricing-grid-cell--base" />
+                            Base rate — {selectedTariff.price_per_kwh}/kWh
+                          </span>
+                          {coverage.sorted.map((slot, idx) => (
+                            <span key={slot.id} className="pricing-legend-item">
+                              <span
+                                className={`pricing-legend-swatch pricing-grid-cell--${CELL_TINTS[idx % CELL_TINTS.length]}`}
+                              />
+                              {daysLabel(slot.days_mask)} {fmtMinutes(slot.start_min)}
+                              –{fmtMinutes(slot.end_min)} — {slot.price_per_kwh}/kWh
+                            </span>
                           ))}
                         </div>
-                      </div>
+                      </>
+                    )}
+                  </section>
+                )}
 
-                      <div className="pricing-legend">
-                        <span className="pricing-legend-item">
-                          <span className="pricing-legend-swatch pricing-grid-cell--base" />
-                          Base rate — {selectedTariff.price_per_kwh}/kWh
-                        </span>
-                        {coverage.sorted.map((slot, idx) => (
-                          <span key={slot.id} className="pricing-legend-item">
-                            <span
-                              className={`pricing-legend-swatch pricing-grid-cell--${CELL_TINTS[idx % CELL_TINTS.length]}`}
-                            />
-                            {daysLabel(slot.days_mask)} {fmtMinutes(slot.start_min)}
-                            –{fmtMinutes(slot.end_min)} — {slot.price_per_kwh}/kWh
-                          </span>
-                        ))}
-                      </div>
-                    </>
-                  )}
+                <section className="stack pricing-section">
+                  <h2>Assignment</h2>
+
+                  <div className="field pricing-default-field">
+                    <label className="field-label" htmlFor="tenant-default-tariff">
+                      Tenant default
+                    </label>
+                    <select
+                      id="tenant-default-tariff"
+                      className="select"
+                      value={defaultTariffId ?? ''}
+                      onChange={(e) =>
+                        assignTenantDefault(e.target.value ? Number(e.target.value) : null)
+                      }
+                    >
+                      <option value="">No default (falls back to the base rate)</option>
+                      {tariffs.map((t) => (
+                        <option key={t.id} value={t.id}>
+                          {t.name}
+                        </option>
+                      ))}
+                    </select>
+                    <p className="field-help">
+                      Used when a charger and its group have no tariff of their own.
+                    </p>
+                  </div>
+
+                  <DataTable
+                    columns={assignmentColumns}
+                    rows={assignmentRows}
+                    keyField="key"
+                    emptyTitle="No groups or chargers yet"
+                    emptyBody="Create a group or register a charger first."
+                    collapse
+                  />
                 </section>
-              )}
-
-              <section className="stack pricing-section">
-                <h2>Assignment</h2>
-
-                <div className="field pricing-default-field">
-                  <label className="field-label" htmlFor="tenant-default-tariff">
-                    Tenant default
-                  </label>
-                  <select
-                    id="tenant-default-tariff"
-                    className="select"
-                    value={defaultTariffId ?? ''}
-                    onChange={(e) =>
-                      assignTenantDefault(e.target.value ? Number(e.target.value) : null)
-                    }
-                  >
-                    <option value="">No default (falls back to the base rate)</option>
-                    {tariffs.map((t) => (
-                      <option key={t.id} value={t.id}>
-                        {t.name}
-                      </option>
-                    ))}
-                  </select>
-                  <p className="field-help">
-                    Used when a charger and its group have no tariff of their own.
-                  </p>
-                </div>
-
-                <DataTable
-                  columns={assignmentColumns}
-                  rows={assignmentRows}
-                  keyField="key"
-                  emptyTitle="No groups or chargers yet"
-                  emptyBody="Create a group or register a charger first."
-                  collapse
-                />
-              </section>
-            </>
-          )}
+              </>
+            )}
+          </Tabs>
         </>
       )}
 
@@ -917,7 +919,6 @@ const CpoPricing = () => {
               onChange={(e) => setFormName(e.target.value)}
               maxLength={100}
               required
-              autoFocus
             />
           </div>
           <div className="field">

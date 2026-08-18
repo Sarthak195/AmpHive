@@ -12,6 +12,10 @@
  * back on / with the plug param preserved. `next` is validated via
  * isSafeInternalPath() so an attacker-controlled query string can never
  * bounce the driver off-origin (open-redirect guard).
+ *
+ * This page is registered on BOTH hosts (driver + operator console), which is
+ * why the Google button is host-gated below — see the comment at its call
+ * site.
  */
 
 import { useState } from 'react';
@@ -21,13 +25,23 @@ import AuthShell from '../components/AuthShell';
 import GoogleSignInButton from '../components/GoogleSignInButton';
 import ResendVerification from '../components/ResendVerification';
 import { useAuth } from '../contexts/AuthContext';
+import useDocumentMeta from '../hooks/useDocumentMeta';
 import { apiErrorCopy } from '../utils/statusCopy';
 import { isSafeInternalPath } from '../utils/safePath';
+import { isCpoHost } from '../utils/appHost';
 
 const Login = () => {
   const { login } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
+
+  // Distinct title so the tab, the back-history entry and the screen-reader
+  // route announcement identify the page. noindex by default — a sign-in form
+  // has nothing to rank for.
+  useDocumentMeta({
+    title: 'Sign in',
+    description: 'Sign in to AmpHive to start a charge, top up your charging credit and see your activity.',
+  });
 
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -76,6 +90,11 @@ const Login = () => {
     >
       <form onSubmit={handleSubmit} className="stack">
         <div className="field">
+          {/* eslint-disable jsx-a11y/no-autofocus -- this page exists solely
+              for this one form, so focusing its first field on arrival is the
+              expected behaviour rather than focus being stolen from other
+              content. Pre-existing; kept deliberately when jsx-a11y was
+              switched on. */}
           <label className="field-label" htmlFor="email">Email address</label>
           <input
             id="email"
@@ -88,6 +107,7 @@ const Login = () => {
             autoComplete="email"
             autoFocus
           />
+          {/* eslint-enable jsx-a11y/no-autofocus */}
         </div>
 
         <div className="field">
@@ -141,7 +161,21 @@ const Login = () => {
 
       {unverified && <ResendVerification email={email} label="Resend verification email" />}
 
-      <GoogleSignInButton />
+      {/* TEMPORARY host gate — NOT a design decision.
+          "Sign in with Google" is broken on the console host in two places at
+          once: /auth/google/callback isn't registered in CpoHostRoutes
+          (App.jsx), and the backend hardcodes the DRIVER origin as the final
+          redirect target (routers/auth.py, `auth/google/callback`). So an
+          operator who clicks this on cpo.<domain> is landed on the driver
+          origin, has their token written to localStorage for THAT origin, and
+          is never signed in to the console — a dead end that looks like a
+          login failure.
+          The real fix is to make the OAuth redirect_uri host-aware (carry the
+          originating host through `state` and validate it against an
+          allowlist of the driver + console origins) and register the callback
+          route on both hosts. Until then, hiding the button is better than
+          offering one that cannot work. */}
+      {!isCpoHost() && <GoogleSignInButton />}
     </AuthShell>
   );
 };

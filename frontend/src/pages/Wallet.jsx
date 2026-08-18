@@ -299,7 +299,9 @@ export default function Wallet() {
           <p className="text-3 text-sm">
             Charging credit is prepaid balance for EV charging on AmpHive only —
             not a wallet, not transferable, and never withdrawable as cash. See the{' '}
-            <Link to="/terms">charging credit terms</Link>.
+            {/* /terms is now the umbrella Terms of Service; the credit-specific
+                terms moved to /charging-credit-terms. */}
+            <Link to="/charging-credit-terms">charging credit terms</Link>.
           </p>
         </section>
 

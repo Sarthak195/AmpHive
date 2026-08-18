@@ -354,9 +354,8 @@ export default function Activity() {
         active={tab}
         onChange={setTab}
         ariaLabel="Activity"
-      />
-
-      <div className="activity-tabpanel">
+        panelClassName="activity-tabpanel"
+      >
         {tab === 'sessions' ? (
           <DataTable
             columns={sessionColumns}
@@ -394,7 +393,7 @@ export default function Activity() {
             collapse
           />
         )}
-      </div>
+      </Tabs>
 
       <SessionDetailModal
         open={detailOpen}

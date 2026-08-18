@@ -21,3 +21,30 @@
   align-items: center;
   gap: var(--sp-2);
 }
+
+/* "Your data" card: the closure control is separated from the export control
+   by a rule, so the destructive half is visibly its own decision rather than
+   the next button in a list. */
+.account-danger {
+  margin-top: var(--sp-5);
+  padding-top: var(--sp-5);
+  border-top: 1px solid var(--border);
+  display: grid;
+  gap: var(--sp-3);
+  justify-items: start;
+}
+
+.account-danger-title {
+  font-size: var(--text-base);
+  color: var(--danger);
+}
+
+/* Consequences list inside the closure dialog. A real <ul> (not styled divs)
+   so a screen reader announces "list, 4 items" before the confirm field — the
+   count is part of how unmissable this has to be. */
+.account-close-consequences {
+  display: grid;
+  gap: var(--sp-2);
+  padding-left: var(--sp-5);
+  list-style: disc;
+}

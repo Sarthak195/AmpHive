@@ -230,13 +230,27 @@ printf 'user %s\ntopic readwrite amphive/#\ntopic read $SYS/#\n\npattern readwri
 sudo chown 1883:1883 "$WORKDIR/mosquitto_acl"
 sudo chmod 600 "$WORKDIR/mosquitto_acl"
 
-# IMPORTANT (P3 headers + M3 trusted_proxies): the block below only runs on the
-# FIRST deploy, when no Caddyfile exists yet — an already-deployed relay keeps
-# its hand-edited Caddyfile untouched. So the security-header / http:// fallback
-# / trusted_proxies changes here DO NOT reach the live prod Caddyfile
-# automatically: an operator must apply the same edits by hand to
-# $WORKDIR/Caddyfile on the relay and reload Caddy. See the "NEEDS OPERATOR
-# DEPLOY / VERIFY" note in the remediation report.
+# ============================================================================
+# IMPORTANT — READ BEFORE ASSUMING THIS SHIPPED ANYTHING
+#
+# The block below only runs on the FIRST deploy, when no Caddyfile exists yet.
+# An already-deployed relay keeps its hand-edited Caddyfile untouched, forever.
+# That means EVERY edit made here — security headers, Permissions-Policy, the
+# http:// redirect/serve split, trusted_proxies — reaches a FRESH relay only.
+# On the live relay it changes NOTHING until an operator applies the same edits
+# by hand to $WORKDIR/Caddyfile and reloads Caddy:
+#
+#   gcloud compute ssh amphive-relay --zone=<zone>
+#   sudo nano ~/amphive/Caddyfile          # apply the same edits
+#   sudo docker compose -f ~/amphive/docker-compose.relay.yml exec caddy \
+#       caddy validate --config /etc/caddy/Caddyfile
+#   sudo docker compose -f ~/amphive/docker-compose.relay.yml exec caddy \
+#       caddy reload --config /etc/caddy/Caddyfile
+#
+# Do NOT "fix" this by deleting the live Caddyfile so it regenerates: the live
+# one carries hand edits, and Caddy would restart ACME from a cold state.
+# deploy/config/Caddyfile.example is the reference for what it should contain.
+# ============================================================================
 if [ ! -f "$WORKDIR/Caddyfile" ]; then
   log "Generating a starter Caddyfile from .env (CADDY_DOMAIN/CADDY_CPO_DOMAIN/"
   log "ACME_EMAIL) — edit in place afterwards; re-running this script will not"
@@ -244,7 +258,15 @@ if [ ! -f "$WORKDIR/Caddyfile" ]; then
   domain="$(env_val CADDY_DOMAIN "$WORKDIR/.env")"; domain="${domain:-amphive.app}"
   cpo_domain="$(env_val CADDY_CPO_DOMAIN "$WORKDIR/.env")"
   acme_email="$(env_val ACME_EMAIL "$WORKDIR/.env")"
-  csp="default-src 'self'; script-src 'self' https://*.razorpay.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' https: wss:; frame-src https://*.razorpay.com; base-uri 'self'; form-action 'self'"
+  # Keep these two strings byte-identical with frontend/nginx.conf and
+  # deploy/config/Caddyfile.example. object-src 'none' and frame-ancestors
+  # 'none' are the modern companions to X-Frame-Options; geolocation is
+  # (self) rather than () on purpose — /map calls navigator.geolocation and a
+  # blanket deny silently breaks the map. If Razorpay Checkout ever needs the
+  # W3C Payment Request API, relax payment=() to
+  # payment=(self "https://api.razorpay.com") rather than dropping it.
+  csp="default-src 'self'; script-src 'self' https://*.razorpay.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' https: wss:; frame-src https://*.razorpay.com; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+  perms="geolocation=(self), camera=(), microphone=(), usb=(), payment=(), interest-cohort=()"
   {
     echo "# Generated once by deploy-relay.sh from .env — edits here are preserved"
     echo "# on future runs (only created when missing). Delete to regenerate."
@@ -271,6 +293,7 @@ if [ ! -f "$WORKDIR/Caddyfile" ]; then
       echo "        X-Content-Type-Options \"nosniff\""
       echo "        X-Frame-Options \"DENY\""
       echo "        Referrer-Policy \"strict-origin-when-cross-origin\""
+      echo "        Permissions-Policy \"$perms\""
       echo "        Content-Security-Policy \"$csp\""
       echo "    }"
     }
@@ -282,12 +305,44 @@ if [ ! -f "$WORKDIR/Caddyfile" ]; then
       echo "}"
       echo
     }
+    # Plain HTTP on a NAMED domain: redirect, never serve. This used to fall
+    # through to the catch-all http:// site below, which SERVED the app in
+    # cleartext for every Host — including the real domains. The comment that
+    # justified that said to tighten once a paid/reliable domain existed;
+    # amphive.app went live 2026-07-20, so the justification expired, and a
+    # disaster-recovery rebuild would otherwise silently reopen a window where
+    # http://<domain>/api/... answers 200 with a bearer JWT in the clear.
+    # 308 keeps the method and body of a mis-addressed POST (and matches what
+    # Caddy's own automatic HTTP->HTTPS redirect uses). Port 80 must stay open:
+    # Caddy answers the ACME HTTP-01 challenge ahead of any site route, so
+    # these redirects do not break certificate issuance or renewal.
+    redir_site() {
+      echo "http://$1 {"
+      echo "    redir https://{host}{uri} 308"
+      echo "}"
+      echo
+    }
     site "$domain"
     [ -n "$cpo_domain" ] && site "$cpo_domain"
-    echo "# Bare-IP / unknown-Host requests: serve rather than redirect, so the site"
-    echo "# stays reachable if DNS is mid-propagation or has an outage. Same"
-    echo "# security headers as the named sites (P3) — HSTS is a harmless no-op"
-    echo "# over plain http, browsers ignore it per spec."
+    redir_site "$domain"
+    [ -n "$cpo_domain" ] && redir_site "$cpo_domain"
+    echo "# Bare-IP / unknown-Host over plain HTTP: still SERVED, deliberately —"
+    echo "# this is the ONE site not converted to a redirect, because:"
+    echo "#   1. Let's Encrypt does not issue certificates for bare IPs, so"
+    echo "#      redirecting http://<ip>/ to https://<ip>/ produces a hard cert"
+    echo "#      interstitial: unreachable, which is worse than cleartext."
+    echo "#   2. Redirecting to the named domain instead defeats the point — the"
+    echo "#      escape hatch exists for when DNS is broken (DuckDNS, 2026-07-11)."
+    echo "#   3. frontend/src/utils/appHost.js treats a bare-IP host as UNSPLIT"
+    echo "#      and App.jsx serves the combined driver+console+admin tree there,"
+    echo "#      so a DNS outage does not lock operators out of the console."
+    echo "# Accepted residual risk: this site is cleartext, /api and /socket.io"
+    echo "# included, with a bearer JWT in play. Mitigated only by nothing linking"
+    echo "# to it. HSTS learned from the https domain does not cover it (HSTS is"
+    echo "# host-scoped and never applies to IP literals). If the DNS-outage risk"
+    echo "# is retired, DELETE this block rather than turning it into a redirect."
+    echo "# Same security headers as the named sites; HSTS is a harmless no-op"
+    echo "# over plain http — browsers ignore it per spec."
     echo "http:// {"
     echo "    encode gzip"
     hdr
@@ -295,9 +350,13 @@ if [ ! -f "$WORKDIR/Caddyfile" ]; then
     echo "}"
   } | sudo tee "$WORKDIR/Caddyfile" >/dev/null
 else
-  log "Caddyfile already present — leaving as-is. NOTE: security-header /"
-  log "trusted_proxies changes in this script do NOT reach an existing Caddyfile"
-  log "— edit $WORKDIR/Caddyfile by hand and reload Caddy to apply them."
+  log "Caddyfile already present — leaving as-is."
+  log "NOTE: security-header / Permissions-Policy / http-redirect / trusted_proxies"
+  log "changes in this script DO NOT reach an existing Caddyfile. Edit"
+  log "$WORKDIR/Caddyfile by hand to match deploy/config/Caddyfile.example, then"
+  log "run 'caddy validate' + 'caddy reload' inside the caddy container. Until"
+  log "you do, this relay runs the OLD headers and still SERVES the app over"
+  log "plain http on the real domains."
 fi
 
 # -----------------------------------------------------------------------------

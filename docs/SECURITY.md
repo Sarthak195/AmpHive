@@ -93,6 +93,106 @@ firmware-image upload — mirrored by an 8m nginx `location`) + nginx
 >   `user_id` note; CPO top-up email lookup made case-insensitive; MQTT discovery
 >   `unique_id` truncated; `bcrypt` requirement/lock pin reconciled.
 
+> **2026-08-18 production-readiness audit + remediation batch.** A whole-product
+> pass (secrets, DB, authn/z, input validation, uploads, rate limiting, API
+> surface, headers/CORS/CSRF, transport, sessions, privacy/legal, deletion and
+> retention, storage, error handling, dependencies, payments, email/webhooks,
+> frontend, SEO, accessibility, mobile, performance, error pages, production
+> config, backups, data export, access control). The security surface was
+> already in good shape — **no SQL injection, no IDOR across all 127 routes, no
+> path traversal, no SSRF, no XSS, no mass assignment, and the payment path
+> (server-authoritative amounts, webhook HMAC fail-closed, dual-layer
+> idempotency) all re-confirmed clean**. What this batch closed:
+>
+> - **Unbounded input reaching the database (five classes of unhandled 500).**
+>   15 free-text fields had no `max_length` while mapping to bounded columns, so
+>   an oversize value arrived as asyncpg `StringDataRightTruncation`; the `days`
+>   lookback on the five CPO analytics routes + the invoice CSV was unclamped,
+>   so `days=10**9` raised `OverflowError` **inside** the handler — a one-request
+>   500 any authenticated CPO could fire. Both now bounded (`schemas.py`,
+>   `routers/cpo/_common.py clamp_days`). Five list endpoints that returned
+>   their whole result set now take a clamped `limit`/`offset`.
+> - **`Plug.local_ip` was unvalidated free text** that the backend republishes
+>   verbatim into the retained MQTT roster, where the gateway firmware consumes
+>   it as a **network target**. Now an IP literal or a plain hostname — no
+>   scheme, port, path, whitespace or quotes (`schemas.validate_local_ip`).
+> - **Bare-admin writes on tenant-scoped CPO routes.** `require_role("cpo",
+>   "admin")` also admits a platform admin, whose `tenant_id` is NULL by design.
+>   `cpo_create_group` / `cpo_create_tariff` wrote that NULL into a NOT NULL
+>   column (IntegrityError -> 500), and — worse — `cpo_claim_gateway` stamped
+>   `claimed_at` while leaving the owner NULL, **permanently burning the claim
+>   code**. All four paths now take the existing `_require_tenant_id` 400.
+> - **Reset / verification tokens were written to stdout.** With `SMTP_HOST`
+>   unset the console fallback logged the whole message body — which for those
+>   two mails is a live single-use **account-takeover credential** — into
+>   `docker logs`, journald and any downstream log shipper. Body redacted by
+>   default; `EMAIL_CONSOLE_FALLBACK=full` restores it for local development.
+> - **PII in logs.** Every auth event and CPO mutation logged the actor's email
+>   address. `user_id` is already logged and is the real correlator, so
+>   addresses are now masked (`s***k@example.com`) by ONE handler-level
+>   `logging.Filter` (`logging_config.PiiRedactionFilter`) rather than at ~45
+>   call sites — future call sites are covered without anyone remembering.
+>   `LOG_REDACT_PII=0` is an incident-response escape hatch.
+> - **Unmetered surfaces.** The `/socket.io/` namespace had **no rate limit at
+>   all** (the blanket middleware only engages under `/api/`) while each connect
+>   spends a JWT decode + a `users` SELECT before rejecting a bad token — now
+>   capped per IP, sharing the HTTP limiters' trusted-proxy-hop derivation via
+>   the extracted `client_ip_from_forwarded`. `/docs`, `/redoc` and
+>   `/openapi.json` published a map of all 127 routes, sat outside the blanket
+>   limiter's path prefix, and are now off unless `ENABLE_API_DOCS` is set.
+> - **Headers are no longer proxy-only.** The app itself now sets `nosniff`,
+>   `DENY`, `Referrer-Policy`, `Permissions-Policy`, `Cache-Control: no-store`
+>   and an API-appropriate `default-src 'none'` CSP with setdefault semantics
+>   (the proxy's richer app CSP still wins), so a response reaching uvicorn
+>   directly is no longer bare. HTML responses (the printable GST invoice) get
+>   their own document CSP instead of the JSON one. At the edge: CSP gained
+>   `frame-ancestors 'none'` + `object-src 'none'`, `Permissions-Policy` added,
+>   `server_tokens off`, gzip enabled (the ~300 KB bundle was uncompressed on
+>   any non-Caddy path), and `X-Robots-Tag: noindex` for the console host.
+>   The nginx config was **verified with a real `nginx -t`** in a throwaway
+>   `nginx:alpine` container on the VM's compose network.
+> - **Rollback-path exposure.** The retired `-NoTls` compose files published
+>   `:8000` on `0.0.0.0` (bypassing nginx's headers and body cap, and letting a
+>   caller forge the whole `X-Forwarded-For` chain to defeat every per-IP
+>   limit) and published plaintext MQTT on `0.0.0.0` with the template default.
+>   Both loopback-bound. **The live relay stack was already correct** — this was
+>   latent in the disaster-recovery path only.
+> - **Dependencies.** First clean lockfile re-resolve since 2026-07-21: 9
+>   advisories in 4 packages -> **1**, and that one (`ecdsa` PYSEC-2026-1325)
+>   has no upstream fix and is unreachable here — it arrives via python-jose and
+>   is ES*-only, while `JWT_ALGORITHM` pins HS256 on both encode and decode.
+>   `tapo` dropped from the runtime image entirely (nothing under `backend/`
+>   imports it). On the frontend, **7 advisories -> 0**: the two that were
+>   actually reachable in the shipped bundle were `react-router` (open redirect
+>   leading to XSS — which had been cited as *mitigated by* the app's own
+>   `safePath.js` guard, weakening that argument) and `socket.io-parser`
+>   (zero-attachment memory exhaustion). Fixing the first needed the
+>   react-router 6 -> 7 major; every package is now on latest with the full
+>   suite (765 tests), eslint and the production build green. CI now installs
+>   the **lockfile** — what the image installs — instead of the loose spec, and
+>   gained pip-audit, npm audit, gitleaks secret scanning, a frontend
+>   `npm run build`, and a CodeQL workflow.
+> - **Privacy and data rights (the largest genuine gap).** The product collected
+>   name, email, Google identity, charging history, payment references and push
+>   subscriptions and had **no Privacy Policy, no Terms of Service, no refund
+>   policy, no contact page, no consent at signup, and legal links reachable
+>   from exactly one page** (the anonymous marketing homepage — signing in made
+>   them disappear). All now exist and are linked from a footer on every
+>   surface. Self-service **data export** (`GET /api/auth/me/export`) and
+>   **account closure** (`DELETE /api/auth/me`) are implemented: closure
+>   ANONYMISES rather than deletes, because every `user_id` FK is
+>   `ON DELETE CASCADE` and a real delete would destroy the charging sessions,
+>   ledger rows and GST invoices that are the operator's tax records and feed
+>   the CPO earnings/payout watermark. See `services/account_closure.py`.
+>
+> **Deliberately NOT changed** (recorded so they are not re-triaged): the
+> container still runs as root — the 2026-08-04 batch built and then reverted
+> that because `deploy.ps1` ships only source (it cannot apply the compose half)
+> and the live root-owned `firmware_images` volume must be chowned first, so it
+> needs a dedicated infra deploy rather than a bundle; and `python-jose` was NOT
+> migrated to PyJWT — it is current at 3.5.0 with no advisory of its own, and an
+> auth-path swap does not belong in a batch this wide.
+
 ---
 
 ## 1. Committed secrets (ROTATED 2026-07-06)

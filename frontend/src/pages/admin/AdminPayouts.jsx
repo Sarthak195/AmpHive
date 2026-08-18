@@ -160,7 +160,11 @@ export default function AdminPayouts() {
             key={t.id}
             type="button"
             className={`seg-item${status === t.id ? ' active' : ''}`}
-            aria-selected={status === t.id}
+            // aria-pressed, not aria-selected: these are toggle buttons in a
+            // role="group", and aria-selected is only meaningful on a tab /
+            // option / row — on a button it is simply ignored, so the filter
+            // read as unselected to assistive tech.
+            aria-pressed={status === t.id}
             onClick={() => changeStatus(t.id)}
           >
             {t.label}
