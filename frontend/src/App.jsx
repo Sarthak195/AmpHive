@@ -102,15 +102,21 @@ const HomeGate = () => {
     .has-tabbar padding so page content never hides behind the tabs. */
 const DriverShell = () => {
   const { user } = useAuth();
+  const { pathname } = useLocation();
+  // HomeGate renders <Marketing /> — which brings its own footer — only for an
+  // anonymous visitor at "/". Every other combination wants SiteFooter.
+  const showsMarketingFooter = pathname === '/' && !user;
   return (
     <div className={user ? 'has-tabbar' : undefined}>
       <AppBar />
       <Outlet />
-      {/* Legal links must be reachable from every signed-in page, not just the
-          anonymous marketing homepage (which is the only place they lived
-          before). Marketing renders its own richer footer, so this one is
-          suppressed there to avoid two stacked footers. */}
-      {user && <SiteFooter />}
+      {/* Legal links must be reachable from EVERY driver page. This was gated
+          on `user`, which meant a signed-OUT visitor to /privacy, /terms,
+          /refunds or /contact got no footer at all — and anonymous is exactly
+          who reads a privacy policy. The gate was only ever meant to avoid
+          stacking two footers on the marketing homepage, which renders its
+          own richer one, so condition on that single case instead. */}
+      {!showsMarketingFooter && <SiteFooter />}
       {user && <MobileTabBar />}
     </div>
   );

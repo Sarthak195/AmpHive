@@ -31,6 +31,7 @@ import { PageHeader, ErrorState, EmptyState, Skeleton, StatusDot, Money, useToas
 import MapComponent from '../components/MapComponent';
 import ReportProblemModal from '../components/ReportProblemModal';
 import { AVAILABILITY_STATES, AVAILABILITY_LABELS, getPlugAvailability } from '../utils/plugAvailability';
+import useDocumentMeta from '../hooks/useDocumentMeta';
 import {
   POWER_BUCKETS,
   PRICE_BUCKETS,
@@ -59,6 +60,17 @@ function formatDistance(km) {
 }
 
 export default function MapPage() {
+  // Public and indexable — the discovery surface a search for "EV charger
+  // near me" should be able to land on. Everything else in the app defaults
+  // to noindex (see hooks/useDocumentMeta.js).
+  useDocumentMeta({
+    title: 'Find a charger near you',
+    description:
+      'Browse AmpHive charging points on the map: where they are, what they cost per kWh, and which are free right now.',
+    path: '/map',
+    index: true,
+  });
+
   const { user } = useAuth();
   const config = useConfig();
   const navigate = useNavigate();

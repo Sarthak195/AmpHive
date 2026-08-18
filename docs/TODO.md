@@ -76,14 +76,29 @@ repeated here.*
 [SECURITY.md](SECURITY.md) §"2026-08-18"). These are the residue: operator
 actions, and two deliberate deferrals.*
 
-- [ ] **Hand-edit the live Caddyfile** — `deploy/relay/deploy-relay.sh`
-      generates it on FIRST deploy only and never updates an existing one, so
-      the new `Permissions-Policy`, the CSP additions
-      (`frame-ancestors`/`object-src`) and the http->https redirect for the
-      named domains do NOT reach prod until an operator edits
-      `~/amphive-relay/Caddyfile` and runs `caddy reload`. The generator now
-      says so in its skip branch. (Carried over from the 2026-08-04
-      operator-deferred list, now with more to apply.)
+- [x] ~~**Hand-edit the live Caddyfile** for the new headers.~~ **NOT
+      REQUIRED on this deployment — verified 2026-08-18.** The standing
+      caveat (carried since the 2026-08-04 audit) assumed the live Caddyfile
+      contained the `header` block that `deploy/relay/deploy-relay.sh`
+      generates, which would SET (replace) nginx's security headers for the
+      named domains and therefore mask any change shipped in
+      `frontend/nginx.conf`. It does not. The live file is four lines — two
+      `reverse_proxy frontend:80` blocks and nothing else:
+
+      ```
+      amphive.app, cpo.amphive.app { reverse_proxy frontend:80 }
+      136-117-94-209.sslip.io      { reverse_proxy frontend:80 }
+      ```
+
+      So **every** security header on prod comes from nginx and passes straight
+      through Caddy, and a normal `deploy.ps1` delivers header changes.
+      Confirmed after deploying: `Permissions-Policy`, CSP `frame-ancestors` +
+      `object-src`, `server_tokens off` and gzip are all live, and http->https
+      still works because Caddy's automatic HTTPS handles the named domains
+      without an explicit `redir`. The generator's warning stays accurate for a
+      *fresh bootstrap* (where it does write a header block), which is the case
+      it was written for — but it should not be repeated as a blocker for
+      routine deploys.
 - [ ] **Verify a real password-reset / verification email still arrives.** The
       no-SMTP console fallback now REDACTS the message body by default (it was
       printing live single-use account-takeover tokens into the logs). Prod has
