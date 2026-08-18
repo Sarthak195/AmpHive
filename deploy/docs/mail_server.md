@@ -1061,12 +1061,36 @@ learning build and the gaps are as instructive as the working parts.
    Inbound opportunistic TLS on 25 is unaffected in practice, but IMAPS and
    submission clients must be told to trust an unverified certificate. Path
    identified (piggyback on the existing Caddy ACME setup) but not implemented.
-3. **No outbound path at all.** `relayhost` is empty and GCP blocks port 25, so
-   outbound mail to external domains will queue and eventually bounce (§0). A
-   smarthost on 587 with `sasl_passwd` credentials is required; verified that
-   `/etc/postfix/sasl_passwd` does not exist. Candidate relays are the usual
-   ones (a Gmail account as the app already uses, or a transactional provider);
-   none evaluated.
+3. **Outbound relays through a consumer Gmail account - MEASURED, and it
+   works.** GCP blocks egress on 25 (SS0), so `relayhost = [smtp.gmail.com]:587`
+   with `sasl_passwd` credentials is the only way out. Two questions mattered
+   and both are now answered empirically rather than assumed:
+
+   - **Does the relay rewrite `From`?** It did, until `support@amphive.app`
+     was verified as a Gmail "Send mail as" alias. Before verification the
+     header arrived as `From: sjgotnfts1@gmail.com` with
+     `X-Google-Original-From` recording the replacement; after verification the
+     `From` survives intact and that header is gone. The verification code was
+     itself delivered to this server's own maildir - the mail server
+     bootstrapped its own credential.
+   - **Does our DKIM signature survive the relay?** **Yes.** Confirmed by
+     Port25's independent verifier on the real path (Postfix -> OpenDKIM ->
+     relay): `DKIM check: pass (matches From: support@amphive.app)`,
+     `header.d=amphive.app`, verified against
+     `mail._domainkey.amphive.app (2048 bits)`. Google *adds* its own
+     `X-Google-DKIM-Signature` (`d=1e100.net`) rather than replacing ours.
+
+   **Net DMARC result: PASS.** SPF passes but is NOT aligned (the envelope
+   sender stays `sjgotnfts1@gmail.com`, so SPF authenticates gmail.com); DKIM
+   passes AND is aligned with the From domain. DMARC requires only one of the
+   two to pass and align, so mail from `support@amphive.app` is authenticated
+   as ours. A transactional provider is therefore NOT required for alignment -
+   it would only be needed to additionally align SPF, which needs an envelope
+   sender in our own domain.
+
+   CAVEAT: this rests on a consumer Gmail account, whose sending limits
+   (roughly 500 recipients/day) and terms are not designed to be a service's
+   MTA. Fine for a portfolio project; not something to build a product on.
 4. **Spam filtering is installed but has never seen internet mail.** rspamd
    is present and running (`/usr/bin/rspamd`, listening on 127.0.0.1:11332 for
    the milter protocol plus 11333/11334), backed by redis, and chained into
