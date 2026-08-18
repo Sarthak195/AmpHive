@@ -23,7 +23,18 @@
 }
 
 /* ---- hero ------------------------------------------------------------------ */
-.mkt-hero-section { padding-bottom: var(--sp-12); }
+/* `overflow-x: clip` contains .mkt-hero-visual::before, the decorative radial
+   glow, whose `inset: -12% -8%` bleeds horizontally beyond its parent. At
+   tablet widths that bleed pushed the document 4px past the viewport and gave
+   the LANDING PAGE a horizontal scrollbar (caught on a real 834px viewport,
+   2026-08-18). The breakpoint below already fixed the phone case; doing it on
+   the section fixes every width at once. `clip`, not `hidden`, so this does
+   not become a scroll container and no descendant's sticky positioning
+   changes. */
+.mkt-hero-section {
+  padding-bottom: var(--sp-12);
+  overflow-x: clip;
+}
 
 .mkt-hero {
   display: grid;
