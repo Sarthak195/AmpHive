@@ -20,7 +20,7 @@ from backend.services.csv_safe import sanitize_csv_cell
 from backend.services.invoices import invoice_to_dict
 from backend.services.rbac import require_role
 
-from ._common import _require_tenant_id
+from ._common import _require_tenant_id, clamp_days
 
 router = APIRouter()
 
@@ -77,7 +77,7 @@ async def cpo_export_invoices_csv(
 
     query = select(Invoice).where(Invoice.tenant_id == tenant_id)
     if days is not None:
-        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=clamp_days(days))
         query = query.where(Invoice.issued_at >= cutoff)
     query = query.order_by(Invoice.issued_at.desc(), Invoice.id.desc()).limit(10000)
 

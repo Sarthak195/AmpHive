@@ -84,7 +84,14 @@ services:
     container_name: amphive-backend
     restart: always
     ports:
-      - "8000:8000"
+      # Loopback-bound (matches deploy/relay/docker-compose.relay.yml). The
+      # SPA reaches the API through the frontend nginx proxy, so nothing
+      # external needs :8000 — and publishing it on 0.0.0.0 exposed a path
+      # that bypasses nginx's security headers AND client_max_body_size, and
+      # lets a caller forge a full X-Forwarded-For chain (defeating every
+      # per-IP rate limit, see backend/services/rate_limit.py client_ip).
+      # It stays published on 127.0.0.1 for VM-local debugging over SSH.
+      - "127.0.0.1:8000:8000"
     environment:
       - DATABASE_URL=${DATABASE_URL}
       - MQTT_BROKER_HOST=mqtt

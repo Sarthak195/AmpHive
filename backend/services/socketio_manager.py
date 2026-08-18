@@ -9,6 +9,10 @@ from sqlalchemy import and_, select
 from backend.database.db import async_session_factory
 from backend.database.models import ChargingSession, User
 from backend.services.auth import decode_access_token
+from backend.services.rate_limit import (
+    client_ip_from_forwarded,
+    socketio_connect_rate_limiter,
+)
 from backend.services.telemetry import TelemetryStore
 
 logger = logging.getLogger("amphive.socketio")
@@ -133,6 +137,23 @@ async def connect(sid, environ, auth=None):
     removed 2026-07-09: query strings land in proxy/access logs, so accepting
     a full JWT there turns every log line into a bearer credential.
     """
+    # Per-IP handshake cap FIRST — before the JWT decode and the users SELECT
+    # below, so a connect flood can't spend DB work per attempt. `environ` is
+    # the WSGI-style dict python-socketio hands the connect handler; header
+    # names are uppercased with dashes turned into underscores there.
+    env = environ or {}
+    peer = None
+    client = env.get("asgi.scope", {}).get("client")
+    if isinstance(client, (tuple, list)) and client:
+        peer = client[0]
+    ip = client_ip_from_forwarded(
+        env.get("HTTP_X_FORWARDED_FOR", ""),
+        peer or env.get("REMOTE_ADDR"),
+    )
+    if socketio_connect_rate_limiter.check(ip) is not None:
+        logger.warning("Socket connection rejected: rate limited (sid: %s)", sid)
+        return False
+
     token = None
     if auth and isinstance(auth, dict):
         token = auth.get("token")

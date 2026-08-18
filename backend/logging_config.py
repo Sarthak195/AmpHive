@@ -26,6 +26,7 @@ structlog for it.
 import json
 import logging
 import os
+import re
 import sys
 from contextvars import ContextVar
 from datetime import datetime, timezone
@@ -64,6 +65,70 @@ def set_correlation_id(correlation_id: Optional[str]) -> None:
 def get_correlation_id() -> str:
     """Read the correlation id bound to the current context ("-" if unset)."""
     return _correlation_id_var.get()
+
+
+# --- PII redaction ---------------------------------------------------------
+# Any email-shaped token in a rendered log message or in a structured extra
+# field is masked to `f***t@domain` before it ever reaches a formatter.
+_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+
+# Structured `extra={...}` keys that carry an address. Masked by name so a
+# value that isn't email-shaped (e.g. a truncated or malformed address) is
+# still redacted rather than passing the regex by accident.
+_PII_EXTRA_KEYS = ("email", "to", "driver_email", "actor_email", "recipient")
+
+
+def mask_email(address: str) -> str:
+    """`sarthak@example.com` -> `s***k@example.com`.
+
+    Keeps the domain (useful for ops: which provider bounced, which tenant's
+    vanity domain) and the first/last character of the local part (enough to
+    eyeball-match against a known account) while removing the address itself.
+    Locals shorter than 3 characters keep only the first character, so a short
+    address isn't effectively published by the mask.
+    """
+    local, sep, domain = address.partition("@")
+    if not sep:
+        return address
+    if len(local) >= 3:
+        masked_local = f"{local[0]}***{local[-1]}"
+    elif local:
+        masked_local = f"{local[0]}***"
+    else:
+        masked_local = "***"
+    return f"{masked_local}@{domain}"
+
+
+def _mask_emails_in(text: str) -> str:
+    return _EMAIL_RE.sub(lambda m: mask_email(m.group(0)), text)
+
+
+class PiiRedactionFilter(logging.Filter):
+    """Masks email addresses in the message body and in the known PII extras.
+
+    A Filter (not a Formatter) so it runs once, before formatting, and applies
+    to both JsonFormatter and PlainFormatter. Set `LOG_REDACT_PII=0` to turn
+    it off — an incident-response escape hatch, not the default.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        for key in _PII_EXTRA_KEYS:
+            value = getattr(record, key, None)
+            if isinstance(value, str) and "@" in value:
+                setattr(record, key, mask_email(value))
+
+        # Render msg % args once and mask the result. Only replace the record's
+        # msg/args when a mask actually applied, so unaffected records keep
+        # stdlib's lazy interpolation.
+        try:
+            rendered = record.getMessage()
+        except Exception:  # pragma: no cover — malformed args are the caller's bug
+            return True
+        if "@" in rendered:
+            masked = _mask_emails_in(rendered)
+            if masked != rendered:
+                record.msg, record.args = masked, ()
+        return True
 
 
 class CorrelationIdFilter(logging.Filter):
@@ -136,6 +201,8 @@ def configure_logging() -> None:
       LOG_LEVEL  — default INFO (DEBUG/INFO/WARNING/ERROR/CRITICAL)
       LOG_FORMAT — "json" (default, one object per line) or "plain" (for
                    local console readability)
+      LOG_REDACT_PII — "1" (default) masks email addresses in every record;
+                   "0" disables the mask for incident response
 
     Idempotent: safe to call more than once (e.g. test setup) — clears any
     handlers a previous call (or basicConfig) installed on the root logger
@@ -146,6 +213,8 @@ def configure_logging() -> None:
     fmt = os.getenv("LOG_FORMAT", "json").lower()
 
     handler = logging.StreamHandler(sys.stdout)
+    if os.getenv("LOG_REDACT_PII", "1").strip().lower() not in ("0", "false", "no", "off"):
+        handler.addFilter(PiiRedactionFilter())
     handler.addFilter(CorrelationIdFilter())
     handler.setFormatter(PlainFormatter() if fmt == "plain" else JsonFormatter())
 

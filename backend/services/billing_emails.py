@@ -128,6 +128,23 @@ async def send_session_bill(user_id: int, receipt: dict) -> None:
         )
 
 
+# An offline-top-up note is free text typed by a CPO and delivered to a
+# DRIVER's inbox from the AmpHive sender. Flattened to one line with control
+# characters stripped so an operator cannot compose multi-line content that
+# reads like part of the receipt (or like a separate message from us), and
+# capped well under the column's 500-char limit.
+_MAX_NOTE_CHARS = 200
+
+
+def _sanitize_operator_note(note: str) -> str:
+    """One line, printable characters only, length-capped."""
+    flat = " ".join(str(note).split())
+    flat = "".join(ch for ch in flat if ch.isprintable())
+    if len(flat) > _MAX_NOTE_CHARS:
+        flat = flat[:_MAX_NOTE_CHARS].rstrip() + "\u2026"
+    return flat
+
+
 async def send_topup_receipt(
     to_addr: str,
     full_name: Optional[str],
@@ -147,8 +164,10 @@ async def send_topup_receipt(
             f"  Amount:      {amount_coins:.2f} coins",
             f"  New balance: {new_balance:.2f} coins",
         ]
-        if note:
-            lines.append(f"  Note:        {note}")
+        safe_note = _sanitize_operator_note(note) if note else ""
+        if safe_note:
+            # Labelled as the operator's words, not ours.
+            lines.append(f"  Operator note: {safe_note}")
         lines += [
             "",
             f"View your credit and history: {frontend_origin()}/credit",

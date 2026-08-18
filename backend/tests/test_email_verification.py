@@ -346,10 +346,27 @@ def test_verify_and_resend_endpoints_are_rate_limit_wrapped():
 
 
 @pytest.mark.asyncio
-async def test_email_verification_console_fallback_logs_link_at_warning(monkeypatch, caplog):
-    """No SMTP_HOST → the verification link is logged at WARNING so the flow is
-    testable without a provider."""
+async def test_email_verification_console_fallback_redacts_link_by_default(monkeypatch, caplog):
+    """No SMTP_HOST -> still a loud WARNING that mail was NOT sent, but the
+    body (which carries a live single-use verification token) is REDACTED by
+    default. See the matching pair in test_password_reset.py."""
     monkeypatch.delenv("SMTP_HOST", raising=False)
+    monkeypatch.delenv("EMAIL_CONSOLE_FALLBACK", raising=False)
+    with caplog.at_level("WARNING", logger="amphive.email"):
+        await email_service.send_email_verification(
+            "newdriver@amphive.test", "https://x.test/verify-email?token=abc"
+        )
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert warnings, "the operator must still be told mail was not delivered"
+    assert all("token=abc" not in r.getMessage() for r in warnings)
+    assert any("REDACTED" in r.getMessage() for r in warnings)
+
+
+@pytest.mark.asyncio
+async def test_email_verification_console_fallback_logs_link_when_opted_in(monkeypatch, caplog):
+    """EMAIL_CONSOLE_FALLBACK=full restores the full body for local dev."""
+    monkeypatch.delenv("SMTP_HOST", raising=False)
+    monkeypatch.setenv("EMAIL_CONSOLE_FALLBACK", "full")
     with caplog.at_level("WARNING", logger="amphive.email"):
         await email_service.send_email_verification(
             "newdriver@amphive.test", "https://x.test/verify-email?token=abc"

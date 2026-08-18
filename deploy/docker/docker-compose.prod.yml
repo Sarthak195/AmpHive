@@ -34,13 +34,16 @@ services:
     container_name: amphive-mqtt
     restart: always
     ports:
-      # MQTT_BIND_IP controls which HOST interface the broker is reachable on.
-      # 0.0.0.0 = public internet (legacy, insecure: the broker is anonymous).
-      # Set it to the VM's overlay/Tailscale IP (e.g. 100.87.241.70) in .env so
-      # only overlay peers (the ESP32 gateways) can reach port 1883. The
-      # backend is unaffected — it reaches 'mqtt' over the compose network,
-      # not via this published port.
-      - "${MQTT_BIND_IP}:1883:1883"
+      # MQTT_BIND_IP controls which HOST interface the PLAINTEXT broker port is
+      # reachable on. The default is now LOOPBACK, not 0.0.0.0: this file is the
+      # retired two-VM-era prod stack kept as the `-NoTls` rollback target, and
+      # with .env.template's MQTT_BIND_IP=0.0.0.0 anyone following this path
+      # published unencrypted MQTT to the internet. Credentials + ACLs still
+      # apply, but the credentials themselves would cross the wire in the clear.
+      # The live relay stack does not host-publish 1883 at all; gateways use the
+      # TLS listener below, and the backend reaches 'mqtt' over the internal
+      # compose network either way.
+      - "${MQTT_BIND_IP:-127.0.0.1}:1883:1883"
       # TLS listener (8883): PUBLIC by default (direct-MQTT path — gateways and
       # agents dial out to mqtts://<public-ip>:8883; auth = TLS + per-gateway
       # creds + ACLs, see docs/SECURITY.md §3). Override MQTT_TLS_BIND_IP in
@@ -81,7 +84,14 @@ services:
     container_name: amphive-backend
     restart: always
     ports:
-      - "8000:8000"
+      # Loopback-bound (matches deploy/relay/docker-compose.relay.yml). The
+      # SPA reaches the API through the frontend nginx proxy, so nothing
+      # external needs :8000 — and publishing it on 0.0.0.0 exposed a path
+      # that bypasses nginx's security headers AND client_max_body_size, and
+      # lets a caller forge a full X-Forwarded-For chain (defeating every
+      # per-IP rate limit, see backend/services/rate_limit.py client_ip).
+      # It stays published on 127.0.0.1 for VM-local debugging over SSH.
+      - "127.0.0.1:8000:8000"
     environment:
       - DATABASE_URL=${DATABASE_URL}
       - MQTT_BROKER_HOST=mqtt

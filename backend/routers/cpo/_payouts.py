@@ -29,7 +29,13 @@ from backend.services.audit import try_record_audit
 from backend.services.money import ZERO_MONEY, to_money
 from backend.services.rbac import require_role
 
-from ._common import _payout_response, _require_tenant_id, logger
+from ._common import (
+    DEFAULT_LIST_LIMIT,
+    _payout_response,
+    _require_tenant_id,
+    clamp_list_window,
+    logger,
+)
 
 router = APIRouter()
 
@@ -231,13 +237,18 @@ async def cpo_request_payout(
 async def cpo_list_payouts(
     user: User = Depends(require_role("cpo", "admin")),
     db: AsyncSession = Depends(get_db),
+    limit: int = DEFAULT_LIST_LIMIT,
+    offset: int = 0,
 ):
     """List the tenant's payouts, newest request first."""
     tenant_id = _require_tenant_id(user)
+    limit, offset = clamp_list_window(limit, offset)
     result = await db.execute(
         select(Payout)
         .where(Payout.tenant_id == tenant_id)
         .order_by(Payout.requested_at.desc(), Payout.id.desc())
+        .limit(limit)
+        .offset(offset)
     )
     return [_payout_response(p) for p in result.scalars().all()]
 

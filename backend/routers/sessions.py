@@ -1189,13 +1189,19 @@ async def get_my_stats(
 async def get_my_disputes(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    limit: int = 500,
+    offset: int = 0,
 ):
     """The caller's disputes, newest first — the driver-side mirror of the
-    CPO's GET /api/cpo/disputes (which owns resolution)."""
+    CPO's GET /api/cpo/disputes (which owns resolution). Windowed (default 500)
+    so the response can't grow without bound as an account ages."""
+    limit, offset = max(1, min(int(limit), 1000)), max(0, int(offset))
     result = await db.execute(
         select(SessionDispute)
         .where(SessionDispute.driver_user_id == user.id)
         .order_by(SessionDispute.created_at.desc(), SessionDispute.id.desc())
+        .limit(limit)
+        .offset(offset)
     )
     return [
         {

@@ -108,11 +108,25 @@ async def lifespan(app: FastAPI):
         await state.telemetry_persistence.stop()
 
 
+# --- Interactive API docs: OFF by default ---------------------------------
+# FastAPI serves /docs, /redoc and /openapi.json publicly unless told not to.
+# They are unreachable through the deployed front door today (nginx proxies
+# only /api/ and /socket.io/, and the backend port is loopback-bound), but that
+# is a property of the *proxy*, not of the app — anything that ever reaches
+# uvicorn directly gets a complete map of all 127 routes with their schemas.
+# They also sit outside the blanket /api/ rate limiter's prefix, so they carry
+# no request budget at all. Off unless explicitly enabled (ENABLE_API_DOCS=1
+# for local development).
+_API_DOCS_ENABLED = os.getenv("ENABLE_API_DOCS", "").strip().lower() in ("1", "true", "yes", "on")
+
 app = FastAPI(
     title="AmpHive Shared EV Charging API",
     description="Backend PaaS control layer orchestrating ESP32 gateways, smart plugs, and headscale security policies.",
     version="2.0.0",
     lifespan=lifespan,
+    docs_url="/docs" if _API_DOCS_ENABLED else None,
+    redoc_url="/redoc" if _API_DOCS_ENABLED else None,
+    openapi_url="/openapi.json" if _API_DOCS_ENABLED else None,
 )
 
 # --- Blanket per-IP API rate limit (SECURITY.md §8.6) ---
@@ -221,6 +235,49 @@ async def correlation_id_middleware(request: Request, call_next):
 # Pydantic Request/Response Schemas — moved to backend/schemas.py (TD#7)
 # ===========================================================================
 
+
+
+# --- Security response headers (defense in depth) --------------------------
+# The deployed stack sets these at the edge (frontend/nginx.conf, and the Caddy
+# relay in front of it), and that remains the primary control — the proxy is
+# where a CSP belongs, since it knows about the static bundle. But those
+# headers are a property of the PROXY: a response served to anything that
+# reaches uvicorn directly (the VM-local :8000 debug port, a future deploy that
+# fronts the API differently, a self-hoster's own proxy that forgets them)
+# carried none at all.
+#
+# This adds the transport-independent subset the API itself can assert without
+# knowing anything about the frontend: no sniffing, no framing, no referrer
+# leakage, and a CSP that is correct for a pure-JSON API (`default-src 'none'`
+# — an API response should never load anything). Set with `setdefault`
+# semantics: an upstream proxy that already set a value KEEPS it, so nginx's
+# richer app CSP is never overwritten and there is still exactly one CSP per
+# response.
+#
+# Registered last => outermost, so it also stamps the 413 and 429 the inner
+# middlewares short-circuit with.
+_SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+    # frame-ancestors is the modern, non-deprecated replacement for
+    # X-Frame-Options; both are sent because Safari still honours only the
+    # latter for some legacy modes.
+    "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+    # No geolocation/camera/mic/USB/payment from an API response, ever.
+    "Permissions-Policy": "geolocation=(), camera=(), microphone=(), usb=(), payment=(), interest-cohort=()",
+    # API responses are per-user and must never be stored by a shared cache.
+    "Cache-Control": "no-store",
+}
+
+
+@app.middleware("http")
+async def security_headers_middleware(request: Request, call_next):
+    response = await call_next(request)
+    for header, value in _SECURITY_HEADERS.items():
+        if header not in response.headers:
+            response.headers[header] = value
+    return response
 
 
 # ===========================================================================

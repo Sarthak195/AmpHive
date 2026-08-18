@@ -7,10 +7,14 @@ can monkeypatch os.environ):
 - SMTP (STARTTLS via smtplib) when SMTP_HOST is set — SMTP_HOST / SMTP_PORT
   (default 587) / SMTP_USER / SMTP_PASSWORD / SMTP_FROM. Login is skipped when
   SMTP_USER is empty (e.g. an unauthenticated relay).
-- Console fallback otherwise: the reset link is logged at WARNING level so the
-  whole flow is testable without a provider — the operator can copy the link
-  out of `docker logs` / journald. WARNING (not INFO) on purpose: it should be
-  loud in production logs that mail is NOT actually being delivered.
+- Console fallback otherwise: a loud WARNING that mail is NOT being delivered.
+  The message BODY — which for the reset/verification mails contains a live,
+  single-use bearer token that takes over the account — is REDACTED by
+  default, because "SMTP is misconfigured" is exactly the situation in which
+  those tokens would otherwise be written into `docker logs`, journald and
+  whatever log shipper is downstream. Set EMAIL_CONSOLE_FALLBACK=full to print
+  the body (i.e. the link) when developing without a mail provider; the
+  redacted log line names the variable, so the affordance stays discoverable.
 
 Reset links point at FRONTEND_ORIGIN (default https://amphive.duckdns.org —
 the Caddy front door; localhost dev sets FRONTEND_ORIGIN=http://localhost:5173).
@@ -55,8 +59,20 @@ def _send_via_smtp(to_addr: str, subject: str, body: str) -> None:
         smtp.send_message(msg)
 
 
+def _console_fallback_shows_body() -> bool:
+    """Whether the no-SMTP fallback may print the message body.
+
+    Default NO: the password-reset and email-verification bodies carry a live
+    single-use token, and a log stream is not an access-controlled channel.
+    Local development opts in with EMAIL_CONSOLE_FALLBACK=full.
+    """
+    return os.getenv("EMAIL_CONSOLE_FALLBACK", "").strip().lower() in (
+        "full", "1", "true", "yes", "on",
+    )
+
+
 def send_email(to_addr: str, subject: str, body: str) -> None:
-    """Send via SMTP if configured, else log the body at WARNING (fallback)."""
+    """Send via SMTP if configured, else log at WARNING (fallback)."""
     if os.getenv("SMTP_HOST"):
         try:
             _send_via_smtp(to_addr, subject, body)
@@ -67,11 +83,19 @@ def send_email(to_addr: str, subject: str, body: str) -> None:
             logger.exception(
                 "SMTP send failed", extra={"to": to_addr, "subject": subject}
             )
-    else:
+    elif _console_fallback_shows_body():
         logger.warning(
             "SMTP not configured (SMTP_HOST unset) — email NOT sent. "
             "To: %s | Subject: %s | Body:\n%s",
             to_addr, subject, body,
+        )
+    else:
+        logger.warning(
+            "SMTP not configured (SMTP_HOST unset) — email NOT sent. "
+            "To: %s | Subject: %s | Body REDACTED (it can contain a live "
+            "single-use token). Set EMAIL_CONSOLE_FALLBACK=full to print it "
+            "for local development.",
+            to_addr, subject,
         )
 
 
