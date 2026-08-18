@@ -18,7 +18,7 @@ there; the previous paid `amphive-vm-in` / static-IP setup is deleted).
 | Resource | Value |
 |----------|-------|
 | Compute VM | `amphive-relay`, zone `us-west1-a`, `e2-micro` (2 shared vCPU / 1 GB RAM + 2 GB swapfile), always-free tier — hosting cost $0/mo |
-| Public IP | `136.117.94.209` — **ephemeral** (not reserved). If GCP ever reassigns it, repoint the `@`, `cpo`, and `mqtt` A records at the registrar. |
+| Public IP | `136.117.94.209` — **reserved/static** (`gcloud compute addresses list` shows `amphive-relay-ip`, IN_USE). This doc previously said "ephemeral"; that was wrong, and it matters now that an **MX record** points here — a changing IP would silently break mail, not just the web. Verified across a stop/start during the 2026-08-18 resize: the address held. A records: `@`, `cpo`, `mqtt`, `mail`. |
 | Database | PostgreSQL 15 as a Docker container. Data persists in the `amphive-relay_pgdata` named volume; nightly pg_dump → GCS + a recovery disk snapshot exist (see runbooks). |
 
 The VM runs `deploy/relay/docker-compose.relay.yml` from `~/amphive-relay/`
