@@ -33,7 +33,30 @@ mkdir -p "$LOCAL"
 log() { echo "[$(date -u '+%F %T')] $*" >> "$LOG"; }
 
 # 1) Logical dump out of the running container.
-if sudo docker exec amphive-relay-db-1 pg_dump -U postgres -Fc amphive > "$LOCAL/amphive-$TS.dump" 2>>"$LOG"; then
+#
+# The container name is RESOLVED, not hardcoded. It used to be a literal
+# `amphive-relay-db-1` — the compose-project-default name, which is what the
+# VM actually runs. But the repo's deploy/relay/docker-compose.relay.yml sets
+# `container_name: amphive-db`, so a stack rebuilt from the repo file would
+# name it differently and this backup would fail EVERY NIGHT while only
+# writing to a log nobody reads. Match on the compose service label instead,
+# which is stable under both naming schemes, and fall back to either literal.
+DB_CONTAINER=$(sudo docker ps --filter "label=com.docker.compose.service=db" \
+                              --format '{{.Names}}' | head -1)
+if [ -z "$DB_CONTAINER" ]; then
+    for candidate in amphive-relay-db-1 amphive-db; do
+        if sudo docker ps --format '{{.Names}}' | grep -qx "$candidate"; then
+            DB_CONTAINER="$candidate"; break
+        fi
+    done
+fi
+if [ -z "$DB_CONTAINER" ]; then
+    log "ERROR: no running Postgres container found (looked for the compose 'db' service, amphive-relay-db-1, amphive-db) - NO BACKUP TAKEN"
+    exit 1
+fi
+log "using db container: $DB_CONTAINER"
+
+if sudo docker exec "$DB_CONTAINER" pg_dump -U postgres -Fc amphive > "$LOCAL/amphive-$TS.dump" 2>>"$LOG"; then
     log "pg_dump OK: amphive-$TS.dump ($(du -h "$LOCAL/amphive-$TS.dump" | cut -f1))"
 else
     log "ERROR: pg_dump failed"
@@ -67,6 +90,14 @@ ls -1t "$LOCAL"/config-*.tar.gz 2>/dev/null | tail -n +4 | xargs -r rm -f
 
 if [ "$UPLOAD_OK" = 1 ]; then
     log "backup complete"
+# Freshness marker. The cron only writes to backup.log, so a silently
+# failing backup is invisible until the day someone needs a restore. This
+# file's MTIME is the last KNOWN-GOOD upload, so a stale backup is one
+# `ls -l` away instead of a log archaeology exercise:
+#   ls -l ~/amphive-relay/backups/LAST_SUCCESS
+# (Still not alerting - see docs/SECURITY.md. A cron that fails silently is
+# a backup you do not have.)
+date -u +%Y-%m-%dT%H:%M:%SZ > "$LOCAL/LAST_SUCCESS"
 else
     log "backup complete WITH UPLOAD ERRORS"
     exit 2

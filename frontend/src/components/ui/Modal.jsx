@@ -68,7 +68,11 @@ export default function Modal({ open, onClose, title, size = 'md', footer, child
   };
 
   return createPortal(
-    <div className="overlay" onClick={handleOverlayClick} onKeyDown={handleKeyDown}>
+    // role="presentation": the scrim is a visual layer that happens to catch
+    // the click-outside gesture. It exposes no semantics of its own, and every
+    // action it offers has a real control inside the dialog (Escape, the close
+    // button), so it must not read as an interactive element.
+    <div className="overlay" role="presentation" onClick={handleOverlayClick} onKeyDown={handleKeyDown}>
       <div
         ref={modalRef}
         className={`modal${SIZE_CLASS[size] || ''}`}

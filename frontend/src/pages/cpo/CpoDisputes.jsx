@@ -288,23 +288,23 @@ export default function CpoDisputes() {
         active={statusFilter}
         onChange={setStatusFilter}
         ariaLabel="Filter disputes by status"
-      />
-
-      <DataTable
-        columns={columns}
-        rows={disputes}
-        loading={loading}
-        error={error}
-        onRetry={fetchDisputes}
-        emptyIcon={Scale}
-        emptyTitle={statusFilter === 'open' ? 'No open disputes' : 'No disputes'}
-        emptyBody={
-          statusFilter === 'open'
-            ? "Nice and quiet — nothing needs your review right now."
-            : 'Driver disputes on finished sessions show up here.'
-        }
-        collapse
-      />
+      >
+        <DataTable
+          columns={columns}
+          rows={disputes}
+          loading={loading}
+          error={error}
+          onRetry={fetchDisputes}
+          emptyIcon={Scale}
+          emptyTitle={statusFilter === 'open' ? 'No open disputes' : 'No disputes'}
+          emptyBody={
+            statusFilter === 'open'
+              ? "Nice and quiet — nothing needs your review right now."
+              : 'Driver disputes on finished sessions show up here.'
+          }
+          collapse
+        />
+      </Tabs>
 
       {/* Read-only session detail */}
       <Modal

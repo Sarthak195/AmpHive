@@ -25,6 +25,8 @@ from backend.database.models import (
 from backend.services.csv_safe import sanitize_csv_cell
 from backend.services.rbac import require_role
 
+from ._common import clamp_days
+
 router = APIRouter()
 
 
@@ -163,7 +165,7 @@ async def cpo_analytics_sessions(
                 status_code=400,
                 detail=f"Invalid status filter '{status_filter}'. Valid: {[s.value for s in SessionStatus]}",
             )
-    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=clamp_days(days))
     conditions.append(ChargingSession.started_at >= cutoff)
 
     totals_row = (
@@ -251,7 +253,7 @@ async def cpo_export_sessions_csv(
                 status_code=400,
                 detail=f"Invalid status filter '{status_filter}'. Valid: {[s.value for s in SessionStatus]}",
             )
-    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=clamp_days(days))
     query = query.where(ChargingSession.started_at >= cutoff)
     query = query.order_by(ChargingSession.started_at.desc()).limit(10000)
 
@@ -300,7 +302,7 @@ async def cpo_analytics_revenue(
     Returns an array of {date, revenue_coins, session_count} for each day
     in the requested range, suitable for plotting a revenue trend line.
     """
-    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=clamp_days(days))
 
     # Query: group completed sessions by date, sum revenue
     result = await db.execute(
@@ -341,7 +343,7 @@ async def cpo_analytics_energy(
     Returns an array of {date, energy_kwh, session_count} for each day
     in the requested range, suitable for plotting an energy consumption chart.
     """
-    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=clamp_days(days))
 
     result = await db.execute(
         select(
@@ -395,7 +397,7 @@ async def cpo_analytics_telemetry(
             detail=f"Invalid bucket '{bucket}'. Allowed: {sorted(allowed_buckets)}.",
         )
 
-    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=clamp_days(days))
     bucket_col = func.date_trunc(bucket, TelemetryReading.recorded_at).label("bucket")
 
     conditions = [

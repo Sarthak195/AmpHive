@@ -47,7 +47,7 @@ const Session = () => {
   const hasSession = isActive;
 
   return (
-    <div className="page session-page">
+    <main className="page session-page">
       <PageHeader
         eyebrow="Live"
         title="Charging"
@@ -105,7 +105,7 @@ const Session = () => {
           }
         />
       )}
-    </div>
+    </main>
   );
 };
 

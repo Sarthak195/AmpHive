@@ -72,6 +72,13 @@ class TransactionType(str, enum.Enum):
     # migration in this repo to extend a native Postgres enum rather than
     # create one.
     CPO_TOPUP = "cpo_topup"
+    # [Account closure] Remaining charging credit forfeited when a user closes
+    # their account. Credit is a closed-loop, non-withdrawable instrument
+    # (see the /terms page), so closure zeroes it — recorded as its own ledger
+    # line rather than a silent write so the running balance still reconciles.
+    # Added via ALTER TYPE in migration 0038_account_closure (same pattern as
+    # 0026_offline_topups).
+    ACCOUNT_CLOSURE = "account_closure"
 
 # --- SQLAlchemy Model Classes ---
 
@@ -221,6 +228,14 @@ class User(Base):
     # how the account originated). NULL = never linked. See the partial
     # unique index above. Alembic revision 0033_google_identity.
     google_sub: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    # [Account closure] When the account holder closed this account. NULL for a
+    # live account. The row is kept as an anonymised TOMBSTONE rather than
+    # deleted: every user_id FK is ON DELETE CASCADE, so a real DELETE would
+    # take the account's charging sessions, ledger transactions and GST tax
+    # invoices with it — records the operator must keep and that feed the CPO's
+    # earnings and payout watermark. See services/account_closure.py.
+    # Alembic revision 0038_account_closure.
+    deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
 
     # Relationships

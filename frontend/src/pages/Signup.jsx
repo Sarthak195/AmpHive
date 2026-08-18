@@ -3,8 +3,13 @@
  * =============================================================================
  * Split out of the old combined Login/register toggle. Password is enforced
  * 8-72 chars client-side (mirrors the backend rule — see ResetPassword) with
- * a live hint under the field. No terms/consent checkbox — none exist to
- * link to, so none is invented here.
+ * a live hint under the field.
+ *
+ * Consent: the Terms of Service and Privacy Policy now exist (/terms,
+ * /privacy), so the submit button carries a stated-consent line linking both.
+ * Deliberately NOT a tick-box: a stated consent at the point of submission is
+ * the norm, is equally binding, and doesn't add a failure mode (a form that
+ * can silently refuse to submit because an unnoticed box is unticked).
  *
  * Registration no longer logs the driver in: the backend now returns
  * 200 { status: 'verification_sent', email } and emails a verification link.
@@ -20,6 +25,7 @@ import AuthShell from '../components/AuthShell';
 import GoogleSignInButton from '../components/GoogleSignInButton';
 import ResendVerification from '../components/ResendVerification';
 import { useAuth } from '../contexts/AuthContext';
+import useDocumentMeta from '../hooks/useDocumentMeta';
 import { apiErrorCopy } from '../utils/statusCopy';
 
 const MIN_LEN = 8;
@@ -27,6 +33,16 @@ const MAX_LEN = 72;
 
 const Signup = () => {
   const { register } = useAuth();
+
+  // Distinct title so the tab, the back-history entry and the screen-reader
+  // route announcement say "Create your account", not the generic site title
+  // every other route used to share. noindex by default: the sign-up form is
+  // reachable from the indexed marketing page, which is the page that should
+  // rank for it.
+  useDocumentMeta({
+    title: 'Create your account',
+    description: 'Create an AmpHive account to find a charger nearby, plug in and pay from your charging credit.',
+  });
 
   const [fullName, setFullName] = useState('');
   const [email, setEmail] = useState('');
@@ -104,6 +120,11 @@ const Signup = () => {
     >
       <form onSubmit={handleSubmit} className="stack">
         <div className="field">
+          {/* eslint-disable jsx-a11y/no-autofocus -- this page exists solely
+              for this one form, so focusing its first field on arrival is the
+              expected behaviour rather than focus being stolen from other
+              content. Pre-existing; kept deliberately when jsx-a11y was
+              switched on. */}
           <label className="field-label" htmlFor="fullName">Full name</label>
           <input
             id="fullName"
@@ -116,6 +137,7 @@ const Signup = () => {
             autoComplete="name"
             autoFocus
           />
+          {/* eslint-enable jsx-a11y/no-autofocus */}
         </div>
 
         <div className="field">
@@ -177,6 +199,14 @@ const Signup = () => {
         <button type="submit" className="btn btn-primary btn-lg btn-full" disabled={busy}>
           {busy ? 'Creating account…' : 'Create account'}
         </button>
+
+        {/* Stated consent at the point of submission — sits with the button
+            that performs the act it refers to, not buried in a footer. */}
+        <p className="auth-body">
+          By creating an account you agree to our{' '}
+          <Link to="/terms">Terms of Service</Link> and{' '}
+          <Link to="/privacy">Privacy Policy</Link>.
+        </p>
       </form>
 
       <GoogleSignInButton />

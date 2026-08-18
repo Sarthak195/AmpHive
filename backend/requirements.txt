@@ -12,9 +12,11 @@ email-validator>=2.0.0
 # JWT token generation and validation (HS256 symmetric signing)
 python-jose[cryptography]>=3.4.0
 # Password hashing — pyca/bcrypt used directly (passlib was dropped: abandoned
-# upstream and incompatible with bcrypt>=4.1). requirements.lock.txt currently
-# resolves bcrypt==4.0.1, so the floor stays >=4.0.1 to match the lock; floating
-# it higher needs a real dependency re-resolve + lockfile refresh.
+# upstream and incompatible with bcrypt>=4.1). The floor sat at >=4.0.1 for a
+# year only because the lockfile had never been re-resolved; the 2026-08-18
+# clean re-resolve moved the lock to bcrypt 5.x, verified against the full
+# auth suite (hashing, verification of EXISTING $2b$ hashes, the constant-cost
+# dummy-hash timing defence, and the 72-byte truncation boundary).
 bcrypt>=4.0.1
 # Load .env files for local development (DATABASE_URL, JWT_SECRET_KEY, etc.)
 python-dotenv>=1.0.0
@@ -25,10 +27,12 @@ python-socketio>=5.11.0
 python-engineio>=4.9.0
 # Web Push delivery for driver notifications (VAPID; keys in .env)
 pywebpush>=2.0.0
-# TP-Link Tapo P110 smart plug control library (Rust-backed). Used only by the
-# standalone tools/turn_on.py, turn_off.py, local_tapo_test.py bench scripts;
-# no longer imported by backend runtime (tapo_direct.py removed 2026-08-02).
-tapo<1.0  # upper-bounded pending a full lockfile (audit L6)
+# NOTE: `tapo` (the Rust-backed TP-Link P110 library) used to be pinned here.
+# It is NOT imported by the backend at runtime — `grep -rn 'import tapo'
+# backend/ agent/` finds nothing since tapo_direct.py was removed 2026-08-02 —
+# so it was only bloating the production image on an always-free e2-micro.
+# It is still used by the standalone bench scripts, which now declare it in
+# tools/requirements.txt. Removed from the runtime closure 2026-08-18.
 # "Sign in with Google" (routers/auth.py google_login/google_callback):
 # verifies the Google-issued ID token (fetches + checks against Google's
 # JWKS). Does NOT hard-depend on `requests`, but google.auth.transport.

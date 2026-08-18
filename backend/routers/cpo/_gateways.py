@@ -32,7 +32,7 @@ from backend.services.rbac import require_role
 from backend.services.session_lifecycle import gateway_is_live
 from backend.services.versioning import version_sort_key
 
-from ._common import logger
+from ._common import DEFAULT_LIST_LIMIT, _require_tenant_id, clamp_list_window, logger
 
 router = APIRouter()
 
@@ -58,10 +58,17 @@ def _normalize_claim_code(raw: str) -> str:
 async def cpo_list_gateways(
     user: User = Depends(require_role("cpo", "admin")),
     db: AsyncSession = Depends(get_db),
+    limit: int = DEFAULT_LIST_LIMIT,
+    offset: int = 0,
 ):
-    """List all gateways owned by the CPO's tenant."""
+    """List all gateways owned by the CPO's tenant (newest first, windowed)."""
+    limit, offset = clamp_list_window(limit, offset)
     result = await db.execute(
-        select(Gateway).where(Gateway.tenant_id == user.tenant_id)
+        select(Gateway)
+        .where(Gateway.tenant_id == user.tenant_id)
+        .order_by(Gateway.id)
+        .limit(limit)
+        .offset(offset)
     )
     gateways = list(result.scalars().all())
 
@@ -103,6 +110,10 @@ async def cpo_create_gateway(
     This is the authenticated version of the legacy /api/gateways/register
     endpoint — CPOs should use this instead.
     """
+    # A platform admin has no tenant of its own — refuse rather than create a
+    # phantom tenant-less gateway (2026-08-18 audit).
+    tenant_id = _require_tenant_id(user)
+
     # Check for duplicate gateway ID
     existing = await db.execute(select(Gateway).where(Gateway.id == req.gateway_id))
     if existing.scalar_one_or_none():
@@ -113,7 +124,7 @@ async def cpo_create_gateway(
     # is satisfied without forcing the operator to invent an overlay IP.
     gateway = Gateway(
         id=req.gateway_id,
-        tenant_id=user.tenant_id,
+        tenant_id=tenant_id,
         name=req.name,
         vpn_ip=req.vpn_ip or req.gateway_id,
     )
@@ -164,6 +175,12 @@ async def cpo_claim_gateway(
     "someone already claimed this" by response shape or rough timing (same
     enumeration-safety reasoning as routers/auth.py's forgot_password).
     """
+    # A platform admin has no tenant — claiming as one would stamp claimed_at
+    # (burning the code permanently) while leaving the owner NULL. Checked
+    # before the lookup: it depends only on the CALLER, never on the code, so
+    # it adds no enumeration oracle (2026-08-18 audit).
+    tenant_id = _require_tenant_id(user)
+
     code = _normalize_claim_code(req.claim_code)
 
     # Always query — even a blank/malformed code — rather than short-circuit
@@ -176,7 +193,7 @@ async def cpo_claim_gateway(
     if gateway is None or gateway.claimed_at is not None:
         raise HTTPException(status_code=404, detail=_CLAIM_NOT_FOUND_DETAIL)
 
-    gateway.tenant_id = user.tenant_id
+    gateway.tenant_id = tenant_id
     gateway.claimed_at = datetime.now(timezone.utc)
     if req.name:
         gateway.name = req.name

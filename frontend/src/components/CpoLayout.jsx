@@ -41,6 +41,7 @@ import useTheme from '../hooks/useTheme';
 import { driverOrigin } from '../utils/appHost';
 import NotificationBell from './NotificationBell';
 import CpoAlerts from './CpoAlerts';
+import SiteFooter from './SiteFooter';
 import './CpoLayout.css';
 
 /** Grouped nav. `badge` names a key of TenantContext counts. */
@@ -219,6 +220,15 @@ const CpoLayoutInner = ({ children }) => {
           <CpoAlerts />
           {children ?? <Outlet />}
         </main>
+
+        {/* Operators had NO route to the Terms or the Privacy Policy from
+            anywhere in the console — the only footer in the app was the
+            marketing one on the anonymous homepage, which the console never
+            renders. A SIBLING of <main>, not a child, so it is exposed as the
+            page's `contentinfo` landmark; .console-legal-footer restores the
+            content column's padding and max-width. The sticky topbar and the
+            off-canvas drawer are untouched. */}
+        <SiteFooter className="console-legal-footer" />
       </div>
     </div>
   );

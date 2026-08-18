@@ -473,7 +473,10 @@ tr.row-link { cursor: pointer; }
   transition: background-color var(--t-fast), color var(--t-fast);
 }
 
+/* aria-selected for a segmented control inside a tablist, aria-pressed for one
+   made of toggle buttons in a role="group" — the two valid shapes. */
 .seg-item[aria-selected='true'],
+.seg-item[aria-pressed='true'],
 .seg-item.active {
   background: var(--surface);
   color: var(--ink);
@@ -684,4 +687,25 @@ tr.row-link { cursor: pointer; }
   font-size: var(--text-sm);
   color: var(--ink-3);
   font-variant-numeric: tabular-nums;
+}
+
+/* ==== touch targets ======================================================= */
+/* The compact controls above (34–38px) are deliberate on desktop: the CPO
+   console packs a filter bar plus per-row actions into every table, and a
+   mouse loses nothing at that size. A finger does — the platform HIGs both
+   ask for ~44px, and these are exactly the controls an operator uses on a
+   phone. So the floor is raised only where the primary input device is
+   coarse, leaving the desktop console's information density untouched.
+   Keyed on (pointer: coarse) rather than a width breakpoint on purpose: a
+   touchscreen laptop needs the bigger targets at desktop widths, and a
+   narrow desktop window does not. */
+@media (pointer: coarse) {
+  .btn-sm { min-height: 44px; }
+
+  .btn-icon {
+    min-height: 44px;
+    min-width: 44px;
+  }
+
+  .seg-item { min-height: 44px; }
 }

@@ -16,7 +16,7 @@ from backend.schemas import CpoGroupCreateRequest, CpoGroupUpdateRequest
 from backend.services.audit import try_record_audit
 from backend.services.rbac import require_role
 
-from ._common import logger
+from ._common import DEFAULT_LIST_LIMIT, _require_tenant_id, clamp_list_window, logger
 
 router = APIRouter()
 
@@ -43,10 +43,17 @@ async def generate_unique_access_code(db: AsyncSession) -> str:
 async def cpo_list_groups(
     user: User = Depends(require_role("cpo", "admin")),
     db: AsyncSession = Depends(get_db),
+    limit: int = DEFAULT_LIST_LIMIT,
+    offset: int = 0,
 ):
     """List all charger groups owned by the CPO's tenant."""
+    limit, offset = clamp_list_window(limit, offset)
     result = await db.execute(
-        select(ChargerGroup).where(ChargerGroup.tenant_id == user.tenant_id)
+        select(ChargerGroup)
+        .where(ChargerGroup.tenant_id == user.tenant_id)
+        .order_by(ChargerGroup.id)
+        .limit(limit)
+        .offset(offset)
     )
     groups = list(result.scalars().all())
 
@@ -110,12 +117,17 @@ async def cpo_create_group(
     Create a new charger group under the CPO's tenant.
     Private groups automatically get a generated access code.
     """
+    # charger_groups.tenant_id is NOT NULL; a platform admin has no tenant, so
+    # this used to reach the DB as NULL -> IntegrityError -> 500 (2026-08-18
+    # audit). Fail with the same clean 400 the other tenant-scoped routes use.
+    tenant_id = _require_tenant_id(user)
+
     access_code = None
     if not req.is_public:
         access_code = await generate_unique_access_code(db)
 
     group = ChargerGroup(
-        tenant_id=user.tenant_id,
+        tenant_id=tenant_id,
         name=req.name,
         is_public=req.is_public,
         access_code=access_code,

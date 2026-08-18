@@ -18,6 +18,38 @@ from backend.schemas import DisputeResponse, PlugReportResponse
 logger = logging.getLogger("amphive.api")
 
 
+# Ceiling on any caller-supplied `days` lookback window. Without one,
+# `datetime.now() - timedelta(days=<huge>)` raises OverflowError inside the
+# handler ("date value out of range" / "Python int too large to convert to
+# C int") and, with no exception handler registered, surfaces as an opaque
+# 500 — a one-request self-DoS-shaped error for any authenticated CPO
+# (2026-08-18 audit). 10 years is far beyond TELEMETRY_RETENTION_DAYS (90)
+# and beyond any real accounting export, so clamping is invisible to real
+# callers. Clamped rather than 422-rejected to match how `limit`/`offset`
+# are already handled on these same routes.
+MAX_LOOKBACK_DAYS = 3660
+
+
+# Ceiling for the list endpoints that had NO bound at all (fleet/history
+# listings that grow with tenant size or account age). The default is
+# deliberately generous so the response shape and contents are unchanged
+# for every realistic dataset — this is a memory/latency ceiling, not
+# pagination UX (the paginated routes use the house {total, items} shape
+# with limit<=200 instead).
+DEFAULT_LIST_LIMIT = 500
+MAX_LIST_LIMIT = 1000
+
+
+def clamp_list_window(limit: int, offset: int) -> tuple[int, int]:
+    """Bound a caller-supplied list window to [1, MAX_LIST_LIMIT] / >=0."""
+    return max(1, min(int(limit), MAX_LIST_LIMIT)), max(0, int(offset))
+
+
+def clamp_days(days: int) -> int:
+    """Bound a caller-supplied lookback window to [1, MAX_LOOKBACK_DAYS]."""
+    return max(1, min(int(days), MAX_LOOKBACK_DAYS))
+
+
 def _require_tenant_id(user: User) -> int:
     """Every /api/cpo/payouts* and /api/cpo/earnings route is tenant-scoped.
     A 'cpo' always has a tenant_id (set by cpo_setup); a bare 'admin' with no

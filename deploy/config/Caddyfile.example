@@ -2,15 +2,26 @@
 #
 # You normally never copy this file anywhere: deploy/scripts/deploy.ps1
 # generates the real Caddyfile on the VM from CADDY_DOMAIN / ACME_EMAIL in
-# .env on every (default, TLS) deploy. This example mirrors what it produces.
+# .env on every (default, TLS) deploy, and deploy/relay/deploy-relay.sh
+# generates a starter one on a fresh relay. This example mirrors what they
+# produce — if you change a header here, change it in BOTH of those too (and
+# in frontend/nginx.conf, which carries the same set for the non-Caddy paths).
+# The only intentional structural difference is the (amphive_headers) snippet
+# below: it is a readability device for this reference file, while the
+# generators emit the same header block longhand per site (they are shell
+# heredocs and have no snippets). The HEADERS THEMSELVES must stay byte-
+# identical across all three.
 #
 # Caddy automatically obtains and renews a Let's Encrypt certificate for the
 # domain (HTTP-01 challenge on :80), persisted in the caddy_data volume.
 #
 # Requirements:
-#   - CADDY_DOMAIN resolves to the VM's public IP (the DuckDNS updater cron on
-#     the VM keeps amphive.duckdns.org pointed there).
-#   - GCP firewall allows inbound tcp:80 AND tcp:443 to the VM.
+#   - CADDY_DOMAIN (and CADDY_CPO_DOMAIN, if set) resolve to the VM's public IP.
+#   - GCP firewall allows inbound tcp:80 AND tcp:443 to the VM. Port 80 must
+#     stay open even though the named sites only redirect on it: that is where
+#     the ACME HTTP-01 challenge is answered, and Caddy serves
+#     /.well-known/acme-challenge/* ahead of any site route, so the redirects
+#     below do not break certificate renewal.
 
 # Global options. trusted_proxies (M3): trust ONLY the compose private network
 # as a proxy hop, so a direct internet client cannot spoof X-Forwarded-For to
@@ -23,20 +34,38 @@
 	}
 }
 
-amphive.duckdns.org {
-	encode gzip
-
-	# Security response headers (P3). Caddy `header <field> <value>` SETS
-	# (replaces) the field, so these are the one authoritative copy even though
-	# the frontend nginx also emits an identical set. CSP mirrors
-	# deploy/relay/deploy-relay.sh (razorpay, self-hosted fonts, wss websockets).
+# Snippet so the two named sites and the bare-IP fallback cannot drift apart.
+# Caddy `header <field> <value>` SETS (replaces) the field, so these are the one
+# authoritative copy even though the frontend nginx also emits an identical set.
+# Keep byte-identical with frontend/nginx.conf and deploy/relay/deploy-relay.sh.
+#
+#   CSP            mirrors nginx: razorpay script/frame-src, 'unsafe-inline'
+#                  styles, self-hosted data: fonts, wss: websockets, plus
+#                  `object-src 'none'` and `frame-ancestors 'none'`
+#                  (frame-ancestors is the modern replacement for
+#                  X-Frame-Options; X-Frame-Options stays as the legacy
+#                  companion for older embedded WebViews).
+#   Permissions-   geolocation is `self`, NOT denied: /map genuinely calls
+#   Policy         navigator.geolocation to centre the map on the driver, and a
+#                  blanket geolocation=() silently breaks it. Everything else
+#                  the app never uses is denied. If Razorpay Checkout is ever
+#                  enabled and needs the W3C Payment Request API, relax
+#                  payment=() to payment=(self "https://api.razorpay.com")
+#                  rather than dropping the directive.
+(amphive_headers) {
 	header {
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"
 		X-Content-Type-Options "nosniff"
 		X-Frame-Options "DENY"
 		Referrer-Policy "strict-origin-when-cross-origin"
-		Content-Security-Policy "default-src 'self'; script-src 'self' https://*.razorpay.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' https: wss:; frame-src https://*.razorpay.com; base-uri 'self'; form-action 'self'"
+		Permissions-Policy "geolocation=(self), camera=(), microphone=(), usb=(), payment=(), interest-cohort=()"
+		Content-Security-Policy "default-src 'self'; script-src 'self' https://*.razorpay.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' https: wss:; frame-src https://*.razorpay.com; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
 	}
+}
+
+amphive.app {
+	encode gzip
+	import amphive_headers
 
 	# WebSocket + API + SPA all live behind the frontend nginx container, which
 	# already proxies /api and /socket.io to the backend. Caddy just terminates
@@ -44,20 +73,82 @@ amphive.duckdns.org {
 	reverse_proxy frontend:80
 }
 
-# Bare-IP / unknown-Host requests: SERVE the app (plain http) rather than
-# redirect to the domain, so the site stays reachable by IP when the DNS
-# provider has an outage (seen with DuckDNS 2026-07-11). Tighten to a
-# redir once a paid/reliable domain is in place.
+cpo.amphive.app {
+	encode gzip
+	import amphive_headers
+	reverse_proxy frontend:80
+}
+
+# ---------------------------------------------------------------------------
+# Plain HTTP on the NAMED domains: redirect, never serve.
+#
+# This used to be covered by the catch-all `http://` block below, which SERVED
+# the app over cleartext for every Host including the real domains. The comment
+# justifying that called it a DuckDNS-outage escape hatch and said to "tighten
+# to a redir once a paid/reliable domain is in place" — amphive.app went live
+# 2026-07-20, so that justification has expired. Leaving it as-is means a
+# disaster-recovery rebuild silently reopens a window where
+# http://amphive.app/api/... answers 200 with a bearer JWT in the Authorization
+# header, in the clear, and neither the browser nor the user is told.
+#
+# 308 (not 301) so a mis-addressed POST keeps its method and body instead of
+# being silently downgraded to a GET — this is also what Caddy's own automatic
+# HTTP→HTTPS redirect uses.
+#
+# Being explicit here also removes a genuine ambiguity in the old file. Caddy
+# adds an automatic HTTP→HTTPS redirect for a site served over HTTPS *unless* a
+# site block already claims that host on the HTTP port — and whether an
+# empty-host `http://` catch-all counted as claiming `amphive.app` was never
+# something the config stated, only something you found out by curling it. An
+# explicit `http://amphive.app` block settles it: Caddy routes by matcher
+# specificity, a site block with a hostname always beats the empty-host
+# catch-all, and the automatic redirect is skipped in favour of this one. The
+# ordering in the file is for human readers, not for Caddy.
+# ---------------------------------------------------------------------------
+http://amphive.app {
+	redir https://{host}{uri} 308
+}
+
+http://cpo.amphive.app {
+	redir https://{host}{uri} 308
+}
+
+# ---------------------------------------------------------------------------
+# Bare-IP / unknown-Host requests over plain HTTP: still SERVED, deliberately.
+#
+# This is the one block that is NOT being converted to a redirect, and the
+# reasoning is worth writing down because "redirect everything to https" reads
+# like the obviously-correct answer:
+#
+#   1. There is no certificate for an IP address. Let's Encrypt does not issue
+#      for bare IPs, so `redir https://{host}{uri}` from http://<ip>/ lands on
+#      a TLS handshake Caddy cannot complete with a valid cert — a hard browser
+#      interstitial. That is strictly worse than cleartext, because it is not
+#      reachable at all.
+#   2. Redirecting to the named domain instead defeats the entire purpose. The
+#      escape hatch exists for the case where DNS is broken (seen with DuckDNS
+#      2026-07-11); sending the browser back to a name that does not resolve is
+#      a no-op with extra steps.
+#   3. The frontend depends on this mode. src/utils/appHost.js treats a bare-IP
+#      host as "unsplit" and App.jsx serves the COMBINED driver + operator +
+#      admin route tree there specifically so a DNS outage does not lock
+#      operators out of the console. Delete this site and that fallback has
+#      nowhere to run.
+#
+# Accepted residual risk, stated plainly: traffic to this site — including /api
+# and /socket.io with a bearer JWT — is cleartext. It is mitigated only by
+# obscurity (you have to type the IP; nothing links to it, robots.txt and the
+# canonical tags all name amphive.app) and by being the fallback rather than
+# the path anyone normally takes. HSTS learned from https://amphive.app does
+# NOT cover it: HSTS is host-scoped and, per spec, is never applied to IP
+# literals. If the DNS-outage risk is ever retired, delete this block — do not
+# convert it to a redirect.
+#
+# Same security headers as the named sites; HSTS is a harmless no-op over plain
+# http — browsers ignore it per spec.
+# ---------------------------------------------------------------------------
 http:// {
 	encode gzip
-	# Same security headers as the named site above (P3); HSTS is a harmless
-	# no-op over plain http — browsers ignore it per spec.
-	header {
-		Strict-Transport-Security "max-age=31536000; includeSubDomains"
-		X-Content-Type-Options "nosniff"
-		X-Frame-Options "DENY"
-		Referrer-Policy "strict-origin-when-cross-origin"
-		Content-Security-Policy "default-src 'self'; script-src 'self' https://*.razorpay.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' https: wss:; frame-src https://*.razorpay.com; base-uri 'self'; form-action 'self'"
-	}
+	import amphive_headers
 	reverse_proxy frontend:80
 }

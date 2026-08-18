@@ -16,10 +16,17 @@ import { MemoryRouter, Routes, Route, useLocation } from 'react-router-dom';
 import Login from './Login';
 import { useAuth } from '../contexts/AuthContext';
 import { useConfig } from '../contexts/ConfigContext';
+import { isCpoHost } from '../utils/appHost';
 import api from '../api/client';
 
 vi.mock('../contexts/AuthContext', () => ({ useAuth: vi.fn() }));
 vi.mock('../contexts/ConfigContext', () => ({ useConfig: vi.fn() }));
+// Only isCpoHost is stubbed — the rest (driverOrigin, used by SiteFooter in
+// the AuthShell frame) has to keep working.
+vi.mock('../utils/appHost', async (importOriginal) => ({
+  ...(await importOriginal()),
+  isCpoHost: vi.fn(() => false),
+}));
 vi.mock('../api/client', () => {
   const api = { get: vi.fn(), post: vi.fn(), put: vi.fn(), patch: vi.fn(), delete: vi.fn() };
   return { api, default: api, apiRequest: vi.fn() };
@@ -57,6 +64,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   useAuth.mockReturnValue({ login: loginSpy });
   useConfig.mockReturnValue({ google_login_enabled: false });
+  isCpoHost.mockReturnValue(false);
 });
 
 describe('Login redirect target', () => {
@@ -191,5 +199,24 @@ describe('Google sign-in button (config-gated)', () => {
     renderLogin('/login');
     const link = screen.getByRole('link', { name: /Continue with Google/i });
     expect(link).toHaveAttribute('href', '/api/auth/google/login');
+  });
+
+  // Login is registered on BOTH hosts, but the Google flow only works on the
+  // driver one: /auth/google/callback isn't in CpoHostRoutes and the backend
+  // hardcodes the driver origin as the redirect target, so an operator who
+  // clicks it on cpo.<domain> lands on the driver origin with their token
+  // written to that origin's localStorage and is never signed in here.
+  it('is hidden on the console host even when Google sign-in is enabled', () => {
+    useConfig.mockReturnValue({ google_login_enabled: true });
+    isCpoHost.mockReturnValue(true);
+    renderLogin('/login');
+    expect(screen.queryByRole('link', { name: /Continue with Google/i })).not.toBeInTheDocument();
+  });
+
+  it('is still shown on the driver host when enabled', () => {
+    useConfig.mockReturnValue({ google_login_enabled: true });
+    isCpoHost.mockReturnValue(false);
+    renderLogin('/login');
+    expect(screen.getByRole('link', { name: /Continue with Google/i })).toBeInTheDocument();
   });
 });

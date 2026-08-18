@@ -284,7 +284,12 @@ export default function AdminGateways() {
       label: 'Status',
       render: (gw) => (
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <StatusDot state={gw.online ? 'available' : 'offline'} />
+          {/* The cell shows only a coloured dot + "3m ago"; srLabel is what
+              carries online/offline to a screen reader (WCAG 1.4.1). */}
+          <StatusDot
+            state={gw.online ? 'available' : 'offline'}
+            srLabel={gw.online ? 'Online' : 'Offline'}
+          />
           <span>{relativeTime(gw.last_seen_at)}</span>
         </div>
       ),

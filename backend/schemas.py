@@ -5,10 +5,61 @@ Extracted verbatim from main.py (2026-07-07, TD#7 split). One module for all
 routers — schemas are cross-cutting (e.g. PlugResponse is returned by both the
 driver and CPO plug routes).
 """
+import ipaddress
+import re
 from datetime import datetime, timezone
 from typing import Optional
 
 from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
+
+# --- Shared input bounds ---------------------------------------------------
+# Every free-text field that lands in a bounded DB column carries a matching
+# `max_length`, so an oversized value is a clean 422 here instead of an
+# asyncpg StringDataRightTruncation -> DataError -> unhandled 500 downstream
+# (2026-08-18 audit). Fields that never touch the DB but DO become in-memory
+# rate-limiter dict keys (the email fields on the unauthenticated auth
+# endpoints) are bounded for the same reason the request-body cap exists:
+# unauthenticated input should never grow server-side state without a ceiling.
+#
+# 320 = RFC 3696 practical maximum for an addr-spec (64 local + @ + 255
+# domain). `users.email` itself is String(255); the wider bound is deliberate
+# on the *lookup* paths (login/forgot/resend/topup) so an over-long address
+# gets the same generic answer as any other unknown address rather than a 422
+# that would leak "this address is too long to be one of ours".
+MAX_EMAIL_LEN = 320
+# Opaque single-use tokens (secrets.token_urlsafe(32) -> 43 chars today).
+# Generous ceiling so a future format change doesn't 422 real links.
+MAX_TOKEN_LEN = 512
+# bcrypt truncates at 72 bytes, so anything longer is already equivalent to
+# its 72-byte prefix. Login stays deliberately unvalidated for pre-rule
+# accounts (TD#30) -- this is a memory bound, not a password policy.
+MAX_LOGIN_PASSWORD_LEN = 512
+
+# A plug's `local_ip` is republished verbatim into the retained MQTT plug
+# roster (routers/cpo/_plugs.py), where the gateway firmware consumes it as a
+# network target. It was previously an unvalidated free string, so whatever a
+# CPO typed reached the device. Accept an IP literal (the documented and
+# overwhelmingly common case) or a conservative hostname shape; reject
+# anything carrying whitespace, quotes, control characters, a scheme, a port,
+# a path, or credentials.
+_HOSTNAME_RE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9.\-]{0,43}[A-Za-z0-9])?$")
+
+
+def validate_local_ip(value: str) -> str:
+    """An IPv4/IPv6 literal, else a plain hostname/label. Raises ValueError."""
+    candidate = value.strip()
+    if not candidate:
+        raise ValueError("local_ip must not be empty")
+    try:
+        return str(ipaddress.ip_address(candidate))
+    except ValueError:
+        pass
+    if not _HOSTNAME_RE.match(candidate):
+        raise ValueError(
+            "local_ip must be an IP address (e.g. 192.168.1.50) or a plain "
+            "hostname " + "—" + " no scheme, port, path, spaces or quotes"
+        )
+    return candidate
 
 # --- Auth Schemas ---
 
@@ -26,17 +77,20 @@ class RegisterRequest(BaseModel):
     full_name: str = Field(max_length=150)
 
 class LoginRequest(BaseModel):
-    email: str
-    password: str
+    # Deliberately NOT EmailStr and NOT length-policied (TD#30): accounts
+    # created before the registration rule must still sign in. The
+    # max_lengths below are memory bounds only -- see MAX_EMAIL_LEN above.
+    email: str = Field(max_length=MAX_EMAIL_LEN)
+    password: str = Field(max_length=MAX_LOGIN_PASSWORD_LEN)
 
 class ForgotPasswordRequest(BaseModel):
     # Plain `str` (not EmailStr) on purpose: the endpoint answers the same
     # generic 200 for ANY input (no account enumeration), and login is also a
     # plain str so pre-EmailStr accounts can recover too.
-    email: str
+    email: str = Field(max_length=MAX_EMAIL_LEN)
 
 class ResetPasswordRequest(BaseModel):
-    token: str
+    token: str = Field(max_length=MAX_TOKEN_LEN)
     # Same 8-72 rule as RegisterRequest (bcrypt truncates at 72 bytes).
     password: str = Field(min_length=8, max_length=72)
 
@@ -44,13 +98,30 @@ class VerifyEmailRequest(BaseModel):
     # The raw verification token from the emailed link
     # (FRONTEND_ORIGIN/verify-email?token=...). Plain str like
     # ResetPasswordRequest.token — an opaque secrets.token_urlsafe value.
-    token: str
+    token: str = Field(max_length=MAX_TOKEN_LEN)
 
 class ResendVerificationRequest(BaseModel):
     # Plain `str` (not EmailStr) on purpose, matching ForgotPasswordRequest:
     # the endpoint answers the same generic 200 for ANY input (no account
     # enumeration), and pre-EmailStr accounts must be resendable too.
-    email: str
+    email: str = Field(max_length=MAX_EMAIL_LEN)
+
+class DeleteAccountRequest(BaseModel):
+    """Body for DELETE /api/auth/me.
+
+    `confirm` is a typed phrase, not a checkbox: closure forfeits any
+    remaining charging credit and cannot be undone, so it must be
+    impossible to trigger by a mis-click or a replayed request.
+
+    `password` re-authenticates the caller. It is REQUIRED for accounts
+    that can sign in with a password, and ignored for Google-only accounts
+    (whose stored hash is deliberately unusable) — those are proven by the
+    bearer token alone, exactly as every other authenticated route treats
+    them.
+    """
+    confirm: str = Field(max_length=64)
+    password: Optional[str] = Field(default=None, max_length=MAX_LOGIN_PASSWORD_LEN)
+
 
 class AuthResponse(BaseModel):
     token: str
@@ -140,7 +211,9 @@ class PlugRegisterRequest(BaseModel):
 # --- Group Schemas ---
 
 class JoinGroupRequest(BaseModel):
-    access_code: str
+    # charger_groups.access_code is String(20); the router upper-cases and
+    # strips before lookup, so a little headroom for pasted whitespace.
+    access_code: str = Field(max_length=32)
 
 class GroupResponse(BaseModel):
     id: int
@@ -383,7 +456,8 @@ class PushUnsubscribeRequest(BaseModel):
 
 class CpoSetupRequest(BaseModel):
     """Request body for CPO onboarding — creates a new tenant."""
-    tenant_name: str
+    # tenants.name is String(100).
+    tenant_name: str = Field(min_length=1, max_length=100)
 
 
 class CpoGatewayCreateRequest(BaseModel):
@@ -398,9 +472,11 @@ class CpoGatewayCreateRequest(BaseModel):
     use, but the preflashed-unit flow (POST /api/cpo/gateways/claim below)
     is now the primary way a CPO adds a gateway.
     """
-    gateway_id: str   # device MAC (matches the firmware-derived gateway_id)
-    name: str
-    vpn_ip: str = ""
+    # Bounds mirror gateways.id String(50) / .name String(100) /
+    # .vpn_ip String(45).
+    gateway_id: str = Field(min_length=1, max_length=50)   # device MAC (matches the firmware-derived gateway_id)
+    name: str = Field(min_length=1, max_length=100)
+    vpn_ip: str = Field(default="", max_length=45)
 
 
 class CpoGatewayClaimRequest(BaseModel):
@@ -455,10 +531,18 @@ class CpoGatewayOtaRequest(BaseModel):
 
 class CpoPlugCreateRequest(BaseModel):
     """Register a new plug on one of the CPO's gateways."""
-    gateway_id: str
-    name: str
-    local_ip: str
-    plug_model: str = "tapo_p110"
+    # Bounds mirror plugs.gateway_id String(50) / .name String(100) /
+    # .local_ip String(45) / .plug_model String(50).
+    gateway_id: str = Field(min_length=1, max_length=50)
+    name: str = Field(min_length=1, max_length=100)
+    local_ip: str = Field(min_length=1, max_length=45)
+    plug_model: str = Field(default="tapo_p110", max_length=50)
+
+    @field_validator("local_ip")
+    @classmethod
+    def _check_local_ip(cls, v: str) -> str:
+        return validate_local_ip(v)
+
     group_id: Optional[int] = None
     # Optional geolocation; when omitted the plug inherits its gateway's coords.
     latitude: Optional[float] = Field(default=None, ge=-90, le=90)
@@ -471,14 +555,14 @@ class CpoPlugCreateRequest(BaseModel):
 
 class CpoPlugUpdateRequest(BaseModel):
     """Update an existing plug's details."""
-    name: Optional[str] = None
+    name: Optional[str] = Field(default=None, min_length=1, max_length=100)
     group_id: Optional[int] = None
     # Status string matching PlugStatus enum values: available, occupied, offline, maintenance
-    status: Optional[str] = None
+    status: Optional[str] = Field(default=None, max_length=32)
     # The plug's LAN IP. Lets an operator fix it after a DHCP change without
     # re-provisioning; on change the backend republishes the retained roster so
     # the gateway re-IPs the plug's slot (omit to leave unchanged).
-    local_ip: Optional[str] = None
+    local_ip: Optional[str] = Field(default=None, min_length=1, max_length=45)
     latitude: Optional[float] = Field(default=None, ge=-90, le=90)
     longitude: Optional[float] = Field(default=None, ge=-180, le=180)
     # [Caps] Per-plug current cap in amps for circuit admission. Send 0 to clear
@@ -496,6 +580,13 @@ class CpoPlugUpdateRequest(BaseModel):
     # max_current_a above.
     rated_power_w: Optional[int] = Field(default=None, ge=0)
     connector_type: Optional[str] = Field(default=None, max_length=32)
+
+    @field_validator("local_ip")
+    @classmethod
+    def _check_local_ip(cls, v):
+        # Same rule as CpoPlugCreateRequest: this value is republished into
+        # the retained MQTT roster and used by the gateway as a network target.
+        return v if v is None else validate_local_ip(v)
 
 
 class CpoPlugMaintenanceRequest(BaseModel):
@@ -528,13 +619,14 @@ class CpoProfileUpdateRequest(BaseModel):
 
 class CpoGroupCreateRequest(BaseModel):
     """Create a new charger group."""
-    name: str
+    # charger_groups.name is String(100).
+    name: str = Field(min_length=1, max_length=100)
     is_public: bool = False
 
 
 class CpoGroupUpdateRequest(BaseModel):
     """Update an existing charger group."""
-    name: Optional[str] = None
+    name: Optional[str] = Field(default=None, min_length=1, max_length=100)
     is_public: Optional[bool] = None
     regenerate_access_code: bool = False
     # [Caps] The group's shared circuit capacity in amps (session-start
@@ -698,7 +790,7 @@ class CpoTopupCreateRequest(BaseModel):
     forgot-password request above: this is a lookup of an EXISTING account
     (the router 404s unknowns), and EmailStr's validator rejects reserved
     TLDs like the seeded `@amphive.test` accounts (caught by CI 2026-07-21)."""
-    driver_email: str
+    driver_email: str = Field(max_length=MAX_EMAIL_LEN)
     amount_coins: float = Field(gt=0)
     note: Optional[str] = Field(default=None, max_length=500)
 

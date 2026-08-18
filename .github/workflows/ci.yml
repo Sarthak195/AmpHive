@@ -60,7 +60,14 @@ jobs:
           cache: pip
           cache-dependency-path: backend/requirements*.txt
       - name: Install dependencies
-        run: pip install -r backend/requirements.txt -r backend/requirements-dev.txt
+        # The LOCKFILE, not requirements.txt: backend/Dockerfile installs
+        # requirements.lock.txt, so testing the loose `>=` spec meant CI could
+        # be green against a dependency set production never runs (and a
+        # lockfile could drift for weeks unnoticed — it had, by a year for
+        # bcrypt). requirements-dev.txt brings pytest/ruff/mypy on top; its
+        # `-r requirements.txt` line is harmless here because every pin in the
+        # lock already satisfies it.
+        run: pip install -r backend/requirements.lock.txt -r backend/requirements-dev.txt
       - name: Lint (ruff)
         # Config lives in pyproject.toml (E/F/W + isort; E501 ignored — see
         # that file for why). Was `--select F401` only; widened 2026-07-21.
@@ -89,13 +96,23 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          # 22 to match frontend/Dockerfile's node:22-alpine. CI used to run 20
+          # while the image built on 22, so CI never exercised the runtime the
+          # bundle is actually built with. It is now also a hard requirement:
+          # jsdom 30 declares ^22.22.2 and @testing-library/jest-dom 7 declares
+          # >=22, so the test job cannot run on 20 at all.
+          node-version: "22"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - name: Install dependencies
         run: npm ci
       - name: Lint
         run: npm run lint
+      - name: Build
+        # A broken Vite build was previously caught only by `docker build` on
+        # the VM during a deploy — the slowest and most expensive place to
+        # find it (deploy.ps1 allows a 25-minute window). Catch it here.
+        run: npm run build
 
   frontend-tests:
     runs-on: ubuntu-latest
@@ -106,10 +123,80 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          # 22 to match frontend/Dockerfile's node:22-alpine. CI used to run 20
+          # while the image built on 22, so CI never exercised the runtime the
+          # bundle is actually built with. It is now also a hard requirement:
+          # jsdom 30 declares ^22.22.2 and @testing-library/jest-dom 7 declares
+          # >=22, so the test job cannot run on 20 at all.
+          node-version: "22"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - name: Install dependencies
         run: npm ci
       - name: Test
         run: npm test
+
+  security:
+    # Dependency + secret scanning. Split from the test jobs so a newly
+    # published advisory shows up as its own red check rather than looking
+    # like a test regression.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # gitleaks needs history to scan past commits, not just the tip.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Audit Python dependencies (pip-audit)
+        # Audits the LOCKFILE — the exact set the production image installs.
+        #
+        # ecdsa PYSEC-2026-1325 (Minerva timing side-channel) is ignored
+        # DELIBERATELY and is the only exception: upstream has published NO
+        # fixed version, it arrives transitively via python-jose, and it is
+        # only reachable for ES* algorithms. AmpHive pins HS256 on both the
+        # encode and decode side (backend/services/auth.py JWT_ALGORITHM), so
+        # the vulnerable code path is never entered. Re-check this when
+        # python-jose is replaced or ecdsa ships a fix; do not add further
+        # ignores without the same kind of written justification.
+        run: |
+          pip install pip-audit
+          pip-audit -r backend/requirements.lock.txt \
+            --ignore-vuln PYSEC-2026-1325 \
+            --progress-spinner off
+
+      - uses: actions/setup-node@v4
+        with:
+          # 22 to match frontend/Dockerfile's node:22-alpine. CI used to run 20
+          # while the image built on 22, so CI never exercised the runtime the
+          # bundle is actually built with. It is now also a hard requirement:
+          # jsdom 30 declares ^22.22.2 and @testing-library/jest-dom 7 declares
+          # >=22, so the test job cannot run on 20 at all.
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Audit npm production dependencies
+        # Hard gate on what actually ships in the browser bundle. Dev/build
+        # chain advisories are reported below but do not fail the build: they
+        # are not reachable by a user of the deployed site, and letting them
+        # block merges trains people to ignore a red check.
+        working-directory: frontend
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Audit npm dev dependencies (report only)
+        working-directory: frontend
+        run: npm audit --audit-level=moderate || true
+
+      - name: Scan for committed secrets (gitleaks)
+        # This repo is PUBLIC and its history has never been rewritten, so a
+        # secret committed by accident is world-readable the moment it lands.
+        # Four real secrets reached history before 2026-07-06 (all since
+        # rotated — see docs/SECURITY.md §1); this is the check that stops the
+        # fifth.
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -202,13 +202,19 @@
 .console {
   display: grid;
   grid-template-columns: var(--sidebar-w) 1fr;
+  /* dvh with a vh fallback — see the note on body in base.css. Matters here
+     twice over: the shell is the full-bleed background of every console page,
+     and on mobile .console-sidebar becomes the off-canvas drawer, whose
+     explicit height wins over its `inset: 0 auto 0 0` bottom edge. */
   min-height: 100vh;
+  min-height: 100dvh;
 }
 
 .console-sidebar {
   position: sticky;
   top: 0;
   height: 100vh;
+  height: 100dvh;
   overflow-y: auto;
   background: var(--bg-deep);
   border-right: 1px solid var(--border);
@@ -288,11 +294,31 @@
   max-width: var(--w-console);
 }
 
+/* The console legal footer sits OUTSIDE <main>, so assistive tech exposes it
+   as the page-level `contentinfo` landmark (a <footer> nested in <main> is
+   only that section's footer and never reaches the landmark rotor).
+   Placement differs between the two consoles and this one rule covers both:
+     - CpoLayout wraps its <main> in .console-column, so the footer simply
+       flows underneath and `grid-column` is inert there;
+     - AdminLayout's <main> IS the grid child, so the footer must pin itself
+       to column 2 or it lands beneath the sidebar.
+   Mirrors .console-main's inline padding and max-width so it lines up with
+   the page content above it. NOTE: `.console-footer` is taken — that is the
+   SIDEBAR's footer (user email + sign out). */
+.console-legal-footer {
+  grid-column: 2;
+  min-width: 0;
+  padding-inline: var(--sp-8);
+  max-width: var(--w-console);
+}
+
 /* Console mobile: off-canvas sidebar */
 .console-topbar { display: none; }
 
 @media (max-width: 900px) {
   .console { grid-template-columns: 1fr; }
+  /* Single column here, so the column-2 pin would be off-grid. */
+  .console-legal-footer { grid-column: 1; padding-inline: var(--sp-4); }
 
   .console-topbar {
     position: sticky;
@@ -365,4 +391,16 @@
   background: var(--bg-deep);
   font-size: var(--text-sm);
   color: var(--ink-2);
+}
+
+/* ==== touch targets ======================================================= */
+/* Same trade as the block at the end of primitives.css: shell controls sized
+   for a mouse grow to 44px only when the pointer is coarse. .console-link is
+   the whole operator sidebar — thirteen nav rows an operator thumbs through
+   inside the mobile drawer — and .wallet-pill is a primary driver action
+   sitting in the app bar next to other tap targets. */
+@media (pointer: coarse) {
+  .wallet-pill { min-height: 44px; }
+
+  .console-link { min-height: 44px; }
 }

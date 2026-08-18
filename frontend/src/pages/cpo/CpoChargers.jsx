@@ -456,7 +456,12 @@ export default function CpoChargers() {
         const online = override !== undefined ? override : gw?.status === 'online';
         return (
           <span className="cpo-chargers-gw-cell">
-            <StatusDot tone={online ? 'ok' : 'danger'} />
+            {/* Dot + gateway name only — without srLabel the gateway's
+                connectivity is conveyed by colour alone (WCAG 1.4.1). */}
+            <StatusDot
+              tone={online ? 'ok' : 'danger'}
+              srLabel={online ? 'Gateway online' : 'Gateway offline'}
+            />
             {gw?.name || row.gateway_id}
           </span>
         );

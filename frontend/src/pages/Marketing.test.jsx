@@ -198,4 +198,22 @@ describe('page sections', () => {
     expect(within(footer).queryByRole('link', { name: /about|careers|blog/i })).toBeNull();
     await settleNetworkFetch();
   });
+
+  it('carries a Legal column reaching every published policy page', async () => {
+    renderPage();
+    const legal = screen.getByRole('navigation', { name: 'Legal' });
+
+    const expectHref = (name, href) =>
+      expect(within(legal).getByRole('link', { name })).toHaveAttribute('href', href);
+
+    expectHref('Terms of Service', '/terms');
+    expectHref('Privacy Policy', '/privacy');
+    expectHref('Refunds', '/refunds');
+    expectHref('Contact', '/contact');
+
+    // /terms is now the umbrella Terms of Service — the credit-specific terms
+    // moved to their own route, and this link used to point at the old one.
+    expectHref('Charging credit terms', '/charging-credit-terms');
+    await settleNetworkFetch();
+  });
 });

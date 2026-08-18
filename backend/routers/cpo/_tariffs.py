@@ -28,7 +28,7 @@ from backend.services.money import to_money
 from backend.services.pricing import mark_tenant_sessions_for_reprice, slot_overlaps
 from backend.services.rbac import require_role
 
-from ._common import _fmt_min, _load_tenant_tariff, _slot_dict, logger
+from ._common import _fmt_min, _load_tenant_tariff, _require_tenant_id, _slot_dict, logger
 
 router = APIRouter()
 
@@ -63,8 +63,11 @@ async def cpo_create_tariff(
     db: AsyncSession = Depends(get_db),
 ):
     """Create a new tariff under the CPO's tenant."""
+    # tariffs.tenant_id is NOT NULL — same bare-admin guard as group create.
+    tenant_id = _require_tenant_id(user)
+
     tariff = Tariff(
-        tenant_id=user.tenant_id,
+        tenant_id=tenant_id,
         name=req.name,
         price_per_kwh=to_money(req.price_per_kwh),
     )

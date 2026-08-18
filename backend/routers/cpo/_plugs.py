@@ -25,7 +25,7 @@ from backend.schemas import (
 from backend.services.audit import try_record_audit
 from backend.services.rbac import require_role
 
-from ._common import logger
+from ._common import DEFAULT_LIST_LIMIT, clamp_list_window, logger
 
 router = APIRouter()
 
@@ -36,14 +36,20 @@ router = APIRouter()
 async def cpo_list_plugs(
     user: User = Depends(require_role("cpo", "admin")),
     db: AsyncSession = Depends(get_db),
+    limit: int = DEFAULT_LIST_LIMIT,
+    offset: int = 0,
 ):
     """List all plugs across the CPO's gateways with status and group info."""
+    limit, offset = clamp_list_window(limit, offset)
     # Group name joined in — previously one ChargerGroup.name query per plug.
     result = await db.execute(
         select(Plug, ChargerGroup.name)
         .join(Gateway, Plug.gateway_id == Gateway.id)
         .outerjoin(ChargerGroup, ChargerGroup.id == Plug.group_id)
         .where(Gateway.tenant_id == user.tenant_id)
+        .order_by(Plug.id)
+        .limit(limit)
+        .offset(offset)
     )
 
     return [

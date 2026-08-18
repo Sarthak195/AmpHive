@@ -1,0 +1,16 @@
+# Dependencies for the standalone bench scripts in tools/ — NOT part of the
+# backend runtime image.
+#
+# tools/turn_on.py, tools/turn_off.py and tools/local_tapo_test.py drive a real
+# TP-Link Tapo P110 over the LAN for hardware bring-up and debugging. They read
+# TAPO_EMAIL / TAPO_PASSWORD / TAPO_PLUG_IP from the environment and fail closed
+# without them (see docs/SECURITY.md §1 — the credentials were env-var'd and
+# rotated 2026-07-06).
+#
+# This used to live in backend/requirements.txt, which meant the Rust-backed
+# `tapo` wheel was installed into the production image even though nothing in
+# backend/ imports it (tapo_direct.py was removed 2026-08-02). Split out
+# 2026-08-18 so the image on the always-free e2-micro stops carrying it.
+#
+#   pip install -r tools/requirements.txt
+tapo<1.0

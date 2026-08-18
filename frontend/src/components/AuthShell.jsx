@@ -5,10 +5,16 @@
  * supporting copy, and a footer slot for the "New here? / Remembered it?"
  * cross-links. Identity comes entirely from tokens/primitives — this file
  * only owns centering/spacing layout.
+ *
+ * It also carries the compact site footer: sign-in and sign-up are the two
+ * screens where somebody most wants to read the Terms or the Privacy Policy
+ * BEFORE they commit, and they render outside every other shell in the app,
+ * so without this they had no link to either.
  */
 
 import { Link } from 'react-router-dom';
 import { Zap } from 'lucide-react';
+import SiteFooter from './SiteFooter';
 import './AuthShell.css';
 
 export default function AuthShell({ title, sub, children, footer }) {
@@ -29,6 +35,12 @@ export default function AuthShell({ title, sub, children, footer }) {
         </div>
 
         {footer && <div className="auth-footer">{footer}</div>}
+
+        {/* `compact` drops the site nav: on a screen whose whole job is one
+            form, a full nav would compete with it. Inside .auth-shell-inner
+            (a 420px grid column) rather than after <main>, so it stays inside
+            the centred column instead of pushing the card off-centre. */}
+        <SiteFooter compact />
       </div>
     </main>
   );

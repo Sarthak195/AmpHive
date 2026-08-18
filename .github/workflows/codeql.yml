@@ -1,0 +1,74 @@
+# CodeQL — GitHub's static analysis, on the two languages this repo ships.
+#
+# Why a separate workflow from ci.yml:
+#   * CodeQL needs `security-events: write` to upload results; ci.yml runs with
+#     default read-only permissions and should stay that way.
+#   * It is slower than the test jobs (minutes, not seconds) and its findings
+#     are advisory rather than a merge gate, so it must not sit in the critical
+#     path of a red/green "did my change break something" signal.
+#   * It has its own weekly schedule, so a newly-published query pack finds an
+#     existing bug even on a quiet week with no commits.
+#
+# This repo is PUBLIC, so both CodeQL and the runner minutes are free.
+#
+# Scope note: the ESP32 firmware under firmware/ is C, which CodeQL can analyse
+# but only with a working build. That build needs ESP-IDF v5.3.3 plus the
+# xtensa/riscv toolchain, which is not something to install on every CI run —
+# so firmware is deliberately out of scope here and is covered by review and
+# on-device testing instead (docs/TESTING.md notes firmware has no
+# host-runnable tests at all).
+
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Mondays 04:17 UTC. Offset from the hour on purpose — GitHub's scheduler
+    # is heavily oversubscribed exactly on the hour.
+    - cron: '17 4 * * 1'
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      packages: read
+      actions: read
+      contents: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: python
+            # backend/, agent/, tools/ and the migration scripts.
+            build-mode: none
+          - language: javascript-typescript
+            # frontend/src plus the service worker in frontend/public.
+            build-mode: none
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          # security-extended adds the lower-precision security queries on top
+          # of the default set. Worth the extra noise on a codebase that
+          # handles payments and drives physical hardware.
+          queries: security-extended
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: /language:${{ matrix.language }}

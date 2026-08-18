@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  AmpHive sitemap — the SEVEN public URLs on the driver origin, and nothing
+  else. Every other route in App.jsx is authenticated (or a client-side
+  redirect to one) and is Disallow:'d in robots.txt / served `noindex` by
+  useDocumentMeta.js; listing a noindex URL here is a self-contradiction that
+  Search Console reports as an error, so they are absent by design.
+
+  All locations are absolute and on https://amphive.app. The operator console
+  (cpo.amphive.app) serves this same file, but a sitemap names the URLs it is
+  a sitemap OF — these driver URLs — not the host that happened to serve it.
+
+  <lastmod> is 2026-08-18 for every entry, and that is a substantiated date,
+  not a placeholder: it is the day this branch shipped the /privacy, /refunds,
+  /contact and /charging-credit-terms pages and rewrote the landing/map heads,
+  and it matches LAST_UPDATED in src/utils/legal.js, which is the date printed
+  on the legal pages themselves. Bump an entry only when that page's content
+  actually changes — a lastmod that moves on every deploy is noise crawlers
+  learn to ignore.
+
+  <changefreq>/<priority> are hints only (Google ignores both); they are here
+  to say which pages are worth re-crawling for the crawlers that still read
+  them.
+-->
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+
+  <!-- Marketing landing. Also the printed-QR deep-link target (/?plug=<id>),
+       but the parameterised form is a per-charger funnel, not a page to index. -->
+  <url>
+    <loc>https://amphive.app/</loc>
+    <lastmod>2026-08-18</lastmod>
+    <changefreq>weekly</changefreq>
+    <priority>1.0</priority>
+  </url>
+
+  <!-- Public charger-discovery map — no account needed, and the page whose
+       content genuinely changes as chargers join the network. -->
+  <url>
+    <loc>https://amphive.app/map</loc>
+    <lastmod>2026-08-18</lastmod>
+    <changefreq>daily</changefreq>
+    <priority>0.9</priority>
+  </url>
+
+  <!-- Legal set. Rarely edited, but they must be crawlable and findable:
+       payment-gateway review and app-store listings both check that these
+       resolve on the public origin. -->
+  <url>
+    <loc>https://amphive.app/terms</loc>
+    <lastmod>2026-08-18</lastmod>
+    <changefreq>yearly</changefreq>
+    <priority>0.4</priority>
+  </url>
+  <url>
+    <loc>https://amphive.app/charging-credit-terms</loc>
+    <lastmod>2026-08-18</lastmod>
+    <changefreq>yearly</changefreq>
+    <priority>0.4</priority>
+  </url>
+  <url>
+    <loc>https://amphive.app/privacy</loc>
+    <lastmod>2026-08-18</lastmod>
+    <changefreq>yearly</changefreq>
+    <priority>0.4</priority>
+  </url>
+  <url>
+    <loc>https://amphive.app/refunds</loc>
+    <lastmod>2026-08-18</lastmod>
+    <changefreq>yearly</changefreq>
+    <priority>0.4</priority>
+  </url>
+
+  <!-- Contact / grievance officer — the page a user or a regulator looks for
+       first, so it gets a higher priority than the rest of the legal set. -->
+  <url>
+    <loc>https://amphive.app/contact</loc>
+    <lastmod>2026-08-18</lastmod>
+    <changefreq>yearly</changefreq>
+    <priority>0.6</priority>
+  </url>
+
+</urlset>

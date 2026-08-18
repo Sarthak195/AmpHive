@@ -30,6 +30,7 @@ import {
 import { useAuth } from '../contexts/AuthContext';
 import useTheme from '../hooks/useTheme';
 import { cpoOrigin, driverOrigin } from '../utils/appHost';
+import SiteFooter from './SiteFooter';
 
 const NAV_ITEMS = [
   { path: '/admin', label: 'Overview', icon: LayoutDashboard, end: true },
@@ -162,6 +163,13 @@ const AdminLayout = () => {
       <main className="console-main">
         <Outlet />
       </main>
+
+      {/* Same reasoning as CpoLayout: admins had no route to the legal pages
+          either. A sibling of <main> so it is a real `contentinfo` landmark;
+          .console is a 2-column grid here with no column wrapper, so
+          .console-legal-footer pins it to column 2 rather than letting it
+          land beneath the sidebar. */}
+      <SiteFooter className="console-legal-footer" />
     </div>
   );
 };

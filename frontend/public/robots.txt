@@ -1,0 +1,74 @@
+# AmpHive robots.txt
+# ==========================================================================
+# One bundle, two hostnames. This exact file is served by BOTH
+# https://amphive.app (the driver app — the public, indexable surface) and
+# https://cpo.amphive.app (the operator console + platform admin, which is
+# authenticated end to end). It therefore has to be written for the driver
+# origin, and the console is kept out of the index by a different mechanism:
+#
+#   * frontend/nginx.conf sends `X-Robots-Tag: noindex, nofollow` for the
+#     cpo.* host only (an nginx `map` on $host), and
+#   * src/hooks/useDocumentMeta.js defaults every route to a `noindex,
+#     nofollow` robots meta tag, opting IN only on the seven public pages.
+#
+# Note the console is deliberately NOT Disallow:'d wholesale here — a crawler
+# has to be allowed to FETCH a page in order to see its noindex. Blocking the
+# crawl instead is the classic way to get a URL indexed anyway, listed with no
+# snippet, off nothing but inbound links.
+#
+# Nothing below is a security control. Everything Disallow:'d is enforced by
+# the backend's auth guards; this file only stops crawler budget being spent
+# on pages that render an empty shell or a login redirect to an anonymous
+# fetcher, and stops those shells competing with the real pages in search.
+
+User-agent: *
+
+# ---- Public, indexable (allowed by default; listed here as documentation) --
+#   /                        marketing landing
+#   /map                     public charger discovery map
+#   /terms                   terms of service
+#   /charging-credit-terms   closed-loop charging-credit terms
+#   /privacy                 privacy policy
+#   /refunds                 refund/cancellation policy
+#   /contact                 contact + grievance officer details
+# These seven are the only URLs in sitemap.xml.
+
+# ---- Authenticated driver surfaces ----------------------------------------
+# Signed-in-only. To an anonymous crawler these render the login shell, so
+# indexing them would put N duplicate near-empty pages in the index.
+Disallow: /account
+Disallow: /session
+Disallow: /credit
+Disallow: /activity
+Disallow: /groups
+
+# ---- Operator console + platform admin ------------------------------------
+# Reachable on the driver origin only as a cross-origin bounce to
+# cpo.amphive.app (App.jsx ExternalRedirect), and role-guarded on the console
+# origin itself. Never anything a search user wants.
+Disallow: /cpo/
+Disallow: /admin/
+
+# ---- Auth + token-landing pages -------------------------------------------
+# /reset-password and /verify-email are reached with a single-use token in the
+# query string; a crawler that indexed one would publish the token. /auth/
+# covers the Google OAuth callback landing.
+Disallow: /login
+Disallow: /signup
+Disallow: /forgot-password
+Disallow: /reset-password
+Disallow: /verify-email
+Disallow: /auth/
+
+# ---- Legacy aliases -------------------------------------------------------
+# Client-side redirects to the authenticated /credit and /activity above
+# (App.jsx keeps the old URLs working). Same reasoning; blocked so the
+# redirect targets are not reached by a second route.
+Disallow: /topup
+Disallow: /wallet
+Disallow: /history
+
+# Absolute, and always the driver origin — including in the copy of this file
+# served by cpo.amphive.app, where a sitemap of driver URLs is the correct
+# cross-host reference and not a claim about the console.
+Sitemap: https://amphive.app/sitemap.xml

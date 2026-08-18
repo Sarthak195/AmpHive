@@ -162,12 +162,25 @@ def client_ip(request: Request) -> str:
     backend's :8000, or a misconfigured proxy), no forwarded token is
     trustworthy and we fall back to the real peer address, then to "unknown".
     """
+    return client_ip_from_forwarded(
+        request.headers.get("x-forwarded-for", ""),
+        request.client.host if request.client else None,
+    )
+
+
+def client_ip_from_forwarded(forwarded_for: str, peer: str | None) -> str:
+    """The hop-counting half of ``client_ip``, on raw values.
+
+    Split out so the Socket.io handshake — which sees an ASGI/WSGI-style
+    ``environ`` dict rather than a Starlette ``Request`` — derives the client
+    address by exactly the same rule as every HTTP limiter, instead of growing
+    a second, subtly different implementation.
+    """
     hops = _trusted_proxy_hops()
-    fwd = request.headers.get("x-forwarded-for", "")
-    chain = [p.strip() for p in fwd.split(",") if p.strip()]
+    chain = [p.strip() for p in (forwarded_for or "").split(",") if p.strip()]
     if len(chain) >= hops:
         return chain[len(chain) - hops]
-    return request.client.host if request.client else "unknown"
+    return peer or "unknown"
 
 
 def _optional_limiter(env_name: str, default: str):
@@ -334,6 +347,29 @@ resend_verification_email_rate_limiter = SlidingWindowRateLimiter(
 # browsing visitor may refresh/poll live availability — but bounded so the
 # open endpoint can't be hammered to enumerate/scrape or exhaust the DB.
 public_map_rate_limiter = SlidingWindowRateLimiter(*_rule_from_env("PUBLIC_MAP_RATE_LIMIT", "60/60"))
+
+# Socket.io handshake, per client IP. The blanket api_rate_limit_middleware
+# exempts everything outside /api/, so without this the namespace was
+# unlimited — and each attempt spends a JWT decode + a users SELECT before an
+# invalid token is refused. 60/60 comfortably clears real clients (one connect
+# per tab, plus reconnect backoff after a network blip) while capping a flood.
+socketio_connect_rate_limiter = SlidingWindowRateLimiter(
+    *_rule_from_env("SOCKETIO_CONNECT_RATE_LIMIT", "60/60")
+)
+
+# Data export (GET /api/auth/me/export) reads a dozen tables for one user
+# and materialises the result in memory, so it is the most expensive
+# self-service endpoint. Per ACCOUNT, since a legitimate user needs it
+# rarely and an abusive one is authenticated by definition.
+data_export_account_rate_limiter = SlidingWindowRateLimiter(
+    *_rule_from_env("DATA_EXPORT_ACCOUNT_RATE_LIMIT", "5/3600")
+)
+
+# Account closure. Irreversible, so the cap exists to bound repeated
+# password-guessing against the re-auth check rather than to bound cost.
+delete_account_account_rate_limiter = SlidingWindowRateLimiter(
+    *_rule_from_env("DELETE_ACCOUNT_ACCOUNT_RATE_LIMIT", "5/3600")
+)
 
 # --- Per-account limiters (layered on top of the per-IP limiters above) ---
 session_start_account_rate_limiter = SlidingWindowRateLimiter(

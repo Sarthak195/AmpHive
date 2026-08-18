@@ -1,19 +1,17 @@
 @echo off
-
-echo ===================================================
-echo      AmpHive Shutdown Script (VM only)
-echo ===================================================
-echo NOTE: Database runs as a Docker container on the VM.
-echo       Stopping the VM stops all containers including Postgres.
-echo       Data persists in the Docker volume on the VM disk.
-
-echo [1/1] Stopping GCP VM Instance (amphive-vm-in)...
-call gcloud compute instances stop amphive-vm-in --zone=asia-south1-a
-
-echo ===================================================
-echo AmpHive VM is now stopped.
-echo No major compute costs are being incurred.
-echo (Cloud SQL has been decommissioned - no SQL instance cost either)
-echo ===================================================
+REM ---------------------------------------------------------------------
+REM Retired 2026-08-18. This helper targeted `amphive-vm-in` in
+REM `asia-south1-a` -- a VM DELETED in the 2026-07-27 consolidation -- and
+REM drove it with docker-compose v1, which the relay stack does not use.
+REM Running it did nothing useful and misled anyone who tried.
+REM
+REM The live stack is `amphive-relay` in `us-west1-a`, at ~/amphive-relay,
+REM using `docker compose -f docker-compose.relay.yml` (v2 plugin).
+REM See docs/DEPLOYMENT.md and deploy/scripts/deploy.ps1.
+REM ---------------------------------------------------------------------
+echo Stopping the AmpHive VM (amphive-relay, us-west1-a)...
+echo NOTE: this takes the WHOLE service down - web, API and the MQTT
+echo       broker every fielded gateway is connected to. Data persists in
+echo       the Docker volume on the VM disk.
+gcloud compute instances stop amphive-relay --zone=us-west1-a
 pause
-

@@ -7,7 +7,81 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 
 ---
 
-## 0. Latest — 2026-08-13 billing correctness: counter-dip double-count + false unmetered alarms
+## 0. Latest — 2026-08-18 production-readiness audit: privacy, data rights, SEO, a11y
+
+A whole-product audit (35 areas, from secrets and injection through to mobile
+UX and error pages) plus the remediation batch. Full security detail is in
+[SECURITY.md](SECURITY.md) §"2026-08-18" and is not repeated here; this entry
+records what changed for the PRODUCT.
+
+**The biggest gap was not security — it was that a service handling names,
+emails, locations and payments had no privacy surface at all.** There was no
+Privacy Policy, no Terms of Service, no refund policy and no contact page; the
+only footer in the app was the marketing one on the anonymous homepage, so
+signing in made even the charging-credit terms unreachable; and there was no
+way for a user to get their data or close their account. Now:
+
+- **New public pages** — `/privacy`, `/terms` (umbrella Terms of Service),
+  `/refunds`, `/contact`. The existing closed-loop credit terms moved verbatim
+  from `/terms` to `/charging-credit-terms` (the RBI closed-system PPI framing
+  is load-bearing — see the file header before touching it), and `/terms` links
+  to it prominently so any external reference still lands in one click. Every
+  claim on the privacy page was written against source, with the check named in
+  the file header. Nothing claims certification or compliance with any regime.
+- **A footer on every surface** (`components/SiteFooter.jsx`), rendered by the
+  driver shell, both consoles and the auth screens.
+- **Consent at signup** — a stated-consent line linking Terms and Privacy
+  (`Signup.jsx`'s old header comment said none was invented because none
+  existed to link to; they exist now).
+- **`GET /api/auth/me/export`** — self-service data export, strictly self-scoped,
+  no credentials, bounded per collection.
+- **`DELETE /api/auth/me`** — self-service account closure. **Anonymises rather
+  than deletes**: every `user_id` FK is `ON DELETE CASCADE`, so a real delete
+  would take the charging sessions, ledger rows and GST invoices with it — the
+  operator's tax records, and the inputs to the CPO earnings/payout watermark.
+  Personal rows are purged, the account row becomes a scrubbed tombstone, and
+  remaining charging credit is forfeited as an explicit `account_closure` ledger
+  line so the running balance still reconciles. Alembic `0038_account_closure`.
+
+**SEO — the app was invisible and un-shareable.** ~35 routes all served the
+same `<title>`, there was no canonical (two hostnames serve a byte-identical
+bundle), no Open Graph or Twitter tags at all (a link pasted into WhatsApp —
+the main distribution channel for a consumer app in India — unfurled bare), no
+`robots.txt`, no `sitemap.xml`, no structured data, and no `noindex` on the
+authenticated surfaces or the operator console. All added: a `useDocumentMeta`
+hook (per-route title/description/canonical/robots, noindex by default so
+authenticated pages opt out of indexing rather than into it), a generated
+1200x630 share image (`frontend/scripts/make-og-image.py` — real brand assets
+only), robots/sitemap, and Organization + WebSite JSON-LD with no invented
+fields.
+
+**A real 404.** Every unknown path used to `<Navigate to="/">` — a silent
+bounce to the homepage — and nginx answered **HTTP 200** for all of them, so
+every mistyped link was a soft 404 inviting crawlers to index unlimited garbage
+as homepage duplicates. There is now a `NotFound` page and an nginx route
+allowlist that returns a genuine 404 status, with a vitest test
+(`src/nginxRoutes.test.js`) that fails CI if a route is added to `App.jsx`
+without updating the allowlist.
+
+**Accessibility.** Skip link, SPA route-change announcement + focus reset,
+`<main>` landmark on the one page missing it, `contentinfo` landmark for the
+console footers, screen-reader text for the status dots that conveyed
+online/offline by colour alone, tabs wired to their panel with
+`aria-controls`/`role="tabpanel"`, and `eslint-plugin-jsx-a11y` at error
+severity so none of it regresses. That linter also found a real bug:
+`aria-selected` on a `<button>` inside `role="group"` (AdminPayouts) is ignored
+by assistive tech, so the active filter read as unselected — now `aria-pressed`.
+
+**Mobile + performance.** Touch targets raised to 44px under
+`@media (pointer: coarse)` only (desktop console density untouched), `100dvh`
+for the iOS toolbar gap, gzip at the edge (the ~300 KB bundle shipped
+uncompressed on any non-Caddy path), and vendor chunk splitting: the CPO
+dashboard route chunk went **397 kB -> 8.8 kB** and the map route **163 kB ->
+10 kB**, with recharts and leaflet now cached independently of app code.
+
+---
+
+## 0.0005 — 2026-08-13 billing correctness: counter-dip double-count + false unmetered alarms
 
 Owner ran a real 4-hour charge (prod session 80, plug 1) and hit both halves
 of the same underlying assumption — that a drop in the firmware's

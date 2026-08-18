@@ -345,7 +345,13 @@ export default function MapPage() {
                     return (
                       <li key={plug.id} className="map-list-row">
                         <span className="map-list-row-main">
-                          <StatusDot state={state} />
+                          {/* The dot is aria-hidden, and this row's only other
+                              content is the charger name — so without srLabel a
+                              screen-reader user gets the name and NO
+                              availability at all. The legend above (:306) can
+                              show the label visibly because it is a legend;
+                              here it has to be sr-only to keep the row compact. */}
+                          <StatusDot state={state} srLabel={AVAILABILITY_LABELS[state]} />
                           <span className="map-list-row-name">{plug.name}</span>
                         </span>
                         <span className="map-list-row-meta">
