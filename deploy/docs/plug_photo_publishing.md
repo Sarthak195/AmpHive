@@ -21,8 +21,9 @@ object, so the service needs delete as well as create.
 1. **Create the bucket** (public-read, uniform bucket-level access):
 
    ```bash
+   # asia-south1 (Mumbai) — same region as gs://amphive-fw, close to the users.
    gcloud storage buckets create gs://amphive-plug-photos \
-       --location=us-west1 --uniform-bucket-level-access
+       --location=asia-south1 --uniform-bucket-level-access
    gcloud storage buckets add-iam-policy-binding gs://amphive-plug-photos \
        --member=allUsers --role=roles/storage.objectViewer
    ```
