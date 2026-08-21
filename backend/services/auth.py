@@ -235,3 +235,44 @@ async def get_current_user(
         )
 
     return user
+
+
+# HTTPBearer with auto_error=False: no Authorization header yields None instead
+# of a 401, so an endpoint can stay PUBLIC while still learning the caller's
+# identity when a valid token happens to be present.
+optional_security_scheme = HTTPBearer(auto_error=False)
+
+
+async def get_current_user_optional(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(optional_security_scheme),
+    db: AsyncSession = Depends(get_db),
+) -> Optional[User]:
+    """
+    Best-effort identity for a PUBLIC endpoint. Returns the authenticated User
+    when a valid, non-revoked, non-disabled token is present, else None — it
+    NEVER raises 401/403 for a missing or bad token (a public read must serve
+    anonymous callers). Use it only to enrich a public response (e.g. mark the
+    caller's own review), never to gate access — for that use get_current_user.
+    """
+    if credentials is None:
+        return None
+
+    payload = decode_access_token(credentials.credentials)
+    if payload is None:
+        return None
+
+    user_id = payload.get("sub")
+    if user_id is None:
+        return None
+
+    result = await db.execute(select(User).where(User.id == int(user_id)))
+    user = result.scalar_one_or_none()
+    if user is None:
+        return None
+
+    # Same revocation + disabled checks as get_current_user, but a failure just
+    # degrades to anonymous rather than raising.
+    if payload.get("tv", 0) != user.token_version or user.is_disabled:
+        return None
+
+    return user

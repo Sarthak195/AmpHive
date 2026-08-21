@@ -592,6 +592,10 @@ async def test_available_plugs_carry_watching_via_one_extra_query():
     db = _db(rows_result, watched_result, favorited_result, expire_result, reservations_result)
 
     with patch("backend.routers.plugs.gateway_is_live", return_value=True), \
+         patch("backend.routers.plugs.resolve_review_aggregates_batch",
+               AsyncMock(return_value={})), \
+         patch("backend.routers.plugs.resolve_photo_thumbnails_batch",
+               AsyncMock(return_value={})), \
          patch("backend.routers.plugs.resolve_price_display_batch",
                AsyncMock(return_value={1: (Decimal("5.00"), None, None),
                                        2: (Decimal("5.00"), None, None)})):
@@ -626,7 +630,11 @@ async def test_get_plug_reports_watching_true():
     )
 
     with patch("backend.routers.plugs.resolve_price_display",
-               AsyncMock(return_value=(Decimal("5.00"), None, None))):
+               AsyncMock(return_value=(Decimal("5.00"), None, None))), \
+         patch("backend.routers.plugs.resolve_review_aggregates_batch",
+               AsyncMock(return_value={})), \
+         patch("backend.routers.plugs.resolve_photo_thumbnails_batch",
+               AsyncMock(return_value={})):
         res = await get_plug(7, user, db)
 
     assert res.watching is True

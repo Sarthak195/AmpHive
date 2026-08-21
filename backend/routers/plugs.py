@@ -1,12 +1,14 @@
 """
 Plugs routes — moved verbatim from main.py (2026-07-07, TD#7 split).
 """
+import asyncio
 import logging
+import uuid
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import and_, delete, or_, select
+from fastapi import APIRouter, Depends, HTTPException, Request
+from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -14,26 +16,39 @@ from backend.database.db import get_db
 from backend.database.models import (
     CapacityRequest,
     ChargerGroup,
+    ChargingSession,
     Gateway,
     GatewayEvent,
     GroupMembership,
     Plug,
+    PlugPhoto,
+    PlugPhotoStatus,
     PlugReport,
     PlugReportStatus,
+    PlugReview,
     PlugStatus,
     PlugWatch,
+    SessionStatus,
     Tenant,
     User,
     UserFavorite,
 )
 from backend.schemas import (
+    PlugPhotoResponse,
     PlugReportCreateRequest,
     PlugReportResponse,
     PlugResponse,
+    PlugReviewCreateRequest,
+    PlugReviewResponse,
     PublicPlugResponse,
 )
 from backend.services.auth import (
     get_current_user,
+    get_current_user_optional,
+)
+from backend.services.photo_publish import (
+    PhotoPublishError,
+    upload_object,
 )
 from backend.services.pricing import resolve_price_display, resolve_price_display_batch
 from backend.services.rate_limit import public_map_rate_limiter, rate_limit_dependency
@@ -113,6 +128,120 @@ async def _reservation_fields_for_plugs(db, plug_ids, user_id, now):
                 end_at=res.end_at.isoformat(),
             )
     return fields
+
+
+async def resolve_review_aggregates_batch(db, plug_ids):
+    """
+    [Reviews] avg_rating (mean PlugReview.rating, 1 dp) + review_count for a
+    batch of plugs in ONE grouped query — same N+1-free discipline as
+    _reservation_fields_for_plugs / resolve_price_display_batch. Returns
+    {plug_id: (avg_rating|None, review_count)}; a plug with no reviews is simply
+    absent from the map, and the caller defaults it to (None, 0) so the UI can
+    tell "unrated" from "rated 0".
+    """
+    if not plug_ids:
+        return {}
+
+    rows = await db.execute(
+        select(
+            PlugReview.plug_id,
+            func.avg(PlugReview.rating),
+            func.count(PlugReview.id),
+        )
+        .where(PlugReview.plug_id.in_(plug_ids))
+        .group_by(PlugReview.plug_id)
+    )
+    return {
+        plug_id: (round(float(avg), 1) if avg is not None else None, int(count))
+        for plug_id, avg, count in rows.all()
+    }
+
+
+async def resolve_photo_thumbnails_batch(db, plug_ids):
+    """[Photos] One APPROVED photo URL per plug (the most recent) for the
+    map/list thumbnail, in ONE query — same N+1-free discipline as the review
+    aggregate. Returns {plug_id: url}; a plug with no approved photo is absent
+    (the caller defaults thumbnail_url to None)."""
+    if not plug_ids:
+        return {}
+
+    rows = await db.execute(
+        select(PlugPhoto.plug_id, PlugPhoto.url)
+        .where(
+            PlugPhoto.plug_id.in_(plug_ids),
+            PlugPhoto.status == PlugPhotoStatus.APPROVED,
+        )
+        .order_by(PlugPhoto.plug_id, PlugPhoto.created_at.desc())
+    )
+    out = {}
+    for plug_id, url in rows.all():
+        # Rows are ordered newest-first within each plug; keep the first seen.
+        out.setdefault(plug_id, url)
+    return out
+
+
+# [Photos] Accepted image types, by leading magic bytes. Kept tiny and explicit
+# (no Pillow/imghdr dependency) — we only need to reject non-images before
+# spending a network round-trip storing them.
+_PHOTO_MAX_BYTES = 8 * 1024 * 1024  # 8 MiB — generous for a phone photo.
+_PHOTO_MAGIC = (
+    (b"\xff\xd8\xff", "image/jpeg", "jpg"),
+    (b"\x89PNG\r\n\x1a\n", "image/png", "png"),
+)
+
+
+def _sniff_image(data: bytes):
+    """Return (content_type, ext) if ``data`` begins with a supported image
+    magic, else None. WebP is RIFF....WEBP (magic split across two ranges)."""
+    for magic, content_type, ext in _PHOTO_MAGIC:
+        if data.startswith(magic):
+            return content_type, ext
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp", "webp"
+    return None
+
+
+def _author_display(full_name: Optional[str], email: Optional[str]) -> str:
+    """Privacy-preserving label for a public review: the driver's first name if
+    they have a real full_name, else their email local-part with the tail
+    masked (``sat***``). NEVER the full email or the user id — the reviews read
+    is unauthenticated."""
+    name = (full_name or "").strip()
+    if name:
+        return name.split()[0]
+    local = (email or "").split("@")[0] or "driver"
+    if len(local) <= 3:
+        return local[0] + "***"
+    return local[:3] + "***"
+
+
+def _plug_review_response(review: PlugReview, *, author_display: str, is_mine: bool = False) -> PlugReviewResponse:
+    return PlugReviewResponse(
+        id=review.id,
+        plug_id=review.plug_id,
+        rating=review.rating,
+        body=review.body,
+        author_display=author_display,
+        created_at=review.created_at.isoformat() if review.created_at else None,
+        is_mine=is_mine,
+    )
+
+
+async def _has_completed_charge(db, plug_id: int, user_id: int) -> bool:
+    """[Reviews] The verified-charger gate: True iff this user has at least one
+    finished ChargingSession (COMPLETED or PAID) on this plug. A driver can't
+    rate a charger they never used. Served by ix_charging_sessions_plug_status /
+    ix_charging_sessions_user_status."""
+    row = await db.execute(
+        select(ChargingSession.id)
+        .where(
+            ChargingSession.plug_id == plug_id,
+            ChargingSession.user_id == user_id,
+            ChargingSession.status.in_([SessionStatus.COMPLETED, SessionStatus.PAID]),
+        )
+        .limit(1)
+    )
+    return row.scalar_one_or_none() is not None
 
 # ===========================================================================
 # Plug Endpoints
@@ -242,8 +371,18 @@ async def get_available_plugs(
         at=now,
     )
 
+    # [Reviews] avg_rating + review_count for the whole list in one grouped
+    # query — keeps this endpoint N+1-free (same shape as price_display above).
+    review_aggs = await resolve_review_aggregates_batch(
+        db, [plug.id for plug, *_ in all_rows]
+    )
+    photo_thumbs = await resolve_photo_thumbnails_batch(
+        db, [plug.id for plug, *_ in all_rows]
+    )
+
     responses = []
     for plug, group_name, group_is_public, _group_tariff_id, gateway, tenant in all_rows:
+        avg_rating, review_count = review_aggs.get(plug.id, (None, 0))
         gw_online = gateway_is_live(gateway, now)
         powered = plug_is_powered(plug, now)
         rate, changes_at, next_rate = price_display[plug.id]
@@ -273,6 +412,9 @@ async def get_available_plugs(
                 rated_power_w=plug.rated_power_w,
                 connector_type=plug.connector_type,
                 is_favorite=plug.id in favorited_plug_ids,
+                avg_rating=avg_rating,
+                review_count=review_count,
+                thumbnail_url=photo_thumbs.get(plug.id),
                 **reservation_fields.get(plug.id, {}),
             )
         )
@@ -345,9 +487,19 @@ async def get_public_plugs(db: AsyncSession = Depends(get_db)):
         at=now,
     )
 
+    # [Reviews] Public aggregate rating for every mapped plug in one grouped
+    # query (unauthenticated — no per-user data leaves here, just a mean+count).
+    review_aggs = await resolve_review_aggregates_batch(
+        db, [plug.id for plug, _, _, _, _, _ in mappable]
+    )
+    photo_thumbs = await resolve_photo_thumbnails_batch(
+        db, [plug.id for plug, _, _, _, _, _ in mappable]
+    )
+
     out = []
     for plug, _group_tariff_id, gateway, _tenant, lat, lon in mappable:
         rate, _changes_at, _next_rate = price_display[plug.id]
+        avg_rating, review_count = review_aggs.get(plug.id, (None, 0))
         out.append(
             PublicPlugResponse(
                 id=plug.id,
@@ -359,6 +511,9 @@ async def get_public_plugs(db: AsyncSession = Depends(get_db)):
                 gateway_online=gateway_is_live(gateway, now),
                 rated_power_w=plug.rated_power_w,
                 connector_type=plug.connector_type,
+                avg_rating=avg_rating,
+                review_count=review_count,
+                thumbnail_url=photo_thumbs.get(plug.id),
             )
         )
     return out
@@ -427,6 +582,15 @@ async def get_plug(
         )
     )).scalar_one_or_none() is not None
 
+    # [Reviews] avg_rating + review_count for this one plug (same grouped helper
+    # the lists use, over a single id).
+    avg_rating, review_count = (
+        await resolve_review_aggregates_batch(db, [plug.id])
+    ).get(plug.id, (None, 0))
+    thumbnail_url = (
+        await resolve_photo_thumbnails_batch(db, [plug.id])
+    ).get(plug.id)
+
     gw_online = gateway_is_live(gateway) if gateway else False
     powered = plug_is_powered(plug, now)
     return PlugResponse(
@@ -452,6 +616,9 @@ async def get_plug(
         rated_power_w=plug.rated_power_w,
         connector_type=plug.connector_type,
         is_favorite=is_favorite,
+        avg_rating=avg_rating,
+        review_count=review_count,
+        thumbnail_url=thumbnail_url,
         **reservation_fields.get(plug.id, {}),
     )
 
@@ -855,6 +1022,313 @@ async def report_plug_problem(
         )
 
     return _plug_report_response(report)
+
+
+# ===========================================================================
+# Plug reviews — verified-charger star ratings (database/models.py PlugReview)
+# ===========================================================================
+
+async def _plug_is_public(db, plug: Plug) -> bool:
+    """A plug is publicly visible when it is ungrouped/legacy (group_id NULL) or
+    sits in a public ChargerGroup — the same rule get_public_plugs filters on.
+    Used to decide whether an ANONYMOUS caller may read a plug's reviews."""
+    if plug.group_id is None:
+        return True
+    is_public = (await db.execute(
+        select(ChargerGroup.is_public).where(ChargerGroup.id == plug.group_id)
+    )).scalar_one_or_none()
+    return is_public is True
+
+
+@router.get(
+    "/api/plugs/{plug_id}/reviews",
+    response_model=List[PlugReviewResponse],
+    dependencies=[Depends(rate_limit_dependency(public_map_rate_limiter, "map"))],
+)
+async def list_plug_reviews(
+    plug_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: Optional[User] = Depends(get_current_user_optional),
+):
+    """
+    PUBLIC — the star reviews for one plug, newest first, for the discovery
+    "Photos & reviews" panel. No auth required (part of pre-signup discovery),
+    rate-limited on the same public-map limiter as GET /api/plugs/public.
+
+    Visibility mirrors the map: an ANONYMOUS caller may read reviews only for a
+    publicly-visible plug (ungrouped or public group) — a private/society plug
+    404s for them, exactly as it is absent from the public map. A SIGNED-IN
+    caller is held to the normal per-plug access rule (ensure_plug_group_access,
+    403 for a private group they haven't joined). `author_display` is a
+    privacy-preserving label; no email/user-id ever leaves here.
+    """
+    plug = (await db.execute(select(Plug).where(Plug.id == plug_id))).scalar_one_or_none()
+    if not plug:
+        raise HTTPException(status_code=404, detail=f"Plug with ID {plug_id} not found.")
+
+    if user is None:
+        if not await _plug_is_public(db, plug):
+            # Don't reveal a private plug's existence to an anonymous caller.
+            raise HTTPException(status_code=404, detail=f"Plug with ID {plug_id} not found.")
+    else:
+        await ensure_plug_group_access(db, plug, user)
+
+    rows = await db.execute(
+        select(PlugReview, User.full_name, User.email)
+        .join(User, User.id == PlugReview.driver_user_id)
+        .where(PlugReview.plug_id == plug_id)
+        .order_by(PlugReview.created_at.desc())
+        .limit(200)
+    )
+    out = []
+    for review, full_name, email in rows.all():
+        display = _author_display(full_name, email)
+        out.append(_plug_review_response(
+            review,
+            author_display=display,
+            is_mine=(user is not None and review.driver_user_id == user.id),
+        ))
+    return out
+
+
+@router.post("/api/plugs/{plug_id}/reviews", response_model=PlugReviewResponse)
+async def create_or_update_plug_review(
+    plug_id: int,
+    req: PlugReviewCreateRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Leave (or edit) a star review for a plug — VERIFIED CHARGERS ONLY. The
+    caller must be able to see the plug (ensure_plug_group_access, 403 for a
+    private group) AND have at least one finished ChargingSession
+    (completed|paid) on it (_has_completed_charge, 403 otherwise) — a driver
+    can't rate a charger they never used.
+
+    One standing review per driver per plug: a second POST is an EDIT, not a
+    duplicate. We insert optimistically and, on the UNIQUE(driver_user_id,
+    plug_id) IntegrityError, update the existing row instead (same idempotency
+    trick as favorite/watch) — so a double-tap race can't create two rows.
+    """
+    plug = (await db.execute(select(Plug).where(Plug.id == plug_id))).scalar_one_or_none()
+    if not plug:
+        raise HTTPException(status_code=404, detail=f"Plug with ID {plug_id} not found.")
+
+    await ensure_plug_group_access(db, plug, user)
+
+    if not await _has_completed_charge(db, plug.id, user.id):
+        raise HTTPException(
+            status_code=403,
+            detail="You can only review a charger you've completed a session at.",
+        )
+
+    gateway = (await db.execute(
+        select(Gateway).where(Gateway.id == plug.gateway_id)
+    )).scalar_one_or_none()
+    if not gateway:
+        raise HTTPException(status_code=404, detail="This charger's gateway no longer exists.")
+
+    now = datetime.now(timezone.utc)
+    review = PlugReview(
+        plug_id=plug.id,
+        tenant_id=gateway.tenant_id,
+        driver_user_id=user.id,
+        rating=req.rating,
+        body=req.body,
+    )
+    db.add(review)
+    try:
+        await db.commit()
+    except IntegrityError:
+        # Already reviewed this plug — treat the second submit as an edit.
+        await db.rollback()
+        existing = (await db.execute(
+            select(PlugReview).where(
+                and_(
+                    PlugReview.driver_user_id == user.id,
+                    PlugReview.plug_id == plug.id,
+                )
+            )
+        )).scalar_one()
+        existing.rating = req.rating
+        existing.body = req.body
+        existing.updated_at = now
+        await db.commit()
+        await db.refresh(existing)
+        review = existing
+    else:
+        await db.refresh(review)
+
+    logger.info(
+        "Plug review saved",
+        extra={"plug_id": plug.id, "review_id": review.id, "user_id": user.id},
+    )
+    return _plug_review_response(
+        review, author_display=_author_display(user.full_name, user.email), is_mine=True
+    )
+
+
+@router.delete("/api/plugs/{plug_id}/reviews/mine", status_code=204)
+async def delete_my_plug_review(
+    plug_id: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Remove the caller's OWN review of this plug (idempotent — a 204 whether
+    or not a row existed, same shape as un-favoriting)."""
+    await db.execute(
+        delete(PlugReview).where(
+            and_(
+                PlugReview.driver_user_id == user.id,
+                PlugReview.plug_id == plug_id,
+            )
+        )
+    )
+    await db.commit()
+    return None
+
+
+# ===========================================================================
+# Plug photos — driver-submitted, held for approval (models.py PlugPhoto)
+# ===========================================================================
+
+def _plug_photo_response(photo: PlugPhoto, *, is_mine: bool = False) -> PlugPhotoResponse:
+    return PlugPhotoResponse(
+        id=photo.id,
+        plug_id=photo.plug_id,
+        url=photo.url,
+        status=photo.status.value,
+        created_at=photo.created_at.isoformat() if photo.created_at else None,
+        is_mine=is_mine,
+    )
+
+
+@router.get(
+    "/api/plugs/{plug_id}/photos",
+    response_model=List[PlugPhotoResponse],
+    dependencies=[Depends(rate_limit_dependency(public_map_rate_limiter, "map"))],
+)
+async def list_plug_photos(
+    plug_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: Optional[User] = Depends(get_current_user_optional),
+):
+    """
+    PUBLIC — a plug's photos for the "Photos & reviews" panel. Anonymous callers
+    see only APPROVED photos (and only for a publicly-visible plug — a private
+    plug 404s, same rule as list_plug_reviews). A SIGNED-IN caller additionally
+    sees their OWN pending photos (so an uploader gets "waiting for review"
+    feedback) and is held to the normal per-plug access rule.
+    """
+    plug = (await db.execute(select(Plug).where(Plug.id == plug_id))).scalar_one_or_none()
+    if not plug:
+        raise HTTPException(status_code=404, detail=f"Plug with ID {plug_id} not found.")
+
+    if user is None:
+        if not await _plug_is_public(db, plug):
+            raise HTTPException(status_code=404, detail=f"Plug with ID {plug_id} not found.")
+        visibility = PlugPhoto.status == PlugPhotoStatus.APPROVED
+    else:
+        await ensure_plug_group_access(db, plug, user)
+        # Approved (public) OR the caller's own pending/rejected? Show approved
+        # to everyone and the caller's own PENDING (not their rejected ones).
+        visibility = or_(
+            PlugPhoto.status == PlugPhotoStatus.APPROVED,
+            and_(
+                PlugPhoto.uploaded_by_user_id == user.id,
+                PlugPhoto.status == PlugPhotoStatus.PENDING,
+            ),
+        )
+
+    rows = await db.execute(
+        select(PlugPhoto)
+        .where(and_(PlugPhoto.plug_id == plug_id, visibility))
+        .order_by(PlugPhoto.created_at.desc())
+        .limit(60)
+    )
+    return [
+        _plug_photo_response(p, is_mine=(user is not None and p.uploaded_by_user_id == user.id))
+        for p in rows.scalars()
+    ]
+
+
+@router.post("/api/plugs/{plug_id}/photos", response_model=PlugPhotoResponse, status_code=201)
+async def upload_plug_photo(
+    plug_id: int,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Upload a photo of a charger — VERIFIED CHARGERS ONLY (same gate as reviews:
+    ensure_plug_group_access + a finished ChargingSession here). HELD FOR
+    APPROVAL: the row lands PENDING and is invisible on the public map until a
+    CPO/admin approves it (routers/cpo/_plug_photos.py).
+
+    RAW body, NOT multipart (no python-multipart dependency — same convention as
+    the admin firmware upload). The bytes are size-guarded (413) and magic-byte
+    sniffed to a supported image type (JPEG/PNG/WebP, 400 otherwise) BEFORE being
+    published to the public bucket gs://amphive-plug-photos (keyless, off the
+    event loop via asyncio.to_thread — services/photo_publish.py).
+    """
+    plug = (await db.execute(select(Plug).where(Plug.id == plug_id))).scalar_one_or_none()
+    if not plug:
+        raise HTTPException(status_code=404, detail=f"Plug with ID {plug_id} not found.")
+
+    await ensure_plug_group_access(db, plug, user)
+
+    if not await _has_completed_charge(db, plug.id, user.id):
+        raise HTTPException(
+            status_code=403,
+            detail="You can only add photos to a charger you've completed a session at.",
+        )
+
+    gateway = (await db.execute(
+        select(Gateway).where(Gateway.id == plug.gateway_id)
+    )).scalar_one_or_none()
+    if not gateway:
+        raise HTTPException(status_code=404, detail="This charger's gateway no longer exists.")
+
+    body = await request.body()
+    if len(body) > _PHOTO_MAX_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Photo exceeds the {_PHOTO_MAX_BYTES // (1024 * 1024)} MiB limit.",
+        )
+    sniffed = _sniff_image(body)
+    if sniffed is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Uploaded file is not a supported image (JPEG, PNG or WebP).",
+        )
+    content_type, ext = sniffed
+
+    object_name = f"plug-{plug_id}/{uuid.uuid4().hex}.{ext}"
+    try:
+        url = await asyncio.to_thread(upload_object, object_name, body, content_type)
+    except PhotoPublishError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to store the photo: {exc}",
+        )
+
+    photo = PlugPhoto(
+        plug_id=plug.id,
+        tenant_id=gateway.tenant_id,
+        uploaded_by_user_id=user.id,
+        url=url,
+        object_name=object_name,
+        status=PlugPhotoStatus.PENDING,
+    )
+    db.add(photo)
+    await db.commit()
+    await db.refresh(photo)
+
+    logger.info(
+        "Plug photo uploaded (pending review)",
+        extra={"plug_id": plug.id, "photo_id": photo.id, "user_id": user.id},
+    )
+    return _plug_photo_response(photo, is_mine=True)
 
 
 # ===========================================================================

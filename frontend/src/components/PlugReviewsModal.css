@@ -1,0 +1,111 @@
+/* PlugReviewsModal — aggregate header, write form, and the review list. */
+.plug-reviews-agg {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.plug-reviews-agg-num {
+  font-size: 0.9rem;
+  color: var(--text-2, #5a6068);
+}
+
+.plug-reviews-form {
+  padding: 12px;
+  border: 1px solid var(--border, #e4e7ec);
+  border-radius: 10px;
+  background: var(--surface-2, #f8f9fb);
+}
+
+.plug-reviews-form .textarea {
+  margin-top: 8px;
+}
+
+.plug-reviews-photos {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.plug-photo-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(84px, 1fr));
+  gap: 6px;
+}
+
+.plug-photo {
+  position: relative;
+  display: block;
+  aspect-ratio: 1 / 1;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--border, #e4e7ec);
+}
+
+.plug-photo img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.plug-photo.is-pending img {
+  opacity: 0.6;
+}
+
+.plug-photo-badge {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  font-size: 0.62rem;
+  text-align: center;
+  padding: 2px;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+}
+
+.plug-photo-upload {
+  align-self: flex-start;
+  cursor: pointer;
+}
+
+.plug-photo-upload.is-busy {
+  pointer-events: none;
+  opacity: 0.7;
+}
+
+.plug-reviews-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-height: 40vh;
+  overflow-y: auto;
+}
+
+.plug-review-item {
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border, #e4e7ec);
+}
+
+.plug-review-item:last-child {
+  border-bottom: 0;
+}
+
+.plug-review-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.plug-review-author {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-2, #5a6068);
+}
+
+.plug-review-body {
+  margin: 4px 0 0;
+  font-size: 0.9rem;
+  color: var(--text-1, #1f2329);
+}
