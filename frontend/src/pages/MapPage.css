@@ -288,6 +288,23 @@
 
 .map-popup-price span { font-size: var(--text-xs); }
 
+.map-popup-thumb {
+  width: 100%;
+  height: 96px;
+  object-fit: cover;
+  border-radius: 8px;
+  margin-bottom: 4px;
+}
+
+.map-popup-rating {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  font-size: var(--text-xs);
+  color: var(--ink-2);
+}
+
 .map-popup-note {
   font-size: var(--text-xs);
   color: var(--ink-3);

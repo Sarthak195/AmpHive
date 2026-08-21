@@ -1,0 +1,53 @@
+/* StarRating — display (fractional overlay) + interactive input. Colors from
+   primitives.css tokens with sane fallbacks; the empty star uses a muted text
+   color, the filled star an amber accent. */
+.star-rating {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  color: var(--star-color, #f5a524);
+  line-height: 0;
+}
+
+.star-rating--display .star-rating-slot {
+  position: relative;
+  display: inline-flex;
+  color: var(--star-empty, var(--text-3, #b9bec7));
+}
+
+.star-rating-fill {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  display: inline-flex;
+  color: var(--star-color, #f5a524);
+}
+
+.star-rating--input .star-rating-btn {
+  background: none;
+  border: 0;
+  padding: 0 1px;
+  margin: 0;
+  cursor: pointer;
+  color: var(--star-empty, var(--text-3, #b9bec7));
+  display: inline-flex;
+  transition: transform 0.08s ease;
+}
+
+.star-rating--input .star-rating-btn:hover {
+  transform: scale(1.12);
+}
+
+/* A filled interactive star (fill=currentColor) needs the amber color; the
+   Star svg inherits currentColor for both stroke and fill. */
+.star-rating--input .star-rating-btn[aria-checked='true'],
+.star-rating--input .star-rating-btn:hover,
+.star-rating--input .star-rating-btn:focus-visible {
+  color: var(--star-color, #f5a524);
+}
+
+.star-rating--input .star-rating-btn:focus-visible {
+  outline: 2px solid var(--focus-ring, #4c8bf5);
+  outline-offset: 2px;
+  border-radius: 2px;
+}

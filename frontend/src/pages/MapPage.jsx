@@ -30,6 +30,7 @@ import usePoll from '../hooks/usePoll';
 import { PageHeader, ErrorState, EmptyState, Skeleton, StatusDot, Money, useToast } from '../components/ui';
 import MapComponent from '../components/MapComponent';
 import ReportProblemModal from '../components/ReportProblemModal';
+import PlugReviewsModal from '../components/PlugReviewsModal';
 import { AVAILABILITY_STATES, AVAILABILITY_LABELS, getPlugAvailability } from '../utils/plugAvailability';
 import useDocumentMeta from '../hooks/useDocumentMeta';
 import {
@@ -84,6 +85,7 @@ export default function MapPage() {
   const [flyTarget, setFlyTarget] = useState(null);
   const [geoBusy, setGeoBusy] = useState(false);
   const [reportPlug, setReportPlug] = useState(null);
+  const [reviewsPlug, setReviewsPlug] = useState(null);
 
   // [Discovery] Client-side list search + filters (shared utils/plugSearch).
   const [search, setSearch] = useState('');
@@ -163,6 +165,14 @@ export default function MapPage() {
     [toast]
   );
 
+  // [Reviews] After a write in the modal, patch this plug's aggregate in place
+  // so the popup/list reflect the new avg + count without a full refetch.
+  const patchReviewAgg = useCallback((plugId, agg) => {
+    setPlugs((prev) =>
+      prev.map((p) => (p.id === plugId ? { ...p, ...agg } : p))
+    );
+  }, []);
+
   const unlocatedCount = useMemo(
     () => plugs.filter((p) => p.latitude == null || p.longitude == null).length,
     [plugs]
@@ -220,6 +230,7 @@ export default function MapPage() {
             onSelectPlug={handleSelectPlug}
             onReportPlug={setReportPlug}
             onToggleFavorite={user ? toggleFavorite : undefined}
+            onOpenReviews={setReviewsPlug}
             flyTo={flyTarget}
             userLocation={userLocation}
           />
@@ -409,6 +420,13 @@ export default function MapPage() {
         onClose={() => setReportPlug(null)}
         plugId={reportPlug?.id}
         plugName={reportPlug?.name}
+      />
+
+      <PlugReviewsModal
+        open={Boolean(reviewsPlug)}
+        onClose={() => setReviewsPlug(null)}
+        plug={reviewsPlug}
+        onSaved={(agg) => reviewsPlug && patchReviewAgg(reviewsPlug.id, agg)}
       />
     </main>
   );
