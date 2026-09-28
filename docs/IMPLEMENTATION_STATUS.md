@@ -7,16 +7,17 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 
 ---
 
-## 0. Latest — 2026-09-28 Cloudflare front door for amphive.app / cpo.amphive.app (Caddy side live, DNS cutover pending)
+## 0. Latest — 2026-09-28 Cloudflare front door for amphive.app / cpo.amphive.app (LIVE — DNS cut over)
 
 Moving `amphive.app` + `cpo.amphive.app` behind Cloudflare's free HTTP proxy
 to cut latency for Indian users (origin is a `us-west1` e2-micro, ~240 ms RTT
 to India). `mqtt.amphive.app` and `mail.amphive.app` stay DNS-only / grey
 cloud — MQTT 8883 and SMTP/IMAP can't traverse the CF HTTP proxy. DNS is
-moving from the registrar (name.com) to Cloudflare's nameservers; that
-cutover is **PENDING the operator**.
+now served by Cloudflare's nameservers (`harlee`/`ridge.ns.cloudflare.com`,
+cut over from name.com 2026-09-28; the old name.com records were left in
+place, so switching the nameservers back is the rollback).
 
-**Live today:** the Caddy side. Global `trusted_proxies` now lists
+**Caddy side:** Global `trusted_proxies` now lists
 Cloudflare's published edge ranges + `client_ip_headers CF-Connecting-IP`,
 and every `reverse_proxy` sets `header_up X-Forwarded-For {client_ip}`
 (`deploy/config/Caddyfile.example`, `deploy/relay/deploy-relay.sh` both
@@ -38,9 +39,19 @@ directly, not routed through Cloudflare. See
 [DEPLOYMENT.md](DEPLOYMENT.md#cloudflare-front-door-amphiveapp-cpoamphiveapp--added-2026-09-28)
 and [SECURITY.md](SECURITY.md#6-operational-notes) for the full write-up.
 
-**Pending:** the actual DNS nameserver cutover from name.com to Cloudflare —
-until an operator does that, traffic isn't flowing through Cloudflare's
-proxy yet, though the origin is ready for it.
+**Verified after cutover (2026-09-28):** `.app` registry delegates to
+Cloudflare; apex + `cpo` resolve to Cloudflare anycast, `mqtt`/`mail` to the
+VM. HTTPS 200 on both hosts via the edge (the Universal SSL edge cert took a
+few minutes to appear after activation — expect a short TLS-handshake-failure
+window on a fresh zone), HSTS/CSP pass through, `/assets/*` `cf-cache-status:
+HIT` after the first fetch, `/api/*` `DYNAMIC` + `no-store`, Socket.io
+handshake offers the websocket upgrade, Google OAuth redirect intact, broker
+TLS on 8883 direct. Client IP: a marked request via Cloudflare and one direct
+to the origin both reached frontend-nginx with `X-Forwarded-For` = the real
+client IP. Measured from an Indian connection (edge colo MRS — Marseille; Indian
+traffic on the free plan is often not served from an Indian colo): median fresh
+connection page TTFB 728 → 582 ms, API 733 → 559 ms, main JS bundle total
+2925 → 954 ms (edge-cached).
 
 ---
 

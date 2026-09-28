@@ -478,15 +478,16 @@ BFG + force-push) to purge the dead values entirely.
 
 ## 6. Operational notes
 
-- [Added 2026-09-28, **Caddy side live; DNS cutover pending**] **Cloudflare
+- [Added 2026-09-28, **LIVE**] **Cloudflare
   front door + client-IP trust model.** `amphive.app` / `cpo.amphive.app`
   moved behind Cloudflare's free HTTP proxy to cut latency for Indian users
   (origin is a `us-west1` e2-micro, ~240 ms RTT to India). `mqtt.amphive.app`
   and `mail.amphive.app` are **deliberately not proxied** — they stay
   DNS-only / grey-cloud, because MQTT 8883 and SMTP/IMAP cannot traverse
-  Cloudflare's HTTP-only proxy. DNS itself is mid-migration from the
-  registrar (name.com) to Cloudflare's nameservers; that nameserver cutover
-  is **pending**, operator-gated.
+  Cloudflare's HTTP-only proxy. Cloudflare's nameservers answer for the zone
+  since 2026-09-28 (registrar still name.com). Verified end to end: a request
+  via Cloudflare and one direct to the origin both reached frontend-nginx
+  with `X-Forwarded-For` = the real client IP.
 
   **Trust model:** Caddy's global `trusted_proxies` now lists Cloudflare's
   published edge ranges plus `client_ip_headers CF-Connecting-IP`, and every

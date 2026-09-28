@@ -93,10 +93,10 @@ and `docker compose up -d backend`.
 cache-hits when only a few files changed). **DNS:** `amphive.app` (driver),
 `cpo.amphive.app` (CPO portal), `mqtt.amphive.app` (direct-MQTT broker) and
 `mail.amphive.app` (self-hosted mail) are records at the registrar (name.com)
-pointing at the relay VM. DuckDNS is retired. **As of 2026-09-28** DNS is
-mid-migration from name.com to Cloudflare's nameservers (see below) — the
-records themselves are unchanged, only who answers for them is moving, and
-that nameserver cutover is still PENDING (operator-gated).
+pointing at the relay VM. DuckDNS is retired. **Since 2026-09-28** Cloudflare's
+nameservers (`harlee`/`ridge.ns.cloudflare.com`) answer for the zone (see
+below) — the records are unchanged; the domain is still registered at
+name.com, whose old DNS records were left in place as the rollback.
 
 ### Cloudflare front door (`amphive.app`, `cpo.amphive.app`) — added 2026-09-28
 
@@ -150,10 +150,12 @@ deliberate trade rather than an oversight. See
 [SECURITY.md](SECURITY.md#6-operational-notes) for the client-IP trust model
 write-up.
 
-**Status 2026-09-28:** Caddy config is live and verified on the VM. DNS
-nameserver cutover from name.com to Cloudflare is still **pending** the
-operator — until it happens, traffic isn't actually flowing through
-Cloudflare's proxy yet, but the origin is ready for it.
+**Status 2026-09-28:** LIVE. Caddy config applied on the VM and the
+nameservers cut over to Cloudflare the same day; end-to-end verification
+(edge TLS, caching, Socket.io, real client IP at nginx, mqtt/mail direct) is
+recorded in [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md). On a fresh
+zone the Universal SSL edge certificate lags activation by a few minutes —
+HTTPS handshakes fail (TLS alert 40) until it lands.
 
 ### Backend dependency lockfile — `backend/requirements.lock.txt`
 
