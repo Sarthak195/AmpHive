@@ -91,8 +91,71 @@ and `docker compose up -d backend`.
 
 **Total time:** ~10–15 min, dominated by the on-box image builds (mostly
 cache-hits when only a few files changed). **DNS:** `amphive.app` (driver),
-`cpo.amphive.app` (CPO portal) and `mqtt.amphive.app` (direct-MQTT broker) are
-A records at the registrar pointing at the relay VM. DuckDNS is retired.
+`cpo.amphive.app` (CPO portal), `mqtt.amphive.app` (direct-MQTT broker) and
+`mail.amphive.app` (self-hosted mail) are records at the registrar (name.com)
+pointing at the relay VM. DuckDNS is retired. **Since 2026-09-28** Cloudflare's
+nameservers (`harlee`/`ridge.ns.cloudflare.com`) answer for the zone (see
+below) — the records are unchanged; the domain is still registered at
+name.com, whose old DNS records were left in place as the rollback.
+
+### Cloudflare front door (`amphive.app`, `cpo.amphive.app`) — added 2026-09-28
+
+`amphive.app` and `cpo.amphive.app` sit behind Cloudflare's free HTTP proxy
+(orange-cloud) to cut latency for Indian visitors — the origin is a
+`us-west1` `e2-micro`, ~240 ms RTT to India, and Cloudflare's edge terminates
+the TLS handshake close to the visitor instead. `mqtt.amphive.app` and
+`mail.amphive.app` stay **DNS-only** (grey-cloud): MQTT on 8883 and SMTP/IMAP
+cannot pass through Cloudflare's HTTP-only proxy, so those two records keep
+resolving straight to the relay VM's IP.
+
+**Caddy side (live):** the global `trusted_proxies` block now lists
+Cloudflare's published edge ranges instead of the old compose-private-network
+ranges, plus `client_ip_headers CF-Connecting-IP`, plus
+`header_up X-Forwarded-For {client_ip}` on every `reverse_proxy` block — see
+`deploy/config/Caddyfile.example` for the annotated reference and
+`deploy/relay/deploy-relay.sh` for the starter-Caddyfile generator (both
+updated 2026-09-28; the live Caddyfile on the VM was hand-edited to match and
+verified with `caddy validate` + reload). Net effect: from a request that
+really came through Cloudflare, Caddy trusts `CF-Connecting-IP` only from
+those ranges and collapses the upstream X-Forwarded-For to that single
+vouched address (a spoofed XFF from the visitor is discarded); from a direct
+hit on the origin IP (bypassing Cloudflare — still possible, see below),
+`CF-Connecting-IP` is ignored and XFF falls back to the real peer. Either way
+Caddy still appends exactly one XFF hop and frontend-nginx appends the other,
+so `backend/services/rate_limit.py`'s `TRUSTED_PROXY_HOPS=2` needed **no
+change** — only its topology comments were updated to spell out the
+Cloudflare hop.
+
+**Cloudflare dashboard settings (free plan):**
+
+| Setting | Value | Why |
+|---|---|---|
+| SSL/TLS mode | Full (strict) | Origin already has valid Let's Encrypt certs via Caddy. |
+| Always Use HTTPS | OFF | Caddy already 308-redirects http→https itself; leaving CF's edge redirect off keeps Let's Encrypt HTTP-01 renewal on :80 flowing through CF to Caddy untouched — Full mode connects to origin with the visitor's scheme, and TLS-ALPN-01 can't work through the proxy. |
+| Rocket Loader | OFF | Rewrites HTML / injects scripts — conflicts with the strict CSP. |
+| Email Address Obfuscation | OFF | Same reason — rewrites HTML against the strict CSP. |
+| Bot Fight Mode | OFF | Can JS-challenge API/Socket.io clients. |
+| WebSockets | ON | Required for Socket.io. |
+| Caching | left at CF defaults | `/assets/*` are `public, max-age=31536000, immutable`; `index.html` is `no-cache`; every `/api` response already carries `Cache-Control: no-store` via `security_headers_middleware` in `backend/main.py`, so CSV exports (e.g. `/api/cpo/invoices.csv`) are never edge-cached despite `.csv` being a CF default-cached extension. |
+
+Cloudflare's IP ranges change rarely; refresh `trusted_proxies` from
+<https://www.cloudflare.com/ips-v4> and `/ips-v6` if they ever do.
+
+**Deliberately not done:** the GCP firewall was **not** locked to Cloudflare's
+ranges on 80/443 — the origin IP stays publicly reachable directly, because
+`mail.amphive.app` is grey-cloud and its Let's Encrypt certificate issuance
+needs :80 reachable directly (not routed through Cloudflare). Caddy's trust
+model handles a direct hit correctly either way (see above), so this is a
+deliberate trade rather than an oversight. See
+[SECURITY.md](SECURITY.md#6-operational-notes) for the client-IP trust model
+write-up.
+
+**Status 2026-09-28:** LIVE. Caddy config applied on the VM and the
+nameservers cut over to Cloudflare the same day; end-to-end verification
+(edge TLS, caching, Socket.io, real client IP at nginx, mqtt/mail direct) is
+recorded in [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md). On a fresh
+zone the Universal SSL edge certificate lags activation by a few minutes —
+HTTPS handshakes fail (TLS alert 40) until it lands.
 
 ### Backend dependency lockfile — `backend/requirements.lock.txt`
 

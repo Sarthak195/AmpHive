@@ -119,10 +119,24 @@ class SlidingWindowRateLimiter:
                 del self._hits[key]
 
 
-# Production request path is: client → Caddy → frontend-nginx → backend. Both
-# Caddy and frontend-nginx APPEND exactly one X-Forwarded-For entry (Caddy
-# appends the real client it peers with; nginx appends Caddy), so the real
-# client sits a fixed 2 hops from the RIGHT of the chain.
+# Production request path (since 2026-09-28) is: client → Cloudflare edge →
+# Caddy → frontend-nginx → backend, for amphive.app / cpo.amphive.app — the
+# only two hostnames Cloudflare proxies. (mqtt.amphive.app and
+# mail.amphive.app are DNS-only / grey-cloud: MQTT 8883 and SMTP/IMAP can't
+# traverse the CF HTTP proxy, and neither goes through this HTTP stack at
+# all.) The Cloudflare hop does NOT add a third trusted hop here, because
+# Caddy's global `trusted_proxies`/`client_ip_headers CF-Connecting-IP`
+# config (deploy/config/Caddyfile.example, deploy/relay/deploy-relay.sh)
+# collapses it before this module ever sees the chain: from a request that
+# actually came through Cloudflare, Caddy trusts CF-Connecting-IP and writes
+# the upstream X-Forwarded-For as that ONE vouched client IP (discarding
+# anything the visitor tried to prepend); from a direct hit on the origin
+# (bypassing Cloudflare — deliberately still reachable, since
+# mail.amphive.app's Let's Encrypt HTTP-01 renewal needs :80 open directly)
+# Caddy ignores CF-Connecting-IP and falls back to the real peer IP. Either
+# way, Caddy still APPENDS exactly one X-Forwarded-For entry, same as before
+# Cloudflare, and frontend-nginx appends the other (Caddy) — so the real
+# client still sits a fixed 2 hops from the RIGHT of the chain.
 _DEFAULT_TRUSTED_PROXY_HOPS = 2
 
 
@@ -145,7 +159,8 @@ def _trusted_proxy_hops() -> int:
 
 
 def client_ip(request: Request) -> str:
-    """Best-effort client IP behind the Caddy → frontend-nginx proxy chain.
+    """Best-effort client IP behind the (Cloudflare →) Caddy → frontend-nginx
+    proxy chain.
 
     X-Forwarded-For is a comma-separated chain that honest proxies APPEND to on
     the RIGHT — each proxy adds the address it received the connection from — so
@@ -161,6 +176,14 @@ def client_ip(request: Request) -> str:
     If the chain is shorter than the trusted-hop count (a direct hit on the
     backend's :8000, or a misconfigured proxy), no forwarded token is
     trustworthy and we fall back to the real peer address, then to "unknown".
+
+    amphive.app / cpo.amphive.app sit behind Cloudflare's proxy as of
+    2026-09-28 (mqtt.amphive.app / mail.amphive.app do not — see
+    ``_DEFAULT_TRUSTED_PROXY_HOPS`` above). That does not change the hop count
+    here: Caddy is configured to trust only Cloudflare's edge ranges for the
+    ``CF-Connecting-IP`` header and to write X-Forwarded-For as that single
+    vouched address, so this function still only ever needs to peel off
+    Caddy's and nginx's two appended hops.
     """
     return client_ip_from_forwarded(
         request.headers.get("x-forwarded-for", ""),
