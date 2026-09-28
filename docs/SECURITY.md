@@ -478,6 +478,41 @@ BFG + force-push) to purge the dead values entirely.
 
 ## 6. Operational notes
 
+- [Added 2026-09-28, **Caddy side live; DNS cutover pending**] **Cloudflare
+  front door + client-IP trust model.** `amphive.app` / `cpo.amphive.app`
+  moved behind Cloudflare's free HTTP proxy to cut latency for Indian users
+  (origin is a `us-west1` e2-micro, ~240 ms RTT to India). `mqtt.amphive.app`
+  and `mail.amphive.app` are **deliberately not proxied** — they stay
+  DNS-only / grey-cloud, because MQTT 8883 and SMTP/IMAP cannot traverse
+  Cloudflare's HTTP-only proxy. DNS itself is mid-migration from the
+  registrar (name.com) to Cloudflare's nameservers; that nameserver cutover
+  is **pending**, operator-gated.
+
+  **Trust model:** Caddy's global `trusted_proxies` now lists Cloudflare's
+  published edge ranges plus `client_ip_headers CF-Connecting-IP`, and every
+  `reverse_proxy` sets `header_up X-Forwarded-For {client_ip}`
+  (`deploy/config/Caddyfile.example`, `deploy/relay/deploy-relay.sh`). From a
+  request that genuinely arrived via Cloudflare, Caddy trusts
+  `CF-Connecting-IP` only because the peer is in those ranges, and writes the
+  upstream XFF as that one vouched address — any XFF the visitor tried to
+  prepend is discarded. **The origin IP is still publicly reachable
+  directly** (the GCP firewall was **not** locked to Cloudflare's ranges on
+  80/443 — deliberately: `mail.amphive.app`'s Let's Encrypt HTTP-01
+  certificate issuance needs :80 reachable directly, not routed through
+  Cloudflare, and locking the firewall to CF ranges would break it). A direct
+  hit on the origin is still handled correctly by the trust model: Caddy sees
+  an untrusted peer, ignores any `CF-Connecting-IP` header the caller sends,
+  and falls back to the real TCP peer address for XFF — so a direct caller
+  cannot spoof identity to poison `backend/services/rate_limit.py`'s per-IP
+  buckets either. Either way Caddy still appends exactly one XFF hop and
+  frontend-nginx appends the other, so `TRUSTED_PROXY_HOPS=2` needed **no
+  change** — only its topology comments were updated. Verified with `caddy
+  validate` + reload against the live Caddyfile, and the XFF/CF-Connecting-IP
+  semantics tested on caddy v2.11.4 in a throwaway container. Cloudflare
+  dashboard settings (SSL/TLS Full (strict), Always Use HTTPS off, Rocket
+  Loader/Email Obfuscation/Bot Fight Mode off, WebSockets on) and the
+  reasoning for each are recorded in
+  [DEPLOYMENT.md](DEPLOYMENT.md#cloudflare-front-door-amphiveapp-cpoamphiveapp--added-2026-09-28).
 - The **VM public IP is ephemeral** and is recorded inconsistently across docs
   (`35.200.131.98`, `34.100.200.152`, and others). The committed
   `amphive_tunnel.conf` endpoint will break whenever the VM IP changes. Prefer a

@@ -7,7 +7,44 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 
 ---
 
-## 0. Latest — 2026-08-18 production-readiness audit: privacy, data rights, SEO, a11y
+## 0. Latest — 2026-09-28 Cloudflare front door for amphive.app / cpo.amphive.app (Caddy side live, DNS cutover pending)
+
+Moving `amphive.app` + `cpo.amphive.app` behind Cloudflare's free HTTP proxy
+to cut latency for Indian users (origin is a `us-west1` e2-micro, ~240 ms RTT
+to India). `mqtt.amphive.app` and `mail.amphive.app` stay DNS-only / grey
+cloud — MQTT 8883 and SMTP/IMAP can't traverse the CF HTTP proxy. DNS is
+moving from the registrar (name.com) to Cloudflare's nameservers; that
+cutover is **PENDING the operator**.
+
+**Live today:** the Caddy side. Global `trusted_proxies` now lists
+Cloudflare's published edge ranges + `client_ip_headers CF-Connecting-IP`,
+and every `reverse_proxy` sets `header_up X-Forwarded-For {client_ip}`
+(`deploy/config/Caddyfile.example`, `deploy/relay/deploy-relay.sh` both
+updated; live Caddyfile hand-edited to match, verified with `caddy validate`
++ reload, semantics tested on caddy v2.11.4 in a throwaway container). From a
+Cloudflare peer the upstream XFF collapses to the vouched `CF-Connecting-IP`
+value only (a spoofed XFF is discarded); from an untrusted peer
+`CF-Connecting-IP` is ignored and XFF falls back to the real peer IP —
+`backend/services/rate_limit.py`'s `TRUSTED_PROXY_HOPS=2` is unchanged
+(Caddy still appends one hop, frontend-nginx the other), only its topology
+comments were updated. Cloudflare dashboard: SSL/TLS Full (strict), Always
+Use HTTPS OFF (Caddy already redirects; keeps ACME HTTP-01 on :80 flowing
+through CF untouched), Rocket Loader / Email Obfuscation / Bot Fight Mode
+OFF (conflict with the strict CSP / would JS-challenge API clients),
+WebSockets ON (Socket.io). GCP firewall on 80/443 was **deliberately not**
+locked to Cloudflare's ranges — the origin IP stays directly reachable
+because `mail.amphive.app`'s Let's Encrypt HTTP-01 renewal needs :80 open
+directly, not routed through Cloudflare. See
+[DEPLOYMENT.md](DEPLOYMENT.md#cloudflare-front-door-amphiveapp-cpoamphiveapp--added-2026-09-28)
+and [SECURITY.md](SECURITY.md#6-operational-notes) for the full write-up.
+
+**Pending:** the actual DNS nameserver cutover from name.com to Cloudflare —
+until an operator does that, traffic isn't flowing through Cloudflare's
+proxy yet, though the origin is ready for it.
+
+---
+
+## 0.0001 — 2026-08-18 production-readiness audit: privacy, data rights, SEO, a11y
 
 A whole-product audit (35 areas, from secrets and injection through to mobile
 UX and error pages) plus the remediation batch. Full security detail is in

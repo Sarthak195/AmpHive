@@ -275,12 +275,25 @@ if [ ! -f "$WORKDIR/Caddyfile" ]; then
     echo "{"
     [ -n "$acme_email" ] && echo "    email $acme_email"
     echo "    servers {"
-    echo "        # M3: trust ONLY the compose private network as a proxy hop, so"
-    echo "        # a direct internet client cannot spoof X-Forwarded-For to poison"
-    echo "        # the backend's per-IP rate limiter (see backend rate_limit.py)."
-    echo "        # Caddy is the edge here, so its immediate peer is the real"
-    echo "        # client; these ranges make Caddy write a clean XFF = client IP."
-    echo "        trusted_proxies static 172.16.0.0/12 192.168.0.0/16 10.0.0.0/8"
+    echo "        # M3 (updated 2026-09-28 for the Cloudflare front door): amphive.app"
+    echo "        # and cpo.amphive.app sit behind Cloudflare's free HTTP proxy now"
+    echo "        # (mqtt.amphive.app and mail.amphive.app stay DNS-only / grey cloud —"
+    echo "        # MQTT 8883 and SMTP/IMAP can't traverse the CF HTTP proxy), so"
+    echo "        # Caddy's peer is a Cloudflare edge IP, not the visitor. These are"
+    echo "        # Cloudflare's published edge ranges (refresh occasionally from"
+    echo "        # https://www.cloudflare.com/ips-v4 and /ips-v6 — they change rarely)."
+    echo "        # Combined with client_ip_headers below, Caddy trusts CF-Connecting-IP"
+    echo "        # ONLY from these ranges and writes the upstream X-Forwarded-For as"
+    echo "        # that single vouched client IP — a spoofed XFF from the visitor is"
+    echo "        # discarded. From an untrusted peer (a direct hit on the origin IP,"
+    echo "        # bypassing Cloudflare — deliberately still possible; the firewall"
+    echo "        # was NOT locked to these ranges because mail.amphive.app's Let's"
+    echo "        # Encrypt HTTP-01 renewal needs :80 reachable directly)"
+    echo "        # CF-Connecting-IP is ignored and XFF falls back to the real peer IP."
+    echo "        # Either way the backend's per-IP rate limiter (see backend"
+    echo "        # rate_limit.py) sees a clean, trustworthy single-value XFF."
+    echo "        trusted_proxies static 173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22 2400:cb00::/32 2606:4700::/32 2803:f800::/32 2405:b500::/32 2405:8100::/32 2a06:98c0::/29 2c0f:f248::/32"
+    echo "        client_ip_headers CF-Connecting-IP"
     echo "    }"
     echo "}"
     echo
@@ -301,7 +314,15 @@ if [ ! -f "$WORKDIR/Caddyfile" ]; then
       echo "$1 {"
       echo "    encode gzip"
       hdr
-      echo "    reverse_proxy frontend:80"
+      # header_up pins the upstream's X-Forwarded-For to the single {client_ip}
+      # the trusted_proxies block above resolved (Cloudflare's vouched
+      # CF-Connecting-IP when behind Cloudflare, the real peer otherwise)
+      # instead of Caddy's default of appending to whatever XFF the client
+      # sent — so frontend-nginx's own append still lands the backend's
+      # TRUSTED_PROXY_HOPS=2 exactly where rate_limit.py expects it.
+      echo "    reverse_proxy frontend:80 {"
+      echo "        header_up X-Forwarded-For {client_ip}"
+      echo "    }"
       echo "}"
       echo
     }
@@ -346,7 +367,9 @@ if [ ! -f "$WORKDIR/Caddyfile" ]; then
     echo "http:// {"
     echo "    encode gzip"
     hdr
-    echo "    reverse_proxy frontend:80"
+    echo "    reverse_proxy frontend:80 {"
+    echo "        header_up X-Forwarded-For {client_ip}"
+    echo "    }"
     echo "}"
   } | sudo tee "$WORKDIR/Caddyfile" >/dev/null
 else
