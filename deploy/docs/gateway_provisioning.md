@@ -32,7 +32,7 @@ way, and none of them is a copy of another:
 
 | Where | What is kept there | How you change it |
 |-------|--------------------|-------------------|
-| **1. On the device** (its NVS flash, the `storage` settings) | The site's Wi-Fi name + password, the Tapo account (email + password) the gateway uses to talk to the plug, the gateway's broker password, and the setup code (the password of its setup Wi-Fi; printed in the serial log whenever the portal starts, and on the unit's label if it has one) | The setup portal: join the gateway's Wi-Fi **`AmpHive_Setup_XXXX`** and open `http://192.168.4.1`. Or, with the board on a USB cable, the [USB tool below](#provision-over-usb-no-phone) |
+| **1. On the device** (its NVS flash, the `storage` settings) | The site's Wi-Fi name + password, the Tapo account (email + password) the gateway uses to talk to the plug, the gateway's broker password, and the setup code (the password of its setup Wi-Fi; printed in the serial log whenever the portal starts, and on the unit's label if it has one) | On a fresh or un-joined device, the setup portal: join the gateway's Wi-Fi **`AmpHive_Setup_XXXX`** and open `http://192.168.4.1`. The firmware opens the portal only when it has no saved Wi-Fi or can't join the saved network at boot, so a deployed gateway is changed with the [USB tool below](#provision-over-usb-no-phone) (board on a USB cable); see [Re-credentialing](#re-credentialing-a-deployed-device) |
 | **2. On the server** (the backend database) | The plug roster: which plugs belong to this gateway, their LAN IPs, and any per-plug current cap | The CPO dashboard / plug API. The backend pushes the roster to the gateway as a retained message on `amphive/gateways/<id>/config` whenever a plug is created, edited or deleted, and again every time the gateway (re)connects |
 | **3. On the broker** (mosquitto's passwd file on the VM) | The gateway's MQTT account: username = the gateway id (its MAC, e.g. `1cc3abb4fb54`) and a hash of its password | `deploy/scripts/add_gateway_user.ps1` (step B below) |
 
@@ -101,7 +101,12 @@ subscribing as the gateway, and prints the password **once**. It is not
 stored anywhere, so hand it straight to the installer. The username is the
 `gateway_id`; the installer types only the password. (`-Password <pwd>` uses
 your own instead, 16-63 chars of `[A-Za-z0-9_-]`, but leaves it in your shell
-history.) Run for an existing account, it **resets** the password.
+history.) Run for an existing account, it **resets** the password, and the
+gateway loses its broker login straight away; see
+[Re-credentialing a deployed device](#re-credentialing-a-deployed-device).
+For an existing account it first asks the database and refuses (exit 9)
+while any of the gateway's plugs has an active charging session; `-Force`
+skips that check.
 
 The script uploads `deploy/scripts/relay_set_gateway_password.sh` and runs it
 over plain OpenSSH (default `Sarthak@8.235.4.66`; `-VmUser`/`-VmIp`/`-KeyFile`
@@ -138,8 +143,9 @@ On the device serial you should see:
 
 ## Provision over USB (no phone)
 
-The setup portal needs a phone or laptop on the gateway's setup Wi-Fi. With
-the board on a USB cable instead, write the same settings with
+The setup portal needs a phone or laptop on the gateway's setup Wi-Fi, and it
+only opens on a fresh or un-joined device. With the board on a USB cable
+instead, write the same settings with
 [`tools/gateway_provision/provision_nvs.py`](../../tools/gateway_provision/README.md).
 It builds the NVS partition from a secrets file kept **outside the repo**,
 checks it, and flashes it with esptool. It never prints a secret value.
@@ -158,23 +164,32 @@ checks it, and flashes it with esptool. It never prints a secret value.
 > it. Check first** (CPO dashboard: no active session on any of its plugs).
 > The tool asks you to type the gateway id before it writes.
 
-1. Get the gateway's broker password (step B) and fill in a secrets file
+1. **Check first: no active session** on any of the gateway's plugs (CPO
+   dashboard). For a gateway that already has a broker account this comes
+   before step 2: step 2 resets its password, which locks the gateway out of
+   the broker at once (`add_gateway_user.ps1` refuses while the database
+   shows an active session; `-Force` skips that). Then do steps 2-5 in one
+   sitting, because the gateway can't reach the broker between the reset and
+   the write.
+2. Get the gateway's broker password (step B) and fill in a secrets file
    outside the repo (format in the
    [tool's README](../../tools/gateway_provision/README.md)): Wi-Fi, Tapo
    account, `mqtt_pwd`, and the unit's existing `setup_code` from its label.
    Without it, the firmware generates a new code and the label goes stale.
-2. Activate ESP-IDF v5.3.x in the shell (`. <IDF>\export.ps1`), or pass
+3. Activate ESP-IDF v5.3.x in the shell (`. <IDF>\export.ps1`), or pass
    `--idf-python` and `--nvs-tool`.
-3. Build and verify. This doesn't touch the device:
+4. Build and verify. This doesn't touch the device:
 
    ```powershell
    python tools\gateway_provision\provision_nvs.py --gateway-id 1cc3abb4fb54 `
        --secrets <outside-repo>\gw-1cc3abb4fb54.local.txt --out <outside-repo>\nvs.bin
    ```
 
-4. Confirm no session is active, then re-run with `--write COM<n>` and type
-   the gateway id when asked.
-5. The gateway reboots, joins Wi-Fi and logs in to the broker; check
+   Both files hold the secrets in plain text, so the tool refuses a
+   `--secrets` or `--out` path inside the repo checkout.
+5. Check again that no session is active, then re-run with `--write COM<n>`
+   and type the gateway id when asked.
+6. The gateway reboots, joins Wi-Fi and logs in to the broker; check
    [Verify](#verify). Delete `nvs.bin` afterwards (the secrets are in it in
    plain text).
 
@@ -182,11 +197,33 @@ checks it, and flashes it with esptool. It never prints a secret value.
 
 ## Re-credentialing a deployed device
 
-To rotate a gateway's broker password, run `add_gateway_user.ps1 -GatewayId
-<id>` (it resets the existing account), then give the device the new password
-through the setup portal's MQTT Password field or the USB tool above. Between
-those two steps the gateway cannot log in, so do it when you can reach the
-device, and never during a charging session.
+The setup portal is **not** an option on a deployed gateway. The firmware
+opens it only when it has no saved Wi-Fi or can't join the saved network at
+boot (after a few retries); there is no button or other trigger, and a
+gateway that is on its Wi-Fi never opens it, not even when the broker
+rejects its password. So to rotate a deployed gateway's broker password:
+
+1. Check the CPO dashboard: **no active session** on any of its plugs.
+   Resetting the account locks the gateway out at once, so a running session
+   would carry on under the firmware's local watchdogs only, unbilled, until
+   the backend's stale-session reaper ended it. (`add_gateway_user.ps1`
+   refuses while the database shows an active session; `-Force` skips the
+   check, e.g. to lock out a compromised gateway.)
+2. Run `add_gateway_user.ps1 -GatewayId <id>`. It resets the existing
+   account.
+3. Straight away, write the new password with the
+   [USB tool](#provision-over-usb-no-phone), filling in **every** value
+   (Wi-Fi, Tapo account, the label's `setup_code` and the new `mqtt_pwd`),
+   because it replaces the whole NVS.
+
+Without a USB cable, the only other way in is to force the portal: power the
+gateway up while its site Wi-Fi is unavailable (router off, or the gateway
+out of range). Once its join attempts fail it opens `AmpHive_Setup_XXXX`
+(and reboots to retry Wi-Fi after 10 idle minutes). Join it, then **bring
+the site Wi-Fi back before you submit**: the portal tests the Wi-Fi before
+saving and won't save while it can't connect. Fill in every field, with the
+new password under "Installer options"; the save rewrites the Wi-Fi and Tapo
+values too.
 
 ---
 

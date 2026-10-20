@@ -86,6 +86,12 @@ jobs:
         run: pytest backend/tests -q --cov=backend --cov-report=term-missing --cov-fail-under=66
         env:
           TEST_DATABASE_URL: postgresql+asyncpg://postgres:ci@localhost:5432/amphive_test
+      - name: Run tools tests
+        # tools/tests: the fake-plug simulator and the gateway USB
+        # provisioning tool (tools/gateway_provision), whose --write path
+        # flashes a real gateway. Pure Python, no IDF, serial port, broker or
+        # DB; they need only pytest and paho-mqtt, both installed above.
+        run: pytest tools/tests -q
 
   frontend-lint:
     runs-on: ubuntu-latest

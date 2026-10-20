@@ -16,9 +16,15 @@
 #   sudo docker logs -f amphive-fake-plug                                  # tail
 #   sudo docker compose -p fakeplug -f docker-compose.fakeplug.yml down    # stop
 # `down` removes the container, so nothing brings it back on its own. The
-# restart policy is `unless-stopped` (it was `always`): a plain
-# `docker stop amphive-fake-plug` now also stays stopped across a VM reboot or
-# dockerd restart, which `always` silently undid.
+# restart policy is now `unless-stopped` (it was `always`), so a plain
+# `docker stop amphive-fake-plug` also stays stopped across a VM reboot or
+# dockerd restart - but ONLY for a container created from this version of
+# the file: Docker fixes the policy at creation. The container deployed
+# before 2026-10-20 keeps `always` (a reboot brings it back) until it is
+# removed with `down` or updated, once, on the VM:
+#   sudo docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' amphive-fake-plug
+#   sudo docker update --restart=unless-stopped amphive-fake-plug   # works while stopped
+# And `up -d` from an older copy of this file gives it `always` again.
 #
 # It reuses the already-built `amphive_backend` image (python + paho-mqtt —
 # see backend/requirements.txt), mounts the sim script, joins the running

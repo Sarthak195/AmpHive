@@ -25,7 +25,11 @@ whichever is easier. The full runbook is
   and `--nvs-tool <IDF>/components/nvs_flash/nvs_partition_tool/nvs_tool.py`.
 - The gateway id: its MAC as 12 lowercase hex characters, e.g. `1cc3abb4fb54`.
   It's shown on the setup portal page and in the serial log.
-- Its broker password, from `deploy/scripts/add_gateway_user.ps1`.
+- Its broker password, from `deploy/scripts/add_gateway_user.ps1`. For a
+  gateway that already has an account this **resets** it, which locks the
+  gateway out of the broker until you write the new password, so check that
+  no session is active *before* running it (it refuses while the database
+  shows one), then build and write in one sitting.
 - A secrets file **kept outside the repo**:
 
   ```
@@ -69,11 +73,16 @@ nvs offset/size come from `firmware/partitions_ota.csv`.
   The temporary CSV the generator needs (plain text) is always deleted, even
   when the build fails. The built `nvs.bin` *does* hold the secrets in plain
   text, so delete it when you're done.
+- **Secrets stay out of git.** The tool refuses a `--secrets` or `--out` path
+  inside the repo checkout (`--allow-in-repo` overrides, for a gitignored
+  path only), and `.gitignore` also covers `*.local.txt`, `nvs*.bin` and
+  `*.bin.csv` as a backstop.
 - **Only the `storage` settings are written.** Every other NVS key is gone
   afterwards: the session record, energy counters, the offline log, and any
   setting not in your file.
 - Not for flash-encrypted units (`firmware/partitions_ota_enc.csv`); those need
   encrypted NVS, which this tool doesn't produce. No fielded unit uses it.
-- Tests (pure logic, no IDF/serial needed):
-  `python -m pytest tools/tests/test_provision_nvs.py`. CI doesn't run them; it
-  covers `backend/` only.
+- Tests (pure logic, no IDF/serial needed; they include the exact esptool
+  command `--write` runs and its confirmation gate):
+  `python -m pytest tools/tests/test_provision_nvs.py`. CI runs all of
+  `tools/tests` in its backend job.

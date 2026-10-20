@@ -17,7 +17,8 @@
 # into the repo first); never overwrite it with this file.
 #
 # Exit codes: 0 ok | 1 no DB container / pg_dump failed | 2 upload failed
-# (local copy kept) | 3 refused by the guard below (nothing done).
+# (local copy kept) | 3 refused by the guard below (nothing done) | 4 backup
+# uploaded, but the LAST_SUCCESS marker could not be updated.
 #
 # Design:
 #   - pg_dump -Fc (custom format): compressed, supports selective pg_restore.
@@ -61,10 +62,17 @@ mkdir -p "$LOCAL" 2>/dev/null
     || guard_fail "cannot write $LOCAL as $ME - owned by root? never run this script with sudo (fix: sudo chown -R $ME: $LOCAL $LOG)."
 ( : >> "$LOG" ) 2>/dev/null \
     || guard_fail "cannot write $LOG as $ME - owned by root? never run this script with sudo (fix: sudo chown $ME: $LOG)."
-[ ! -e "$LOCAL/LAST_SUCCESS" ] || [ -w "$LOCAL/LAST_SUCCESS" ] \
-    || guard_fail "cannot write $LOCAL/LAST_SUCCESS as $ME - owned by root? never run this script with sudo (fix: sudo chown -R $ME: $LOCAL)."
 
 log() { echo "[$(date -u '+%F %T')] $*" >> "$LOG"; }
+
+# NOT fatal: LAST_SUCCESS is only a freshness marker, and step 5 replaces it
+# by rename, which needs only the directory (checked above). So a marker left
+# root-owned by a sudo run is repaired by the next good run instead of
+# costing a backup.
+if [ -e "$LOCAL/LAST_SUCCESS" ] && [ ! -w "$LOCAL/LAST_SUCCESS" ]; then
+    echo "backup_db.sh: WARN: $LOCAL/LAST_SUCCESS is not writable by $ME (root-owned?); a good run replaces it." >&2
+    log "WARN: LAST_SUCCESS not writable by $ME (root-owned?); a good run replaces it"
+fi
 
 # 1) Logical dump out of the running container.
 #
@@ -124,14 +132,21 @@ ls -1t "$LOCAL"/config-*.tar.gz 2>/dev/null | tail -n +4 | xargs -r rm -f
 
 if [ "$UPLOAD_OK" = 1 ]; then
     log "backup complete"
-# Freshness marker. The cron only writes to backup.log, so a silently
-# failing backup is invisible until the day someone needs a restore. This
-# file's MTIME is the last KNOWN-GOOD upload, so a stale backup is one
-# `ls -l` away instead of a log archaeology exercise:
-#   ls -l ~/amphive-relay/backups/LAST_SUCCESS
-# (Still not alerting - see docs/SECURITY.md. A cron that fails silently is
-# a backup you do not have.)
-date -u +%Y-%m-%dT%H:%M:%SZ > "$LOCAL/LAST_SUCCESS"
+    # 5) Freshness marker. The cron only writes to backup.log, so a silently
+    # failing backup is invisible until the day someone needs a restore. This
+    # file's MTIME is the last KNOWN-GOOD upload, so a stale backup is one
+    # `ls -l` away instead of a log archaeology exercise:
+    #   ls -l ~/amphive-relay/backups/LAST_SUCCESS
+    # (Still not alerting - see docs/SECURITY.md. A cron that fails silently
+    # is a backup you do not have.)
+    # Written to a temp file and RENAMED into place: a plain
+    # `date > LAST_SUCCESS` fails on a root-owned marker, a rename does not.
+    if ! { date -u +%Y-%m-%dT%H:%M:%SZ > "$LOCAL/LAST_SUCCESS.tmp" \
+           && mv -f "$LOCAL/LAST_SUCCESS.tmp" "$LOCAL/LAST_SUCCESS"; }; then
+        log "WARN: backup uploaded, but LAST_SUCCESS could not be updated"
+        echo "backup_db.sh: WARN: backup uploaded, but $LOCAL/LAST_SUCCESS could not be updated." >&2
+        exit 4
+    fi
 else
     log "backup complete WITH UPLOAD ERRORS"
     exit 2

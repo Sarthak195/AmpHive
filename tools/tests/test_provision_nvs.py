@@ -33,6 +33,37 @@ class _Stdin:
         return self._tty
 
 
+def _files(tmp_path, s):
+    """A secrets file holding `s`, and a stand-in nvs_tool.py (main() only checks it exists)."""
+    secrets = tmp_path / "s.txt"
+    secrets.write_text("".join(f"{k}={v}\n" for k, v in s.items()), encoding="utf-8")
+    tool = tmp_path / "nvs_tool.py"
+    tool.write_text("")
+    return str(secrets), str(tool)
+
+
+def _fake_idf(vals, tool, calls, esptool_rc=0):
+    """subprocess.run stand-in for the generator, nvs_tool and esptool; records every argv."""
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        if "esp_idf_nvs_partition_gen" in cmd:
+            Path(cmd[5]).write_bytes(b"\xff" * 0x6000)
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        if tool in cmd:
+            dump = "\n".join(f" storage:{k} = b'{v}'" for k, v in vals.items())
+            return subprocess.CompletedProcess(cmd, 0, "Page no. 0, Status: Full\n" + dump, "")
+        if "esptool" in cmd:
+            return subprocess.CompletedProcess(
+                cmd, esptool_rc, "Wrote 24576 bytes at 0x00009000\nHard resetting via RTS pin...\n", "")
+        raise AssertionError(f"unexpected call: {cmd}")
+    return fake_run
+
+
+def _main_args(secrets, out, tool, *extra):
+    return ["--gateway-id", GW, "--secrets", secrets, "--out", out,
+            "--nvs-tool", tool, "--idf-python", "py", *extra]
+
+
 def test_read_kv_skips_comments_and_blanks_and_keeps_values_verbatim(tmp_path):
     p = tmp_path / "s.txt"
     p.write_bytes(b"# comment\r\n\r\nwifi_ssid=My=Net\r\nnoequals\r\n wifi_pwd = x\n")
@@ -160,28 +191,16 @@ def test_generator_errors_are_redacted(tmp_path, monkeypatch):
 
 def test_main_builds_and_verifies_without_printing_a_secret(tmp_path, monkeypatch, capsys):
     s = _secrets(setup_code="k2m4n6p8q9")
-    secrets = tmp_path / "s.txt"
-    secrets.write_text("".join(f"{k}={v}\n" for k, v in s.items()), encoding="utf-8")
-    tool = tmp_path / "nvs_tool.py"
-    tool.write_text("")
-    vals = pn.collect_values(GW, s, {})
-
-    def fake_run(cmd, **kw):
-        if "esp_idf_nvs_partition_gen" in cmd:
-            Path(cmd[5]).write_bytes(b"\xff" * 0x6000)
-            return subprocess.CompletedProcess(cmd, 0, "", "")
-        assert str(tool) in cmd, f"unexpected call: {cmd}"
-        dump = "\n".join(f" storage:{k} = b'{v}'" for k, v in vals.items())
-        return subprocess.CompletedProcess(cmd, 0, "Page no. 0, Status: Full\n" + dump, "")
-
-    monkeypatch.setattr(pn.subprocess, "run", fake_run)
-    pn.main(["--gateway-id", GW, "--secrets", str(secrets), "--out", str(tmp_path / "nvs.bin"),
-             "--nvs-tool", str(tool), "--idf-python", "py"])
+    secrets, tool = _files(tmp_path, s)
+    calls = []
+    monkeypatch.setattr(pn.subprocess, "run", _fake_idf(pn.collect_values(GW, s, {}), tool, calls))
+    pn.main(_main_args(secrets, str(tmp_path / "nvs.bin"), tool))
     printed = capsys.readouterr().out
     assert "storage keys:" in printed
     for k in SECRET_KEYS:
         assert s[k] not in printed
     assert not (tmp_path / "nvs.bin.csv").exists()
+    assert not [c for c in calls if "esptool" in c]  # no --write: the device is never touched
 
 
 def test_main_refuses_an_id_that_is_not_a_mac():
@@ -204,3 +223,94 @@ def test_write_confirmation_needs_a_terminal_and_the_typed_gateway_id(monkeypatc
 
     monkeypatch.setattr("builtins.input", lambda prompt: f" {GW} ")
     pn.confirm_write(GW)  # confirmed: returns normally
+
+
+def test_inside_repo_tells_the_checkout_from_everything_else(tmp_path):
+    assert pn.inside_repo(str(REPO))
+    assert pn.inside_repo(str(REPO / "nvs.bin"))
+    assert pn.inside_repo(str(REPO / "tools" / "gateway_provision" / "nvs.bin"))
+    assert not pn.inside_repo(str(tmp_path / "nvs.bin"))
+    assert not pn.inside_repo(str(REPO) + "-sibling" + os.sep + "nvs.bin")  # prefix, not parent
+
+
+@pytest.mark.parametrize("opt", ["--secrets", "--out"])
+def test_main_refuses_a_secrets_or_image_path_inside_the_repo(tmp_path, monkeypatch, opt):
+    def no_tools(cmd, **kw):
+        raise AssertionError(f"nothing may run before the path check: {cmd}")
+
+    monkeypatch.setattr(pn.subprocess, "run", no_tools)
+    paths = {"--secrets": str(tmp_path / "s.txt"), "--out": str(tmp_path / "nvs.bin")}
+    paths[opt] = str(REPO / "provision-test-must-not-exist.bin")
+    with pytest.raises(SystemExit) as e:
+        pn.main(["--gateway-id", GW, "--secrets", paths["--secrets"], "--out", paths["--out"]])
+    assert "inside the repo" in str(e.value) and opt in str(e.value)
+    assert not (REPO / "provision-test-must-not-exist.bin").exists()
+
+
+def test_allow_in_repo_lets_an_in_repo_path_through(tmp_path, monkeypatch):
+    secrets, tool = _files(tmp_path, _secrets())
+    out = str(REPO / "nvs.bin")  # gitignored (nvs*.bin); build is stubbed, so nothing is written
+    built = []
+    monkeypatch.setattr(pn, "build", lambda vals, o, size, py: built.append(o))
+    monkeypatch.setattr(pn, "verify", lambda *a: None)
+    pn.main(_main_args(secrets, out, tool, "--allow-in-repo"))
+    assert built == [out]
+
+
+def test_write_flashes_at_the_nvs_offset_of_the_real_partition_table(tmp_path, monkeypatch, capsys):
+    s = _secrets()
+    secrets, tool = _files(tmp_path, s)
+    out = str(tmp_path / "nvs.bin")
+    calls = []
+    monkeypatch.setattr(pn.subprocess, "run", _fake_idf(pn.collect_values(GW, s, {}), tool, calls))
+    # No --partitions: offset and size come from firmware/partitions_ota.csv.
+    pn.main(_main_args(secrets, out, tool, "--write", "COM9", "--yes"))
+    # Exactly one esptool call, last (after build + verify), writing the image
+    # at nvs's offset 0x9000: never at its size (0x6000, inside the
+    # bootloader) or anywhere else.
+    assert [c for c in calls if "esptool" in c] == [calls[-1]]
+    assert calls[-1] == ["py", "-m", "esptool", "--chip", "auto", "--port", "COM9",
+                         "--baud", "115200", "write_flash", "0x9000", out]
+    printed = capsys.readouterr().out
+    assert "WARNING" in printed and "0x9000" in printed and "COM9" in printed
+    assert "NVS written" in printed
+    for k in ("wifi_pwd", "tapo_pwd", "mqtt_pwd"):
+        assert s[k] not in printed
+
+
+@pytest.mark.parametrize("tty, answer, why", [
+    (False, None, "terminal"),         # no terminal to confirm on, and no --yes
+    (True, "yes", "nothing written"),  # confirmed with something other than the id
+])
+def test_write_without_yes_stops_before_esptool(tmp_path, monkeypatch, tty, answer, why):
+    s = _secrets()
+    secrets, tool = _files(tmp_path, s)
+    calls = []
+    monkeypatch.setattr(pn.subprocess, "run", _fake_idf(pn.collect_values(GW, s, {}), tool, calls))
+    monkeypatch.setattr(sys, "stdin", _Stdin(tty))
+    monkeypatch.setattr("builtins.input", lambda prompt: answer)
+    with pytest.raises(SystemExit) as e:
+        pn.main(_main_args(secrets, str(tmp_path / "nvs.bin"), tool, "--write", "COM9"))
+    assert why in str(e.value)
+    assert not [c for c in calls if "esptool" in c]
+
+
+def test_write_goes_ahead_once_the_gateway_id_is_typed(tmp_path, monkeypatch):
+    s = _secrets()
+    secrets, tool = _files(tmp_path, s)
+    calls = []
+    monkeypatch.setattr(pn.subprocess, "run", _fake_idf(pn.collect_values(GW, s, {}), tool, calls))
+    monkeypatch.setattr(sys, "stdin", _Stdin(True))
+    monkeypatch.setattr("builtins.input", lambda prompt: GW)
+    pn.main(_main_args(secrets, str(tmp_path / "nvs.bin"), tool, "--write", "COM9"))
+    assert calls[-1][2] == "esptool"
+
+
+def test_a_failed_esptool_write_exits_nonzero(tmp_path, monkeypatch):
+    s = _secrets()
+    secrets, tool = _files(tmp_path, s)
+    monkeypatch.setattr(pn.subprocess, "run",
+                        _fake_idf(pn.collect_values(GW, s, {}), tool, [], esptool_rc=2))
+    with pytest.raises(SystemExit) as e:
+        pn.main(_main_args(secrets, str(tmp_path / "nvs.bin"), tool, "--write", "COM9", "--yes"))
+    assert "esptool write failed" in str(e.value)

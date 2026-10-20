@@ -27,15 +27,19 @@
 # Usage:
 #   .\deploy\scripts\add_gateway_user.ps1 -GatewayId 1cc3abb4fb54
 #       Generates a strong password and prints it ONCE; it is not stored
-#       anywhere, so put it straight into the gateway (setup portal MQTT
-#       field, or mqtt_pwd for tools/gateway_provision/provision_nvs.py).
+#       anywhere, so put it straight into the gateway: the setup portal's MQTT
+#       field on a fresh/unjoined device only (the firmware opens the portal
+#       only when it has no saved Wi-Fi or can't join it at boot), otherwise
+#       mqtt_pwd for tools/gateway_provision/provision_nvs.py over USB.
 #   .\deploy\scripts\add_gateway_user.ps1 -GatewayId 1cc3abb4fb54 -Password <pwd>
 #       Uses yours (16-63 chars of [A-Za-z0-9_-]). It then sits in your
 #       PowerShell history, which is why omitting -Password is preferred.
 #
-# For an existing account this RESETS the password: the gateway is locked out
-# until its own NVS holds the new one, so do it when you can reach the device,
-# and never while it is in a charging session.
+# For an existing account this RESETS the password: the gateway loses its
+# broker login (expect it to be dropped at once) until its own NVS holds the
+# new one, so have the USB tool ready. The remote script refuses (exit 9)
+# while the database shows an active charging session on the gateway's plugs;
+# -Force skips that check (e.g. to lock out a compromised gateway at once).
 #
 # Requires the Windows OpenSSH client (ssh + scp) and the key gcloud created
 # ($HOME\.ssh\google_compute_engine, authorized on the VM through project
@@ -50,7 +54,10 @@ param(
     # and the login gcloud provisions for this box.
     [string]$VmUser = "Sarthak",
     [string]$VmIp = "8.235.4.66",
-    [string]$KeyFile = (Join-Path $HOME ".ssh\google_compute_engine")
+    [string]$KeyFile = (Join-Path $HOME ".ssh\google_compute_engine"),
+    # Reset an existing account even if the database shows an active charging
+    # session on the gateway's plugs (or the check can't run).
+    [switch]$Force
 )
 
 function Fail($msg) { Write-Host "ERROR: $msg" -ForegroundColor Red; exit 1 }
@@ -103,8 +110,10 @@ Remove-Item $tmp -ErrorAction SilentlyContinue
 if ($scpRc -ne 0) { Fail "scp to $target failed (exit $scpRc) - nothing changed on the VM." }
 
 Write-Host "Setting the broker password for '$GatewayId' (sent over stdin) ..." -ForegroundColor Cyan
-# The id is the only interpolated value and was validated above.
-$remoteCmd = 'bash {0} {1}; rc=$?; rm -f {0}; exit $rc' -f $remoteScript, $GatewayId
+# The id (validated above) and the fixed --force flag are the only
+# interpolated values.
+$forceArg = if ($Force) { " --force" } else { "" }
+$remoteCmd = 'bash {0} {1}{2}; rc=$?; rm -f {0}; exit $rc' -f $remoteScript, $GatewayId, $forceArg
 $Password | & ssh @sshOpts $target $remoteCmd
 $rc = $LASTEXITCODE
 
@@ -115,9 +124,13 @@ switch ($rc) {
             Write-Host ""
             Write-Host "MQTT password for $GatewayId (shown ONCE, not stored anywhere):" -ForegroundColor Yellow
             Write-Host "  $Password"
-            Write-Host "Give it to the installer (setup portal MQTT field), or put it in the USB provisioning file as mqtt_pwd."
+            Write-Host "Put it into the gateway now: the setup portal's MQTT field (fresh/unjoined device only), or mqtt_pwd in the USB provisioning file (tools/gateway_provision; the way to reach a deployed unit)."
         }
         exit 0
+    }
+    9 {
+        Write-Host "Refused (see above): the database shows an active charging session on this gateway's plugs, or the check could not run. Nothing changed. A reset now would lock the gateway out mid-session; re-run once the session has ended, or with -Force after checking the CPO dashboard yourself." -ForegroundColor Red
+        exit 9
     }
     { $_ -in 2, 3, 4, 5, 7 } {
         Write-Host "FAILED (remote exit $rc, see the output above) - the passwd file was NOT changed." -ForegroundColor Red

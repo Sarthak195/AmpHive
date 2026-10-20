@@ -147,7 +147,10 @@ Three jobs, all required:
    → `ruff check backend/` (lint; config in `pyproject.toml`, E/F/W + isort) →
    `mypy` (lenient starter config scoped to the `backend/services` +
    `backend/routers` files that pass today) →
-   `pytest backend/tests -q --cov=backend --cov-report=term-missing --cov-fail-under=66`.
+   `pytest backend/tests -q --cov=backend --cov-report=term-missing --cov-fail-under=66`
+   → `pytest tools/tests -q` (since 2026-10-20: the fake-plug simulator and
+   the gateway USB provisioning tool, including the exact esptool command its
+   `--write` runs; pure Python, no IDF, serial port, broker or DB).
    Runs on Python 3.11 (matches `backend/Dockerfile`'s `python:3.11-slim`).
 2. **`frontend-lint`** — `npm ci` then `npm run lint` and `npm test`.
 3. **`frontend-tests`** — a second, independent `npm ci` + `npm test` (kept
@@ -252,11 +255,24 @@ sudo docker logs -f amphive-fake-plug                                  # tail
 sudo docker compose -p fakeplug -f docker-compose.fakeplug.yml down    # stop when done
 ```
 
-`down` removes the container, so nothing restarts it behind your back. Its
-restart policy is now `unless-stopped` (it was `always`, which brought a
-`docker stop`ped container back on the next VM reboot or dockerd restart), so
-a plain `sudo docker stop amphive-fake-plug` also stays stopped. Expect the
-gateway to show offline while it's stopped; that is normal.
+`down` removes the container, so nothing restarts it behind your back. A
+plain `sudo docker stop amphive-fake-plug` also stays stopped, but **only for
+a container created from the current compose file**
+(`restart: unless-stopped`). Docker fixes a container's restart policy when
+it creates it, and the container deployed before 2026-10-20 was created with
+`restart: always`, which brings a stopped container back on the next VM
+reboot or dockerd restart. Until that container is removed or updated, a
+reboot restarts it. One-time fix on the VM:
+
+```bash
+sudo docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' amphive-fake-plug   # want: unless-stopped
+sudo docker update --restart=unless-stopped amphive-fake-plug   # if it says always (works while stopped)
+```
+
+(Or `down` it, which removes the container.) Copy the current compose file
+to the VM before the next `up -d` too: `up -d` from the old copy gives the
+container `always` again. Expect the gateway to show offline while it's
+stopped; that is normal.
 
 ## 2. Coverage assessment
 

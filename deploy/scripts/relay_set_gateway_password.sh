@@ -4,7 +4,7 @@
 #
 # Runs ON the VM as the normal user (it calls sudo itself). Normally driven by
 # deploy/scripts/add_gateway_user.ps1, which scp's this file to /tmp and runs
-#   bash /tmp/relay_set_gateway_password.sh <gateway_id>
+#   bash /tmp/relay_set_gateway_password.sh <gateway_id> [--force]
 # over plain OpenSSH with the password on STDIN (first line). The password
 # never appears on an ssh/sudo command line or in shell history. (It is
 # briefly on the argv of mosquitto_passwd / mosquitto_sub inside the
@@ -15,6 +15,14 @@
 #   pattern readwrite amphive/gateways/%u/#
 # scopes every account to its own subtree, so no ACL edit is needed.
 #
+# RESETTING an existing account locks that gateway out until its own NVS
+# holds the new password (see (c)). So in update mode this first asks the
+# database and refuses (exit 9) while any of the gateway's plugs has an
+# active charging session: the session would run on under the firmware's
+# local watchdogs only, unbilled, until the backend's stale-session reaper
+# ended it. --force skips that check (e.g. to lock out a compromised gateway
+# at once).
+#
 # Generalised from the reset script used live on 2026-10-19 for 1cc3abb4fb54.
 # Gotchas it encodes:
 #  (a) Feed the password over PLAIN OpenSSH, never `gcloud compute ssh`: on
@@ -23,14 +31,19 @@
 #      script reads would be "y" instead of the password.
 #  (b) mosquitto_passwd rejects a file containing blank lines ("Corrupt
 #      password file") although the broker itself ignores them, so it runs
-#      on a copy with blank lines stripped, never on the live file.
+#      on a copy with blank lines stripped, never on the live file. The
+#      sanity check compares that copy with the LIVE file, so a failed or
+#      truncated copy can never vouch for itself.
 #  (c) The live file (~/amphive-relay/config/mosquitto_passwd, owner
 #      1883:1883 mode 600) is a SINGLE-FILE bind mount (:ro) into the broker
 #      container. Docker pins the inode at container start, so a replaced
 #      file (mv, sed -i, mosquitto_passwd's own rewrite) is invisible to the
 #      broker. Write back IN PLACE with `cat tmp > live` (keeps inode, owner
 #      and mode), then SIGHUP the broker: it reloads passwd + ACL without
-#      dropping connected clients.
+#      dropping the OTHER connected clients. The gateway whose password just
+#      changed loses its login either way: mosquitto 2.x re-checks connected
+#      clients' credentials on reload, so expect it to be dropped right
+#      then (not tested here); at the latest its next reconnect fails.
 #  (d) Verify by subscribing AS the gateway to its retained
 #      amphive/gateways/<id>/config (the plug roster), from inside the
 #      broker's network namespace (plaintext 1883 is not published on the
@@ -39,9 +52,12 @@
 # Exit codes:
 #   0  done and verified
 #   2  bad arguments / password     \
-#   3  broker container or passwd    |  live file NOT touched
+#   3  broker container or passwd    |
 #      mount not found               |
-#   4  backup copy failed            |
+#   9  active charging session on    |
+#      the gateway's plugs, or the   |  live file NOT touched
+#      check could not run           |
+#   4  backup or work copy failed    |
 #   5  mosquitto_passwd failed       |
 #   7  sanity check failed          /
 #   6  live file WAS updated, but the HUP or the verify failed (backup kept)
@@ -49,7 +65,12 @@
 # =============================================================================
 set -uo pipefail
 
-[ $# -eq 1 ] || { echo "usage: bash $0 <gateway_id>   (password on stdin)"; exit 2; }
+USAGE="usage: bash $0 <gateway_id> [--force]   (password on stdin)"
+case $# in
+  1) FORCE=0 ;;
+  2) [ "$2" = --force ] || { echo "$USAGE"; exit 2; }; FORCE=1 ;;
+  *) echo "$USAGE"; exit 2 ;;
+esac
 GW=$1
 # Used in grep patterns and as the MQTT username (63 bytes max: the
 # firmware's mqtt_user buffer is 64 including the NUL).
@@ -63,18 +84,24 @@ PW=${PW%$'\r'}     # a PowerShell pipe ends the line with CRLF
 [[ $PW =~ ^[A-Za-z0-9_-]{16,63}$ ]] || {
   echo "refusing: password missing or not 16-63 chars of [A-Za-z0-9_-]"; exit 2; }
 
-# Broker container: compose-default name on the VM (amphive-relay-mqtt-1) or
-# the repo compose's container_name (amphive-mqtt). Resolved by the compose
-# service label, like backup_db.sh does for db. MQTT_CONTAINER overrides.
-C=${MQTT_CONTAINER:-}
-if [ -z "$C" ]; then
-  C=$(sudo docker ps --filter "label=com.docker.compose.service=mqtt" --format '{{.Names}}' | head -1)
-fi
-if [ -z "$C" ]; then
-  for candidate in amphive-relay-mqtt-1 amphive-mqtt; do
-    if sudo docker ps --format '{{.Names}}' | grep -qx "$candidate"; then C=$candidate; break; fi
-  done
-fi
+# A compose service's running container: by the compose service label, which
+# holds under both the compose-default names on the VM (amphive-relay-mqtt-1)
+# and the repo compose's container_name (amphive-mqtt), else by those literal
+# names. backup_db.sh resolves db the same way.
+find_container() {
+  local svc=$1 name='' cand
+  shift
+  name=$(sudo docker ps --filter "label=com.docker.compose.service=$svc" --format '{{.Names}}' | head -1)
+  if [ -z "$name" ]; then
+    for cand in "$@"; do
+      if sudo docker ps --format '{{.Names}}' | grep -qx "$cand"; then name=$cand; break; fi
+    done
+  fi
+  printf '%s\n' "$name"
+}
+
+# Broker container; MQTT_CONTAINER overrides.
+C=${MQTT_CONTAINER:-$(find_container mqtt amphive-relay-mqtt-1 amphive-mqtt)}
 [ -n "$C" ] || { echo "no running broker container found (set MQTT_CONTAINER=<name>)"; exit 3; }
 # Same image as the running broker, so the hash format matches and nothing
 # has to be pulled.
@@ -98,35 +125,69 @@ case $COUNT in
 esac
 echo "account $GW: $MODE"
 
+# Never reset a gateway mid-session (see the header). Update mode only: a
+# gateway with no account yet can't be connected.
+if [ "$MODE" = update ] && [ "$FORCE" = 1 ]; then
+  echo "--force: NOT checking $GW for an active charging session"
+elif [ "$MODE" = update ]; then
+  DBC=${DB_CONTAINER:-$(find_container db amphive-relay-db-1 amphive-db)}
+  ACTIVE=''
+  if [ -n "$DBC" ]; then
+    # $GW matched ^[A-Za-z0-9_-]+$ above, so it is safe inside the quotes.
+    ACTIVE=$(sudo docker exec "$DBC" psql -U postgres -d amphive -tAc \
+      "SELECT count(*) FROM charging_sessions s JOIN plugs p ON p.id = s.plug_id WHERE p.gateway_id = '$GW' AND s.status = 'active'" 2>&1)
+  fi
+  case $ACTIVE in
+    0) echo "no active charging session on $GW's plugs" ;;
+    ''|*[!0-9]*)
+      echo "refusing: could not check $GW for an active charging session (db container: ${DBC:-not found}; psql: ${ACTIVE:-no output})"
+      echo "Check the CPO dashboard yourself, then re-run with --force."
+      exit 9 ;;
+    *)
+      echo "refusing: $ACTIVE active charging session(s) on $GW's plugs - a reset now locks the gateway out mid-session."
+      echo "Re-run once it has ended (or with --force)."
+      exit 9 ;;
+  esac
+fi
+
 TS=$(date -u +%Y%m%dT%H%M%SZ)
 BAK="$SRC.bak-$TS"
 sudo cp -p "$SRC" "$BAK" || { echo "backup FAILED - live file untouched"; exit 4; }
 echo "backup: $BAK"
 INODE_BEFORE=$(sudo stat -c %i "$SRC")
 
-# (b) work on a blank-line-free copy.
+# (b) work on a blank-line-free copy. Everything the sanity check compares
+# against is read from the LIVE file, never from this copy: a copy that died
+# half-way (OOM on this 1 GB box, a full /tmp) must not be able to vouch for
+# itself, or `cat tmp > live` would wipe every other account.
 WORK=$(mktemp -d)
 trap 'sudo rm -rf "$WORK"' EXIT
-sudo sh -c "sed '/^[[:space:]]*\$/d' '$SRC' > '$WORK/passwd'"
-OLD_USERS=$(sudo cut -d: -f1 "$WORK/passwd" | LC_ALL=C sort)
-OLD_GW_LINE=$(sudo grep "^$GW:" "$WORK/passwd" | sha256sum)
+sudo sh -c "sed '/^[[:space:]]*\$/d' '$SRC' > '$WORK/passwd'" || {
+  echo "work copy FAILED - live file untouched"; exit 4; }
+LIVE_LINES=$(sudo grep -cv '^[[:space:]]*$' "$SRC")
+COPY_LINES=$(sudo grep -c '' "$WORK/passwd")
+if ! [[ $LIVE_LINES =~ ^[0-9]+$ ]] || [ "$COPY_LINES" != "$LIVE_LINES" ]; then
+  echo "work copy incomplete (${COPY_LINES:-?} of ${LIVE_LINES:-?} lines) - live file untouched"; exit 4
+fi
+OLD_OTHERS=$(sudo grep -v -e '^[[:space:]]*$' -e "^$GW:" "$SRC")
+OLD_GW_LINE=$(sudo grep "^$GW:" "$SRC" | sha256sum)
 # -b adds the user if absent, replaces the hash if present.
 printf '%s\n' "$PW" | sudo docker run -i --rm -v "$WORK":/work "$IMG" \
   sh -c 'read -r PW && mosquitto_passwd -b /work/passwd "$1" "$PW"' _ "$GW" \
   || { echo "mosquitto_passwd FAILED - live file untouched"; exit 5; }
 
-# Sanity before touching the live file: exactly the same accounts (plus $GW
-# when creating), and $GW's line really changed (a fresh salt guarantees that
-# even for an unchanged password).
-NEW_USERS=$(sudo cut -d: -f1 "$WORK/passwd" | LC_ALL=C sort)
-if [ "$MODE" = create ]; then
-  EXPECTED=$(printf '%s\n%s\n' "$OLD_USERS" "$GW" | sed '/^$/d' | LC_ALL=C sort)
-else
-  EXPECTED=$OLD_USERS
+# Sanity before touching the live file: every OTHER account's line is exactly
+# as in the live file (byte for byte, same order), $GW has exactly one line,
+# and that line really changed (a fresh salt guarantees it even for an
+# unchanged password).
+NEW_OTHERS=$(sudo grep -v "^$GW:" "$WORK/passwd")
+NEW_GW_COUNT=$(sudo grep -c "^$GW:" "$WORK/passwd")
+if [ "$NEW_OTHERS" != "$OLD_OTHERS" ]; then
+  echo "sanity check FAILED: the other accounts differ from the live file - live file untouched"; exit 7
 fi
-if [ "$NEW_USERS" != "$EXPECTED" ] \
+if [ "$NEW_GW_COUNT" != 1 ] \
    || [ "$(sudo grep "^$GW:" "$WORK/passwd" | sha256sum)" = "$OLD_GW_LINE" ]; then
-  echo "sanity check FAILED - live file untouched"; exit 7
+  echo "sanity check FAILED: $GW has ${NEW_GW_COUNT:-?} line(s), or its hash did not change - live file untouched"; exit 7
 fi
 
 # (c) write back IN PLACE.

@@ -31,7 +31,9 @@ mail store and `/etc/dovecot/users` (mail_server.md gap 6), which the repo copy
 lacks. To change it, merge the change into the live
 `~/amphive-relay/backup_db.sh` (or first copy the live file into the repo),
 strip CRLF, and keep it executable. Never overwrite the live copy with the
-repo file as-is.
+repo file as-is. Before merging in the guard below, run
+`ls -la ~/amphive-relay/backups/` and fix anything still owned by root with
+`sudo chown -R "$USER": ~/amphive-relay/backups ~/amphive-relay/backup.log`.
 
 ## Incident 2026-10-20: 45 days without a backup
 
@@ -46,18 +48,26 @@ bounced because the VM has no local mailbox. Nothing else was watching, so
 
 **Fix (2026-10-20).** `chown` of `backup.log` and `backups/` back to the
 normal user, then one manual run as that user (no sudo), which uploaded to
-`gs://amphive-db-backups-2/2026/10/`.
+`gs://amphive-db-backups-2/2026/10/`. A sudo run also leaves the files it
+wrote *inside* `backups/` root-owned (its dump and config tarball, and the
+`LAST_SUCCESS` marker if it wrote one), so the chown has to be recursive:
+`sudo chown -R "$USER": ~/amphive-relay/backups ~/amphive-relay/backup.log`.
+Check with `ls -la ~/amphive-relay/backups/`.
 
 **So it can't fail silently again**, `backup_db.sh` now opens with a guard:
 
 - It refuses to run as root (exit 3). It already uses `sudo` itself for the
   steps that need root, so there is never a reason to run the whole script
   with sudo.
-- If `backups/`, `backup.log` or `backups/LAST_SUCCESS` is not writable, it
-  exits 3 with `ERROR: cannot write … - owned by root? never run this script
-  with sudo (fix: sudo chown …)`. The message goes to **stderr** and to
-  **syslog** (`journalctl -t amphive-backup`), so it no longer depends on the
-  very log file that is broken.
+- If `backups/` or `backup.log` is not writable, it exits 3 with
+  `ERROR: cannot write … - owned by root? never run this script with sudo
+  (fix: sudo chown …)`. The message goes to **stderr** and to **syslog**
+  (`journalctl -t amphive-backup`), so it no longer depends on the very log
+  file that is broken.
+- A root-owned `backups/LAST_SUCCESS` only gets a warning, not a refusal: the
+  marker is written to a temp file and renamed into place, which needs only
+  the (writable) directory, so the next good run replaces it. Refusing there
+  would have stopped the backups again over a timestamp file.
 
 Rule: run it by hand only as the normal user, i.e. `~/amphive-relay/backup_db.sh`.
 
@@ -68,6 +78,8 @@ ls -l ~/amphive-relay/backups/LAST_SUCCESS    # mtime = last good upload; older 
 tail -5 ~/amphive-relay/backup.log
 journalctl -t amphive-backup --since "2 days ago"   # guard refusals land here
 ls -ld ~/amphive-relay/backup.log ~/amphive-relay/backups   # owner must be the normal user, not root
+ls -la ~/amphive-relay/backups/   # nothing in here may be root-owned either; if it is:
+# sudo chown -R "$USER": ~/amphive-relay/backups ~/amphive-relay/backup.log
 ```
 
 There is still no alerting, so a failing backup only shows up if someone

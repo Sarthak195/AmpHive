@@ -23,9 +23,11 @@ nvs_tool.py: --idf-python, else $IDF_PYTHON, else the env from
 $IDF_PYTHON_ENV_PATH (set by IDF's export script), else this interpreter;
 --nvs-tool, else $IDF_PATH/components/nvs_flash/nvs_partition_tool/nvs_tool.py.
 
-Usage:
-  python provision_nvs.py --gateway-id 1cc3abb4fb54 --secrets S --out nvs.bin              # build + verify
-  python provision_nvs.py --gateway-id 1cc3abb4fb54 --secrets S --out nvs.bin --write COM5
+Usage, with D a directory OUTSIDE the repo (both files hold the secrets in
+plain text, so the tool refuses a --secrets or --out path inside this
+checkout unless --allow-in-repo is given):
+  python provision_nvs.py --gateway-id 1cc3abb4fb54 --secrets D/s.txt --out D/nvs.bin
+      builds + verifies only; add --write COM5 to also flash it
 """
 from __future__ import annotations
 
@@ -38,7 +40,8 @@ import sys
 from typing import Any
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_PARTITIONS = os.path.join(HERE, "..", "..", "firmware", "partitions_ota.csv")
+REPO_ROOT = os.path.normpath(os.path.join(HERE, "..", ".."))
+DEFAULT_PARTITIONS = os.path.join(REPO_ROOT, "firmware", "partitions_ota.csv")
 # firmware/partitions_ota.csv's nvs row; used only if that file can't be read.
 FALLBACK_NVS = (0x9000, 0x6000)
 NAMESPACE = "storage"  # keys read by load_config_from_nvs() in firmware/main/main.c
@@ -131,6 +134,17 @@ def redact(text: str, vals: dict[str, str]) -> str:
         if v:
             text = text.replace(v, "***")
     return text
+
+
+def inside_repo(path: str) -> bool:
+    """True if `path` resolves (symlinks followed, case folded as the OS does)
+    to somewhere inside this checkout, where one `git add -A` would commit it."""
+    p = os.path.normcase(os.path.realpath(path))
+    root = os.path.normcase(os.path.realpath(REPO_ROOT))
+    try:
+        return os.path.commonpath([p, root]) == root
+    except ValueError:  # different drives (Windows)
+        return False
 
 
 def nvs_partition(path: str) -> tuple[int, int]:
@@ -248,10 +262,21 @@ def main(argv: list[str] | None = None) -> None:
                     help="partition table CSV to take the nvs offset/size from")
     ap.add_argument("--yes", action="store_true",
                     help="skip the no-active-session confirmation before --write")
+    ap.add_argument("--allow-in-repo", action="store_true",
+                    help="allow a --secrets/--out path inside the repo checkout "
+                         "(only for a gitignored one)")
     a = ap.parse_args(argv)
 
     if not GATEWAY_ID_RE.fullmatch(a.gateway_id):
         sys.exit("refusing: --gateway-id must be the 12-char lowercase hex MAC id")
+    if not a.allow_in_repo:
+        # The image (and the generator's CSV next to it) and the secrets file
+        # hold every password in plain text: keep them out of `git add -A`.
+        for opt, path in (("--secrets", a.secrets), ("--out", a.out)):
+            if inside_repo(path):
+                sys.exit(f"refusing: {opt} {path} is inside the repo checkout ({REPO_ROOT}); "
+                         "it holds plaintext secrets - keep it outside the repo "
+                         "(or pass --allow-in-repo for a gitignored path)")
     try:
         offset, size = nvs_partition(a.partitions)
     except (OSError, ValueError) as e:
