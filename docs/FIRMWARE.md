@@ -855,11 +855,15 @@ The first capture showed the cause: the board heard the AP at -81 to -89 dBm.
 Placement fixes that, not firmware.
 
 **Current: fw `2.8.0-direct` — boot report, plug reachability, offline log ring
-(2026-10-20; build-verified only, not flashed or published for OTA).** It acts
-on the 45-day log forensics. The gateway reset itself about once per powered
-hour with no recorded cause (F1). A failed `get_device_info` was reported as
-relay OFF (F4). Nothing explained an MQTT failure, and forwarded logs were
-dropped while MQTT was down (F5). 2.8.0 adds:
+(2026-10-20; build-verified only, not flashed or published for OTA).** Deploy
+the matching backend (branch `fix/connection-noise`, PR #130) **before**
+flashing or OTA-ing 2.8.0: an older backend stores the new events as untitled,
+unacknowledged warnings and parses the `[offline]` log replays as info.
+
+2.8.0 acts on the 45-day log forensics. The gateway reset itself about once
+per powered hour with no recorded cause (F1). A failed `get_device_info` was
+reported as relay OFF (F4). Nothing explained an MQTT failure, and forwarded
+logs were dropped while MQTT was down (F5). 2.8.0 adds:
 - a `GATEWAY_BOOT` event once per boot, on the first MQTT connect (§1);
 - `PLUG_UNREACHABLE` / `PLUG_RECOVERED` events and the 30 s idle-plug poll
   backoff (§3);
@@ -901,8 +905,9 @@ consumes them.
 The boot line on serial prints the same token and code
 (`reset reason: brownout [9]`). Before 2.8.0 it printed a prose description.
 
-Two wire changes outside `/alarms` that MQTT_CONTRACT.md doesn't record yet
-(backend side):
+Two wire changes outside `/alarms`. Both are recorded in
+[MQTT_CONTRACT.md](MQTT_CONTRACT.md) by the matching backend change (branch
+`fix/connection-noise`, PR #130), and that backend handles both:
 - **`/telemetry`:** a session frame from a poll with no relay reading omits
   `"relay"`. The backend's existing default (`status == "occupied"`) reads it
   as ON. Idle frames always carry `"relay"`, because without a relay reading
@@ -910,4 +915,6 @@ Two wire changes outside `/alarms` that MQTT_CONTRACT.md doesn't record yet
 - **`/logs`:** a line held through an MQTT outage arrives as
   `[offline] <line as logged>`, colour escape included. After an overflow, a
   synthetic `[offline] (N older line(s) lost)` line goes first. The backend's
-  level parser doesn't handle the prefix yet (§1, "Backend gap").
+  `services/mqtt/logs.py` `_log_line_level` strips the prefix before reading
+  the level letter, so held WARN/ERROR lines keep their severity and the
+  synthetic line is stored as `info` (§1, "Backend parsing of held lines").
