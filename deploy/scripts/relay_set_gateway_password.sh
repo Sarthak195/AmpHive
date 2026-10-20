@@ -131,16 +131,21 @@ if [ "$MODE" = update ] && [ "$FORCE" = 1 ]; then
   echo "--force: NOT checking $GW for an active charging session"
 elif [ "$MODE" = update ]; then
   DBC=${DB_CONTAINER:-$(find_container db amphive-relay-db-1 amphive-db)}
-  ACTIVE=''
+  ACTIVE='' PSQL_ERR=''
   if [ -n "$DBC" ]; then
+    # Only stdout is the count. Notices, warnings and errors go to stderr,
+    # kept apart so a harmless server WARNING can't turn a clean 0 into a
+    # refusal, but still shown when the check fails.
+    ERRF=$(mktemp)
     # $GW matched ^[A-Za-z0-9_-]+$ above, so it is safe inside the quotes.
     ACTIVE=$(sudo docker exec "$DBC" psql -U postgres -d amphive -tAc \
-      "SELECT count(*) FROM charging_sessions s JOIN plugs p ON p.id = s.plug_id WHERE p.gateway_id = '$GW' AND s.status = 'active'" 2>&1)
+      "SELECT count(*) FROM charging_sessions s JOIN plugs p ON p.id = s.plug_id WHERE p.gateway_id = '$GW' AND s.status = 'active'" 2>"$ERRF")
+    PSQL_ERR=$(head -c 300 "$ERRF" | tr '\n' ' '); rm -f "$ERRF"
   fi
   case $ACTIVE in
     0) echo "no active charging session on $GW's plugs" ;;
     ''|*[!0-9]*)
-      echo "refusing: could not check $GW for an active charging session (db container: ${DBC:-not found}; psql: ${ACTIVE:-no output})"
+      echo "refusing: could not check $GW for an active charging session (db container: ${DBC:-not found}; psql: ${PSQL_ERR:-${ACTIVE:-no output}})"
       echo "Check the CPO dashboard yourself, then re-run with --force."
       exit 9 ;;
     *)
