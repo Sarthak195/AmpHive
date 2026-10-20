@@ -58,8 +58,8 @@ alembic head stays `0038`):
 - **fw 2.8.0-direct diagnostics (F1/F4/F5).** `/alarms` now understands
   `GATEWAY_BOOT` (info: firmware, reset reason and code, boot count, Wi-Fi
   RSSI/attempts/last disconnect reason, minimum free heap), `PLUG_UNREACHABLE`
-  (warning: N failed polls in a row) and `PLUG_RECOVERED` (info: down for
-  ~N s). Each is folded into a readable `detail`. Every value is treated as
+  (warning: N polls in a row without a complete reading) and `PLUG_RECOVERED`
+  (info: down for ~N s). Each is folded into a readable `detail`. Every value is treated as
   untrusted (coerced, sanitized, range-checked), and every alarm's `detail` is
   now capped at the 255-character column. Before, an absurd
   `UNMETERED_CONSUMPTION` estimate could overflow the column and drop the
@@ -69,7 +69,10 @@ alembic head stays `0038`):
   matters is in the frontend note below). The "Gateway alarm" log line
   carries the detail, so the backend log alone shows why a gateway
   restarted. Exact payloads are in [MQTT_CONTRACT.md](MQTT_CONTRACT.md). The
-  firmware side ships separately as fw 2.8.0-direct.
+  firmware side ships separately as fw 2.8.0-direct. **Deploy this backend
+  before flashing or OTA-ing fw 2.8.0**: an older backend stores the new
+  events as untitled, unacknowledged warnings and parses the `[offline]` log
+  replays as info.
 
 **Frontend (minimal).** The driver's session monitor used to render *any*
 recent alarm for its plug as a red banner. It would have shown

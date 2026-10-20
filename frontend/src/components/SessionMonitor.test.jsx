@@ -182,7 +182,7 @@ describe('SessionMonitor — notices', () => {
       plug_id: 2,
       event_type: 'PLUG_UNREACHABLE',
       severity: 'warning',
-      detail: "Gateway can't reach the plug over the LAN (3 failed polls in a row) - readings paused until it answers.",
+      detail: "Gateway couldn't get a complete reading from the plug 3 times in a row - readings may pause until it answers.",
       received_at: Date.now() - 5000,
     };
     useSession.mockReturnValue(baseSession({ alarms: [unreachable] }));

@@ -2813,16 +2813,16 @@ async def _alarm_detail(payload):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("payload,exp_type,exp_sev,exp_plug,exp_detail", [
     ({"event": "GATEWAY_BOOT", "fw": "2.8.0-direct", "reset_reason": "brownout",
-      "reset_code": 15, "boot_count": 42, "wifi_rssi": -79, "last_wifi_reason": 2,
+      "reset_code": 9, "boot_count": 42, "wifi_rssi": -79, "last_wifi_reason": 2,
       "wifi_attempts": 3, "min_free_heap": 123456, "uptime_s": 12},
      "GATEWAY_BOOT", "info", None,
-     "Gateway booted (fw 2.8.0-direct): reset reason brownout [15], boot #42, "
+     "Gateway booted (fw 2.8.0-direct): reset reason brownout [9], boot #42, "
      "Wi-Fi RSSI -79 dBm after 3 attempts, last Wi-Fi failure reason 2, "
      "min free heap 123456 B."),
     ({"error": "PLUG_UNREACHABLE", "plug_id": 1, "failures": 3},
      "PLUG_UNREACHABLE", "warning", 1,
-     "Gateway can't reach the plug over the LAN (3 failed polls in a row) - "
-     "readings paused until it answers."),
+     "Gateway couldn't get a complete reading from the plug 3 times in a row - "
+     "readings may pause until it answers."),
     ({"event": "PLUG_RECOVERED", "plug_id": 1, "down_s": 95},
      "PLUG_RECOVERED", "info", 1,
      "Plug reachable again after ~95 s."),
@@ -2853,12 +2853,14 @@ async def test_fw28_diagnostic_alarms_exact_detail(payload, exp_type, exp_sev, e
     ({"event": "GATEWAY_BOOT", "fw": "2.8.0 \"evil\"", "reset_code": 9, "wifi_attempts": 2},
      "Gateway booted (fw 2.8.0_evil): reset code 9, Wi-Fi up after 2 attempts."),
     ({"error": "PLUG_UNREACHABLE", "plug_id": 1},
-     "Gateway can't reach the plug over the LAN - readings paused until it answers."),
+     "Gateway couldn't get a complete reading from the plug - readings may pause "
+     "until it answers."),
     ({"error": "PLUG_UNREACHABLE", "plug_id": 1, "failures": 1},
-     "Gateway can't reach the plug over the LAN (1 failed poll in a row) - "
-     "readings paused until it answers."),
+     "Gateway couldn't get a complete reading from the plug 1 time in a row - "
+     "readings may pause until it answers."),
     ({"error": "PLUG_UNREACHABLE", "plug_id": 1, "failures": "lots"},
-     "Gateway can't reach the plug over the LAN - readings paused until it answers."),
+     "Gateway couldn't get a complete reading from the plug - readings may pause "
+     "until it answers."),
     ({"event": "PLUG_RECOVERED", "plug_id": 1}, "Plug reachable again."),
     ({"event": "PLUG_RECOVERED", "plug_id": 1, "down_s": float("nan")}, "Plug reachable again."),
     ({"event": "PLUG_RECOVERED", "plug_id": 1, "down_s": 94.6}, "Plug reachable again after ~95 s."),

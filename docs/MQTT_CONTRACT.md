@@ -44,7 +44,7 @@
 |-----------|-------|-----|----------|---------|
 | backend → gateway | `amphive/gateways/{gateway_id}/plugs/{plug_id}/commands` | 1 | no | `{"action":"ON"\|"OFF","max_duration_seconds":<int>,"max_kwh":<float>,"max_current_a":<float>,"session_id":"<str>","local_ip":"<str>"}` OR `{"action":"SET_LIMITS","max_kwh":<float>,"max_duration_seconds":<int>,"max_current_a":<float>,"local_ip":"<str>"}` OR `{"action":"SET_INTERVAL","interval_ms":<int>}` OR `{"action":"OTA","url":"<http(s)>"}` |
 | backend → gateway | `amphive/gateways/{gateway_id}/config` | 1 | yes | `{"v":1,"plugs":[{"plug_id":<int>,"local_ip":"<str>","max_current_a":<float\|null>}, ...]}` — the gateway's full plug roster (fw ≥ 2.0.0-direct) |
-| gateway → backend | `amphive/gateways/{gateway_id}/telemetry` | 0 | no | `{"plug_id":<int>,"watts":<f>,"kwh":<f>,"voltage":<f>,"current":<f>,"relay":<bool>,"status":"occupied"\|"available","session_id":"<str>","today_kwh":<f>,"month_kwh":<f>}` (`today_kwh`/`month_kwh` fw ≥ 2.4.0-direct) |
+| gateway → backend | `amphive/gateways/{gateway_id}/telemetry` | 0 | no | `{"plug_id":<int>,"watts":<f>,"kwh":<f>,"voltage":<f>,"current":<f>,"relay":<bool>,"status":"occupied"\|"available","session_id":"<str>","today_kwh":<f>,"month_kwh":<f>}` (`today_kwh`/`month_kwh` fw ≥ 2.4.0-direct; fw ≥ 2.8.0-direct omits `relay` from a session frame when the poll got no device-info reading, see the `relay` note below) |
 
 > `voltage`/`current` are the plug's **measured** volts/amps (a Tapo P110 exposes
 > both, ~2 dp). Because active power factor is < 1, `current` is **not**
@@ -83,6 +83,18 @@ state (`device_on`), distinct from `status` (the gateway's own session state).
 It lets the backend/UI show the physical relay and underpins the firmware's
 `UNAUTHORIZED_ON` guard: a relay ON with no active session (physical button /
 Tapo app / stale NVS resume) is forced OFF locally and alarmed.
+
+`relay` is **not always present** as of fw ≥ 2.8.0-direct. A poll that got
+the energy sample but no `get_device_info` reading has no relay state, and
+the firmware no longer reports one it didn't read (before 2.8.0 a failed
+`get_device_info` went out as relay OFF, forensics F4). A session frame from
+such a poll still goes out, for billing and liveness, just **without**
+`"relay"`. An idle poll without a relay reading sends **no frame at all**,
+since an idle frame without `relay` would read as relay OFF. (A poll with no
+energy sample sends nothing, idle or not.) When `relay` is missing the
+backend falls back to the frame's status (`services/mqtt/telemetry.py`:
+`payload.get("relay", status == "occupied")`), so a relay-less session frame
+reads as relay ON. Offline-resync frames always carry `relay` (below).
 
 > **`today_kwh`/`month_kwh` + `UNMETERED_CONSUMPTION` (offline-consumption
 > detection, fw ≥ 2.4.0-direct).** A P110's `get_energy_usage` response also
@@ -139,7 +151,7 @@ Tapo app / stale NVS resume) is forced OFF locally and alarmed.
 > payloads:
 >
 > ```json
-> {"event":"GATEWAY_BOOT","fw":"2.8.0-direct","reset_reason":"brownout","reset_code":15,"boot_count":42,"wifi_rssi":-79,"last_wifi_reason":2,"wifi_attempts":3,"min_free_heap":123456,"uptime_s":12}
+> {"event":"GATEWAY_BOOT","fw":"2.8.0-direct","reset_reason":"brownout","reset_code":9,"boot_count":42,"wifi_rssi":-79,"last_wifi_reason":2,"wifi_attempts":3,"min_free_heap":123456,"uptime_s":12}
 > {"error":"PLUG_UNREACHABLE","plug_id":1,"failures":3}
 > {"event":"PLUG_RECOVERED","plug_id":1,"down_s":95}
 > ```
@@ -148,12 +160,15 @@ Tapo app / stale NVS resume) is forced OFF locally and alarmed.
 > values into the event's `detail`:
 >
 > - `GATEWAY_BOOT` — severity `info`, gateway-wide (no `plug_id`): "Gateway
->   booted (fw 2.8.0-direct): reset reason brownout [15], boot #42, Wi-Fi RSSI
+>   booted (fw 2.8.0-direct): reset reason brownout [9], boot #42, Wi-Fi RSSI
 >   -79 dBm after 3 attempts, last Wi-Fi failure reason 2, min free heap
 >   123456 B."
-> - `PLUG_UNREACHABLE` — severity `warning`: "Gateway can't reach the plug
->   over the LAN (3 failed polls in a row) - readings paused until it
->   answers."
+> - `PLUG_UNREACHABLE` — severity `warning`: "Gateway couldn't get a complete
+>   reading from the plug 3 times in a row - readings may pause until it
+>   answers." The firmware raises it once after 3 polls in a row that didn't
+>   come back complete: no answer at all, or a partial one (the energy sample
+>   arrived but `get_device_info` failed, say). So it doesn't by itself mean
+>   the plug is off the LAN.
 > - `PLUG_RECOVERED` — severity `info`: "Plug reachable again after ~95 s."
 >
 > All values are **untrusted**. Each field is coerced on its own — `fw` and

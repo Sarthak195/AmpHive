@@ -75,7 +75,7 @@ def _plural(n: int, word: str) -> str:
 
 def _gateway_boot_detail(payload: Dict[str, Any]) -> str:
     """Human-readable detail for the fw >= 2.8.0 boot report, e.g. "Gateway
-    booted (fw 2.8.0-direct): reset reason brownout [15], boot #42, Wi-Fi RSSI
+    booted (fw 2.8.0-direct): reset reason brownout [9], boot #42, Wi-Fi RSSI
     -79 dBm after 3 attempts, last Wi-Fi failure reason 2, min free heap
     123456 B." Every field is optional and untrusted: a missing/malformed one
     just drops its clause. `uptime_s` is accepted but not shown (it is always
@@ -167,7 +167,7 @@ class MQTTAlarmMixin:
         # Fallbacks for the fw 2.8.0 diagnostics when their numbers are
         # missing/malformed; _handle_gateway_alarm builds the full text.
         "GATEWAY_BOOT": "Gateway booted.",
-        "PLUG_UNREACHABLE": "Gateway can't reach the plug over the LAN - readings paused until it answers.",
+        "PLUG_UNREACHABLE": "Gateway couldn't get a complete reading from the plug - readings may pause until it answers.",
         "PLUG_RECOVERED": "Plug reachable again.",
     }
 
@@ -232,12 +232,16 @@ class MQTTAlarmMixin:
         elif event_type == "GATEWAY_BOOT":
             detail = _gateway_boot_detail(payload)
         elif event_type == "PLUG_UNREACHABLE":
+            # Firmware raises this after N polls in a row that weren't
+            # complete: no answer at all, or a partial one (e.g. the energy
+            # sample arrived but get_device_info failed). So the text claims
+            # an incomplete reading, not that the plug is off the LAN.
             failures = _safe_int(payload.get("failures"), 1, 10**6)
             if failures is not None:
                 detail = (
-                    f"Gateway can't reach the plug over the LAN "
-                    f"({_plural(failures, 'failed poll')} in a row) - readings "
-                    f"paused until it answers."
+                    f"Gateway couldn't get a complete reading from the plug "
+                    f"{_plural(failures, 'time')} in a row - readings may "
+                    f"pause until it answers."
                 )
         elif event_type == "PLUG_RECOVERED":
             down_s = _safe_int(payload.get("down_s"), 0, 10**9)
