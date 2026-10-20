@@ -123,16 +123,15 @@ lost. So:
   publish fails, esp-mqtt runs the `MQTT_EVENT_ERROR` and `_DISCONNECTED`
   handlers on the publishing task, on top of the flush. The flush buffer is
   static for the same reason.
-- **Backend gap (open, backend side).** `services/mqtt/logs.py`
-  `_log_line_level` skips an ANSI colour escape only at the very start of a
-  line, then reads the level letter. A held line is `[offline] ` followed by the
-  line as logged, and `CONFIG_LOG_COLORS=y` puts the colour escape after the
-  prefix: `[offline] \033[0;33mW (1234) amphive: ...`. The parser reads `[`, so
-  every held WARN/ERROR line is stored at severity `info`, and the admin/CPO
-  warning/error log filters hide exactly these lines. The fix: strip an
-  optional leading `[offline] `, then skip the colour escape, then read the
-  letter. The synthetic `[offline] (N older line(s) lost)` line has neither a
-  colour escape nor a level letter, so `info` is right for it.
+- **Backend parsing of held lines.** A held line is `[offline] ` followed by
+  the line as logged, and `CONFIG_LOG_COLORS=y` puts the colour escape after
+  the prefix: `[offline] \033[0;33mW (1234) amphive: ...`. The backend's
+  `services/mqtt/logs.py` `_log_line_level` strips the optional leading
+  `[offline] ` before skipping the colour escape and reading the level letter
+  (branch `fix/connection-noise`, `backend/tests/test_gateway_log_level.py`), so
+  held WARN/ERROR lines keep their severity in the admin/CPO filters. The
+  synthetic `[offline] (N older line(s) lost)` line has neither a colour escape
+  nor a level letter, so it is stored as `info`.
 
 Broker endpoint (fw ≥ 2.3.0): `AMPHIVE_DIRECT_MQTT 1` → default `MQTT_BROKER_URL
 "mqtts://mqtt.amphive.app:8883"` — a **DNS name**, so the broker can move
