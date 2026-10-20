@@ -84,16 +84,14 @@ any CPO's `GET /api/cpo/gateways` fleet view, nor in the admin fleet view
 (see "Out of scope" below):
 
 ```powershell
-$pw = python -c "import secrets; print(secrets.token_urlsafe(21))"
-.\deploy\scripts\add_gateway_user.ps1 -GatewayId 1cc3abb4fb54 -Password $pw `
-  -VmName amphive-relay -VmZone us-west1-a -RemoteDir ~/amphive-relay
+.\deploy\scripts\add_gateway_user.ps1 -GatewayId 1cc3abb4fb54
 ```
 
-> The script's built-in defaults (`-VmName amphive-vm-in -VmZone
-> asia-south1-a -RemoteDir /home/Sarthak/amphive`) are **stale** — prod moved
-> to the free-tier `amphive-relay` VM (`us-west1-a`, `~/amphive-relay`) in the
-> 2026-07-27 consolidation. Always pass the three flags above explicitly
-> until the script's defaults are updated.
+> Rewritten 2026-10-20: the script now targets the relay VM directly (plain
+> OpenSSH to `Sarthak@8.235.4.66` by default, password over stdin), generates
+> the password and prints it once. The old `-VmName/-VmZone/-RemoteDir`
+> flags are gone. See [gateway_provisioning.md](gateway_provisioning.md)
+> step B.
 
 Because the buyer never opens "Installer options" in the portal (see below),
 **burn this password into the unit's NVS now**, over the same USB/serial
@@ -105,6 +103,10 @@ documented for rotating a deployed device's Tapo password (see
 [docs/ESP32_CONNECTION.md §9](../../docs/ESP32_CONNECTION.md) troubleshooting
 table, "KLAP handshake1 auth mismatch" row): `nvs_set_str(handle, "mqtt_pwd",
 pw)` in namespace `"storage"`, called once before the unit leaves the bench.
+(`tools/gateway_provision/provision_nvs.py` doesn't fit here: it needs the
+site's Wi-Fi and Tapo values, which only the buyer knows, and it replaces
+the whole NVS partition, so the label's setup code survives only if you pass
+it in.)
 (If you'd rather skip this step for a given batch, that's fine too — the
 buyer's portal still has "Installer options" as a fallback; it's just an
 extra step for them.)

@@ -104,22 +104,28 @@ v5.3.x, not v6):
 
 ```powershell
 . C:\path\to\your\esp-idf\export.ps1     # your IDF install, not this repo's business
-.\tools\flasher\scripts\build-merged-image.ps1 -Chip esp32c3
+.\tools\flasher\scripts\build-merged-image.ps1 -Chip esp32     # the fielded hardware
+.\tools\flasher\scripts\build-merged-image.ps1 -Chip esp32c3   # C3 boards
 ```
 
-This runs `idf.py set-target esp32c3`, `idf.py build`, then
+Each run does `idf.py set-target <chip>`, `idf.py build`, then
 `idf.py merge-bin`, and writes
-`tools/flasher/firmware-images/amphive-gateway-esp32c3-merged.bin`. The
+`tools/flasher/firmware-images/amphive-gateway-<chip>-merged.bin`. The
 script never hardcodes an IDF path (it only checks `$env:IDF_PATH` is set) —
 so it works regardless of where ESP-IDF happens to be installed on whichever
 machine runs it.
 
-Today only `esp32c3` actually builds from this repo's `firmware/` tree —
-`sdkconfig.defaults` is tuned specifically for the real fielded hardware (no
-PSRAM, dual-OTA partitions sized for it; see
-[`docs/FIRMWARE.md`](../../docs/FIRMWARE.md) §6). `esp32` is supported by
-this tool's chip→image mapping for forward compatibility, but producing a
-real image for it needs its own `sdkconfig`/partition work first.
+**Which chip is real:** the production gateway (`1cc3abb4fb54`) is a
+**classic ESP32** (ESP32-D0WD-V3, on a CP210x USB-serial bridge). The
+firmware builds and flashes for target **`esp32`** with ESP-IDF v5.3.3, and
+that is what the fielded unit runs. An earlier version of this README said
+only `esp32c3` builds; that was wrong. The same `firmware/` sources also build
+for `esp32c3` (there is a C3 bench unit), and `sdkconfig.defaults` (4 MB
+flash setting, no PSRAM config, dual-OTA partitions) suits both boards; see
+[`docs/FIRMWARE.md`](../../docs/FIRMWARE.md) §6 for the build config. When
+run with `-Chip esp32`, `build-merged-image.ps1` still prints an older
+heads-up that the config is "tuned for ESP32-C3" and that `esp32` "may need its
+own sdkconfig work". That message is out of date and can be ignored.
 
 To publish an image so the flasher (and end users) can find it automatically:
 attach `amphive-gateway-<chip>-merged.bin` as a release asset on a

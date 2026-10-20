@@ -147,7 +147,10 @@ Three jobs, all required:
    → `ruff check backend/` (lint; config in `pyproject.toml`, E/F/W + isort) →
    `mypy` (lenient starter config scoped to the `backend/services` +
    `backend/routers` files that pass today) →
-   `pytest backend/tests -q --cov=backend --cov-report=term-missing --cov-fail-under=66`.
+   `pytest backend/tests -q --cov=backend --cov-report=term-missing --cov-fail-under=66`
+   → `pytest tools/tests -q` (since 2026-10-20: the fake-plug simulator and
+   the gateway USB provisioning tool, including the exact esptool command its
+   `--write` runs; pure Python, no IDF, serial port, broker or DB).
    Runs on Python 3.11 (matches `backend/Dockerfile`'s `python:3.11-slim`).
 2. **`frontend-lint`** — `npm ci` then `npm run lint` and `npm test`.
 3. **`frontend-tests`** — a second, independent `npm ci` + `npm test` (kept
@@ -227,24 +230,49 @@ each gateway (including this one) authenticates with its **own** per-gateway
 account (username == gateway_id) — the old shared `amphive-gateway` account
 was retired 2026-07-10 (see [SECURITY.md](SECURITY.md) §3).
 
-**Always-on deployment (running in prod since 2026-07-08).** For a fake plug
-that stays live without a terminal open, `deploy/docker/docker-compose.fakeplug.yml`
-runs the simulator as an always-on container (`restart: always`, survives crashes
-and VM reboots). It reuses the `amphive_backend` image (which already has
-paho-mqtt), joins the relay stack's `amphive-relay_default` network, and
-reaches the broker as `mqtt:1883` with the `MQTT_GW_*` creds from
-`~/amphive-relay/.env`. It is **test-only and not shipped by `deploy.ps1`** —
-deploy it manually (commands in the compose file header). Currently deployed
+**On-demand deployment on the VM (kept STOPPED since 2026-10-20).**
+`deploy/docker/docker-compose.fakeplug.yml` runs the simulator as a container
 on `amphive-relay` (the free-tier consolidated VM, see
-[DEPLOYMENT.md](DEPLOYMENT.md)) as container `amphive-fake-plug` driving
-gateway `fakeplug-gw-01` / plug 2 — now roster-capable, so adding a 2nd/3rd
-plug to that gateway via the CPO UI/API works without touching the compose
-file. Manage it with:
+[DEPLOYMENT.md](DEPLOYMENT.md)): container `amphive-fake-plug`, driving gateway
+`fakeplug-gw-01` / plug 2. It reuses the `amphive_backend` image (which
+already has paho-mqtt), joins the relay stack's `amphive-relay_default`
+network, and reaches the broker as `mqtt:1883` with the `MQTT_GW_*` creds from
+`~/amphive-relay/.env`. It is **test-only and not shipped by `deploy.ps1`**
+(install/update commands are in the compose file header). It is
+roster-capable, so adding a 2nd/3rd plug to that gateway via the CPO UI/API
+works without touching the compose file. Plug 2 sits in a private group
+(since 2026-09-28), so drivers don't see it; a test driver joins that group
+first.
+
+It ran always-on from 2026-07-08 to 2026-10-20, and its 5 s telemetry grew
+into ~99% of the backend's log lines and ~1M telemetry rows. So now it is
+started for a test and stopped afterwards. On the VM:
 
 ```bash
-sudo docker logs -f amphive-fake-plug                                    # tail
-cd ~/amphive-relay && sudo docker-compose -p fakeplug -f docker-compose.fakeplug.yml down   # stop
+cd ~/amphive-relay
+sudo docker compose -p fakeplug -f docker-compose.fakeplug.yml up -d   # start (give it a minute to come online)
+sudo docker logs -f amphive-fake-plug                                  # tail
+sudo docker compose -p fakeplug -f docker-compose.fakeplug.yml down    # stop when done
 ```
+
+`down` removes the container, so nothing restarts it behind your back. A
+plain `sudo docker stop amphive-fake-plug` also stays stopped, but **only for
+a container created from the current compose file**
+(`restart: unless-stopped`). Docker fixes a container's restart policy when
+it creates it, and the container deployed before 2026-10-20 was created with
+`restart: always`, which brings a stopped container back on the next VM
+reboot or dockerd restart. Until that container is removed or updated, a
+reboot restarts it. One-time fix on the VM:
+
+```bash
+sudo docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' amphive-fake-plug   # want: unless-stopped
+sudo docker update --restart=unless-stopped amphive-fake-plug   # if it says always (works while stopped)
+```
+
+(Or `down` it, which removes the container.) Copy the current compose file
+to the VM before the next `up -d` too: `up -d` from the old copy gives the
+container `always` again. Expect the gateway to show offline while it's
+stopped; that is normal.
 
 ## 2. Coverage assessment
 
