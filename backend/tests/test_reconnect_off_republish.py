@@ -50,7 +50,8 @@ def _manager_with_db(execute_results):
 async def test_online_republishes_off_only_to_plugs_without_active_session():
     mgr, db = _manager_with_db([
         _result_scalar_one(MagicMock()),                                    # gateway row lookup
-        _result_rows([(1, "10.0.0.11", "Bay 1"), (2, "10.0.0.12", "Bay 2")]),  # (plug_id, local_ip, name)
+        # (plug_id, local_ip, name, current_power_w)
+        _result_rows([(1, "10.0.0.11", "Bay 1", 0.0), (2, "10.0.0.12", "Bay 2", 0.0)]),
         _result_scalars([2]),                                               # plug 2 has an ACTIVE session
         _result_rows([]),                                                   # [queued charge] no WAITING rows
         _result_scalars([]),                                                # [operator alert] no CPOs to notify
@@ -68,7 +69,11 @@ async def test_online_republishes_off_only_to_plugs_without_active_session():
 
 
 @pytest.mark.asyncio
-async def test_offline_status_does_not_republish():
+async def test_offline_status_does_not_republish(monkeypatch):
+    # Immediate (undebounced) offline path, so the driver-notification query
+    # below runs inline — the debounce is covered in test_mqtt_manager.py.
+    import backend.services.mqtt_manager as mm
+    monkeypatch.setattr(mm, "GATEWAY_OFFLINE_NOTIFY_DELAY_SEC", 0)
     offline_sessions = MagicMock()
     offline_sessions.all.return_value = []   # no ACTIVE sessions on this gateway
     mgr, db = _manager_with_db([

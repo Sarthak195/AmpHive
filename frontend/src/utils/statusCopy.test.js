@@ -113,6 +113,12 @@ describe('eventTypeCopy', () => {
     expect(eventTypeCopy('OTA_START_FAILED')).toBe('Firmware update failed to start');
   });
 
+  it('covers the fw 2.8.0 boot / plug-reachability diagnostics', () => {
+    expect(eventTypeCopy('GATEWAY_BOOT')).toBe('Gateway restarted');
+    expect(eventTypeCopy('PLUG_UNREACHABLE')).toBe('Plug unreachable');
+    expect(eventTypeCopy('PLUG_RECOVERED')).toBe('Plug reachable again');
+  });
+
   it('humanizes unknown event types', () => {
     expect(eventTypeCopy('SOME_NEW_EVENT')).toBe('Some new event');
   });

@@ -58,7 +58,7 @@
 > 2.2.0-direct, persists it in the session NVS blob so crash recovery re-arms
 > the session's own cap rather than the gateway default. Older firmware ignores it.
 | gateway → backend | `amphive/gateways/{gateway_id}/status` | 1 | yes | `{"status":"online","fw":"<ver>"}` (on connect) / `{"status":"offline"}` (LWT) |
-| gateway → backend | `amphive/gateways/{gateway_id}/alarms` | 1 | no | `{"error":"THERMAL_CUTOFF"\|"OVERCURRENT_CUTOFF"\|"OVERCURRENT_CAP"\|"UNAUTHORIZED_ON"\|"UNMETERED_CONSUMPTION","plug_id":<int>}` (UNMETERED_CONSUMPTION additionally carries `"kwh":<f>,"today_kwh":<f>,"month_kwh":<f>`, fw ≥ 2.4.0-direct) or `{"event":"OTA_STARTED"\|"OTA_OK_REBOOTING"\|"OTA_FAILED"\|"OTA_REFUSED_SESSION_ACTIVE"\|...}` or (software agent) `{"event":"LOCAL_LIMIT_CUTOFF","reason":"ENERGY_LIMIT"\|"DURATION_LIMIT","plug_id":<int>}` |
+| gateway → backend | `amphive/gateways/{gateway_id}/alarms` | 1 | no | `{"error":"THERMAL_CUTOFF"\|"OVERCURRENT_CUTOFF"\|"OVERCURRENT_CAP"\|"UNAUTHORIZED_ON"\|"UNMETERED_CONSUMPTION","plug_id":<int>}` (UNMETERED_CONSUMPTION additionally carries `"kwh":<f>,"today_kwh":<f>,"month_kwh":<f>`, fw ≥ 2.4.0-direct) or `{"event":"OTA_STARTED"\|"OTA_OK_REBOOTING"\|"OTA_FAILED"\|"OTA_REFUSED_SESSION_ACTIVE"\|...}` or (software agent) `{"event":"LOCAL_LIMIT_CUTOFF","reason":"ENERGY_LIMIT"\|"DURATION_LIMIT","plug_id":<int>}` or (fw ≥ 2.8.0-direct diagnostics, see the note below) `{"event":"GATEWAY_BOOT",...}` / `{"error":"PLUG_UNREACHABLE","plug_id":<int>,"failures":<int>}` / `{"event":"PLUG_RECOVERED","plug_id":<int>,"down_s":<int>}` |
 | gateway → backend | `amphive/gateways/{gateway_id}/logs` | 0 | no | raw WARN/ERROR log line as plain text (fw ≥ 2.1.0-direct). Field diagnostics — persisted as `gateway_logs` rows (see `services/mqtt/logs.py`), no notify/socket fan-out. Covered by the `amphive/gateways/%u/#` ACL. |
 | agent → backend | `amphive/gateways/{gateway_id}/discovery` | 1 | no | `{"unique_id":"<str>","provider":"<str>","model":"<str>","alias":"<str>","capabilities":["switch","power","energy"]}` |
 | backend → agent | `amphive/gateways/{gateway_id}/assign` | 1 | yes | `{"<unique_id>":<plug_id:int>, ...}` (full map for the gateway) |
@@ -131,6 +131,48 @@ Tapo app / stale NVS resume) is forced OFF locally and alarmed.
 > (`services/mqtt/alarms.py` `_notify_cpos_unmetered_consumption`), on top of
 > the usual passive `gateway_events`/`gateway_alarm` feed every alarm type
 > gets.
+
+> **fw ≥ 2.8.0-direct diagnostics on `/alarms` (backend side 2026-10-20).**
+> Three informational reports for field forensics — the 2026-10-20 45-day log
+> forensic found the gateway resetting about once per powered hour with the
+> cause never recorded, and plug-side LAN outages failing silently. Exact
+> payloads:
+>
+> ```json
+> {"event":"GATEWAY_BOOT","fw":"2.8.0-direct","reset_reason":"brownout","reset_code":15,"boot_count":42,"wifi_rssi":-79,"last_wifi_reason":2,"wifi_attempts":3,"min_free_heap":123456,"uptime_s":12}
+> {"error":"PLUG_UNREACHABLE","plug_id":1,"failures":3}
+> {"event":"PLUG_RECOVERED","plug_id":1,"down_s":95}
+> ```
+>
+> The backend (`services/mqtt/alarms.py` `_handle_gateway_alarm`) folds the
+> values into the event's `detail`:
+>
+> - `GATEWAY_BOOT` — severity `info`, gateway-wide (no `plug_id`): "Gateway
+>   booted (fw 2.8.0-direct): reset reason brownout [15], boot #42, Wi-Fi RSSI
+>   -79 dBm after 3 attempts, last Wi-Fi failure reason 2, min free heap
+>   123456 B."
+> - `PLUG_UNREACHABLE` — severity `warning`: "Gateway can't reach the plug
+>   over the LAN (3 failed polls in a row) - readings paused until it
+>   answers."
+> - `PLUG_RECOVERED` — severity `info`: "Plug reachable again after ~95 s."
+>
+> All values are **untrusted**. Each field is coerced on its own — `fw` and
+> `reset_reason` are reduced to `[A-Za-z0-9._+-]` (32 chars max), numbers are
+> rounded and range-checked — and a missing or malformed field just drops its
+> clause (a bare `{"event":"GATEWAY_BOOT"}` reads "Gateway booted.";
+> `PLUG_UNREACHABLE`/`PLUG_RECOVERED` without their number fall back to the
+> sentence without it). `last_wifi_reason` `0` means "no Wi-Fi failure since
+> boot" and is left out (ESP-IDF reason codes start at 1); `uptime_s` is
+> accepted but not shown. Every alarm's `detail` is capped at 255 characters
+> (the `gateway_events.detail` column). None of the three finalizes a
+> session, enters maintenance, or rings a bell — they are persisted as
+> `gateway_events` and broadcast as `gateway_alarm` like every alarm, and the
+> plug-scoped two go through the same plug-ownership check. In the UI the CPO
+> alert strip shows only critical/warning events (so `PLUG_UNREACHABLE`
+> appears there, the two info events only in the Health feed), and the
+> driver's session monitor never renders an info-level event as an alarm
+> banner — a newer `PLUG_RECOVERED` clears an earlier `PLUG_UNREACHABLE`
+> banner for the same plug.
 
 > **`/discovery` + `/assign` (software gateways only).** These two topics belong
 > to the **AmpHive Agent** ([AMPHIVE_AGENT.md](AMPHIVE_AGENT.md)) — a software
@@ -225,7 +267,8 @@ Tapo app / stale NVS resume) is forced OFF locally and alarmed.
 > and `OTA` (gateway-scoped). Older single-plug firmware ignores the field and
 > falls back to its one provisioned target plug, so adding it is backward-safe.
 > On gateway reconnect the backend both republishes the retained roster and
-> re-sends OFF (with `local_ip`) to every idle plug.
+> re-sends OFF (with `local_ip`) to every idle plug (the operator bell for that
+> OFF is gated — see "Offline debounce + orphan bell gating" below).
 
 > **Note on topic shape:** telemetry is published **per-gateway**
 > (`.../{gateway_id}/telemetry`) with `plug_id` inside the JSON body — *not* the
@@ -313,10 +356,29 @@ telemetry message the handler:
 3. Persists authoritative session totals (`energy_kwh`, `peak_power_w`) to the
    active `charging_sessions` row and `current_power_w` to the plug.
 
-Status messages update the gateway's `status`/`last_seen_at` in the DB. Alarm
+Status messages update the gateway's `status` (and the reported `fw`) in the
+DB — not `last_seen_at`, which only telemetry stamps (REC-09). Alarm
 messages (`/alarms`) are ingested by `_handle_gateway_alarm` → persisted as
 `gateway_events` and broadcast as the `gateway_alarm` Socket.io event
 (2026-07-10).
+
+> **Offline debounce + orphan bell gating (2026-10-20).** A real
+> ONLINE→OFFLINE transition still flips `gateways.status` at once, so
+> `gateway_is_live` and every start gate stay truthful. Its side effects — the
+> driver "Charger connection lost" notice and the `plug_connectivity`
+> `gateway_online:false` push — now wait `GATEWAY_OFFLINE_NOTIFY_DELAY_SEC`
+> (default 120 s; `services/mqtt/status.py` `_deferred_offline_notice`) and
+> fire only if the stored status is still OFFLINE then. Any `online` in the
+> meantime — a real transition or a retained replay — cancels them (logged
+> "Gateway back within offline-notice window - notice suppressed"); `<= 0`
+> restores the immediate behaviour. The 2026-10-20 log forensic found 22 of
+> 33 offline→online pairs reversing within 1 s, each one ringing a bell. On
+> `online`, the orphan-OFF sweep still OFFs every plug without an ACTIVE
+> session (minus mid-debounce queued charges), but the CPO `orphan_off` bell —
+> already limited to a real OFFLINE→ONLINE transition — now also requires the
+> plug's last-known `current_power_w >= ORPHAN_ALERT_MIN_POWER_W` (default
+> 5 W). An idle plug's OFF only logs at INFO; a relay found ON with no session
+> is still covered by the firmware's own `UNAUTHORIZED_ON` alarm.
 
 > **Alarm handling by type.** `THERMAL_CUTOFF` and `OVERCURRENT_CUTOFF` are
 > hardware faults (severity `critical`): the backend **finalizes** the plug's
@@ -341,6 +403,9 @@ messages (`/alarms`) are ingested by `_handle_gateway_alarm` → persisted as
 > maintenance flip (the plug itself is healthy) — but it additionally
 > bell-notifies every CPO of the tenant (unlike every other alarm type here,
 > which only reach the passive `gateway_events` feed); see the dedicated note
+> above. The fw ≥ 2.8.0-direct diagnostics — `GATEWAY_BOOT` and
+> `PLUG_RECOVERED` (severity `info`), `PLUG_UNREACHABLE` (`warning`) — never
+> finalize, never enter maintenance and never bell-notify; see their note
 > above.
 
 There is **no Last Will & Testament configured on the backend client**; the

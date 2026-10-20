@@ -7,7 +7,99 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 
 ---
 
-## 0. Latest — 2026-08-18 production-readiness audit: privacy, data rights, SEO, a11y
+## 0. Latest — 2026-10-20 connection noise: debounced offline notices, gated orphan bells, fw 2.8.0 diagnostics
+
+A 45-day forensic pass over the prod logs (one user, who is driver, operator
+and admin at once) found that most of the bells were noise, and why:
+
+- **F1** — the ESP32 gateway reset itself about once per powered hour: 68-70
+  of 79 reconnects were chip resets, and nothing recorded why.
+- **F2** — the backend had no debounce on gateway offline/online. Every
+  sub-second reconnect rang "Charger connection lost" (during a session) or
+  "Plug auto-recovered" (the `orphan_off` bell, when idle): 96 of 139
+  notifications (69%), with 22 of 33 offline->online pairs reversing within
+  1 s.
+- **F3** — the 300 s stale-session reaper ended 12 of 26 sessions.
+- **F4** — about 6 plug-side outages in 55 days where the gateway's KLAP/HTTP
+  polls failed silently, and a failed `get_device_info` was reported as
+  relay OFF.
+- **F5** — no reset reason, no Wi-Fi disconnect reason, no MQTT error
+  handler, and forwarded log lines were dropped while MQTT was down.
+- **F11** — the per-frame "Telemetry received" INFO line was 99% of all
+  backend log lines.
+
+**What changed in the backend** (branch `fix/connection-noise`; no migration,
+alembic head stays `0038`):
+
+- **Debounced offline side effects (F2).** A real ONLINE->OFFLINE transition
+  still flips `gateways.status` at once, so `gateway_is_live` and every start
+  gate stay truthful. The driver notice and the `plug_connectivity`
+  `gateway_online:false` push now wait `GATEWAY_OFFLINE_NOTIFY_DELAY_SEC`
+  (default 120 s) in a per-gateway task (`services/mqtt/status.py`
+  `_deferred_offline_notice`). That task re-reads the gateway in a fresh DB
+  session and only acts if it is still OFFLINE. Any `online` for that gateway
+  in the meantime, a retained replay included, cancels the task and logs
+  "Gateway back within offline-notice window - notice suppressed". A second
+  offline replaces a pending task, `MQTTManager.stop()` cancels whatever is
+  pending, and `<= 0` restores the old immediate behaviour. The online
+  connectivity push is unchanged.
+- **Orphan-OFF bell gating (F2).** On reconnect every plug without an ACTIVE
+  session still gets its OFF, exactly as before (REC-06 ordering and the
+  queued-charge hold untouched). But the CPO `orphan_off` bell now also needs
+  the plug's last-known `plugs.current_power_w >= ORPHAN_ALERT_MIN_POWER_W`
+  (default 5 W), read in the same snapshot query. An idle plug's OFF only logs
+  at INFO. A relay found ON with no session is still covered by the
+  firmware's own `UNAUTHORIZED_ON` critical alarm. The bell text now says how
+  much the plug was last drawing.
+- **Stale reaper (F3).** Prod sets `SESSION_STALE_TIMEOUT_SEC=1200` through
+  `.env`. The code default stays 300 s.
+- **Log volume (F11).** "Telemetry received" is DEBUG now. Every frame still
+  lands in `telemetry_readings`.
+- **fw 2.8.0-direct diagnostics (F1/F4/F5).** `/alarms` now understands
+  `GATEWAY_BOOT` (info: firmware, reset reason and code, boot count, Wi-Fi
+  RSSI/attempts/last disconnect reason, minimum free heap), `PLUG_UNREACHABLE`
+  (warning: N failed polls in a row) and `PLUG_RECOVERED` (info: down for
+  ~N s). Each is folded into a readable `detail`. Every value is treated as
+  untrusted (coerced, sanitized, range-checked), and every alarm's `detail` is
+  now capped at the 255-character column. Before, an absurd
+  `UNMETERED_CONSUMPTION` estimate could overflow the column and drop the
+  event. None of the three finalizes, enters maintenance or bells. The
+  "Gateway alarm" log line carries the detail, so the backend log alone shows
+  why a gateway restarted. Exact payloads are in
+  [MQTT_CONTRACT.md](MQTT_CONTRACT.md). The firmware side ships separately as
+  fw 2.8.0-direct.
+
+**Frontend (minimal).** The driver's session monitor used to render *any*
+recent alarm for its plug as a red banner. It would have shown
+`PLUG_RECOVERED` as a red "Plug reachable again" alert in the middle of a
+session. Now it takes the newest alarm for the plug and renders it only if
+it is not info-level. A newer `PLUG_RECOVERED` therefore clears the
+`PLUG_UNREACHABLE` banner instead of leaving it up for its full 2 minutes.
+`LOCAL_LIMIT_CUTOFF` (info, software agent only) no longer shows a red banner
+either; the finalize already tells the driver. `statusCopy` gained the
+operator-facing names "Gateway restarted", "Plug unreachable" and "Plug
+reachable again". The CPO alert strip already showed only critical/warning,
+and the Health page is the passive feed, so neither changed.
+
+**Known gaps (not changed here):**
+
+- The console's Health nav badge (`TenantContext.unackedEvents`) counts every
+  unacknowledged event, info-level included. So each `GATEWAY_BOOT` ticks it
+  until acknowledged; the Health page's "Acknowledge selected" clears them in
+  bulk. A follow-up could count only critical/warning.
+- A notice still pending when the backend stops is cancelled. After the
+  restart the retained `offline` replay is not a transition, so no notice is
+  re-armed. A gateway that dropped within ~2 minutes before a deploy never
+  produces the driver notice. The reaper still closes the session.
+- Two status messages for the same gateway are persisted by independent
+  coroutines (pre-existing). If they interleave so that the stored status ends
+  OFFLINE although the gateway is back, the deferred notice fires. It then
+  matches what the start gates see, and the re-read covers the opposite
+  order.
+
+---
+
+## 0.0001 — 2026-08-18 production-readiness audit: privacy, data rights, SEO, a11y
 
 A whole-product audit (35 areas, from secrets and injection through to mobile
 UX and error pages) plus the remediation batch. Full security detail is in

@@ -14,6 +14,7 @@ thread.
 
 import asyncio
 import json
+import logging
 import threading
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -207,6 +208,11 @@ async def test_telemetry_update_direct_when_no_loop():
     ({"event": "OTA_STARTED"}, "OTA_STARTED", "info", None),
     ({"event": "OTA_FAILED"}, "OTA_FAILED", "warning", None),
     ({"error": "SOMETHING_NEW"}, "SOMETHING_NEW", "warning", None),  # unknown → warning
+    # fw 2.8.0 diagnostics: boot report (gateway-wide) + plug LAN reachability.
+    ({"event": "GATEWAY_BOOT", "fw": "2.8.0-direct", "reset_reason": "brownout"},
+     "GATEWAY_BOOT", "info", None),
+    ({"error": "PLUG_UNREACHABLE", "plug_id": 1, "failures": 3}, "PLUG_UNREACHABLE", "warning", 1),
+    ({"event": "PLUG_RECOVERED", "plug_id": 1, "down_s": 95}, "PLUG_RECOVERED", "info", 1),
 ])
 async def test_alarm_parsed_and_persisted(payload, exp_type, exp_sev, exp_plug):
     """
@@ -2075,15 +2081,19 @@ async def test_set_plug_telemetry_interval_noop_before_lifespan(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_no_duplicate_offline_notify_on_repeated_offline_status():
+async def test_no_duplicate_offline_notify_on_repeated_offline_status(monkeypatch):
     """
     Subscriptions re-issue on every connect, so a backend/broker reconnect
     replays the retained LWT `offline`. _notify_drivers_gateway_offline must
     fire only on a real ONLINE->OFFLINE transition: once on the first offline,
     never again while the gateway is already stored OFFLINE (REC-08).
+    (Immediate path — GATEWAY_OFFLINE_NOTIFY_DELAY_SEC=0; the debounce has its
+    own tests below.)
     """
+    import backend.services.mqtt_manager as mm
     from backend.database.models import GatewayStatus
 
+    monkeypatch.setattr(mm, "GATEWAY_OFFLINE_NOTIFY_DELAY_SEC", 0)
     MQTTManager._instance = None
     gateway = MagicMock()
     gateway.status = GatewayStatus.ONLINE
@@ -2129,14 +2139,17 @@ async def test_status_online_does_not_bump_last_seen_at():
 
 
 @pytest.mark.asyncio
-async def test_plug_connectivity_emitted_on_transition():
+async def test_plug_connectivity_emitted_on_transition(monkeypatch):
     """
     On a real online<->offline transition, plug_connectivity is broadcast for
     each of the gateway's plugs with the {plug_id, gateway_online} contract the
-    frontend consumes (Faster-offline Lever 1).
+    frontend consumes (Faster-offline Lever 1). (Immediate path —
+    GATEWAY_OFFLINE_NOTIFY_DELAY_SEC=0; the debounced path is tested below.)
     """
+    import backend.services.mqtt_manager as mm
     from backend.database.models import GatewayStatus
 
+    monkeypatch.setattr(mm, "GATEWAY_OFFLINE_NOTIFY_DELAY_SEC", 0)
     MQTTManager._instance = None
     gateway = MagicMock()
     gateway.status = GatewayStatus.ONLINE
@@ -2153,6 +2166,238 @@ async def test_plug_connectivity_emitted_on_transition():
     assert emit_mock.await_count == 2
     emit_mock.assert_any_await(10, False)
     emit_mock.assert_any_await(11, False)
+    MQTTManager._instance = None
+
+
+# ---------------------------------------------------------------------------
+# [Offline debounce] Deferred gateway-offline side effects
+# (services/mqtt/status.py _deferred_offline_notice): the driver "Charger
+# connection lost" notice and the plug_connectivity=false push wait out
+# GATEWAY_OFFLINE_NOTIFY_DELAY_SEC and are dropped if the gateway is back by
+# then. Tiny monkeypatched delays — no real 120 s sleeps.
+# ---------------------------------------------------------------------------
+
+_NOTICE_DELAY = 0.05
+
+
+def _debounce_mgr(monkeypatch, gateway, n_results, delay=_NOTICE_DELAY):
+    """MQTTManager whose _FakeSession answers each of `n_results` queries with
+    the same `gateway` mock (the status persists AND the deferred re-read, so
+    the re-read sees whatever status the persists left behind), with the side
+    effects and the online-path collaborators mocked out. Tests that expect
+    NO re-read pass one spare result and assert it is still unconsumed: a
+    one-shot iterator that ran dry inside the task would otherwise surface as
+    a swallowed error that looks exactly like "no notice"."""
+    import backend.services.mqtt_manager as mm
+
+    monkeypatch.setattr(mm, "GATEWAY_OFFLINE_NOTIFY_DELAY_SEC", delay)
+    MQTTManager._instance = None
+    session = _FakeSession([_FakeResult(scalar=gateway) for _ in range(n_results)])
+    mgr = MQTTManager(db_session_factory=lambda: session)
+    mgr.client = MagicMock()
+    mgr._notify_drivers_gateway_offline = AsyncMock()
+    mgr._broadcast_plug_connectivity = AsyncMock()
+    mgr._republish_off_for_orphaned_plugs = AsyncMock()
+    mgr._publish_roster_for_gateway = AsyncMock()
+    return mgr, session
+
+
+@pytest.mark.asyncio
+async def test_offline_then_online_within_window_suppresses_notice(monkeypatch, caplog):
+    """A sub-second offline->online blip (22 of 33 pairs in the 2026-10-20 log
+    forensic) must neither notify drivers nor push plug_connectivity=false:
+    the `online` cancels the pending notice while it is still sleeping. The
+    DB status flip itself stays immediate."""
+    from backend.database.models import GatewayStatus
+
+    gw = MagicMock()
+    gw.status = GatewayStatus.ONLINE
+    # offline persist + online persist + one spare only a re-read would consume
+    mgr, session = _debounce_mgr(monkeypatch, gw, n_results=3)
+
+    await mgr._persist_gateway_status("gw-1", "offline")
+    assert gw.status == GatewayStatus.OFFLINE        # immediate DB flip
+    pending = mgr._offline_notice_tasks()["gw-1"]    # notice armed, not sent
+    mgr._notify_drivers_gateway_offline.assert_not_awaited()
+    mgr._broadcast_plug_connectivity.assert_not_awaited()
+
+    with caplog.at_level(logging.INFO, logger="amphive.mqtt"):
+        await mgr._persist_gateway_status("gw-1", "online")
+
+    # Cancelled outright — not "ran, re-read ONLINE, skipped".
+    assert mgr._offline_notice_tasks() == {}
+    assert "notice suppressed" in caplog.text
+    await asyncio.sleep(_NOTICE_DELAY * 3)           # well past the window
+    assert pending.cancelled()
+    assert next(session._results, None) is not None  # the re-read never ran
+    mgr._notify_drivers_gateway_offline.assert_not_awaited()
+    # Only the reachable push of the real OFFLINE->ONLINE transition.
+    mgr._broadcast_plug_connectivity.assert_awaited_once_with("gw-1", True)
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_offline_notice_fires_once_when_still_offline_after_window(monkeypatch):
+    """A gateway that stays offline past the window gets the driver notice and
+    the plug_connectivity=false push — exactly once."""
+    from backend.database.models import GatewayStatus
+
+    gw = MagicMock()
+    gw.status = GatewayStatus.ONLINE
+    # offline persist + the deferred re-read (still stored OFFLINE)
+    mgr, _ = _debounce_mgr(monkeypatch, gw, n_results=2)
+
+    await mgr._persist_gateway_status("gw-1", "offline")
+    task = mgr._offline_notice_tasks()["gw-1"]
+    mgr._notify_drivers_gateway_offline.assert_not_awaited()  # debounced
+
+    await asyncio.wait_for(task, timeout=2)
+    await asyncio.sleep(_NOTICE_DELAY * 2)  # and nothing fires again later
+
+    mgr._notify_drivers_gateway_offline.assert_awaited_once_with("gw-1")
+    mgr._broadcast_plug_connectivity.assert_awaited_once_with("gw-1", False)
+    assert mgr._offline_notice_tasks() == {}
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("delay", [0, -1])
+async def test_offline_notice_immediate_when_delay_disabled(monkeypatch, delay):
+    """GATEWAY_OFFLINE_NOTIFY_DELAY_SEC <= 0 restores the old behaviour: notice
+    and unreachable push on the transition itself, no task armed."""
+    from backend.database.models import GatewayStatus
+
+    gw = MagicMock()
+    gw.status = GatewayStatus.ONLINE
+    mgr, _ = _debounce_mgr(monkeypatch, gw, n_results=1, delay=delay)
+
+    await mgr._persist_gateway_status("gw-1", "offline")
+
+    mgr._notify_drivers_gateway_offline.assert_awaited_once_with("gw-1")
+    mgr._broadcast_plug_connectivity.assert_awaited_once_with("gw-1", False)
+    assert mgr._offline_notice_tasks() == {}
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_retained_online_replay_cancels_pending_offline_notice(monkeypatch):
+    """ANY `online` cancels a pending notice — a retained replay too (gateway
+    already stored ONLINE, so no transition): the gateway is demonstrably
+    reachable."""
+    from backend.database.models import GatewayStatus
+
+    gw = MagicMock()
+    gw.status = GatewayStatus.ONLINE
+    mgr, session = _debounce_mgr(monkeypatch, gw, n_results=3)
+
+    await mgr._persist_gateway_status("gw-1", "offline")
+    pending = mgr._offline_notice_tasks()["gw-1"]
+    # The stored status already reads ONLINE when the retained `online` lands,
+    # so this is a replay, not a transition.
+    gw.status = GatewayStatus.ONLINE
+    await mgr._persist_gateway_status("gw-1", "online")
+
+    # Replay path (no operator alert) — and still the notice is cancelled.
+    mgr._republish_off_for_orphaned_plugs.assert_awaited_once_with(
+        "gw-1", alert_operators=False
+    )
+    assert mgr._offline_notice_tasks() == {}
+    await asyncio.sleep(_NOTICE_DELAY * 3)
+    assert pending.cancelled()
+    assert next(session._results, None) is not None  # no re-read
+    mgr._notify_drivers_gateway_offline.assert_not_awaited()
+    mgr._broadcast_plug_connectivity.assert_not_awaited()  # no transition either way
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_new_offline_notice_replaces_pending_one(monkeypatch):
+    """Re-arming a gateway's notice cancels the pending one first: one notice,
+    one re-read."""
+    from backend.database.models import GatewayStatus
+
+    gw = MagicMock()
+    gw.status = GatewayStatus.OFFLINE
+    mgr, session = _debounce_mgr(monkeypatch, gw, n_results=2)  # 1 re-read + spare
+
+    mgr._schedule_offline_notice("gw-1", _NOTICE_DELAY)
+    first = mgr._offline_notice_tasks()["gw-1"]
+    mgr._schedule_offline_notice("gw-1", _NOTICE_DELAY)
+    second = mgr._offline_notice_tasks()["gw-1"]
+    assert second is not first
+
+    await asyncio.wait_for(second, timeout=2)
+
+    assert first.cancelled()
+    assert next(session._results, None) is not None  # only one re-read
+    mgr._notify_drivers_gateway_offline.assert_awaited_once_with("gw-1")
+    mgr._broadcast_plug_connectivity.assert_awaited_once_with("gw-1", False)
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_offline_notice_skipped_when_recheck_finds_gateway_back(monkeypatch):
+    """Backstop for an `online` that slipped in before the notice was armed
+    (two status coroutines interleaving on the loop): the deferred task
+    re-reads the stored status and stays silent unless it is still OFFLINE."""
+    from backend.database.models import GatewayStatus
+
+    gw = MagicMock()
+    gw.status = GatewayStatus.ONLINE  # what the re-read sees
+    mgr, _ = _debounce_mgr(monkeypatch, gw, n_results=1)
+
+    mgr._schedule_offline_notice("gw-1", _NOTICE_DELAY)
+    await asyncio.wait_for(mgr._offline_notice_tasks()["gw-1"], timeout=2)
+
+    mgr._notify_drivers_gateway_offline.assert_not_awaited()
+    mgr._broadcast_plug_connectivity.assert_not_awaited()
+    assert mgr._offline_notice_tasks() == {}
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_stop_cancels_pending_offline_notices(monkeypatch):
+    """MQTTManager.stop() (lifespan teardown) cancels every pending notice so
+    none fires into a shutting-down app."""
+    from backend.database.models import GatewayStatus
+
+    gw = MagicMock()
+    gw.status = GatewayStatus.OFFLINE
+    mgr, _ = _debounce_mgr(monkeypatch, gw, n_results=2)
+
+    mgr._schedule_offline_notice("gw-1", _NOTICE_DELAY)
+    mgr._schedule_offline_notice("gw-2", _NOTICE_DELAY)
+    pending = list(mgr._offline_notice_tasks().values())
+
+    mgr.stop()
+
+    assert mgr._offline_notice_tasks() == {}
+    await asyncio.sleep(_NOTICE_DELAY * 3)
+    assert all(t.cancelled() for t in pending)
+    mgr._notify_drivers_gateway_offline.assert_not_awaited()
+    mgr._broadcast_plug_connectivity.assert_not_awaited()
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_offline_notice_failure_is_logged_not_raised(monkeypatch, caplog):
+    """A failing side effect inside the deferred task is caught and logged —
+    the task ends cleanly and drops out of the pending map."""
+    from backend.database.models import GatewayStatus
+
+    gw = MagicMock()
+    gw.status = GatewayStatus.OFFLINE
+    mgr, _ = _debounce_mgr(monkeypatch, gw, n_results=1)
+    mgr._notify_drivers_gateway_offline = AsyncMock(side_effect=RuntimeError("boom"))
+
+    mgr._schedule_offline_notice("gw-1", _NOTICE_DELAY)
+    task = mgr._offline_notice_tasks()["gw-1"]
+    with caplog.at_level(logging.ERROR, logger="amphive.mqtt"):
+        await asyncio.wait_for(task, timeout=2)
+
+    assert task.exception() is None
+    assert "Deferred offline notice failed" in caplog.text
+    assert mgr._offline_notice_tasks() == {}
     MQTTManager._instance = None
 
 
@@ -2516,6 +2761,139 @@ async def test_persist_gateway_event_does_not_notify_cpos_for_other_event_types(
          patch("backend.services.notifications.notify", notify_mock):
         await mgr._persist_gateway_event("gw-9", 5, "THERMAL_CUTOFF", "critical", None)
 
+    notify_mock.assert_not_awaited()
+    MQTTManager._instance = None
+
+
+# ---------------------------------------------------------------------------
+# [fw 2.8.0 diagnostics] GATEWAY_BOOT / PLUG_UNREACHABLE / PLUG_RECOVERED on
+# .../alarms (services/mqtt/alarms.py) — informational events with untrusted
+# values folded into `detail`; never a finalize, maintenance flip or bell.
+# ---------------------------------------------------------------------------
+
+
+async def _alarm_detail(payload):
+    """Run _handle_gateway_alarm on `payload` and return what it forwarded to
+    _persist_gateway_event."""
+    MQTTManager._instance = None
+    mgr = MQTTManager(db_session_factory=lambda: None, event_loop=asyncio.get_running_loop())
+    captured = {}
+
+    async def fake_persist(gateway_id, plug_id, event_type, severity, detail):
+        captured.update(plug_id=plug_id, event_type=event_type,
+                        severity=severity, detail=detail)
+
+    mgr._persist_gateway_event = fake_persist
+    mgr._handle_gateway_alarm("gw-9", payload)
+    await asyncio.sleep(0.05)
+    MQTTManager._instance = None
+    return captured
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload,exp_type,exp_sev,exp_plug,exp_detail", [
+    ({"event": "GATEWAY_BOOT", "fw": "2.8.0-direct", "reset_reason": "brownout",
+      "reset_code": 15, "boot_count": 42, "wifi_rssi": -79, "last_wifi_reason": 2,
+      "wifi_attempts": 3, "min_free_heap": 123456, "uptime_s": 12},
+     "GATEWAY_BOOT", "info", None,
+     "Gateway booted (fw 2.8.0-direct): reset reason brownout [15], boot #42, "
+     "Wi-Fi RSSI -79 dBm after 3 attempts, last Wi-Fi failure reason 2, "
+     "min free heap 123456 B."),
+    ({"error": "PLUG_UNREACHABLE", "plug_id": 1, "failures": 3},
+     "PLUG_UNREACHABLE", "warning", 1,
+     "Gateway can't reach the plug over the LAN (3 failed polls in a row) - "
+     "readings paused until it answers."),
+    ({"event": "PLUG_RECOVERED", "plug_id": 1, "down_s": 95},
+     "PLUG_RECOVERED", "info", 1,
+     "Plug reachable again after ~95 s."),
+])
+async def test_fw28_diagnostic_alarms_exact_detail(payload, exp_type, exp_sev, exp_plug, exp_detail):
+    """The three fw 2.8.0 payloads, exactly as docs/MQTT_CONTRACT.md quotes
+    them, map to the documented severity and detail text."""
+    captured = await _alarm_detail(payload)
+
+    assert captured["event_type"] == exp_type
+    assert captured["severity"] == exp_sev
+    assert captured["plug_id"] == exp_plug
+    assert captured["detail"] == exp_detail
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload,exp_detail", [
+    # Nothing but the event name: the bare fallback.
+    ({"event": "GATEWAY_BOOT"}, "Gateway booted."),
+    # Hostile/malformed values each drop (or sanitize) just their own clause:
+    # markup stripped from the reason, non-numeric code, bool boot count,
+    # 0 = "no Wi-Fi failure since boot", impossible negative heap.
+    ({"event": "GATEWAY_BOOT", "fw": "2.8.0-direct", "reset_reason": "<script>",
+      "reset_code": "x", "boot_count": True, "wifi_rssi": -79, "wifi_attempts": 1,
+      "last_wifi_reason": 0, "min_free_heap": -5},
+     "Gateway booted (fw 2.8.0-direct): reset reason script, Wi-Fi RSSI -79 dBm after 1 attempt."),
+    # Junk fw with spaces/quotes collapses to a safe token; code-only reset.
+    ({"event": "GATEWAY_BOOT", "fw": "2.8.0 \"evil\"", "reset_code": 9, "wifi_attempts": 2},
+     "Gateway booted (fw 2.8.0_evil): reset code 9, Wi-Fi up after 2 attempts."),
+    ({"error": "PLUG_UNREACHABLE", "plug_id": 1},
+     "Gateway can't reach the plug over the LAN - readings paused until it answers."),
+    ({"error": "PLUG_UNREACHABLE", "plug_id": 1, "failures": 1},
+     "Gateway can't reach the plug over the LAN (1 failed poll in a row) - "
+     "readings paused until it answers."),
+    ({"error": "PLUG_UNREACHABLE", "plug_id": 1, "failures": "lots"},
+     "Gateway can't reach the plug over the LAN - readings paused until it answers."),
+    ({"event": "PLUG_RECOVERED", "plug_id": 1}, "Plug reachable again."),
+    ({"event": "PLUG_RECOVERED", "plug_id": 1, "down_s": float("nan")}, "Plug reachable again."),
+    ({"event": "PLUG_RECOVERED", "plug_id": 1, "down_s": 94.6}, "Plug reachable again after ~95 s."),
+])
+async def test_fw28_diagnostic_alarms_degrade_gracefully(payload, exp_detail):
+    """Every field is optional and untrusted: missing/malformed values drop
+    their clause instead of crashing the handler or leaking raw input."""
+    captured = await _alarm_detail(payload)
+
+    assert captured["detail"] == exp_detail
+
+
+@pytest.mark.asyncio
+async def test_alarm_detail_capped_to_column_size():
+    """GatewayEvent.detail is String(255): an over-long detail (here an absurd
+    UNMETERED_CONSUMPTION estimate) is capped, not left to fail the insert and
+    drop the whole event."""
+    captured = await _alarm_detail(
+        {"error": "UNMETERED_CONSUMPTION", "plug_id": 5, "kwh": 1e200}
+    )
+
+    assert len(captured["detail"]) == 255
+    assert captured["detail"].startswith("Plug consumed an estimated ")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("event_type,severity", [
+    ("GATEWAY_BOOT", "info"),
+    ("PLUG_UNREACHABLE", "warning"),
+    ("PLUG_RECOVERED", "info"),
+])
+async def test_fw28_diagnostic_events_persist_without_side_effects(event_type, severity):
+    """Persisted + broadcast like every alarm, but never a session finalize,
+    a maintenance flip, or a CPO bell."""
+    MQTTManager._instance = None
+    db = _AlarmDB()
+    mgr = MQTTManager(db_session_factory=lambda: db)
+    finalize_mock = AsyncMock()
+    auto_maint_mock = AsyncMock()
+    mgr._finalize_session_after_cutoff = finalize_mock
+    mgr._auto_enter_maintenance = auto_maint_mock
+
+    notify_mock = AsyncMock()
+    emit_mock = AsyncMock()
+    with patch("backend.services.socketio_manager.emit_gateway_alarm", emit_mock), \
+         patch("backend.services.notifications.notify", notify_mock):
+        await mgr._persist_gateway_event("gw-9", 5, event_type, severity, "detail text")
+
+    assert len(db.added) == 1
+    assert db.added[0].event_type == event_type
+    assert db.added[0].severity == severity
+    assert db.added[0].detail == "detail text"
+    emit_mock.assert_awaited_once()
+    finalize_mock.assert_not_awaited()
+    auto_maint_mock.assert_not_awaited()
     notify_mock.assert_not_awaited()
     MQTTManager._instance = None
 

@@ -166,6 +166,11 @@ export const EVENT_TYPE_COPY = {
   OTA_FAILED: 'Firmware update failed',
   OTA_REFUSED_SESSION_ACTIVE: 'Firmware update deferred — session active',
   OTA_START_FAILED: 'Firmware update failed to start',
+  // fw >= 2.8.0 diagnostics (backend/services/mqtt/alarms.py): why the
+  // gateway restarted, and the plug dropping off / coming back on the LAN.
+  GATEWAY_BOOT: 'Gateway restarted',
+  PLUG_UNREACHABLE: 'Plug unreachable',
+  PLUG_RECOVERED: 'Plug reachable again',
   // [Trust bundle] Written by routers/plugs.py report_plug_problem alongside
   // every PlugReport — surfaces in the SAME CpoAlerts strip / Health feed as
   // the hardware alarms above (no separate alert pipeline).
