@@ -8,8 +8,11 @@ consistent, testable, per-table restore) and daily GCP disk snapshots
 
 | Layer | Schedule | Retention | Where |
 |-------|----------|-----------|-------|
-| `pg_dump -Fc` of `amphive` + ops-config tarball | cron `0 21 * * *` (21:00 UTC = 02:30 IST) via `~/amphive/backup_db.sh` | GCS: 30-day lifecycle rule · local `~/amphive/backups/`: last 3 sets | `gs://amphive-db-backups/YYYY/MM/` (private, PAP enforced, asia-south1) |
-| Disk snapshot of `amphive-vm-in` | daily 20:00 UTC (resource policy `amphive-daily-snapshot`) | 14 days, kept on disk delete | GCP snapshots, asia-south1 |
+| `pg_dump -Fc` of `amphive` + ops-config tarball (+ mail-store tarball, live copy only, see below) | cron `0 21 * * *` (21:00 UTC = 02:30 IST) in the **normal user's** crontab, running `~/amphive-relay/backup_db.sh` | local `~/amphive-relay/backups/`: last 3 sets (log: `~/amphive-relay/backup.log`) · GCS: 30-day lifecycle rule on the original bucket (not re-verified on `-2`) | `gs://amphive-db-backups-2/YYYY/MM/` (private, PAP enforced, asia-south1) since the 2026-09-04 GCP account move; the original `gs://amphive-db-backups` went with the old project |
+| Disk snapshot | daily 20:00 UTC (resource policy `amphive-daily-snapshot`) | 14 days, kept on disk delete | GCP snapshots. Set up for `amphive-vm-in`, re-created for `amphive-relay` on 2026-08-02 in the old project. **Not verified since the move to the new project**: check with `gcloud compute resource-policies list` |
+
+(The setup history and restore test below are dated and keep the names of
+their day: `amphive-vm-in`, `~/amphive`, the `amphive-db` container.)
 
 The config tarball holds `.env`, `Caddyfile`, `mosquitto.conf`,
 `mosquitto_passwd`, `mosquitto_acl`, `mqtt-certs/` — the **per-gateway broker
@@ -18,11 +21,57 @@ re-provisioning every fielded device. The tarball contains secrets; the bucket
 is private and unlisted principals have no access.
 
 The script always writes the local copy first and treats the GCS upload as
-best-effort (exit 2 + `~/amphive/backup.log` entry on failure), so a broken
-upload path degrades to local-only backups instead of none.
+best-effort (exit 2 + `~/amphive-relay/backup.log` entry on failure), so a
+broken upload path degrades to local-only backups instead of none.
 
-`deploy.ps1` re-ships `deploy/scripts/backup_db.sh` to the VM on every deploy
-(CRLF stripped); the cron entry is one-time (already installed 2026-07-11).
+`deploy.ps1` does **not** ship `backup_db.sh`: since its 2026-08-02 relay
+rewrite it ships only `backend/` + `frontend/`. The VM copy is installed by
+hand, and it has drifted from `deploy/scripts/backup_db.sh`: it also tars the
+mail store and `/etc/dovecot/users` (mail_server.md gap 6), which the repo copy
+lacks. To change it, merge the change into the live
+`~/amphive-relay/backup_db.sh` (or first copy the live file into the repo),
+strip CRLF, and keep it executable. Never overwrite the live copy with the
+repo file as-is.
+
+## Incident 2026-10-20: 45 days without a backup
+
+**What happened.** During the 2026-09-04 GCP account move the script was
+test-run by hand as `sudo ./backup_db.sh`. That run worked, but it created
+`~/amphive-relay/backup.log` and `~/amphive-relay/backups/` owned by
+**root**. The nightly cron runs as the normal user, so from then on every run
+died in under a second: it could neither append to its log nor write a dump
+into `backups/`. Cron mailed the error output to the user, and that mail
+bounced because the VM has no local mailbox. Nothing else was watching, so
+**no backup was taken for 45 days**.
+
+**Fix (2026-10-20).** `chown` of `backup.log` and `backups/` back to the
+normal user, then one manual run as that user (no sudo), which uploaded to
+`gs://amphive-db-backups-2/2026/10/`.
+
+**So it can't fail silently again**, `backup_db.sh` now opens with a guard:
+
+- It refuses to run as root (exit 3). It already uses `sudo` itself for the
+  steps that need root, so there is never a reason to run the whole script
+  with sudo.
+- If `backups/`, `backup.log` or `backups/LAST_SUCCESS` is not writable, it
+  exits 3 with `ERROR: cannot write … - owned by root? never run this script
+  with sudo (fix: sudo chown …)`. The message goes to **stderr** and to
+  **syslog** (`journalctl -t amphive-backup`), so it no longer depends on the
+  very log file that is broken.
+
+Rule: run it by hand only as the normal user, i.e. `~/amphive-relay/backup_db.sh`.
+
+### Is the backup actually running?
+
+```sh
+ls -l ~/amphive-relay/backups/LAST_SUCCESS    # mtime = last good upload; older than a day = broken
+tail -5 ~/amphive-relay/backup.log
+journalctl -t amphive-backup --since "2 days ago"   # guard refusals land here
+ls -ld ~/amphive-relay/backup.log ~/amphive-relay/backups   # owner must be the normal user, not root
+```
+
+There is still no alerting, so a failing backup only shows up if someone
+looks (see docs/SECURITY.md).
 
 ## One-time setup (DONE 2026-07-11, owner-approved)
 
@@ -59,23 +108,27 @@ used — deleted 2026-07-11.)
 
 ## Restore — logical dump
 
+On the VM, from `~/amphive-relay` (compose service names work whatever the
+containers happen to be called):
+
 ```sh
-# Latest local dump (or: gsutil cp gs://amphive-db-backups/YYYY/MM/<name>.dump .)
-DUMP=$(ls -1t ~/amphive/backups/amphive-*.dump | head -1)
+cd ~/amphive-relay
+# Latest local dump (or: gcloud storage cp gs://amphive-db-backups-2/YYYY/MM/<name>.dump .)
+DUMP=$(ls -1t ~/amphive-relay/backups/amphive-*.dump | head -1)
 
 # Into a fresh/empty database:
-sudo docker exec amphive-db createdb -U postgres amphive_new
-sudo docker exec -i amphive-db pg_restore -U postgres -d amphive_new < "$DUMP"
+sudo docker compose -f docker-compose.relay.yml exec -T db createdb -U postgres amphive_new
+sudo docker compose -f docker-compose.relay.yml exec -T db pg_restore -U postgres -d amphive_new < "$DUMP"
 
 # Over the live DB (DESTRUCTIVE — stop the backend first):
-sudo docker stop amphive-backend
-sudo docker exec -i amphive-db pg_restore -U postgres -d amphive --clean --if-exists < "$DUMP"
-sudo docker start amphive-backend
+sudo docker compose -f docker-compose.relay.yml stop backend
+sudo docker compose -f docker-compose.relay.yml exec -T db pg_restore -U postgres -d amphive --clean --if-exists < "$DUMP"
+sudo docker compose -f docker-compose.relay.yml start backend
 ```
 
-Config files: `sudo tar -xzf config-<ts>.tar.gz -C /home/Sarthak/amphive` then
-restart the affected containers (`mqtt` for passwd/ACL/certs, `caddy` for the
-Caddyfile). Full-VM loss: create the instance, restore the newest **disk
+Config files: `sudo tar -xzf config-<ts>.tar.gz -C /home/Sarthak/amphive-relay`
+then restart the affected containers (`mqtt` for passwd/ACL/certs, `caddy` for
+the Caddyfile). Full-VM loss: create the instance, restore the newest **disk
 snapshot** first, then apply the newest logical dump on top if it is fresher.
 
 ## Restore test (do this quarterly)

@@ -32,9 +32,13 @@ files describe the retired two-VM-era stack and are kept for reference.
 
 ### Containers (relay compose)
 
-Compose-default names (`amphive-relay-<service>-1`) except the fake plug
-(`fakeplug`); mosquitto logs to **stdout only** (bounded by the compose
-json-file limits — no file mirror on this stack). Restart policy
+Compose-default names (`amphive-relay-<service>-1`) except the optional fake
+plug (`amphive-fake-plug`, its own compose project `fakeplug`, **kept stopped**
+since 2026-10-20; start/stop in [TESTING.md](TESTING.md)). Every service's
+stdout log is capped by the json-file driver at 5 MB × 3 files (the
+`x-logging` anchor in the repo compose, 2026-10-20; the live copy on the VM
+gets it by hand, since deploy.ps1 doesn't ship the compose file). mosquitto
+logs to **stdout only** (no file mirror on this stack). Restart policy
 `unless-stopped`.
 
 | Container | Image/build | Port | Notes |
@@ -190,7 +194,8 @@ historical reference (its keys were rotated dead long ago — see
 
 | Script | Purpose |
 |--------|---------|
-| `fake_plug.py` | Hardware-free ESP32-gateway simulator (v2) speaking the full current MQTT contract — retained multi-plug roster (`.../config`), ON/OFF/SET_INTERVAL/SET_LIMITS, `/logs` WARN+ forwarding, configurable ramp/jitter load per plug (runs as the `fakeplug` container on the VM). |
+| `fake_plug.py` | Hardware-free ESP32-gateway simulator (v2) speaking the full current MQTT contract — retained multi-plug roster (`.../config`), ON/OFF/SET_INTERVAL/SET_LIMITS, `/logs` WARN+ forwarding, configurable ramp/jitter load per plug. Also deployable as the `amphive-fake-plug` container on the VM, which is **kept stopped** and started only for a test (see [TESTING.md](TESTING.md)). |
+| `gateway_provision/` | USB alternative to the setup portal: `provision_nvs.py` builds a gateway's NVS settings (Wi-Fi, Tapo account, broker password, setup code) with ESP-IDF's tools, verifies them, optionally writes them with esptool, and never prints a secret. **Writing replaces the whole NVS partition and reboots the gateway, so never use it during a charging session.** See [`tools/gateway_provision/README.md`](../tools/gateway_provision/README.md) and `deploy/docs/gateway_provisioning.md`. |
 | `p110_sim/` | P110 **network-protocol** emulator (KLAP v2, real crypto) — emulates N plugs so a **real** ESP32 gateway can be multi-plug bench-tested without owning that many P110s. Different layer than `fake_plug.py` (which fakes the whole gateway over MQTT and never touches real firmware); see `tools/p110_sim/README.md`. |
 | `local_tapo_test.py` | LAN Tapo connection self-test (info → on → 3 s → off). |
 | `turn_on.py` / `turn_off.py` | Minimal manual on/off against a LAN plug. |

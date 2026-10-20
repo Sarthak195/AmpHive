@@ -1,11 +1,24 @@
 # =============================================================================
-# AmpHive — Fake Plug (test-only, OPTIONAL)
+# AmpHive — Fake Plug (test-only, OPTIONAL, run on demand)
 # =============================================================================
 # Runs the software ESP32-gateway stand-in (tools/fake_plug.py, v2 — full
-# current MQTT contract + multi-plug roster support) as an always-on
-# container, so the app can be tested end-to-end WITHOUT hardware. It is NOT
-# part of the production stack and is NOT shipped by deploy/scripts/deploy.ps1
-# — deploy it manually, onto the current prod host (amphive-relay).
+# current MQTT contract + multi-plug roster support) as a container on the
+# prod host (amphive-relay), so the app can be tested end-to-end WITHOUT
+# hardware. It is NOT part of the production stack and is NOT shipped by
+# deploy/scripts/deploy.ps1.
+#
+# KEPT STOPPED since 2026-10-20: start it for a test, stop it afterwards. It
+# ran always-on from 2026-07-08, and its 5 s telemetry ended up as ~99% of the
+# backend's log lines and ~1M telemetry rows. On the VM (a separate compose
+# PROJECT, so redeploys of the main stack never touch it):
+#   cd ~/amphive-relay
+#   sudo docker compose -p fakeplug -f docker-compose.fakeplug.yml up -d   # start
+#   sudo docker logs -f amphive-fake-plug                                  # tail
+#   sudo docker compose -p fakeplug -f docker-compose.fakeplug.yml down    # stop
+# `down` removes the container, so nothing brings it back on its own. The
+# restart policy is `unless-stopped` (it was `always`): a plain
+# `docker stop amphive-fake-plug` now also stays stopped across a VM reboot or
+# dockerd restart, which `always` silently undid.
 #
 # It reuses the already-built `amphive_backend` image (python + paho-mqtt —
 # see backend/requirements.txt), mounts the sim script, joins the running
@@ -16,28 +29,20 @@
 #
 # The plug row must already exist (created once via the CPO API):
 #   python tools/fake_plug.py --register-only --cpo-email cpo@amphive.test --cpo-password '<pw>'
-#   -> gateway=fakeplug-gw-01  plug_id=2  (public group)
+#   -> gateway=fakeplug-gw-01  plug_id=2
 # (This registration already happened historically — this step is only
-# needed again if the gateway/plug row is ever deleted.)
+# needed again if the gateway/plug row is ever deleted. Plug 2 was moved into
+# a private group on 2026-09-28, so drivers don't see it.)
 #
 # The broker account for this gateway (username MUST equal the gateway_id —
 # see docs/MQTT_CONTRACT.md's ACL note) is created the same way any real
-# gateway's is; add_gateway_user.ps1's own defaults still point at the
-# decommissioned amphive-vm-in box (out of scope for this file — see
-# deploy/scripts/add_gateway_user.ps1), so override them explicitly:
-#   .\deploy\scripts\add_gateway_user.ps1 -GatewayId fakeplug-gw-01 -Password '<pw>' `
-#       -VmName amphive-relay -VmZone us-west1-a -RemoteDir ~/amphive-relay
+# gateway's is (omit -Password and the script generates one and prints it once):
+#   .\deploy\scripts\add_gateway_user.ps1 -GatewayId fakeplug-gw-01
 # Then set MQTT_FAKEPLUG_PASSWORD=<pw> in ~/amphive-relay/.env on the VM.
 #
-# Deploy (from repo root; a separate compose PROJECT so redeploys of the main
-# stack never touch it):
+# Install/update the files (from repo root), then start it as above:
 #   gcloud compute scp tools/fake_plug.py deploy/docker/docker-compose.fakeplug.yml \
 #       amphive-relay:~/amphive-relay/ --zone=us-west1-a
-#   gcloud compute ssh amphive-relay --zone=us-west1-a --command \
-#       "cd ~/amphive-relay && sudo docker-compose -p fakeplug -f docker-compose.fakeplug.yml up -d"
-#
-# Tail logs:  sudo docker logs -f amphive-fake-plug
-# Stop:       cd ~/amphive-relay && sudo docker-compose -p fakeplug -f docker-compose.fakeplug.yml down
 #
 # v2 capabilities available here without any compose change (see
 # tools/fake_plug.py's docstring / --help for the full flag list): the fake
@@ -55,7 +60,14 @@ services:
   fake-plug:
     image: amphive_backend            # reuse the backend image (has paho-mqtt)
     container_name: amphive-fake-plug
-    restart: always                   # survives crashes AND VM reboots
+    restart: unless-stopped           # survives crashes + reboots while started; a manual stop sticks
+    # Same bounds as every service in deploy/relay/docker-compose.relay.yml
+    # (its x-logging anchor): at most 3 x 5 MB of stdout kept on disk.
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "3"
     # Mounted, not baked, so updating the sim is just scp + `restart`.
     volumes:
       - ./fake_plug.py:/fake_plug.py:ro

@@ -1,48 +1,143 @@
 # =============================================================================
-# Add (or update) a per-gateway MQTT account on the production broker.
+# Create (or reset) a per-gateway MQTT account on the production broker.
 #
-# Username MUST equal the gateway_id: the broker ACL scopes each gateway to
-# amphive/gateways/<username>/# via the %u pattern (see deploy.ps1 / SECURITY.md
-# §3), so a matching username is what isolates one client site from another.
+# Username MUST equal the gateway_id: the broker ACL line
+# `pattern readwrite amphive/gateways/%u/#` scopes each gateway to its own
+# subtree (SECURITY.md section 3), so a matching username is what isolates one
+# client site from another. Redeploys preserve these accounts (deploy.ps1
+# never ships the broker files).
 #
-# The password is hashed on the VM by mosquitto_passwd; the broker is then
-# SIGHUP'd to reload passwd+ACL without dropping existing connections.
-# Redeploys preserve these accounts (deploy.ps1 no longer recreates the file).
+# Rewritten 2026-10-20 for the relay VM. The old version ran mosquitto_passwd
+# against ~/amphive-relay/mosquitto_passwd and HUP'd a container named
+# amphive-mqtt; on the live box the file is ~/amphive-relay/config/
+# mosquitto_passwd (owner 1883:1883, mode 600), single-file bind-mounted
+# read-only into the broker container amphive-relay-mqtt-1. This script now
+# uploads deploy/scripts/relay_set_gateway_password.sh (the logic of the reset
+# that was verified live on 2026-10-19) to /tmp on the VM and runs it over
+# PLAIN OpenSSH, with the password on STDIN only - never on any command line.
+# That script's header explains the broker-side gotchas (blank lines vs.
+# mosquitto_passwd, the inode-pinning bind mount, verify-by-subscribe). The
+# two that shape THIS file:
+#   - Plain OpenSSH, not `gcloud compute ssh`: on Windows gcloud runs plink,
+#     which auto-accepts the host key by injecting a "y" line into the remote
+#     stdin, so a stdin-fed password would arrive as "y".
+#   - On Windows the repo is checked out with CRLF (core.autocrlf) and bash
+#     chokes on CR, so an LF-only copy of the script is uploaded.
 #
 # Usage:
-#   .\deploy\scripts\add_gateway_user.ps1 -GatewayId gw-clientsite-01 -Password <pwd>
+#   .\deploy\scripts\add_gateway_user.ps1 -GatewayId 1cc3abb4fb54
+#       Generates a strong password and prints it ONCE; it is not stored
+#       anywhere, so put it straight into the gateway (setup portal MQTT
+#       field, or mqtt_pwd for tools/gateway_provision/provision_nvs.py).
+#   .\deploy\scripts\add_gateway_user.ps1 -GatewayId 1cc3abb4fb54 -Password <pwd>
+#       Uses yours (16-63 chars of [A-Za-z0-9_-]). It then sits in your
+#       PowerShell history, which is why omitting -Password is preferred.
 #
-# Provision the same values into the device (captive portal MQTT fields -> NVS
-# mqtt_user/mqtt_pwd) or the agent (.env AMPHIVE_MQTT_USER/AMPHIVE_MQTT_PASS).
+# For an existing account this RESETS the password: the gateway is locked out
+# until its own NVS holds the new one, so do it when you can reach the device,
+# and never while it is in a charging session.
+#
+# Requires the Windows OpenSSH client (ssh + scp) and the key gcloud created
+# ($HOME\.ssh\google_compute_engine, authorized on the VM through project
+# metadata). The first connection records the VM's host key
+# (StrictHostKeyChecking=accept-new); a CHANGED host key still fails loudly.
+# The software agent uses the same account via .env AMPHIVE_MQTT_USER/PASS.
 # =============================================================================
 param(
     [Parameter(Mandatory = $true)][string]$GatewayId,
-    [Parameter(Mandatory = $true)][string]$Password,
-    # Defaults match deploy/scripts/deploy.ps1 ($VM_NAME/$VM_ZONE/$REMOTE_DIR).
-    # They previously still named `amphive-vm-in` in `asia-south1-a`, a VM
-    # DELETED in the 2026-07-27 consolidation — so running this tool (the one
-    # that provisions a gateway's broker credentials) with its defaults
-    # targeted a machine that no longer exists.
-    [string]$VmName = "amphive-relay",
-    [string]$VmZone = "us-west1-a",
-    [string]$RemoteDir = "/home/Sarthak/amphive-relay"
+    [string]$Password,
+    # Defaults: the relay VM's static IP since the 2026-09-04 GCP account move,
+    # and the login gcloud provisions for this box.
+    [string]$VmUser = "Sarthak",
+    [string]$VmIp = "8.235.4.66",
+    [string]$KeyFile = (Join-Path $HOME ".ssh\google_compute_engine")
 )
 
-# Same alphanumeric policy deploy.ps1 enforces for the managed accounts — the
-# values are interpolated into a remote shell command.
-foreach ($pair in @(@("GatewayId", $GatewayId), @("Password", $Password))) {
-    if ($pair[1] -notmatch '^[A-Za-z0-9_-]+$') {
-        Write-Host "ERROR: $($pair[0]) may only contain [A-Za-z0-9_-]." -ForegroundColor Red
+function Fail($msg) { Write-Host "ERROR: $msg" -ForegroundColor Red; exit 1 }
+
+# The id ends up in a remote command line and in grep patterns.
+if ($GatewayId -notmatch '^[A-Za-z0-9_-]{1,63}$') {
+    Fail "GatewayId may only contain [A-Za-z0-9_-] (1-63 chars)."
+}
+
+$generated = $false
+if (-not $Password) {
+    # 21 random bytes -> 28 chars of base64url ([A-Za-z0-9_-]), 168 bits.
+    $bytes = New-Object byte[] 21
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    $rng.GetBytes($bytes)
+    $rng.Dispose()
+    $Password = [Convert]::ToBase64String($bytes).Replace('+', '-').Replace('/', '_').TrimEnd('=')
+    $generated = $true
+}
+# Same rule the remote script enforces: fits the firmware's 64-byte mqtt_pwd
+# buffer and is safe to type into the setup portal.
+if ($Password -notmatch '^[A-Za-z0-9_-]{16,63}$') {
+    Fail "Password must be 16-63 chars of [A-Za-z0-9_-]."
+}
+
+foreach ($tool in "ssh", "scp") {
+    if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
+        Fail "$tool not found - install the Windows OpenSSH client."
+    }
+}
+if (-not (Test-Path $KeyFile)) {
+    Fail "SSH key $KeyFile not found (one 'gcloud compute ssh amphive-relay --zone=us-west1-a' creates and authorizes it)."
+}
+$src = Join-Path $PSScriptRoot "relay_set_gateway_password.sh"
+if (-not (Test-Path $src)) { Fail "$src not found." }
+
+$target = "$VmUser@$VmIp"
+$sshOpts = @("-i", $KeyFile, "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=15")
+$remoteScript = "/tmp/relay_set_gateway_password.sh"
+
+# LF-only, BOM-less copy for the VM.
+$tmp = Join-Path ([System.IO.Path]::GetTempPath()) "relay_set_gateway_password.sh"
+$text = [System.IO.File]::ReadAllText($src) -replace "`r`n", "`n"
+[System.IO.File]::WriteAllText($tmp, $text, (New-Object System.Text.UTF8Encoding($false)))
+
+Write-Host "Uploading the broker script to ${target}:$remoteScript ..." -ForegroundColor Cyan
+& scp @sshOpts $tmp "${target}:$remoteScript"
+$scpRc = $LASTEXITCODE
+Remove-Item $tmp -ErrorAction SilentlyContinue
+if ($scpRc -ne 0) { Fail "scp to $target failed (exit $scpRc) - nothing changed on the VM." }
+
+Write-Host "Setting the broker password for '$GatewayId' (sent over stdin) ..." -ForegroundColor Cyan
+# The id is the only interpolated value and was validated above.
+$remoteCmd = 'bash {0} {1}; rc=$?; rm -f {0}; exit $rc' -f $remoteScript, $GatewayId
+$Password | & ssh @sshOpts $target $remoteCmd
+$rc = $LASTEXITCODE
+
+switch ($rc) {
+    0 {
+        Write-Host "Done. '$GatewayId' can now use amphive/gateways/$GatewayId/# on both listeners." -ForegroundColor Green
+        if ($generated) {
+            Write-Host ""
+            Write-Host "MQTT password for $GatewayId (shown ONCE, not stored anywhere):" -ForegroundColor Yellow
+            Write-Host "  $Password"
+            Write-Host "Give it to the installer (setup portal MQTT field), or put it in the USB provisioning file as mqtt_pwd."
+        }
+        exit 0
+    }
+    { $_ -in 2, 3, 4, 5, 7 } {
+        Write-Host "FAILED (remote exit $rc, see the output above) - the passwd file was NOT changed." -ForegroundColor Red
+        exit $rc
+    }
+    6 {
+        Write-Host "The passwd file WAS updated, but the broker reload or the verify failed (see above; the backup path is printed there)." -ForegroundColor Red
+        if ($generated) { Write-Host "New password for $GatewayId (needed if you keep this change): $Password" -ForegroundColor Yellow }
+        exit 6
+    }
+    8 {
+        Write-Host "Write-back FAILED - restore the passwd file from the backup named above." -ForegroundColor Red
+        exit 8
+    }
+    255 {
+        Write-Host "ssh failed (connection or authentication, exit 255). If it dropped mid-run, check ~/amphive-relay/config/mosquitto_passwd on the VM." -ForegroundColor Red
+        exit 255
+    }
+    default {
+        Write-Host "Unexpected exit $rc - check the output above and the passwd file on the VM." -ForegroundColor Red
         exit 1
     }
 }
-
-Write-Host "Adding broker account for gateway '$GatewayId'..." -ForegroundColor Cyan
-$cmd = "sudo docker run --rm -v ${RemoteDir}:/work eclipse-mosquitto:2.0 sh -c 'mosquitto_passwd -b /work/mosquitto_passwd $GatewayId $Password && chown 1883:1883 /work/mosquitto_passwd && chmod 600 /work/mosquitto_passwd' && sudo docker kill -s HUP amphive-mqtt"
-gcloud compute ssh --quiet $VmName --zone=$VmZone --command=$cmd
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "FAILED - passwd file not updated." -ForegroundColor Red
-    exit 1
-}
-
-Write-Host "Done. '$GatewayId' can now use amphive/gateways/$GatewayId/# on both listeners." -ForegroundColor Green
