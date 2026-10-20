@@ -48,8 +48,12 @@ firmware/
 ## 1. Boot & tasks (`main/main.c`)
 
 `app_main`:
-1. `wifi_init()` — init NVS, load saved config, survey-scan the SSID, connect
-   STA (blocking; up to `BOOT_WIFI_ROUNDS` 6 rounds, see below).
+0. `start_log_forwarding()` — first, before anything else (fw ≥ 2.8.0):
+   installs the WARN/ERROR log hook and starts the `log_forward` drain task.
+   Lines logged before MQTT is up are held in RAM (see below).
+1. `wifi_init()` — init NVS, load saved config (and bump the `boot_count`
+   counter), survey-scan the SSID, connect STA (blocking; up to
+   `BOOT_WIFI_ROUNDS` 6 rounds, see below).
 2. If no config / WiFi fails → `start_captive_portal()` and idle until the user
    submits the setup form (which triggers `esp_restart()`).
 3. `tapo_init()` (also restores the persisted energy integrator from NVS).
@@ -59,6 +63,7 @@ firmware/
 | Task | Stack | Prio | Core |
 |------|-------|------|------|
 | `telemetry_safety` | 8192 | 5 | floating |
+| `log_forward` | 4096 | 3 | floating |
 
 **Runtime Wi-Fi resilience (fw ≥ 2.5.0-direct):** the `MAXIMUM_RETRY` (5)
 burst on `WIFI_EVENT_STA_DISCONNECTED` exists only to give the two bounded
@@ -87,6 +92,37 @@ mains-powered). Field note, 2026-10-20: at -81 to -89 dBm the gateway saw
 auth/assoc timeouts, lost EAPOL frames and no DHCP lease. It joined once, in
 round 3, and then never got an IP. That is a placement problem these settings
 cannot fix: keep the gateway where it hears the AP at about -70 dBm or better.
+
+**Boot report, MQTT errors, offline log ring (fw ≥ 2.8.0-direct).** The 45-day
+log forensics found the gateway resetting about once per powered hour with no
+recorded cause, and every forwarded log line written while MQTT was down was
+lost. So:
+- **`GATEWAY_BOOT`.** On the first MQTT connect of each boot (right after the
+  online status) the gateway publishes one `GATEWAY_BOOT` event on `/alarms`
+  (QoS 1, not retained). It carries the reset cause, the boot count, and how
+  the Wi-Fi join went. If esp-mqtt refuses the publish it is retried on the
+  next connect; once accepted it is not sent again that boot. `boot_count` is
+  a `u32` in NVS (`storage`/`boot_count`) bumped once per boot inside
+  `load_config_from_nvs()`, so portal and crash boots count too. It starts at 1
+  on the first 2.8.0 boot. Payload and field meanings: see the 2.8.0 entry at
+  the end of this file.
+- **`MQTT_EVENT_ERROR`** now logs one WARN line: `type` (the esp-mqtt error
+  type), `tls_err` (esp-tls `esp_err_t`, with its name), `tls_stack_err` (the
+  mbedTLS code), `sock_errno` and `connect_rc` (the broker's CONNACK code). That
+  covers a refused login, a TLS failure and a dead socket.
+- **Log forwarding survives MQTT outages.** The vprintf hook still only
+  enqueues: a zero-timeout queue send from a stack buffer, with no locks and no
+  logging of its own. It skips ISR context and the drain task's own lines. The
+  hook is installed first in `app_main`. When the drain task can't publish a
+  line (MQTT down, or the publish fails) it keeps it in a RAM ring of the last
+  **24** WARN/ERROR lines. It flushes them oldest-first, each prefixed
+  `[offline] ` and capped at 199 chars like a live line, within about 1 s of
+  the next connect. If the ring overflowed, a `[offline] (N older line(s) lost)`
+  line goes first. So boot-time Wi-Fi failures and crash-recovery warnings now
+  reach the backend. **Backend note:** `services/mqtt/logs.py`
+  `_log_line_level` reads the level from the first character after an
+  optional colour escape. Until it strips the `[offline] ` prefix, held lines
+  are stored with severity `info`.
 
 Broker endpoint (fw ≥ 2.3.0): `AMPHIVE_DIRECT_MQTT 1` → default `MQTT_BROKER_URL
 "mqtts://mqtt.amphive.app:8883"` — a **DNS name**, so the broker can move
@@ -284,6 +320,33 @@ driver's auth hash (see §4).
     `{"error":"UNAUTHORIZED_ON","plug_id":N}` once per episode (rising edge).
   - Since fw 1.5.0 the telemetry payload also includes `"relay":<bool>` — the
     actual `device_on` state, distinct from `"status"` (session state).
+  - **Failed polls and plug reachability (fw ≥ 2.8.0-direct, forensics F4).** A
+    poll fails when either KLAP request fails, when the plug answers with a
+    non-zero `error_code`, or when `get_device_info` has no `device_on` (§4).
+    A failed poll is skipped. Nothing is published for that plug, and no
+    watchdog, unauthorized-on check or baseline reconcile runs for it until a
+    poll succeeds. Before 2.8.0 a failed `get_device_info` went out as
+    `relay:false` and reset the unauthorized-on latch. The trade-off: duration
+    and energy watchdogs don't run during the outage. A plug that can't be read
+    can't be switched off either; the watchdogs run on the first good poll, and
+    the backend's stale-session reaper covers the gap.
+    - After **3** failed polls in a row the gateway publishes
+      `{"error":"PLUG_UNREACHABLE","plug_id":N,"failures":3}` **once**. If MQTT
+      is down it tries again on later failures until esp-mqtt accepts it, so
+      `failures` can then be above 3.
+    - While unreachable, a plug with **no** session is polled only every
+      **30 s** (`PLUG_IDLE_BACKOFF_MS`), so a dead plug's ~4 s timeouts don't
+      stretch every sweep. A plug with a session keeps the normal cadence. The
+      check is made every sweep, so an `ON` restores the cadence at once. A
+      roster or command IP change clears the backoff.
+    - The first good poll after a **delivered** `PLUG_UNREACHABLE` publishes
+      `{"event":"PLUG_RECOVERED","plug_id":N,"down_s":<s since the first
+      failure>}`. It is retried each sweep until accepted, and always goes out
+      before a newer outage's `PLUG_UNREACHABLE`.
+  - **`ON` baseline (fw ≥ 2.8.0-direct).** The pre-session meter read falls
+    back to `tapo_plug_energy_kwh()` (the driver's own integrator) when the
+    poll fails. Before 2.8.0 it fell back to 0, which billed the plug's whole
+    lifetime meter on the first frame and tripped the energy watchdog at once.
 - On MQTT reconnect, buffered offline telemetry entries are drained and published
   with `"offline":true` and `"offline_ts"` so the backend can distinguish replayed data.
 
@@ -339,7 +402,17 @@ never be reused to act on plug B.
 - **`tapo_plug_set_power(plug, on)`** → `set_device_info {device_on}`.
 - **`tapo_plug_get_telemetry(plug, out)`** → `get_energy_usage` (real
   `current_power`, **milliwatts**) + `get_device_info` (`device_on`,
-  `overheat_status`, `overcurrent_status`).
+  `overheat_status`, `overcurrent_status`). Since fw 2.8.0 **both must
+  succeed**. A transport error, a non-zero `error_code`, or a
+  `get_device_info` reply without `device_on` returns an error
+  (`ESP_ERR_INVALID_RESPONSE` for an unusable reply), and `out` must not be
+  used. Before that, a failed `get_device_info` returned `ESP_OK` with the
+  memset `device_on=false` and "normal" safety statuses: a false relay-OFF
+  reading. A good energy sample is still integrated when only
+  `get_device_info` fails.
+- **`tapo_plug_energy_kwh(plug)`** (fw ≥ 2.8.0) returns the plug's energy
+  integrator with no round trip. The `ON` handler uses it as the session
+  baseline when its pre-ON poll fails (§3).
 - **`tapo_plug_set_ip(plug, ip)`** rebinds a plug's IP (new DHCP lease) and
   invalidates its session so the next call re-handshakes.
 - **Addressing:** `ip` is normally a bare IPv4 (a real P110 only listens on
@@ -358,7 +431,7 @@ current, or temperature. So the `tapo_telemetry_t` fields map as:
 |-------|--------|
 | `power_w` | **real** — `current_power` (mW) ÷ 1000 |
 | `energy_kwh` | **real** — driver-side monotonic **lifetime** Wh integrator (robust vs the plug's daily `today_energy` reset); **per-plug**, persisted to NVS (key `wh_<plug_id>`) across reboots and updated under that plug's mutex. Since fw 1.5.0 it integrates with the **trapezoidal rule** (average of consecutive power samples × dt) instead of left-rectangle, reducing error on ramping loads at the 10 s poll cadence; the previous sample is held per-plug in the `tapo_plug_t` context |
-| `device_on` / `overheated` / `overcurrent` | **real** — from `get_device_info` status strings |
+| `device_on` / `overheated` / `overcurrent` | **real** — from `get_device_info` status strings. If `get_device_info` fails or returns an error, the whole poll fails (fw ≥ 2.8.0). It no longer reads as OFF / normal. |
 | `voltage_v` | **nominal** (configured, default 230 V) |
 | `current_a` | **derived** — `power_w / voltage_v` |
 | `temperature_c` | **nominal** — the P110 has no temperature sensor |
@@ -672,7 +745,7 @@ before flashing/OTA-ing a real unit); not yet OTA'd to a fielded gateway. See
 [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for the version-by-version
 matrix and on-device verification history.
 
-**Current: fw `2.6.0-direct` — security hardening (2026-08-06, deep-audit
+**fw `2.6.0-direct` — security hardening (2026-08-06, deep-audit
 remediation).** Source + docs only; **OTA to fielded units is operator-gated**
 and deferred — no field unit runs this yet. Three fixes, none of which change
 the shape described in §§1–4:
@@ -721,7 +794,7 @@ sweep, walking the baseline forward over energy a billed session is already
 accounting for (same NVS-flush throttle, never reports, never detects). Only
 energy delivered **outside** a session can produce a delta now. See §4a.
 
-**Current: fw `2.7.1-direct` — Wi-Fi diagnostics + a longer boot Wi-Fi window
+**fw `2.7.1-direct` (previous) — Wi-Fi diagnostics + a longer boot Wi-Fi window
 (2026-10-20; USB-flashed to gw `1cc3abb4fb54`, not published for OTA).** A
 re-provisioned gateway kept falling back to the setup portal. Version 2.7.0
 logged only "WiFi connection dropped. Retrying..." and gave up after one ~11 s
@@ -734,3 +807,47 @@ burst. 2.7.1 adds:
 
 The first capture showed the cause: the board heard the AP at -81 to -89 dBm.
 Placement fixes that, not firmware.
+
+**Current: fw `2.8.0-direct` — boot report, plug reachability, offline log ring
+(2026-10-20; build-verified only, not flashed or published for OTA).** It acts
+on the 45-day log forensics. The gateway reset itself about once per powered
+hour with no recorded cause (F1). A failed `get_device_info` was reported as
+relay OFF (F4). Nothing explained an MQTT failure, and forwarded logs were
+dropped while MQTT was down (F5). 2.8.0 adds:
+- a `GATEWAY_BOOT` event once per boot, on the first MQTT connect (§1);
+- `PLUG_UNREACHABLE` / `PLUG_RECOVERED` events and the 30 s idle-plug poll
+  backoff (§3);
+- failed polls instead of false readings: a failed or error-coded
+  `get_device_info` no longer reads as relay OFF, an error-coded
+  `get_energy_usage` no longer reads as 0 W, and the `ON` baseline falls back
+  to the meter instead of 0 (§3, §4);
+- a WARN line for every `MQTT_EVENT_ERROR` (§1);
+- forwarded logs that survive MQTT outages: a 24-line RAM ring, flushed with
+  the `[offline] ` prefix (§1).
+
+The new events, all on `amphive/gateways/{gw}/alarms` (QoS 1, not retained).
+[MQTT_CONTRACT.md](MQTT_CONTRACT.md) is updated by the backend change that
+consumes them.
+
+```json
+{"event":"GATEWAY_BOOT","fw":"2.8.0-direct","reset_reason":"brownout","reset_code":9,"boot_count":42,"wifi_rssi":-67,"last_wifi_reason":2,"wifi_attempts":3,"min_free_heap":151208,"uptime_s":19}
+{"error":"PLUG_UNREACHABLE","plug_id":2,"failures":3}
+{"event":"PLUG_RECOVERED","plug_id":2,"down_s":95}
+```
+
+`GATEWAY_BOOT` fields, in this order:
+
+| Key | Meaning |
+|-----|---------|
+| `fw` | running app version (`PROJECT_VER`) |
+| `reset_reason` | `esp_reset_reason()` as a token: `poweron` (1), `ext` (2), `sw` (3, `esp_restart()`: OTA, portal save/idle, Wi-Fi last resort), `panic` (4), `int_wdt` (5), `task_wdt` (6), `wdt` (7, other watchdog), `deepsleep` (8), `brownout` (9); anything else is `other` |
+| `reset_code` | the raw `esp_reset_reason_t` value (the numbers in parentheses above) |
+| `boot_count` | NVS `storage`/`boot_count`, +1 every boot (1 on the first 2.8.0 boot) |
+| `wifi_rssi` | current AP RSSI in dBm (`esp_wifi_sta_get_ap_info`); **omitted** if unavailable |
+| `last_wifi_reason` | last STA disconnect reason this boot (`WIFI_REASON_*`), 0 if none |
+| `wifi_attempts` | STA attempts up to and including the one that got the first IP (1 = first try) |
+| `min_free_heap` | `esp_get_minimum_free_heap_size()`: lowest free heap since boot, bytes |
+| `uptime_s` | seconds since boot when sent |
+
+The boot line on serial prints the same token and code
+(`reset reason: brownout [9]`). Before 2.8.0 it printed a prose description.

@@ -139,9 +139,28 @@ esp_err_t tapo_plug_set_power(tapo_plug_t *plug, bool turn_on);
  * Issues get_energy_usage (power) and get_device_info (state + safety statuses)
  * over the plug's KLAP session and maps them into out_telemetry; advances the
  * plug's monotonic energy integrator (trapezoidal) and throttled NVS persist.
- * @return ESP_OK on success
+ *
+ * Both requests must succeed (fw >= 2.8.0): a transport failure, a non-zero
+ * error_code, or a get_device_info reply without device_on fails the whole
+ * poll, and out_telemetry must then not be used — before 2.8.0 a failed
+ * get_device_info returned ESP_OK with device_on=false, a false relay-OFF
+ * reading. A good get_energy_usage sample is still integrated when only
+ * get_device_info fails. For a meter reading without a round trip, see
+ * tapo_plug_energy_kwh().
+ * @return ESP_OK on success; the klap error, or ESP_ERR_INVALID_RESPONSE for an
+ *         unusable plug reply, otherwise
  */
 esp_err_t tapo_plug_get_telemetry(tapo_plug_t *plug, tapo_telemetry_t *out_telemetry);
+
+/**
+ * @brief The plug's monotonic energy integrator (kWh) as it stands, with no
+ *        network round trip — the same value tapo_plug_get_telemetry() reports
+ *        as energy_kwh.
+ *
+ * For a session baseline when the pre-ON poll fails (main.c's ON handler): the
+ * meter is still valid, stale by at most one poll's accrual.
+ */
+float tapo_plug_energy_kwh(tapo_plug_t *plug);
 
 /**
  * @brief Reconcile a plug's today/month energy counters against the

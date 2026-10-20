@@ -136,6 +136,13 @@ static int wifi_retry_count = 0;
 // connect underneath it (a scan during a connect fails with ESP_ERR_WIFI_STATE).
 static volatile bool boot_survey_pending = false;
 
+// Facts for the once-per-boot GATEWAY_BOOT event (fw 2.8.0). The two Wi-Fi
+// fields are written only by the Wi-Fi event handler (event-loop task) and read
+// by the MQTT task after the first connect.
+static uint32_t s_boot_count = 0;            // NVS storage/boot_count, bumped in load_config_from_nvs()
+static uint8_t  s_last_wifi_reason = 0;      // last STA disconnect reason this boot (0 = none)
+static uint32_t s_wifi_failed_attempts = 0;  // STA attempts that failed before the first IP
+
 // ── Runtime Wi-Fi resilience ─────────────────────────────────────────────────
 // The bounded MAXIMUM_RETRY burst exists only to produce a definite pass/fail
 // signal for the two paths that wait on WIFI_FAIL_BIT: boot-time wifi_init()
@@ -169,6 +176,14 @@ static TickType_t wifi_down_since_tick = 0; // tick of the first DISCONNECTED th
 // context's *own* lock, so we never hold plugs_mutex across a network call.
 #define MAX_PLUGS SESSION_NVS_MAX_PLUGS
 
+// Plug reachability (fw 2.8.0, forensics F4). PLUG_UNREACHABLE_FAILURES failed
+// polls in a row raise PLUG_UNREACHABLE once; the first good poll after that
+// raises PLUG_RECOVERED. Meanwhile a plug with NO session is polled only every
+// PLUG_IDLE_BACKOFF_MS, so its ~4 s KLAP timeouts don't stretch every sweep; a
+// plug with a session keeps the normal cadence for its safety watchdogs.
+#define PLUG_UNREACHABLE_FAILURES  3
+#define PLUG_IDLE_BACKOFF_MS       30000
+
 typedef struct {
     bool         in_use;
     int          plug_id;
@@ -185,6 +200,13 @@ typedef struct {
     uint8_t      cap_over_count;         // debounce: consecutive over-cap polls
     bool         unauthorized_flagged;   // rising-edge latch for UNAUTHORIZED_ON
     bool         pending_remove;         // roster dropped this plug — telemetry task reaps it
+    // reachability (fw 2.8.0) — see PLUG_UNREACHABLE_FAILURES
+    uint8_t      poll_failures;          // consecutive failed telemetry polls (saturates)
+    TickType_t   fail_since_tick;        // first failure of the current run
+    TickType_t   last_poll_tick;         // last poll attempt (paces the idle backoff)
+    bool         unreachable_sent;       // PLUG_UNREACHABLE delivered for this run
+    bool         recovered_pending;      // PLUG_RECOVERED owed but not delivered yet
+    uint32_t     recovered_down_s;       // down_s for that PLUG_RECOVERED
 } plug_slot_t;
 
 static plug_slot_t plugs[MAX_PLUGS];
@@ -202,6 +224,17 @@ static plug_slot_t *slot_find_locked(int plug_id) {
     return NULL;
 }
 
+// Forget a slot's reachability history (a new plug, or a new id for this one).
+// Caller holds plugs_mutex.
+static void slot_reset_reachability_locked(plug_slot_t *s) {
+    s->poll_failures = 0;
+    s->fail_since_tick = 0;
+    s->last_poll_tick = 0;
+    s->unreachable_sent = false;
+    s->recovered_pending = false;
+    s->recovered_down_s = 0;
+}
+
 // Find or allocate the slot for plug_id, (re)binding its IP. `local_ip` is the
 // plug's LAN IP from the retained roster (amphive/gateways/{gw}/config) or an
 // ON/OFF command payload. Returns NULL if the table is full or no IP is known
@@ -215,6 +248,8 @@ static plug_slot_t *slot_get_locked(int plug_id, const char *local_ip) {
             strncpy(s->local_ip, ip, sizeof(s->local_ip) - 1);
             s->local_ip[sizeof(s->local_ip) - 1] = '\0';
             tapo_plug_set_ip(s->tapo, s->local_ip);
+            // New address: a backed-off unreachable plug is retried next sweep.
+            s->last_poll_tick = xTaskGetTickCount() - pdMS_TO_TICKS(PLUG_IDLE_BACKOFF_MS);
         }
         s->pending_remove = false;   // named again → keep
         return s;
@@ -236,6 +271,7 @@ static plug_slot_t *slot_get_locked(int plug_id, const char *local_ip) {
             plugs[i].plug_id = plug_id;
             plugs[i].unauthorized_flagged = false;
             plugs[i].pending_remove = false;
+            slot_reset_reachability_locked(&plugs[i]);
             tapo_plug_reassign_id(plugs[i].tapo, plug_id);
             return &plugs[i];
         }
@@ -253,6 +289,7 @@ static plug_slot_t *slot_get_locked(int plug_id, const char *local_ip) {
         plugs[i].cap_over_count = 0;
         plugs[i].unauthorized_flagged = false;
         plugs[i].pending_remove = false;
+        slot_reset_reachability_locked(&plugs[i]);
         plugs[i].in_use = true;   // publish the slot last (fields are set above)
         ESP_LOGI(TAG, "Tracking plug %d @ %s (slot %d)", plug_id, ip, i);
         return &plugs[i];
@@ -414,6 +451,15 @@ static void load_config_from_nvs(void) {
     if (nvs_get_str(my_handle, "plug_cap_a", cap_str, &size) == ESP_OK) {
         float c = atof(cap_str);
         if (c > 0.0f) default_plug_cap_a = c;
+    }
+
+    // Boot counter (fw 2.8.0), reported in GATEWAY_BOOT. This runs exactly
+    // once per boot, before Wi-Fi, so portal and crash boots count too.
+    uint32_t boots = 0;
+    nvs_get_u32(my_handle, "boot_count", &boots);   // absent before 2.8.0 → 0
+    s_boot_count = boots + 1;
+    if (nvs_set_u32(my_handle, "boot_count", s_boot_count) == ESP_OK) {
+        nvs_commit(my_handle);
     }
 
     nvs_close(my_handle);
@@ -1039,17 +1085,19 @@ static const char *wifi_auth_str(wifi_auth_mode_t m) {
     }
 }
 
+// Short machine-friendly token: printed in the boot line and sent as
+// GATEWAY_BOOT "reset_reason" (the raw code goes alongside as reset_code).
 static const char *reset_reason_str(esp_reset_reason_t r) {
     switch (r) {
-        case ESP_RST_POWERON:   return "power-on";
-        case ESP_RST_EXT:       return "external reset pin";
-        case ESP_RST_SW:        return "software restart";
-        case ESP_RST_PANIC:     return "panic/exception";
-        case ESP_RST_INT_WDT:   return "interrupt watchdog";
-        case ESP_RST_TASK_WDT:  return "task watchdog";
-        case ESP_RST_WDT:       return "other watchdog";
-        case ESP_RST_DEEPSLEEP: return "deep-sleep wake";
-        case ESP_RST_BROWNOUT:  return "brownout - supply voltage dipped";
+        case ESP_RST_POWERON:   return "poweron";
+        case ESP_RST_EXT:       return "ext";        // external reset pin
+        case ESP_RST_SW:        return "sw";         // esp_restart()
+        case ESP_RST_PANIC:     return "panic";      // exception/abort
+        case ESP_RST_INT_WDT:   return "int_wdt";    // interrupt watchdog
+        case ESP_RST_TASK_WDT:  return "task_wdt";
+        case ESP_RST_WDT:       return "wdt";        // other watchdog (RTC/MWDT)
+        case ESP_RST_DEEPSLEEP: return "deepsleep";
+        case ESP_RST_BROWNOUT:  return "brownout";   // supply voltage dipped
         default:                return "other";
     }
 }
@@ -1128,6 +1176,8 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
         }
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
         const wifi_event_sta_disconnected_t *d = (const wifi_event_sta_disconnected_t *)event_data;
+        s_last_wifi_reason = d->reason;                    // GATEWAY_BOOT last_wifi_reason
+        if (!sta_got_ip_once) s_wifi_failed_attempts++;    // ... and wifi_attempts
         if (sta_got_ip_once && wifi_down_since_tick == 0) {
             wifi_down_since_tick = xTaskGetTickCount();   // outage begins
         }
@@ -1248,16 +1298,24 @@ static bool wifi_init(void) {
     return false;
 }
 
-// ─── OTA event → alarms topic ───────────────────────────────────────────────
-// Coarse OTA lifecycle events go to the alarms topic (the backend does not
-// subscribe to it, so this can't be mistaken for gateway status).
-static void publish_ota_event(const char *event) {
-    if (!mqtt_connected || mqtt_client == NULL) return;
+// ─── Alarms topic ───────────────────────────────────────────────────────────
+// The one publish path for amphive/gateways/{gw}/alarms (every alarm and
+// event below): QoS 1, not retained. Returns whether esp-mqtt accepted the
+// message (false while offline), so an event that must go out exactly once can
+// retry on a later sweep or connect.
+static bool publish_alarms_payload(const char *payload) {
+    if (!mqtt_connected || mqtt_client == NULL) return false;
     char topic[128];
-    char payload[96];
     snprintf(topic, sizeof(topic), "amphive/gateways/%s/alarms", gateway_id);
+    return esp_mqtt_client_publish(mqtt_client, topic, payload, 0, 1, 0) >= 0;
+}
+
+// Coarse OTA lifecycle events ({"event":...}, never on the status topic, so
+// they can't be mistaken for gateway status).
+static void publish_ota_event(const char *event) {
+    char payload[96];
     snprintf(payload, sizeof(payload), "{\"event\":\"%s\"}", event);
-    esp_mqtt_client_publish(mqtt_client, topic, payload, 0, 1, 0);
+    publish_alarms_payload(payload);
 }
 
 // ─── Safety alarm → alarms topic ────────────────────────────────────────────
@@ -1266,12 +1324,62 @@ static void publish_ota_event(const char *event) {
 // a one-shot event). Silent when offline — the condition is still enforced
 // locally regardless of the broker link.
 static void publish_alarm(const char *error, int plug_id) {
-    if (!mqtt_connected || mqtt_client == NULL) return;
-    char topic[128];
     char payload[96];
-    snprintf(topic, sizeof(topic), "amphive/gateways/%s/alarms", gateway_id);
     snprintf(payload, sizeof(payload), "{\"error\":\"%s\",\"plug_id\":%d}", error, plug_id);
-    esp_mqtt_client_publish(mqtt_client, topic, payload, 0, 1, 0);
+    publish_alarms_payload(payload);
+}
+
+// ─── Plug reachability → alarms topic (fw 2.8.0) ────────────────────────────
+// Sent once per outage / recovery; the caller marks each delivered only when
+// these return true (see plug_track_reachability()).
+static bool publish_plug_unreachable(int plug_id, unsigned failures) {
+    char payload[96];
+    snprintf(payload, sizeof(payload),
+             "{\"error\":\"PLUG_UNREACHABLE\",\"plug_id\":%d,\"failures\":%u}", plug_id, failures);
+    return publish_alarms_payload(payload);
+}
+
+static bool publish_plug_recovered(int plug_id, uint32_t down_s) {
+    char payload[96];
+    snprintf(payload, sizeof(payload),
+             "{\"event\":\"PLUG_RECOVERED\",\"plug_id\":%d,\"down_s\":%lu}", plug_id, (unsigned long)down_s);
+    return publish_alarms_payload(payload);
+}
+
+// ─── Boot report → alarms topic (fw 2.8.0, forensics F1/F5) ─────────────────
+// Once per boot, on the first MQTT connect: why the chip last restarted and how
+// the Wi-Fi join went, so resets show up server-side with a cause instead of as
+// a bare offline/online blip. Retried on the next connect if esp-mqtt refused it.
+static bool s_boot_event_sent = false;
+
+static void publish_gateway_boot(void) {
+    if (s_boot_event_sent) return;
+    esp_reset_reason_t rst = esp_reset_reason();
+    cJSON *o = cJSON_CreateObject();
+    if (!o) return;
+    cJSON_AddStringToObject(o, "event", "GATEWAY_BOOT");
+    cJSON_AddStringToObject(o, "fw", esp_app_get_description()->version);
+    cJSON_AddStringToObject(o, "reset_reason", reset_reason_str(rst));
+    cJSON_AddNumberToObject(o, "reset_code", (int)rst);
+    cJSON_AddNumberToObject(o, "boot_count", s_boot_count);
+    wifi_ap_record_t ap;
+    if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+        cJSON_AddNumberToObject(o, "wifi_rssi", ap.rssi);
+    }
+    cJSON_AddNumberToObject(o, "last_wifi_reason", s_last_wifi_reason);
+    // Failed attempts stop counting at the first IP, so +1 is the attempt
+    // that got it (1 = joined first try).
+    cJSON_AddNumberToObject(o, "wifi_attempts", s_wifi_failed_attempts + 1);
+    cJSON_AddNumberToObject(o, "min_free_heap", esp_get_minimum_free_heap_size());
+    cJSON_AddNumberToObject(o, "uptime_s", (double)(esp_timer_get_time() / 1000000));
+    char *payload = cJSON_PrintUnformatted(o);
+    cJSON_Delete(o);
+    if (!payload) return;
+    if (publish_alarms_payload(payload)) {
+        s_boot_event_sent = true;
+        ESP_LOGI(TAG, "GATEWAY_BOOT sent: %s", payload);
+    }
+    cJSON_free(payload);
 }
 
 // ─── Offline-consumption report → alarms topic ──────────────────────────────
@@ -1286,14 +1394,11 @@ static void publish_alarm(const char *error, int plug_id) {
 // NVS baseline once a report is actually delivered (can_report), so the
 // NEXT (still-pending) poll just recomputes and retries -- nothing is lost.
 static void publish_unmetered_alarm(int plug_id, float estimated_kwh, float today_kwh, float month_kwh) {
-    if (!mqtt_connected || mqtt_client == NULL) return;
-    char topic[128];
     char payload[192];
-    snprintf(topic, sizeof(topic), "amphive/gateways/%s/alarms", gateway_id);
     snprintf(payload, sizeof(payload),
              "{\"error\":\"UNMETERED_CONSUMPTION\",\"plug_id\":%d,\"kwh\":%.3f,\"today_kwh\":%.3f,\"month_kwh\":%.3f}",
              plug_id, estimated_kwh, today_kwh, month_kwh);
-    esp_mqtt_client_publish(mqtt_client, topic, payload, 0, 1, 0);
+    publish_alarms_payload(payload);
 }
 
 // ─── Firmware log → MQTT (TD#28 firmware half) ───────────────────────────────
@@ -1302,14 +1407,28 @@ static void publish_unmetered_alarm(int plug_id, float estimated_kwh, float toda
 //  - never block the task that logged (bounded queue, zero-timeout send, drop-on-full)
 //  - never publish from the vprintf hook (it can run on the MQTT task and re-enter
 //    esp-mqtt); a dedicated low-priority drain task owns every publish
-//  - avoid a feedback loop: only WARN/ERROR forward, and enqueues are suppressed
-//    while the drain task is inside a publish call
+//  - avoid a feedback loop: only WARN/ERROR forward, and lines the drain task
+//    logs itself (e.g. esp-mqtt errors inside its own publish) are never enqueued
+//  - survive MQTT outages (fw 2.8.0): a line the drain task can't send goes into
+//    a RAM ring of the last LOG_RING_LEN lines, flushed oldest-first with an
+//    "[offline] " prefix as soon as MQTT is back. The hook is installed first
+//    thing in app_main, so boot-time Wi-Fi failures and crash-recovery warnings
+//    are kept too (before 2.8.0 every line logged while offline was dropped).
 // The broker ACL (pattern readwrite amphive/gateways/%u/#) already covers /logs.
-#define LOG_FWD_LINE_MAX   200
-#define LOG_FWD_QUEUE_LEN  16
+#define LOG_FWD_LINE_MAX    200
+#define LOG_FWD_QUEUE_LEN   16
+#define LOG_FWD_POLL_MS     1000   // drain-task wake-up, so the ring flushes <= 1 s after connect
+#define LOG_RING_LEN        24     // lines held while MQTT is down (24 x 200 B of RAM)
+#define LOG_OFFLINE_PREFIX  "[offline] "
 static QueueHandle_t  s_log_queue = NULL;
 static vprintf_like_t s_orig_vprintf = NULL;
-static volatile bool  s_log_publishing = false;
+static TaskHandle_t   s_log_task = NULL;
+
+// Offline ring, owned by log_forward_task alone (so it needs no lock).
+static char     s_log_ring[LOG_RING_LEN][LOG_FWD_LINE_MAX];
+static uint8_t  s_log_ring_head = 0;      // oldest line
+static uint8_t  s_log_ring_count = 0;
+static uint32_t s_log_ring_dropped = 0;   // lines overwritten since the last flush
 
 // Level letter of an ESP-IDF log line, skipping a leading ANSI colour escape.
 static char log_line_level(const char *s) {
@@ -1320,13 +1439,21 @@ static char log_line_level(const char *s) {
     return s[0];
 }
 
+// Runs in whatever task logged (several at once — esp_log releases its lock
+// before calling it). Formats into a stack buffer and does a zero-timeout queue
+// send: no locks, no waiting, and no ESP_LOG (that would recurse into here).
 static int log_forward_vprintf(const char *fmt, va_list args) {
     // Serial first — the original handler consumes `args`, so copy for our own use.
     va_list copy;
     va_copy(copy, args);
     int r = s_orig_vprintf ? s_orig_vprintf(fmt, args) : vprintf(fmt, args);
 
-    if (s_log_queue && !s_log_publishing) {
+    // An ESP_LOGx format starts with its level letter (after an optional colour
+    // escape), so I/D/V lines are skipped without formatting them twice; a
+    // format that starts with a conversion is classified after formatting.
+    char fmt_lvl = log_line_level(fmt);
+    if (s_log_queue && (fmt_lvl == 'E' || fmt_lvl == 'W' || fmt_lvl == '%') &&
+        !xPortInIsrContext() && xTaskGetCurrentTaskHandle() != s_log_task) {
         char line[LOG_FWD_LINE_MAX];
         int n = vsnprintf(line, sizeof(line), fmt, copy);
         if (n > 0) {
@@ -1340,32 +1467,75 @@ static int log_forward_vprintf(const char *fmt, va_list args) {
     return r;
 }
 
+// Keep a line that couldn't be published; when full, overwrite the oldest.
+static void log_ring_push(const char *line) {
+    uint8_t slot = (s_log_ring_head + s_log_ring_count) % LOG_RING_LEN;
+    if (s_log_ring_count == LOG_RING_LEN) {
+        s_log_ring_head = (s_log_ring_head + 1) % LOG_RING_LEN;   // slot was the oldest
+        s_log_ring_dropped++;
+    } else {
+        s_log_ring_count++;
+    }
+    strncpy(s_log_ring[slot], line, LOG_FWD_LINE_MAX - 1);
+    s_log_ring[slot][LOG_FWD_LINE_MAX - 1] = '\0';
+}
+
+// Publish the held lines oldest-first with the "[offline] " prefix (cut to
+// LOG_FWD_LINE_MAX - 1 chars, the same cap as a live line). Stops at the first
+// failed publish and keeps the rest; returns true once the ring is empty.
+static bool log_ring_flush(const char *topic) {
+    char out[LOG_FWD_LINE_MAX + 16];
+    if (s_log_ring_dropped) {
+        snprintf(out, sizeof(out), LOG_OFFLINE_PREFIX "(%lu older line(s) lost)",
+                 (unsigned long)s_log_ring_dropped);
+        if (esp_mqtt_client_publish(mqtt_client, topic, out, 0, 0, 0) < 0) return false;
+        s_log_ring_dropped = 0;
+    }
+    while (s_log_ring_count) {
+        snprintf(out, sizeof(out), LOG_OFFLINE_PREFIX "%s", s_log_ring[s_log_ring_head]);
+        out[LOG_FWD_LINE_MAX - 1] = '\0';
+        if (esp_mqtt_client_publish(mqtt_client, topic, out, 0, 0, 0) < 0) return false;
+        s_log_ring_head = (s_log_ring_head + 1) % LOG_RING_LEN;
+        s_log_ring_count--;
+    }
+    return true;
+}
+
 static void log_forward_task(void *pvParameters) {
-    char topic[128];
-    snprintf(topic, sizeof(topic), "amphive/gateways/%s/logs", gateway_id);
+    char topic[128] = "";   // built on first use: gateway_id is set after this task starts
     char line[LOG_FWD_LINE_MAX];
     while (1) {
-        if (xQueueReceive(s_log_queue, line, portMAX_DELAY) != pdTRUE) continue;
-        if (!mqtt_connected || mqtt_client == NULL) continue;   // discard when offline
-        size_t len = strlen(line);
-        while (len && (line[len - 1] == '\n' || line[len - 1] == '\r')) line[--len] = '\0';
-        if (len == 0) continue;
-        s_log_publishing = true;   // don't re-enqueue logs emitted during publish
-        esp_mqtt_client_publish(mqtt_client, topic, line, 0, 0, 0);
-        s_log_publishing = false;
+        bool got = xQueueReceive(s_log_queue, line, pdMS_TO_TICKS(LOG_FWD_POLL_MS)) == pdTRUE;
+        if (got) {
+            size_t len = strlen(line);
+            while (len && (line[len - 1] == '\n' || line[len - 1] == '\r')) line[--len] = '\0';
+            got = len > 0;
+        }
+        bool online = mqtt_connected && mqtt_client != NULL && gateway_id[0] != '\0';
+        if (online && !topic[0]) {
+            snprintf(topic, sizeof(topic), "amphive/gateways/%s/logs", gateway_id);
+        }
+        // Held (older) lines go out before a live one.
+        if (online && (s_log_ring_count || s_log_ring_dropped)) online = log_ring_flush(topic);
+        if (!got) continue;
+        if (!online || esp_mqtt_client_publish(mqtt_client, topic, line, 0, 0, 0) < 0) {
+            log_ring_push(line);
+        }
     }
 }
 
-// Install the vprintf hook + start the drain task. gateway_id must already be set.
+// Install the vprintf hook + start the drain task. Called first thing in
+// app_main; needs nothing else to be up (the topic is built on first publish).
 static void start_log_forwarding(void) {
     s_log_queue = xQueueCreate(LOG_FWD_QUEUE_LEN, LOG_FWD_LINE_MAX);
     if (!s_log_queue) {
         ESP_LOGE(TAG, "log forward: queue alloc failed; serial-only logging");
         return;
     }
+    // Task before hook, so s_log_task is known before the hook can see a line.
+    xTaskCreate(log_forward_task, "log_forward", 4096, NULL, 3, &s_log_task);
     s_orig_vprintf = esp_log_set_vprintf(log_forward_vprintf);
-    xTaskCreate(log_forward_task, "log_forward", 4096, NULL, 3, NULL);
-    ESP_LOGI(TAG, "Log forwarding enabled -> amphive/gateways/%s/logs (WARN+)", gateway_id);
+    ESP_LOGI(TAG, "Log forwarding enabled (WARN+, held in RAM until MQTT connects)");
 }
 
 // ─── MQTT Subscriber/Event Handler ──────────────────────────────────────────
@@ -1388,6 +1558,9 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
                      "{\"status\":\"online\",\"fw\":\"%s\"}",
                      esp_app_get_description()->version);
             esp_mqtt_client_publish(mqtt_client, status_topic, status_payload, 0, 1, 1);
+
+            // Once per boot: reset cause + Wi-Fi join facts (no-op after it's sent).
+            publish_gateway_boot();
 
             // Subscribe to incoming commands for this gateway's plugs
             char command_topic[128];
@@ -1415,7 +1588,24 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
             ESP_LOGW(TAG, "MQTT disconnected from broker.");
             mqtt_connected = false;
             break;
-            
+
+        case MQTT_EVENT_ERROR: {
+            // Why a connect or the session failed (fw 2.8.0; before, only the
+            // bare disconnect was logged). WARN, so the line is forwarded — or
+            // held and flushed after the next connect.
+            const esp_mqtt_error_codes_t *e = event->error_handle;
+            if (e) {
+                int se = e->esp_tls_stack_err;   // mbedTLS codes are negative
+                ESP_LOGW(TAG, "MQTT error: type=%d tls_err=0x%x (%s) tls_stack_err=%s0x%x "
+                              "sock_errno=%d connect_rc=%d",
+                         (int)e->error_type, (unsigned)e->esp_tls_last_esp_err,
+                         esp_err_to_name(e->esp_tls_last_esp_err),
+                         se < 0 ? "-" : "", se < 0 ? 0u - (unsigned)se : (unsigned)se,
+                         e->esp_transport_sock_errno, (int)e->connect_return_code);
+            }
+            break;
+        }
+
         case MQTT_EVENT_DATA: {
             char topic[256] = {0};
             char data[512]  = {0};
@@ -1507,10 +1697,14 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
                 } else {
                     // Read the meter BEFORE energising (captures the pre-session
                     // baseline, so the first telemetry frame doesn't bill the
-                    // meter's whole standing value).
+                    // meter's whole standing value). A failed read — a plug blip,
+                    // or since 2.8.0 any failed get_device_info — falls back to
+                    // the driver's own meter value, never 0: a 0 baseline billed
+                    // the whole lifetime meter on the first frame and tripped
+                    // the energy watchdog at once.
                     tapo_telemetry_t base;
                     float baseline = (tapo_plug_get_telemetry(t, &base) == ESP_OK)
-                                     ? base.energy_kwh : 0.0f;
+                                     ? base.energy_kwh : tapo_plug_energy_kwh(t);
 
                     // Mark the session active BEFORE the relay energises: a
                     // concurrent telemetry poll must never see device_on with no
@@ -1731,6 +1925,61 @@ static void resync_offline_logs(void) {
     ESP_LOGI(TAG, "Offline resync complete: %u entries published.", sent);
 }
 
+// ─── Plug reachability (fw 2.8.0, forensics F4) ──────────────────────────────
+// Called by the telemetry task after every poll of slot i: decides under
+// plugs_mutex, publishes outside it. An event counts as sent only once esp-mqtt
+// accepts it, so one raised while MQTT is down goes out on a later sweep, and an
+// outage's PLUG_RECOVERED always goes out before the next one's PLUG_UNREACHABLE.
+static void plug_track_reachability(int i, bool ok) {
+    bool     want_unreachable = false, want_recovered, back = false;
+    unsigned failures = 0, failed_polls = 0;
+    uint32_t down_s, back_s = 0;
+
+    xSemaphoreTake(plugs_mutex, portMAX_DELAY);
+    plug_slot_t *s = &plugs[i];
+    int plug_id = s->plug_id;
+    if (ok) {
+        if (s->poll_failures >= PLUG_UNREACHABLE_FAILURES) {
+            back = true;
+            failed_polls = s->poll_failures;
+            back_s = (uint32_t)((xTaskGetTickCount() - s->fail_since_tick) / configTICK_RATE_HZ);
+            if (s->unreachable_sent) {   // RECOVERED only ever follows a sent UNREACHABLE
+                s->recovered_pending = true;
+                s->recovered_down_s = back_s;
+            }
+        }
+        s->poll_failures = 0;
+        s->unreachable_sent = false;
+    } else {
+        if (s->poll_failures == 0) s->fail_since_tick = xTaskGetTickCount();
+        if (s->poll_failures < UINT8_MAX) s->poll_failures++;
+        failures = s->poll_failures;
+        want_unreachable = failures >= PLUG_UNREACHABLE_FAILURES && !s->unreachable_sent;
+    }
+    want_recovered = s->recovered_pending;
+    down_s = s->recovered_down_s;
+    xSemaphoreGive(plugs_mutex);
+
+    if (failures == PLUG_UNREACHABLE_FAILURES) {
+        ESP_LOGW(TAG, "Plug %d unreachable: %u polls in a row failed", plug_id, failures);
+    }
+    if (back) {
+        ESP_LOGI(TAG, "Plug %d reachable again after %lu s (%u failed polls)",
+                 plug_id, (unsigned long)back_s, failed_polls);
+    }
+    if (want_recovered) {
+        if (!publish_plug_recovered(plug_id, down_s)) return;   // retry next sweep
+        xSemaphoreTake(plugs_mutex, portMAX_DELAY);
+        if (plugs[i].plug_id == plug_id) plugs[i].recovered_pending = false;
+        xSemaphoreGive(plugs_mutex);
+    }
+    if (want_unreachable && publish_plug_unreachable(plug_id, failures)) {
+        xSemaphoreTake(plugs_mutex, portMAX_DELAY);
+        if (plugs[i].plug_id == plug_id) plugs[i].unreachable_sent = true;
+        xSemaphoreGive(plugs_mutex);
+    }
+}
+
 // ─── Telemetry Polling & Watchdog Safety Loop ────────────────────────────────
 // Polls EVERY known plug each cycle (safety enforcement must not depend on MQTT),
 // publishes per-plug telemetry under the one per-gateway topic (plug_id in the
@@ -1763,12 +2012,25 @@ static void telemetry_task(void *pvParameters) {
                above (this same task), so `t` stays valid after we release. */
             bool in_use = plugs[i].in_use;
             tapo_plug_t *t = plugs[i].tapo;
+            /* Idle backoff (fw 2.8.0): an unreachable plug with no session is
+               polled only every PLUG_IDLE_BACKOFF_MS. Re-checked every sweep, so
+               an ON for that plug restores the normal cadence at once. */
+            TickType_t now_tick = xTaskGetTickCount();
+            bool backoff = in_use && !plugs[i].session_active &&
+                           plugs[i].poll_failures >= PLUG_UNREACHABLE_FAILURES &&
+                           (TickType_t)(now_tick - plugs[i].last_poll_tick) < pdMS_TO_TICKS(PLUG_IDLE_BACKOFF_MS);
+            if (in_use && !backoff) plugs[i].last_poll_tick = now_tick;
             xSemaphoreGive(plugs_mutex);
-            if (!in_use) continue;
+            if (!in_use || backoff) continue;
 
-            /* ALWAYS poll the plug — safety enforcement must not depend on MQTT */
+            /* ALWAYS poll the plug — safety enforcement must not depend on MQTT.
+               A failed poll is skipped, never read as relay OFF (forensics F4):
+               the watchdogs, the unauthorized-on guard and the idle-baseline
+               reconcile all wait for the next good poll. */
             tapo_telemetry_t telemetry;
-            if (tapo_plug_get_telemetry(t, &telemetry) != ESP_OK) continue;
+            bool poll_ok = tapo_plug_get_telemetry(t, &telemetry) == ESP_OK;
+            plug_track_reachability(i, poll_ok);
+            if (!poll_ok) continue;
 
             /* Decide everything under the lock (reading the live session state),
                then do the network I/O — publish, force-off, alarm — after
@@ -1944,6 +2206,11 @@ static void telemetry_task(void *pvParameters) {
 
 // ─── Entry Point ─────────────────────────────────────────────────────────────
 void app_main(void) {
+    // 0. Log forwarding first (fw 2.8.0): the hook only enqueues and the drain
+    //    task holds WARN/ERROR lines in RAM until MQTT connects, so boot-time
+    //    Wi-Fi failures and crash-recovery warnings reach the backend too.
+    start_log_forwarding();
+
     esp_reset_reason_t rst = esp_reset_reason();
     ESP_LOGI(TAG, "AmpHive gateway fw %s (partition: %s, reset reason: %s [%d])",
              esp_app_get_description()->version,
@@ -2035,11 +2302,6 @@ void app_main(void) {
     //     and builds its slot table from it (handle_plug_roster), so telemetry
     //     flows for every plug without a captive-portal plug IP or a provisional
     //     slot. Crash-recovered sessions repopulate their own slots below.
-
-    // 5c. Forward WARN/ERROR logs to the broker so a deployed gateway is
-    //     observable without a serial cable (TD#28). gateway_id is set by now;
-    //     the drain task only publishes once MQTT connects.
-    start_log_forwarding();
 
     // 6. Start telemetry and safety watchdog loops
     //    Stack raised to 8 KB: the task now performs real KLAP crypto + HTTP each poll.

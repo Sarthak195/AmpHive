@@ -639,8 +639,17 @@ esp_err_t tapo_plug_get_telemetry(tapo_plug_t *plug, tapo_telemetry_t *out) {
 
     xSemaphoreTake(plug->mutex, portMAX_DELAY);
 
-    /* 1) power (+ energy source, + real current/voltage) */
+    /* 1) power (+ energy source, + real current/voltage). A plug-side error reply
+     *    (non-zero error_code) carries no readings; parsing it would report 0 W and
+     *    starve the integrator, so it fails the poll like a transport error. */
     esp_err_t rc = klap_request(plug->ip, &plug->sess, "{\"method\":\"get_energy_usage\"}", plain, KLAP_RESP_CAP, &plen);
+    if (rc == ESP_OK) {
+        int ec = response_error_code((const char *)plain);
+        if (ec != 0) {
+            ESP_LOGW(TAG, "plug %d: get_energy_usage error_code=%d", plug->plug_id, ec);
+            rc = ESP_ERR_INVALID_RESPONSE;
+        }
+    }
     if (rc != ESP_OK) { xSemaphoreGive(plug->mutex); free(plain); return rc; }
     {
         long mw = 0;   /* get_energy_usage.current_power is in milliwatts */
@@ -654,8 +663,19 @@ esp_err_t tapo_plug_get_telemetry(tapo_plug_t *plug, tapo_telemetry_t *out) {
         if (json_int((const char *)plain, "\"month_energy\":", &month_wh)) meas_month_kwh = (float)month_wh / 1000.0f;
     }
 
-    /* 2) state + safety statuses */
+    /* 2) state + safety statuses. This must succeed for the poll to count (fw
+     *    2.8.0, forensics F4): `out` was memset above, so carrying on after a
+     *    failed or error-coded get_device_info returned ESP_OK with device_on =
+     *    false and both safety statuses "normal" — a false relay-OFF reading. The
+     *    power sample from 1) is still real, so it is integrated below first. */
     rc = klap_request(plug->ip, &plug->sess, "{\"method\":\"get_device_info\"}", plain, KLAP_RESP_CAP, &plen);
+    if (rc == ESP_OK) {
+        int ec = response_error_code((const char *)plain);
+        if (ec != 0 || !strstr((const char *)plain, "\"device_on\":")) {
+            ESP_LOGW(TAG, "plug %d: get_device_info unusable (error_code=%d)", plug->plug_id, ec);
+            rc = ESP_ERR_INVALID_RESPONSE;
+        }
+    }
     if (rc == ESP_OK) {
         out->device_on   = json_true((const char *)plain, "\"device_on\":");
         out->overheated  = json_status_abnormal((const char *)plain, "\"overheat_status\":");
@@ -694,6 +714,7 @@ esp_err_t tapo_plug_get_telemetry(tapo_plug_t *plug, tapo_telemetry_t *out) {
 
     xSemaphoreGive(plug->mutex);
     free(plain);
+    if (rc != ESP_OK) return rc;   /* get_device_info failed: no relay/safety reading */
 
     out->power_w   = power_w;
     /* Prefer the plug's REAL measured voltage/current; fall back to nominal /
@@ -711,6 +732,14 @@ esp_err_t tapo_plug_get_telemetry(tapo_plug_t *plug, tapo_telemetry_t *out) {
     out->month_energy_kwh = meas_month_kwh;
 
     return ESP_OK;
+}
+
+float tapo_plug_energy_kwh(tapo_plug_t *plug) {
+    if (!plug) return 0.0f;
+    xSemaphoreTake(plug->mutex, portMAX_DELAY);
+    double wh = plug->energy_wh;
+    xSemaphoreGive(plug->mutex);
+    return (float)(wh / 1000.0);
 }
 
 esp_err_t tapo_plug_reconcile_idle_baseline(tapo_plug_t *plug, float today_kwh, float month_kwh,
