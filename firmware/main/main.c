@@ -121,6 +121,21 @@ static bool mqtt_connected = false;
 static int wifi_retry_count = 0;
 #define MAXIMUM_RETRY  5
 
+// Boot-time STA window: BOOT_WIFI_ROUNDS bursts of MAXIMUM_RETRY quick retries,
+// BOOT_WIFI_BACKOFF_MS apart, before falling back to the captive portal (~2-3
+// min instead of one ~11 s burst). On a marginal link (-81 dBm measured
+// 2026-10-20) auth/assoc/EAPOL frames get lost and the first success came in
+// round 3. MAXIMUM_RETRY itself stays short: the portal's credential pre-check
+// relies on that burst.
+#define BOOT_WIFI_ROUNDS      6
+#define BOOT_WIFI_BACKOFF_MS  5000
+// Cap per round: an attempt that associates but never gets an IP (DHCP lost on
+// a weak link) raises neither bit, and would otherwise block boot forever.
+#define BOOT_WIFI_ROUND_MAX_MS 60000
+// Set while wifi_init() runs its boot survey scan, so STA_START doesn't start a
+// connect underneath it (a scan during a connect fails with ESP_ERR_WIFI_STATE).
+static volatile bool boot_survey_pending = false;
+
 // ── Runtime Wi-Fi resilience ─────────────────────────────────────────────────
 // The bounded MAXIMUM_RETRY burst exists only to produce a definite pass/fail
 // signal for the two paths that wait on WIFI_FAIL_BIT: boot-time wifi_init()
@@ -985,6 +1000,93 @@ static void start_captive_portal(void) {
     }
 }
 
+// ─── Wi-Fi / reset diagnostics ───────────────────────────────────────────────
+// Serial-visible reasons for the two failure classes the logs could never
+// explain: why a STA attempt failed (reason code + RSSI) and why the chip last
+// restarted.
+
+static const char *wifi_reason_str(uint8_t reason) {
+    switch (reason) {
+        case WIFI_REASON_AUTH_EXPIRE:                return "auth timeout - AP did not answer";
+        case WIFI_REASON_AUTH_LEAVE:                 return "deauthenticated by AP";
+        case WIFI_REASON_DISASSOC_DUE_TO_INACTIVITY: return "assoc timeout - AP did not answer";
+        case WIFI_REASON_ASSOC_TOOMANY:              return "AP has too many clients";
+        case WIFI_REASON_ASSOC_LEAVE:                return "disassociated";
+        case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:     return "4-way handshake timeout - weak signal or wrong password";
+        case WIFI_REASON_BEACON_TIMEOUT:             return "beacon timeout - signal lost";
+        case WIFI_REASON_NO_AP_FOUND:                return "SSID not found in scan";
+        case WIFI_REASON_AUTH_FAIL:                  return "authentication failed";
+        case WIFI_REASON_ASSOC_FAIL:                 return "association failed";
+        case WIFI_REASON_HANDSHAKE_TIMEOUT:          return "handshake timeout - weak signal or wrong password";
+        case WIFI_REASON_CONNECTION_FAIL:            return "connection failed";
+        case WIFI_REASON_NO_AP_FOUND_W_COMPATIBLE_SECURITY:
+        case WIFI_REASON_NO_AP_FOUND_IN_AUTHMODE_THRESHOLD: return "no AP with compatible security";
+        default:                                     return "see esp_wifi_types reason codes";
+    }
+}
+
+static const char *wifi_auth_str(wifi_auth_mode_t m) {
+    switch (m) {
+        case WIFI_AUTH_OPEN:          return "open";
+        case WIFI_AUTH_WEP:           return "WEP";
+        case WIFI_AUTH_WPA_PSK:       return "WPA-PSK";
+        case WIFI_AUTH_WPA2_PSK:      return "WPA2-PSK";
+        case WIFI_AUTH_WPA_WPA2_PSK:  return "WPA/WPA2-PSK";
+        case WIFI_AUTH_ENTERPRISE:    return "enterprise";
+        case WIFI_AUTH_WPA3_PSK:      return "WPA3-SAE";
+        case WIFI_AUTH_WPA2_WPA3_PSK: return "WPA2/WPA3";
+        default:                      return "other";
+    }
+}
+
+static const char *reset_reason_str(esp_reset_reason_t r) {
+    switch (r) {
+        case ESP_RST_POWERON:   return "power-on";
+        case ESP_RST_EXT:       return "external reset pin";
+        case ESP_RST_SW:        return "software restart";
+        case ESP_RST_PANIC:     return "panic/exception";
+        case ESP_RST_INT_WDT:   return "interrupt watchdog";
+        case ESP_RST_TASK_WDT:  return "task watchdog";
+        case ESP_RST_WDT:       return "other watchdog";
+        case ESP_RST_DEEPSLEEP: return "deep-sleep wake";
+        case ESP_RST_BROWNOUT:  return "brownout - supply voltage dipped";
+        default:                return "other";
+    }
+}
+
+// One line per BSSID that carries the configured SSID, as heard from here:
+// channel (+/- = HT40 side), RSSI, security, PHY modes. Tells a weak link
+// apart from an AP that hears us but won't answer, and exposes extenders or
+// WPA3-only modes sharing the SSID.
+static void log_ssid_survey(void) {
+    wifi_scan_config_t sc = { .ssid = (uint8_t *)wifi_ssid, .show_hidden = false };
+    if (esp_wifi_scan_start(&sc, true) != ESP_OK) {
+        ESP_LOGW(TAG, "Wi-Fi survey: scan failed");
+        return;
+    }
+    static wifi_ap_record_t recs[8];
+    uint16_t total = 0;
+    esp_wifi_scan_get_ap_num(&total);
+    uint16_t n = sizeof(recs) / sizeof(recs[0]);
+    if (esp_wifi_scan_get_ap_records(&n, recs) != ESP_OK) n = 0;
+    if (total == 0) {
+        ESP_LOGW(TAG, "Wi-Fi survey: '%s' not heard (wrong name, 5 GHz-only, or out of range)", wifi_ssid);
+        return;
+    }
+    ESP_LOGI(TAG, "Wi-Fi survey: '%s' heard from %u BSSID(s)", wifi_ssid, (unsigned)total);
+    for (int i = 0; i < n; i++) {
+        const wifi_ap_record_t *r = &recs[i];
+        ESP_LOGI(TAG, "  " MACSTR " ch %u%s rssi %d dBm, %s (pairwise %d, group %d), phy %s%s%s%s",
+                 MAC2STR(r->bssid), (unsigned)r->primary,
+                 r->second == WIFI_SECOND_CHAN_ABOVE ? "+" :
+                 r->second == WIFI_SECOND_CHAN_BELOW ? "-" : "",
+                 (int)r->rssi, wifi_auth_str(r->authmode),
+                 (int)r->pairwise_cipher, (int)r->group_cipher,
+                 r->phy_11b ? "b" : "", r->phy_11g ? "g" : "",
+                 r->phy_11n ? "n" : "", r->phy_11ax ? "/ax" : "");
+    }
+}
+
 // ─── WiFi Event Handler ───────────────────────────────────────────────────────
 
 // One-shot redial while the AP is away (armed only after the link has been up
@@ -1021,18 +1123,22 @@ static void wifi_redial_timer_cb(void *arg) {
 static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                                 int32_t event_id, void *event_data) {
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
-        if(config_loaded) {
+        if(config_loaded && !boot_survey_pending) {
             esp_wifi_connect();
         }
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        const wifi_event_sta_disconnected_t *d = (const wifi_event_sta_disconnected_t *)event_data;
         if (sta_got_ip_once && wifi_down_since_tick == 0) {
             wifi_down_since_tick = xTaskGetTickCount();   // outage begins
         }
         if (wifi_retry_count < MAXIMUM_RETRY) {
             esp_wifi_connect();
             wifi_retry_count++;
-            ESP_LOGW(TAG, "WiFi connection dropped. Retrying...");
+            ESP_LOGW(TAG, "WiFi connection dropped (reason %u: %s, rssi %d). Retrying...",
+                     (unsigned)d->reason, wifi_reason_str(d->reason), (int)d->rssi);
         } else {
+            ESP_LOGW(TAG, "WiFi attempt failed (reason %u: %s, rssi %d) - retry burst exhausted",
+                     (unsigned)d->reason, wifi_reason_str(d->reason), (int)d->rssi);
             // Definite-failure signal for the two bounded waiters
             // (boot-time wifi_init and the portal pre-check).
             xEventGroupSetBits(wifi_event_group, WIFI_FAIL_BIT);
@@ -1093,21 +1199,53 @@ static bool wifi_init(void) {
     wifi_config_t wifi_cfg = {0};
     strncpy((char*)wifi_cfg.sta.ssid, wifi_ssid, sizeof(wifi_cfg.sta.ssid));
     strncpy((char*)wifi_cfg.sta.password, wifi_password, sizeof(wifi_cfg.sta.password));
+    // Join the strongest BSSID carrying the SSID (extender/mesh), not the first
+    // one a fast scan happens to hear.
+    wifi_cfg.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
+    wifi_cfg.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg));
+    // Mains-powered gateway, so no modem sleep (it delays and drops frames on a
+    // weak link and adds latency to plug polls), and 20 MHz channels (~3 dB
+    // more robust than HT40; MQTT/KLAP traffic doesn't need the throughput).
+    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_set_bandwidth(WIFI_IF_STA, WIFI_BW_HT20));
+    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_set_ps(WIFI_PS_NONE));
+    boot_survey_pending = true;
     ESP_ERROR_CHECK(esp_wifi_start());
+    log_ssid_survey();
+    boot_survey_pending = false;
 
     ESP_LOGI(TAG, "Connecting to local VLAN WiFi...");
-    EventBits_t bits = xEventGroupWaitBits(wifi_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
-                        pdFALSE, pdFALSE, portMAX_DELAY);
-                        
-    if (bits & WIFI_CONNECTED_BIT) {
-        return true;
-    } else {
-        ESP_LOGE(TAG, "Failed to connect to STA. Will fallback to Captive Portal.");
-        return false;
+    esp_wifi_connect();
+    for (int round = 1; ; round++) {
+        EventBits_t bits = xEventGroupWaitBits(wifi_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
+                                               pdFALSE, pdFALSE, pdMS_TO_TICKS(BOOT_WIFI_ROUND_MAX_MS));
+        if (bits & WIFI_CONNECTED_BIT) {
+            return true;
+        }
+        if (!(bits & WIFI_FAIL_BIT)) {
+            // Associated (or mid-attempt) but no IP: abort the attempt. With the
+            // burst marked exhausted, the DISCONNECTED handler raises FAIL
+            // instead of redialing.
+            ESP_LOGW(TAG, "WiFi round %d/%d: no IP after %d s - aborting attempt",
+                     round, BOOT_WIFI_ROUNDS, BOOT_WIFI_ROUND_MAX_MS / 1000);
+            wifi_retry_count = MAXIMUM_RETRY;
+            esp_wifi_disconnect();
+            xEventGroupWaitBits(wifi_event_group, WIFI_FAIL_BIT, pdFALSE, pdFALSE, pdMS_TO_TICKS(5000));
+        }
+        if (round >= BOOT_WIFI_ROUNDS) {
+            break;
+        }
+        ESP_LOGW(TAG, "WiFi round %d/%d failed - next round in %d s",
+                 round, BOOT_WIFI_ROUNDS, BOOT_WIFI_BACKOFF_MS / 1000);
+        vTaskDelay(pdMS_TO_TICKS(BOOT_WIFI_BACKOFF_MS));
+        wifi_retry_count = 0;
+        xEventGroupClearBits(wifi_event_group, WIFI_FAIL_BIT);
+        esp_wifi_connect();
     }
+    ESP_LOGE(TAG, "Failed to connect to STA. Will fallback to Captive Portal.");
+    return false;
 }
 
 // ─── OTA event → alarms topic ───────────────────────────────────────────────
@@ -1806,9 +1944,11 @@ static void telemetry_task(void *pvParameters) {
 
 // ─── Entry Point ─────────────────────────────────────────────────────────────
 void app_main(void) {
-    ESP_LOGI(TAG, "AmpHive gateway fw %s (partition: %s)",
+    esp_reset_reason_t rst = esp_reset_reason();
+    ESP_LOGI(TAG, "AmpHive gateway fw %s (partition: %s, reset reason: %s [%d])",
              esp_app_get_description()->version,
-             esp_ota_get_running_partition()->label);
+             esp_ota_get_running_partition()->label,
+             reset_reason_str(rst), (int)rst);
     ota_update_init(publish_ota_event);
 
     // 1. Initialize WiFi and attempt STA connection

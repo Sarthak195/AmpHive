@@ -48,7 +48,8 @@ firmware/
 ## 1. Boot & tasks (`main/main.c`)
 
 `app_main`:
-1. `wifi_init()` — init NVS, load saved config, connect STA (blocking).
+1. `wifi_init()` — init NVS, load saved config, survey-scan the SSID, connect
+   STA (blocking; up to `BOOT_WIFI_ROUNDS` 6 rounds, see below).
 2. If no config / WiFi fails → `start_captive_portal()` and idle until the user
    submits the setup form (which triggers `esp_restart()`).
 3. `tapo_init()` (also restores the persisted energy integrator from NVS).
@@ -72,6 +73,20 @@ reboots as a last resort (the Wi-Fi driver itself may be wedged) — but never
 with an active charging session, same rule as OTA `REBOOT` — landing in the
 boot path, whose portal-idle loop retries STA every 10 min. esp-mqtt owns its
 own reconnection, so MQTT recovers as soon as IP is back.
+
+**Boot Wi-Fi window + diagnostics (fw ≥ 2.7.1-direct):** before the first
+connect, `wifi_init` scans for the configured SSID and logs one line per BSSID
+(channel, HT40 side, RSSI, security, PHY modes). Every
+`STA_DISCONNECTED` logs the reason code and RSSI, and boot logs
+`esp_reset_reason()`. The boot connect runs up to 6 rounds of the 5-retry burst,
+5 s apart (~2-3 min), each capped at 60 s so an attempt that associates but
+never gets a DHCP lease can't block boot. Only after that does it fall back to the
+portal; before 2.7.1 one ~11 s burst decided. The STA uses an all-channel
+scan sorted by signal, 20 MHz channels and no modem sleep (the gateway is
+mains-powered). Field note, 2026-10-20: at -81 to -89 dBm the gateway saw
+auth/assoc timeouts, lost EAPOL frames and no DHCP lease. It joined once, in
+round 3, and then never got an IP. That is a placement problem these settings
+cannot fix: keep the gateway where it hears the AP at about -70 dBm or better.
 
 Broker endpoint (fw ≥ 2.3.0): `AMPHIVE_DIRECT_MQTT 1` → default `MQTT_BROKER_URL
 "mqtts://mqtt.amphive.app:8883"` — a **DNS name**, so the broker can move
@@ -687,7 +702,7 @@ the shape described in §§1–4:
   serial-flash step at manufacture —
   [deploy/docs/firmware_flash_encryption.md](../deploy/docs/firmware_flash_encryption.md).
 
-**Current: fw `2.7.0-direct` — false `UNMETERED_CONSUMPTION` after every
+**fw `2.7.0-direct` (previous) — false `UNMETERED_CONSUMPTION` after every
 session (2026-08-13).** Ships everything in 2.6.0 (which was never built or
 released) plus one fix, and is the first of these actually OTA'd to the field.
 
@@ -705,3 +720,17 @@ Fix: the session branch now calls
 sweep, walking the baseline forward over energy a billed session is already
 accounting for (same NVS-flush throttle, never reports, never detects). Only
 energy delivered **outside** a session can produce a delta now. See §4a.
+
+**Current: fw `2.7.1-direct` — Wi-Fi diagnostics + a longer boot Wi-Fi window
+(2026-10-20; USB-flashed to gw `1cc3abb4fb54`, not published for OTA).** A
+re-provisioned gateway kept falling back to the setup portal. Version 2.7.0
+logged only "WiFi connection dropped. Retrying..." and gave up after one ~11 s
+burst. 2.7.1 adds:
+- the boot survey scan;
+- reason code + RSSI on every disconnect;
+- `esp_reset_reason()` at boot (the forensics' unexplained hourly resets);
+- the ~2-3 min multi-round boot window with a per-round DHCP cap;
+- all-channel/strongest-BSSID selection, HT20 and no modem sleep (§1).
+
+The first capture showed the cause: the board heard the AP at -81 to -89 dBm.
+Placement fixes that, not firmware.
