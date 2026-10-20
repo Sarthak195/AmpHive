@@ -47,12 +47,20 @@
 # Log rotation for EVERY service (2026-10-20; previously only mqtt and
 # backend had it). Docker's json-file driver keeps a container's stdout with
 # no size limit unless told otherwise, and this box's disk is as tight as its
-# RAM, so each container is capped at 3 x 5 MB, bounded harder than the
-# retired prod files' 10m/5. Logging options apply when a container is
-# CREATED: after changing them, `docker compose up -d` recreates the
-# containers, and the old json log files are deleted along with the old
-# containers.
+# RAM. db, backend, frontend and caddy keep at most 3 x 10 MB each
+# (x-logging) and mqtt 3 x 5 MB (x-logging-mqtt): about 135 MB in all, and
+# still under the retired prod files' 10m/5 (50 MB per container). These are
+# the values the live copy on the VM gets by hand (LIVE COPY DRIFT above).
+# Logging options apply when a container is CREATED: after changing them,
+# `docker compose up -d` recreates the containers, and the old json log
+# files are deleted along with the old containers.
 x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-logging-mqtt: &mqtt-logging
   driver: "json-file"
   options:
     max-size: "5m"
@@ -119,7 +127,7 @@ services:
       timeout: 10s
       retries: 3
       start_period: 15s
-    logging: *default-logging
+    logging: *mqtt-logging
 
   backend:
     build:

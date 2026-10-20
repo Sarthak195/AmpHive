@@ -34,12 +34,13 @@ files describe the retired two-VM-era stack and are kept for reference.
 
 Compose-default names (`amphive-relay-<service>-1`) except the optional fake
 plug (`amphive-fake-plug`, its own compose project `fakeplug`, **kept stopped**
-since 2026-10-20; start/stop in [TESTING.md](TESTING.md)). Every service's
-stdout log is capped by the json-file driver at 5 MB × 3 files (the
-`x-logging` anchor in the repo compose, 2026-10-20; the live copy on the VM
-gets it by hand, since deploy.ps1 doesn't ship the compose file). mosquitto
-logs to **stdout only** (no file mirror on this stack). Restart policy
-`unless-stopped`.
+since 2026-10-20; start/stop in [TESTING.md](TESTING.md)). Every container's
+stdout log is capped by the json-file driver: 3 files of 10 MB for db,
+backend, frontend, caddy and the fake plug, 3 files of 5 MB for mqtt (the
+`x-logging` / `x-logging-mqtt` anchors in the repo compose, 2026-10-20; the
+live copy on the VM gets the same values by hand, since deploy.ps1 doesn't
+ship the compose file). mosquitto logs to **stdout only** (no file mirror on
+this stack). Restart policy `unless-stopped`.
 
 | Container | Image/build | Port | Notes |
 |-----------|-------------|------|---------|

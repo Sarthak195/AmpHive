@@ -67,12 +67,13 @@ services:
     image: amphive_backend            # reuse the backend image (has paho-mqtt)
     container_name: amphive-fake-plug
     restart: unless-stopped           # survives crashes + reboots while started; a manual stop sticks
-    # Same bounds as every service in deploy/relay/docker-compose.relay.yml
-    # (its x-logging anchor): at most 3 x 5 MB of stdout kept on disk.
+    # Same bounds as the relay stack's non-mqtt services (the x-logging
+    # anchor in deploy/relay/docker-compose.relay.yml): at most 3 x 10 MB of
+    # stdout kept on disk.
     logging:
       driver: "json-file"
       options:
-        max-size: "5m"
+        max-size: "10m"
         max-file: "3"
     # Mounted, not baked, so updating the sim is just scp + `restart`.
     volumes:
