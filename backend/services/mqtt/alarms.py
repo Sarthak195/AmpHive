@@ -171,6 +171,18 @@ class MQTTAlarmMixin:
         "PLUG_RECOVERED": "Plug reachable again.",
     }
 
+    # [fw 2.8.0 diagnostics] Forensic records, not alerts: stored already
+    # acknowledged so they stay out of the unacknowledged set the console
+    # fetches. That set is windowed server-side (CpoAlerts asks for the newest
+    # 50, newest first, and drops info rows only in the browser), so a boot
+    # report on every chip reset — or a brownout boot loop — would otherwise
+    # crowd an older unacknowledged critical (UNAUTHORIZED_ON, ...) out of the
+    # alert strip, and tick the Health nav badge each time. The rows are still
+    # persisted, broadcast and logged; the Health page shows them with
+    # "Unacknowledged only" unticked. PLUG_UNREACHABLE is a real warning and
+    # stays unacknowledged.
+    _PRE_ACKED_EVENT_TYPES = frozenset({"GATEWAY_BOOT", "PLUG_RECOVERED"})
+
     def _handle_gateway_alarm(self, gateway_id: str, payload: Dict[str, Any]):
         """
         Process an alarm/event from a gateway (topic .../alarms). Two shapes:
@@ -322,6 +334,7 @@ class MQTTAlarmMixin:
                     event_type=event_type,
                     severity=severity,
                     detail=detail,
+                    acknowledged=event_type in self._PRE_ACKED_EVENT_TYPES,
                 )
                 session.add(event)
                 await session.commit()

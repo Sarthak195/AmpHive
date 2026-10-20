@@ -63,11 +63,13 @@ alembic head stays `0038`):
   untrusted (coerced, sanitized, range-checked), and every alarm's `detail` is
   now capped at the 255-character column. Before, an absurd
   `UNMETERED_CONSUMPTION` estimate could overflow the column and drop the
-  event. None of the three finalizes, enters maintenance or bells. The
-  "Gateway alarm" log line carries the detail, so the backend log alone shows
-  why a gateway restarted. Exact payloads are in
-  [MQTT_CONTRACT.md](MQTT_CONTRACT.md). The firmware side ships separately as
-  fw 2.8.0-direct.
+  event. None of the three finalizes, enters maintenance or bells.
+  `GATEWAY_BOOT` and `PLUG_RECOVERED` are forensic records, not alerts, so
+  they are stored already acknowledged (`_PRE_ACKED_EVENT_TYPES`; why that
+  matters is in the frontend note below). The "Gateway alarm" log line
+  carries the detail, so the backend log alone shows why a gateway
+  restarted. Exact payloads are in [MQTT_CONTRACT.md](MQTT_CONTRACT.md). The
+  firmware side ships separately as fw 2.8.0-direct.
 
 **Frontend (minimal).** The driver's session monitor used to render *any*
 recent alarm for its plug as a red banner. It would have shown
@@ -78,15 +80,35 @@ it is not info-level. A newer `PLUG_RECOVERED` therefore clears the
 `LOCAL_LIMIT_CUTOFF` (info, software agent only) no longer shows a red banner
 either; the finalize already tells the driver. `statusCopy` gained the
 operator-facing names "Gateway restarted", "Plug unreachable" and "Plug
-reachable again". The CPO alert strip already showed only critical/warning,
-and the Health page is the passive feed, so neither changed.
+reachable again".
+
+The CPO alert strip and the Health page did not change, but the data they
+read did. The strip renders only critical/warning, yet it filters in the
+browser *after* fetching the newest 50 unacknowledged events
+(`unacknowledged_only=true&limit=50`). A boot report on every chip reset
+would have filled that window and pushed an older unacknowledged critical
+(an `UNAUTHORIZED_ON`, say) out of the strip — after about a month of
+ordinary resets, or within the hour in a brownout boot loop — and ticked the
+Health nav badge each time. Storing `GATEWAY_BOOT` and `PLUG_RECOVERED`
+already acknowledged keeps them out of that set. They are still persisted,
+broadcast and logged; the Health page hides them by default ("Unacknowledged
+only" starts ticked) and lists them once it is unticked. `PLUG_UNREACHABLE`
+is a real warning and stays unacknowledged, so it shows in the strip.
+`backend/tests/test_gateway_event_feed.py` (DB-gated) proves that 60 boots
+plus a recovery leave an older `UNAUTHORIZED_ON` in the strip's window.
 
 **Known gaps (not changed here):**
 
-- The console's Health nav badge (`TenantContext.unackedEvents`) counts every
-  unacknowledged event, info-level included. So each `GATEWAY_BOOT` ticks it
-  until acknowledged; the Health page's "Acknowledge selected" clears them in
-  bulk. A follow-up could count only critical/warning.
+- The alert strip still windows before it filters. With the forensic rows
+  pre-acknowledged the window holds only real alerts, but 50 or more newer
+  unacknowledged *warnings* (a flapping plug's repeated `PLUG_UNREACHABLE`,
+  say) could still push an older critical out of the strip. This is
+  pre-existing; the event stays on the Health page and in the badge count. A
+  server-side severity sort or filter on `/api/cpo/events` would close it.
+- The Health nav badge (`TenantContext.unackedEvents`) counts every
+  unacknowledged event, so the remaining info notices (`OTA_*`,
+  `LOCAL_LIMIT_CUTOFF`) still tick it until acknowledged. They are rare;
+  `GATEWAY_BOOT` and `PLUG_RECOVERED` no longer do.
 - A notice still pending when the backend stops is cancelled. After the
   restart the retained `offline` replay is not a transition, so no notice is
   re-armed. A gateway that dropped within ~2 minutes before a deploy never
@@ -487,7 +509,7 @@ the `cpo.py` god router + `MQTTManager` god object; a backend deps lockfile.
 | Role-based access control | ✅ | Enforced via `services/rbac.py` `require_role(...)` on all `/api/cpo/*` routes (checks the DB role, not just the token) |
 | MQTT command publish (ON/OFF) | ✅ | QoS 1, 3 s wait |
 | MQTT inbound telemetry/status handling | ✅ | Telemetry updates TelemetryStore and session DB (now incl. `voltage`/`relay`). Status updates gateway state in DB. |
-| MQTT inbound alarm handling + CPO events feed | ✅ | Subscribes `amphive/gateways/+/alarms` (2026-07-10): `_handle_gateway_alarm` maps `{"error"\|"event"}` → severity, persists a `gateway_events` row (tenant resolved from the gateway), and broadcasts a `gateway_alarm` Socket.io event. CPO reads via `GET /api/cpo/events` (filters: `unacknowledged_only`, `severity`) and clears with `POST /api/cpo/events/{id}/ack`. **Verified live in prod 2026-07-10** (synthetic `UNAUTHORIZED_ON` → persisted event id, retrieved + acked via API). **2026-08-02:** `UNMETERED_CONSUMPTION` (offline-consumption detection, above) additionally bell-notifies every CPO of the tenant directly (`notify()`) — the first alarm type to do so, on top of the passive feed every type gets. |
+| MQTT inbound alarm handling + CPO events feed | ✅ | Subscribes `amphive/gateways/+/alarms` (2026-07-10): `_handle_gateway_alarm` maps `{"error"\|"event"}` → severity, persists a `gateway_events` row (tenant resolved from the gateway), and broadcasts a `gateway_alarm` Socket.io event. CPO reads via `GET /api/cpo/events` (filters: `unacknowledged_only`, `severity`) and clears with `POST /api/cpo/events/{id}/ack`. **Verified live in prod 2026-07-10** (synthetic `UNAUTHORIZED_ON` → persisted event id, retrieved + acked via API). **2026-08-02:** `UNMETERED_CONSUMPTION` (offline-consumption detection, above) additionally bell-notifies every CPO of the tenant directly (`notify()`) — the first alarm type to do so, on top of the passive feed every type gets. **2026-10-20:** fw 2.8.0 diagnostics `GATEWAY_BOOT` / `PLUG_UNREACHABLE` / `PLUG_RECOVERED` (§0); the two info ones are stored already acknowledged (`_PRE_ACKED_EVENT_TYPES`), so they never occupy the unacknowledged window the CPO alert strip and Health badge read. |
 | MQTT inbound firmware log-line diagnostics (TD#28) | ✅ | Subscribes `amphive/gateways/+/logs` (QoS 0, plain text — not JSON, matched before the JSON parse in `services/mqtt/router.py`). `services/mqtt/logs.py` `MQTTLogsMixin` parses the ESP-IDF level letter (E/W/I/D/V → error/warning/info, skipping a leading ANSI colour escape) and persists a `gateway_logs` row (tenant resolved from the gateway) — no notify/socket fan-out, a diagnostics feed distinct from the alarm/event feed above. CPO reads via `GET /api/cpo/gateways/{gateway_id}/logs`; admin cross-tenant via `GET /api/admin/gateway-logs`. Pruned after `GATEWAY_LOGS_RETENTION_DAYS` (default 14) by the session reaper's `reap_gateway_logs_once()`. |
 | Orphan-OFF operator alert | ✅ | `mqtt/status.py._republish_off_for_orphaned_plugs` (reconnect-time OFF republish for plugs with no ACTIVE session) now also notifies every CPO of the gateway's tenant — one `orphan_off` bell notification (`services/notifications.py notify()`) per (plug, CPO) pair, only when at least one plug was actually OFF'd. First CPO-targeted `notify()` call site (previously driver-only); delivered via the existing NotificationBell/Socket.io path, no frontend change needed. |
 | Plug maintenance workflow (fault console) | ✅ | **2026-07-12**: a THERMAL_CUTOFF/OVERCURRENT_CUTOFF alarm now auto-enters the plug into MAINTENANCE (`MQTTManager._auto_enter_maintenance`; excludes `UNAUTHORIZED_ON` and OTA events; env-gate `AUTO_MAINTENANCE_ON_CRITICAL_ALARM`, default on) — session-start already 409s any non-AVAILABLE plug, so this blocks new sessions until an operator clears it. Operators drive enter/clear via `POST /api/cpo/plugs/{id}/maintenance` (`clear` 409s while an ACTIVE session exists); both paths audit (`plug.maintenance_enter`/`plug.maintenance_clear`) and broadcast the status flip like any other plug-status change. |

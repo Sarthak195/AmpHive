@@ -167,12 +167,17 @@ Tapo app / stale NVS resume) is forced OFF locally and alarmed.
 > (the `gateway_events.detail` column). None of the three finalizes a
 > session, enters maintenance, or rings a bell — they are persisted as
 > `gateway_events` and broadcast as `gateway_alarm` like every alarm, and the
-> plug-scoped two go through the same plug-ownership check. In the UI the CPO
-> alert strip shows only critical/warning events (so `PLUG_UNREACHABLE`
-> appears there, the two info events only in the Health feed), and the
-> driver's session monitor never renders an info-level event as an alarm
-> banner — a newer `PLUG_RECOVERED` clears an earlier `PLUG_UNREACHABLE`
-> banner for the same plug.
+> plug-scoped two go through the same plug-ownership check. `GATEWAY_BOOT`
+> and `PLUG_RECOVERED` are forensic records, not alerts, so the backend
+> stores them **already acknowledged** (`_PRE_ACKED_EVENT_TYPES`). The CPO
+> alert strip fetches the newest 50 *unacknowledged* events and drops info
+> rows only in the browser, so a boot report per chip reset would otherwise
+> crowd older criticals out of that window (and tick the Health badge each
+> time). `PLUG_UNREACHABLE` (`warning`) stays unacknowledged and shows in
+> the strip; the two info events are listed on the Health page with
+> "Unacknowledged only" unticked. The driver's session monitor never renders
+> an info-level event as an alarm banner — a newer `PLUG_RECOVERED` clears
+> an earlier `PLUG_UNREACHABLE` banner for the same plug.
 
 > **`/discovery` + `/assign` (software gateways only).** These two topics belong
 > to the **AmpHive Agent** ([AMPHIVE_AGENT.md](AMPHIVE_AGENT.md)) — a software

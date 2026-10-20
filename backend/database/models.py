@@ -728,7 +728,10 @@ class GatewayEvent(Base):
     - tenant_id is denormalized (gateway -> tenant) so the CPO feed filters
       without a join. plug_id is nullable (some events are gateway-wide).
     - acknowledged lets an operator clear an alert from the active feed
-      without deleting the audit row.
+      without deleting the audit row. Pure forensic records (the fw 2.8.0
+      GATEWAY_BOOT / PLUG_RECOVERED reports) are inserted already
+      acknowledged, so True does not always mean an operator acted
+      (services/mqtt/alarms.py _PRE_ACKED_EVENT_TYPES).
     """
     __tablename__ = "gateway_events"
 

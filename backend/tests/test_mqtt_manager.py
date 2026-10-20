@@ -13,6 +13,7 @@ thread.
 """
 
 import asyncio
+import inspect
 import json
 import logging
 import threading
@@ -2202,6 +2203,21 @@ def _debounce_mgr(monkeypatch, gateway, n_results, delay=_NOTICE_DELAY):
     return mgr, session
 
 
+async def _park(*tasks):
+    """Yield to the loop once so freshly armed notice tasks run up to their
+    `await asyncio.sleep(delay)`, and prove they got there. The fake session
+    never suspends, so without this a test's cancel lands before the task's
+    first step and none of its body runs (not the sleep, not the
+    except/finally, not the commit-point bookkeeping): such a test can't tell
+    a working cancel from a sleep that swallows CancelledError. In production
+    the `online` arrives 0.3-1 s after the LWT, i.e. while the notice is
+    already asleep. One yield suffices: _deferred_offline_notice has no await
+    before its sleep."""
+    await asyncio.sleep(0)
+    for task in tasks:
+        assert inspect.getcoroutinestate(task.get_coro()) == inspect.CORO_SUSPENDED
+
+
 @pytest.mark.asyncio
 async def test_offline_then_online_within_window_suppresses_notice(monkeypatch, caplog):
     """A sub-second offline->online blip (22 of 33 pairs in the 2026-10-20 log
@@ -2218,6 +2234,7 @@ async def test_offline_then_online_within_window_suppresses_notice(monkeypatch, 
     await mgr._persist_gateway_status("gw-1", "offline")
     assert gw.status == GatewayStatus.OFFLINE        # immediate DB flip
     pending = mgr._offline_notice_tasks()["gw-1"]    # notice armed, not sent
+    await _park(pending)                             # asleep in its window
     mgr._notify_drivers_gateway_offline.assert_not_awaited()
     mgr._broadcast_plug_connectivity.assert_not_awaited()
 
@@ -2292,6 +2309,7 @@ async def test_retained_online_replay_cancels_pending_offline_notice(monkeypatch
 
     await mgr._persist_gateway_status("gw-1", "offline")
     pending = mgr._offline_notice_tasks()["gw-1"]
+    await _park(pending)
     # The stored status already reads ONLINE when the retained `online` lands,
     # so this is a replay, not a transition.
     gw.status = GatewayStatus.ONLINE
@@ -2322,6 +2340,7 @@ async def test_new_offline_notice_replaces_pending_one(monkeypatch):
 
     mgr._schedule_offline_notice("gw-1", _NOTICE_DELAY)
     first = mgr._offline_notice_tasks()["gw-1"]
+    await _park(first)
     mgr._schedule_offline_notice("gw-1", _NOTICE_DELAY)
     second = mgr._offline_notice_tasks()["gw-1"]
     assert second is not first
@@ -2368,6 +2387,7 @@ async def test_stop_cancels_pending_offline_notices(monkeypatch):
     mgr._schedule_offline_notice("gw-1", _NOTICE_DELAY)
     mgr._schedule_offline_notice("gw-2", _NOTICE_DELAY)
     pending = list(mgr._offline_notice_tasks().values())
+    await _park(*pending)
 
     mgr.stop()
 
@@ -2865,14 +2885,17 @@ async def test_alarm_detail_capped_to_column_size():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("event_type,severity", [
-    ("GATEWAY_BOOT", "info"),
-    ("PLUG_UNREACHABLE", "warning"),
-    ("PLUG_RECOVERED", "info"),
+@pytest.mark.parametrize("event_type,severity,pre_acked", [
+    ("GATEWAY_BOOT", "info", True),
+    ("PLUG_UNREACHABLE", "warning", False),
+    ("PLUG_RECOVERED", "info", True),
 ])
-async def test_fw28_diagnostic_events_persist_without_side_effects(event_type, severity):
+async def test_fw28_diagnostic_events_persist_without_side_effects(event_type, severity, pre_acked):
     """Persisted + broadcast like every alarm, but never a session finalize,
-    a maintenance flip, or a CPO bell."""
+    a maintenance flip, or a CPO bell. The two pure forensic records
+    (GATEWAY_BOOT, PLUG_RECOVERED) are stored already acknowledged so they
+    can't crowd real alerts out of the console's unacknowledged window;
+    PLUG_UNREACHABLE is a real warning and stays unacknowledged."""
     MQTTManager._instance = None
     db = _AlarmDB()
     mgr = MQTTManager(db_session_factory=lambda: db)
@@ -2891,10 +2914,36 @@ async def test_fw28_diagnostic_events_persist_without_side_effects(event_type, s
     assert db.added[0].event_type == event_type
     assert db.added[0].severity == severity
     assert db.added[0].detail == "detail text"
+    assert db.added[0].acknowledged is pre_acked
     emit_mock.assert_awaited_once()
     finalize_mock.assert_not_awaited()
     auto_maint_mock.assert_not_awaited()
     notify_mock.assert_not_awaited()
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("event_type,severity", [
+    ("UNAUTHORIZED_ON", "critical"),
+    ("UNMETERED_CONSUMPTION", "warning"),
+    ("OTA_STARTED", "info"),  # pre-acking is per type, not per severity
+])
+async def test_alarm_events_stay_unacknowledged_outside_the_forensic_types(event_type, severity):
+    """Only GATEWAY_BOOT / PLUG_RECOVERED are pre-acknowledged: every other
+    alarm (a real alert, or an existing info notice) lands unacknowledged
+    exactly as before, so the CPO alert strip and Health badge still see it."""
+    MQTTManager._instance = None
+    db = _AlarmDB()
+    mgr = MQTTManager(db_session_factory=lambda: db)
+    mgr._finalize_session_after_cutoff = AsyncMock()
+    mgr._auto_enter_maintenance = AsyncMock()
+    mgr._notify_cpos_unmetered_consumption = AsyncMock()
+
+    with patch("backend.services.socketio_manager.emit_gateway_alarm", AsyncMock()):
+        await mgr._persist_gateway_event("gw-9", 5, event_type, severity, None)
+
+    assert len(db.added) == 1
+    assert db.added[0].acknowledged is False
     MQTTManager._instance = None
 
 
