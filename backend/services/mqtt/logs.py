@@ -21,6 +21,10 @@ logger = logging.getLogger("amphive.mqtt")
 # gateway_logs.message column, capped at 220 in the model/migration).
 LOG_LINE_MAX = 200
 
+# Firmware >= 2.8.0 holds WARN/ERROR lines while MQTT is down and replays them
+# on reconnect with this marker in front of the (optionally colourised) line.
+OFFLINE_REPLAY_PREFIX = "[offline] "
+
 
 class MQTTLogsMixin:
     """Inbound firmware log-line handling: parse + persist only."""
@@ -58,9 +62,14 @@ class MQTTLogsMixin:
 
     @staticmethod
     def _log_line_level(s: str) -> str:
-        """Port of firmware's log_line_level() (main.c): skip a leading ANSI
-        colour escape (`\\033[...m`), then return the first character — the
-        ESP-IDF level letter (E/W/I/D/V) on a well-formed line."""
+        """Port of firmware's log_line_level() (main.c): skip the fw 2.8.0
+        offline-replay marker and a leading ANSI colour escape (`\\033[...m`),
+        then return the first character — the ESP-IDF level letter
+        (E/W/I/D/V) on a well-formed line. Without the marker skip, a held
+        `[offline] \\033[0;33mW ...` line would be stored as info and hidden by
+        the warning/error filters."""
+        if s.startswith(OFFLINE_REPLAY_PREFIX):
+            s = s[len(OFFLINE_REPLAY_PREFIX):]
         if s.startswith("\033["):
             m = s.find("m")
             if m != -1:

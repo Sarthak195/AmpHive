@@ -7,7 +7,124 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 
 ---
 
-## 0. Latest — 2026-08-18 production-readiness audit: privacy, data rights, SEO, a11y
+## 0. Latest — 2026-10-20 connection noise: debounced offline notices, gated orphan bells, fw 2.8.0 diagnostics
+
+A 45-day forensic pass over the prod logs (one user, who is driver, operator
+and admin at once) found that most of the bells were noise, and why:
+
+- **F1** — the ESP32 gateway reset itself about once per powered hour: 68-70
+  of 79 reconnects were chip resets, and nothing recorded why.
+- **F2** — the backend had no debounce on gateway offline/online. Every
+  sub-second reconnect rang "Charger connection lost" (during a session) or
+  "Plug auto-recovered" (the `orphan_off` bell, when idle): 96 of 139
+  notifications (69%), with 22 of 33 offline->online pairs reversing within
+  1 s.
+- **F3** — the 300 s stale-session reaper ended 12 of 26 sessions.
+- **F4** — about 6 plug-side outages in 55 days where the gateway's KLAP/HTTP
+  polls failed silently, and a failed `get_device_info` was reported as
+  relay OFF.
+- **F5** — no reset reason, no Wi-Fi disconnect reason, no MQTT error
+  handler, and forwarded log lines were dropped while MQTT was down.
+- **F11** — the per-frame "Telemetry received" INFO line was 99% of all
+  backend log lines.
+
+**What changed in the backend** (branch `fix/connection-noise`; no migration,
+alembic head stays `0038`):
+
+- **Debounced offline side effects (F2).** A real ONLINE->OFFLINE transition
+  still flips `gateways.status` at once, so `gateway_is_live` and every start
+  gate stay truthful. The driver notice and the `plug_connectivity`
+  `gateway_online:false` push now wait `GATEWAY_OFFLINE_NOTIFY_DELAY_SEC`
+  (default 120 s) in a per-gateway task (`services/mqtt/status.py`
+  `_deferred_offline_notice`). That task re-reads the gateway in a fresh DB
+  session and only acts if it is still OFFLINE. Any `online` for that gateway
+  in the meantime, a retained replay included, cancels the task and logs
+  "Gateway back within offline-notice window - notice suppressed". A second
+  offline replaces a pending task, `MQTTManager.stop()` cancels whatever is
+  pending, and `<= 0` restores the old immediate behaviour. The online
+  connectivity push is unchanged.
+- **Orphan-OFF bell gating (F2).** On reconnect every plug without an ACTIVE
+  session still gets its OFF, exactly as before (REC-06 ordering and the
+  queued-charge hold untouched). But the CPO `orphan_off` bell now also needs
+  the plug's last-known `plugs.current_power_w >= ORPHAN_ALERT_MIN_POWER_W`
+  (default 5 W), read in the same snapshot query. An idle plug's OFF only logs
+  at INFO. A relay found ON with no session is still covered by the
+  firmware's own `UNAUTHORIZED_ON` critical alarm. The bell text now says how
+  much the plug was last drawing.
+- **Stale reaper (F3).** Prod sets `SESSION_STALE_TIMEOUT_SEC=1200` through
+  `.env`. The code default stays 300 s.
+- **Log volume (F11).** "Telemetry received" is DEBUG now. Every frame still
+  lands in `telemetry_readings`.
+- **fw 2.8.0-direct diagnostics (F1/F4/F5).** `/alarms` now understands
+  `GATEWAY_BOOT` (info: firmware, reset reason and code, boot count, Wi-Fi
+  RSSI/attempts/last disconnect reason, minimum free heap), `PLUG_UNREACHABLE`
+  (warning: N polls in a row without a complete reading) and `PLUG_RECOVERED`
+  (info: down for ~N s). Each is folded into a readable `detail`. Every value is treated as
+  untrusted (coerced, sanitized, range-checked), and every alarm's `detail` is
+  now capped at the 255-character column. Before, an absurd
+  `UNMETERED_CONSUMPTION` estimate could overflow the column and drop the
+  event. None of the three finalizes, enters maintenance or bells.
+  `GATEWAY_BOOT` and `PLUG_RECOVERED` are forensic records, not alerts, so
+  they are stored already acknowledged (`_PRE_ACKED_EVENT_TYPES`; why that
+  matters is in the frontend note below). The "Gateway alarm" log line
+  carries the detail, so the backend log alone shows why a gateway
+  restarted. Exact payloads are in [MQTT_CONTRACT.md](MQTT_CONTRACT.md). The
+  firmware side ships separately as fw 2.8.0-direct. **Deploy this backend
+  before flashing or OTA-ing fw 2.8.0**: an older backend stores the new
+  events as untitled, unacknowledged warnings and parses the `[offline]` log
+  replays as info.
+
+**Frontend (minimal).** The driver's session monitor used to render *any*
+recent alarm for its plug as a red banner. It would have shown
+`PLUG_RECOVERED` as a red "Plug reachable again" alert in the middle of a
+session. Now it takes the newest alarm for the plug and renders it only if
+it is not info-level. A newer `PLUG_RECOVERED` therefore clears the
+`PLUG_UNREACHABLE` banner instead of leaving it up for its full 2 minutes.
+`LOCAL_LIMIT_CUTOFF` (info, software agent only) no longer shows a red banner
+either; the finalize already tells the driver. `statusCopy` gained the
+operator-facing names "Gateway restarted", "Plug unreachable" and "Plug
+reachable again".
+
+The CPO alert strip and the Health page did not change, but the data they
+read did. The strip renders only critical/warning, yet it filters in the
+browser *after* fetching the newest 50 unacknowledged events
+(`unacknowledged_only=true&limit=50`). A boot report on every chip reset
+would have filled that window and pushed an older unacknowledged critical
+(an `UNAUTHORIZED_ON`, say) out of the strip — after about a month of
+ordinary resets, or within the hour in a brownout boot loop — and ticked the
+Health nav badge each time. Storing `GATEWAY_BOOT` and `PLUG_RECOVERED`
+already acknowledged keeps them out of that set. They are still persisted,
+broadcast and logged; the Health page hides them by default ("Unacknowledged
+only" starts ticked) and lists them once it is unticked. `PLUG_UNREACHABLE`
+is a real warning and stays unacknowledged, so it shows in the strip.
+`backend/tests/test_gateway_event_feed.py` (DB-gated) proves that 60 boots
+plus a recovery leave an older `UNAUTHORIZED_ON` in the strip's window.
+
+**Known gaps (not changed here):**
+
+- The alert strip still windows before it filters. With the forensic rows
+  pre-acknowledged the window holds only real alerts, but 50 or more newer
+  unacknowledged *warnings* (a flapping plug's repeated `PLUG_UNREACHABLE`,
+  say) could still push an older critical out of the strip. This is
+  pre-existing; the event stays on the Health page and in the badge count. A
+  server-side severity sort or filter on `/api/cpo/events` would close it.
+- The Health nav badge (`TenantContext.unackedEvents`) counts every
+  unacknowledged event, so the remaining info notices (`OTA_*`,
+  `LOCAL_LIMIT_CUTOFF`) still tick it until acknowledged. They are rare;
+  `GATEWAY_BOOT` and `PLUG_RECOVERED` no longer do.
+- A notice still pending when the backend stops is cancelled. After the
+  restart the retained `offline` replay is not a transition, so no notice is
+  re-armed. A gateway that dropped within ~2 minutes before a deploy never
+  produces the driver notice. The reaper still closes the session.
+- Two status messages for the same gateway are persisted by independent
+  coroutines (pre-existing). If they interleave so that the stored status ends
+  OFFLINE although the gateway is back, the deferred notice fires. It then
+  matches what the start gates see, and the re-read covers the opposite
+  order.
+
+---
+
+## 0.0001 — 2026-08-18 production-readiness audit: privacy, data rights, SEO, a11y
 
 A whole-product audit (35 areas, from secrets and injection through to mobile
 UX and error pages) plus the remediation batch. Full security detail is in
@@ -395,12 +512,12 @@ the `cpo.py` god router + `MQTTManager` god object; a backend deps lockfile.
 | Role-based access control | ✅ | Enforced via `services/rbac.py` `require_role(...)` on all `/api/cpo/*` routes (checks the DB role, not just the token) |
 | MQTT command publish (ON/OFF) | ✅ | QoS 1, 3 s wait |
 | MQTT inbound telemetry/status handling | ✅ | Telemetry updates TelemetryStore and session DB (now incl. `voltage`/`relay`). Status updates gateway state in DB. |
-| MQTT inbound alarm handling + CPO events feed | ✅ | Subscribes `amphive/gateways/+/alarms` (2026-07-10): `_handle_gateway_alarm` maps `{"error"\|"event"}` → severity, persists a `gateway_events` row (tenant resolved from the gateway), and broadcasts a `gateway_alarm` Socket.io event. CPO reads via `GET /api/cpo/events` (filters: `unacknowledged_only`, `severity`) and clears with `POST /api/cpo/events/{id}/ack`. **Verified live in prod 2026-07-10** (synthetic `UNAUTHORIZED_ON` → persisted event id, retrieved + acked via API). **2026-08-02:** `UNMETERED_CONSUMPTION` (offline-consumption detection, above) additionally bell-notifies every CPO of the tenant directly (`notify()`) — the first alarm type to do so, on top of the passive feed every type gets. |
+| MQTT inbound alarm handling + CPO events feed | ✅ | Subscribes `amphive/gateways/+/alarms` (2026-07-10): `_handle_gateway_alarm` maps `{"error"\|"event"}` → severity, persists a `gateway_events` row (tenant resolved from the gateway), and broadcasts a `gateway_alarm` Socket.io event. CPO reads via `GET /api/cpo/events` (filters: `unacknowledged_only`, `severity`) and clears with `POST /api/cpo/events/{id}/ack`. **Verified live in prod 2026-07-10** (synthetic `UNAUTHORIZED_ON` → persisted event id, retrieved + acked via API). **2026-08-02:** `UNMETERED_CONSUMPTION` (offline-consumption detection, above) additionally bell-notifies every CPO of the tenant directly (`notify()`) — the first alarm type to do so, on top of the passive feed every type gets. **2026-10-20:** fw 2.8.0 diagnostics `GATEWAY_BOOT` / `PLUG_UNREACHABLE` / `PLUG_RECOVERED` (§0); the two info ones are stored already acknowledged (`_PRE_ACKED_EVENT_TYPES`), so they never occupy the unacknowledged window the CPO alert strip and Health badge read. |
 | MQTT inbound firmware log-line diagnostics (TD#28) | ✅ | Subscribes `amphive/gateways/+/logs` (QoS 0, plain text — not JSON, matched before the JSON parse in `services/mqtt/router.py`). `services/mqtt/logs.py` `MQTTLogsMixin` parses the ESP-IDF level letter (E/W/I/D/V → error/warning/info, skipping a leading ANSI colour escape) and persists a `gateway_logs` row (tenant resolved from the gateway) — no notify/socket fan-out, a diagnostics feed distinct from the alarm/event feed above. CPO reads via `GET /api/cpo/gateways/{gateway_id}/logs`; admin cross-tenant via `GET /api/admin/gateway-logs`. Pruned after `GATEWAY_LOGS_RETENTION_DAYS` (default 14) by the session reaper's `reap_gateway_logs_once()`. |
-| Orphan-OFF operator alert | ✅ | `mqtt/status.py._republish_off_for_orphaned_plugs` (reconnect-time OFF republish for plugs with no ACTIVE session) now also notifies every CPO of the gateway's tenant — one `orphan_off` bell notification (`services/notifications.py notify()`) per (plug, CPO) pair, only when at least one plug was actually OFF'd. First CPO-targeted `notify()` call site (previously driver-only); delivered via the existing NotificationBell/Socket.io path, no frontend change needed. |
+| Orphan-OFF operator alert | ✅ | `mqtt/status.py._republish_off_for_orphaned_plugs` (reconnect-time OFF republish for plugs with no ACTIVE session) now also notifies every CPO of the gateway's tenant — one `orphan_off` bell notification (`services/notifications.py notify()`) per (plug, CPO) pair, only when at least one plug was actually OFF'd. First CPO-targeted `notify()` call site (previously driver-only); delivered via the existing NotificationBell/Socket.io path, no frontend change needed. **2026-10-20:** the bell now also needs the plug to have been last seen drawing power (`plugs.current_power_w >= ORPHAN_ALERT_MIN_POWER_W`, default 5 W) on top of the existing real-OFFLINE→ONLINE-transition gate (a retained `online` replay never bells). An idle plug still gets its OFF, with only an INFO log (§0). |
 | Plug maintenance workflow (fault console) | ✅ | **2026-07-12**: a THERMAL_CUTOFF/OVERCURRENT_CUTOFF alarm now auto-enters the plug into MAINTENANCE (`MQTTManager._auto_enter_maintenance`; excludes `UNAUTHORIZED_ON` and OTA events; env-gate `AUTO_MAINTENANCE_ON_CRITICAL_ALARM`, default on) — session-start already 409s any non-AVAILABLE plug, so this blocks new sessions until an operator clears it. Operators drive enter/clear via `POST /api/cpo/plugs/{id}/maintenance` (`clear` 409s while an ACTIVE session exists); both paths audit (`plug.maintenance_enter`/`plug.maintenance_clear`) and broadcast the status flip like any other plug-status change. |
 | Gateway reachability in the driver plug API | ✅ | `GET /api/plugs/available` and `/api/plugs/{id}` now return `gateway_online` (via `gateway_is_live`: ONLINE + `last_seen_at` within the liveness window), so the driver UI can flag an unreachable charger before a start attempt rather than only via a 409. **Verified in prod** (live gateways → true, never-connected gateway → false). |
-| Live gateway connectivity push (faster-gateway-offline-detection) | ✅ | See [proposals/faster-gateway-offline-detection.md](proposals/faster-gateway-offline-detection.md) — levers 1+3 shipped: `mqtt/status.py` emits `plug_connectivity` on every real online↔offline transition, and `services/session_reaper.py reap_gateway_silence_once()` closes the silence-case gap (TCP-connected but telemetry wedged, no LWT) by reusing `gateway_is_live()` per reaper tick with a bounded in-memory dedup (`_silence_pushed`). Dashboard/CpoGateways/CpoChargers all patch in place on the socket event plus a 30s `usePoll` backstop. Lever 2 (tighter keepalive/liveness-window constants) deliberately held pending field data. |
+| Live gateway connectivity push (faster-gateway-offline-detection) | ✅ | See [proposals/faster-gateway-offline-detection.md](proposals/faster-gateway-offline-detection.md) — levers 1+3 shipped: `mqtt/status.py` emits `plug_connectivity` on every real online↔offline transition, and `services/session_reaper.py reap_gateway_silence_once()` closes the silence-case gap (TCP-connected but telemetry wedged, no LWT) by reusing `gateway_is_live()` per reaper tick with a bounded in-memory dedup (`_silence_pushed`). Dashboard/CpoGateways/CpoChargers all patch in place on the socket event plus a 30s `usePoll` backstop. Lever 2 (tighter keepalive/liveness-window constants) deliberately held pending field data. **2026-10-20:** the offline direction is debounced. It waits `GATEWAY_OFFLINE_NOTIFY_DELAY_SEC` (default 120 s) and is dropped if the gateway is back by then; the online direction still fires at once (§0). The silence sweep only looks at gateways stored ONLINE, so it does not bypass the debounce. |
 | Gateway firmware-version tracking | ✅ | The `fw` field on the gateway's `online` status is now persisted to `gateways.firmware_version` (Alembic `0006_gateway_firmware_version`; LWT/offline never clobbers it), exposed by `GET /api/cpo/gateways`, and shown in the CPO plugs table (online dot + `fw <ver>`) so an operator can see which gateways need an OTA. |
 | Live-stream staleness flag | ✅ | The Socket.io `telemetry` payload now carries `is_stale`/`age_sec` (age since the last MQTT write vs `TELEMETRY_STALE_AFTER_SEC`, default 15 s), plus `relay_on`/`voltage_v`, so the frontend shows a "reconnecting" banner instead of freezing on stale values. |
 | Live telemetry / Socket.io | ✅ | Streams real telemetry from TelemetryStore via Socket.io (sole transport — the legacy SSE endpoint + `sse-starlette` dep were retired 2026-07-07). Automatically triggers the plug to report telemetry at 1s intervals when there are active listeners or an active session. **Correction 2026-07-05:** the stream task called a non-existent `await sio.get_participants(room=...)` API, which raised on every iteration and killed each stream before the first emit — the earlier "fully functional/verified" claim was wrong. Fixed (room-manager membership check) with a regression test in `backend/tests/test_socketio.py`. |

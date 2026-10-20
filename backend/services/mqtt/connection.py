@@ -25,6 +25,10 @@ class MQTTConnectionMixin:
 
     def stop(self):
         logger.info("Stopping MQTT client loop...")
+        # Drop any still-pending debounced gateway-offline notices
+        # (services/mqtt/status.py) so none fires into a shutting-down app.
+        # Called from the lifespan teardown, i.e. on the event loop.
+        self._cancel_offline_notices()
         self.client.loop_stop()
         self.client.disconnect()
 

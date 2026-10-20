@@ -607,7 +607,8 @@ async def test_orphan_off_skips_mid_debounce_queued_plug():
 
     mgr = _manager([
         _result_scalar_one_or_none(gw),                                  # gateway lookup
-        _result_rows([(1, "10.0.0.11", "Bay 1"), (2, "10.0.0.12", "Bay 2")]),  # plugs
+        # plugs: (plug_id, local_ip, name, current_power_w)
+        _result_rows([(1, "10.0.0.11", "Bay 1", 0.0), (2, "10.0.0.12", "Bay 2", 0.0)]),
         _result_scalars([]),                                             # no ACTIVE sessions
         _result_rows([(queued_plug, tenant)]),                           # plug 1 has a WAITING queue
         # No 5th result: on a retained replay the CPO-users query is not issued.
@@ -641,7 +642,7 @@ async def test_orphan_off_still_offs_eligible_queued_plug():
 
     mgr = _manager([
         _result_scalar_one_or_none(gw),
-        _result_rows([(1, "10.0.0.11", "Bay 1")]),
+        _result_rows([(1, "10.0.0.11", "Bay 1", 0.0)]),
         _result_scalars([]),
         _result_rows([(eligible_plug, tenant)]),
         # No 5th result: on a retained replay the CPO-users query is not issued.
@@ -669,7 +670,7 @@ async def test_orphan_off_no_orphans_skips_cpo_lookup_and_notify():
 
     mgr = _manager([
         _result_scalar_one_or_none(gw),                 # gateway lookup
-        _result_rows([(1, "10.0.0.11", "Bay 1")]),       # plugs
+        _result_rows([(1, "10.0.0.11", "Bay 1", 0.0)]),  # plugs
         _result_scalars([1]),                            # plug 1 has an ACTIVE session
         _result_rows([]),                                # no queued charges
         # No 5th result: the CPO-users query must not be issued.

@@ -142,10 +142,15 @@ const SessionMonitor = () => {
   const priceNow = tariff?.price_now != null ? Number(tariff.price_now) : null;
   const kwhLeft = priceNow > 0 ? Math.max(0, remainingCoins) / priceNow : null;
 
-  // The most recent alarm for this plug (last 2 minutes).
-  const recentAlarm = (alarms || []).find(
+  // The most recent alarm for this plug (last 2 minutes) — shown only when it
+  // is not info-level. Info events (fw 2.8.0 PLUG_RECOVERED / GATEWAY_BOOT,
+  // OTA notices) are routine diagnostics, never a red banner; a newer one
+  // still supersedes an older warning, so PLUG_RECOVERED clears the
+  // PLUG_UNREACHABLE banner instead of leaving it up.
+  const latestAlarm = (alarms || []).find(
     (a) => a.plug_id === plugId && now - (a.received_at || 0) < 120000
   );
+  const recentAlarm = latestAlarm && latestAlarm.severity !== 'info' ? latestAlarm : null;
 
   // Ring progress toward the auto-stop target — the backend stops at whichever
   // limit trips first, so show the nearer of the two. No limit → indeterminate.
