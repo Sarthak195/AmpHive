@@ -176,9 +176,10 @@ static TickType_t wifi_down_since_tick = 0; // tick of the first DISCONNECTED th
 // context's *own* lock, so we never hold plugs_mutex across a network call.
 #define MAX_PLUGS SESSION_NVS_MAX_PLUGS
 
-// Plug reachability (fw 2.8.0, forensics F4). PLUG_UNREACHABLE_FAILURES failed
-// polls in a row raise PLUG_UNREACHABLE once; the first good poll after that
-// raises PLUG_RECOVERED. Meanwhile a plug with NO session is polled only every
+// Plug reachability (fw 2.8.0, forensics F4). PLUG_UNREACHABLE_FAILURES polls in
+// a row that weren't whole (failed outright, or missing one half) raise
+// PLUG_UNREACHABLE once; the first whole poll after that raises
+// PLUG_RECOVERED. Meanwhile a plug with NO session is polled only every
 // PLUG_IDLE_BACKOFF_MS, so its ~4 s KLAP timeouts don't stretch every sweep; a
 // plug with a session keeps the normal cadence for its safety watchdogs.
 #define PLUG_UNREACHABLE_FAILURES  3
@@ -201,7 +202,7 @@ typedef struct {
     bool         unauthorized_flagged;   // rising-edge latch for UNAUTHORIZED_ON
     bool         pending_remove;         // roster dropped this plug — telemetry task reaps it
     // reachability (fw 2.8.0) — see PLUG_UNREACHABLE_FAILURES
-    uint8_t      poll_failures;          // consecutive failed telemetry polls (saturates)
+    uint8_t      poll_failures;          // consecutive polls that weren't whole (saturates)
     TickType_t   fail_since_tick;        // first failure of the current run
     TickType_t   last_poll_tick;         // last poll attempt (paces the idle backoff)
     bool         unreachable_sent;       // PLUG_UNREACHABLE delivered for this run
@@ -1420,6 +1421,13 @@ static void publish_unmetered_alarm(int plug_id, float estimated_kwh, float toda
 #define LOG_FWD_POLL_MS     1000   // drain-task wake-up, so the ring flushes <= 1 s after connect
 #define LOG_RING_LEN        24     // lines held while MQTT is down (24 x 200 B of RAM)
 #define LOG_OFFLINE_PREFIX  "[offline] "
+// Drain-task stack (fw 2.8.0: was 4096). When a publish fails, esp-mqtt runs
+// the MQTT_EVENT_ERROR and _DISCONNECTED handlers on the publishing task
+// (esp_mqtt_write -> dispatch -> esp_event_loop_run), so mqtt_event_handler's
+// ~1.1 KB frame and newlib's vfprintf for its WARN lines stack on top of the
+// publish. Summed from the ELF's frame sizes, that left an estimated ~100 B of
+// 4096 under the ring flush (not measured on the device).
+#define LOG_FWD_STACK       6144
 static QueueHandle_t  s_log_queue = NULL;
 static vprintf_like_t s_orig_vprintf = NULL;
 static TaskHandle_t   s_log_task = NULL;
@@ -1484,7 +1492,10 @@ static void log_ring_push(const char *line) {
 // LOG_FWD_LINE_MAX - 1 chars, the same cap as a live line). Stops at the first
 // failed publish and keeps the rest; returns true once the ring is empty.
 static bool log_ring_flush(const char *topic) {
-    char out[LOG_FWD_LINE_MAX + 16];
+    // Static, not on the stack: only the drain task calls this, and a failed
+    // publish runs esp-mqtt's error handlers on top of this frame (see
+    // LOG_FWD_STACK).
+    static char out[LOG_FWD_LINE_MAX + 16];
     if (s_log_ring_dropped) {
         snprintf(out, sizeof(out), LOG_OFFLINE_PREFIX "(%lu older line(s) lost)",
                  (unsigned long)s_log_ring_dropped);
@@ -1533,7 +1544,7 @@ static void start_log_forwarding(void) {
         return;
     }
     // Task before hook, so s_log_task is known before the hook can see a line.
-    xTaskCreate(log_forward_task, "log_forward", 4096, NULL, 3, &s_log_task);
+    xTaskCreate(log_forward_task, "log_forward", LOG_FWD_STACK, NULL, 3, &s_log_task);
     s_orig_vprintf = esp_log_set_vprintf(log_forward_vprintf);
     ESP_LOGI(TAG, "Log forwarding enabled (WARN+, held in RAM until MQTT connects)");
 }
@@ -1697,11 +1708,12 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
                 } else {
                     // Read the meter BEFORE energising (captures the pre-session
                     // baseline, so the first telemetry frame doesn't bill the
-                    // meter's whole standing value). A failed read — a plug blip,
-                    // or since 2.8.0 any failed get_device_info — falls back to
-                    // the driver's own meter value, never 0: a 0 baseline billed
-                    // the whole lifetime meter on the first frame and tripped
-                    // the energy watchdog at once.
+                    // meter's whole standing value). Anything short of a whole
+                    // poll (a plug blip, or since 2.8.0 a partial one) falls back
+                    // to the driver's own meter value, never 0: a 0 baseline
+                    // billed the whole lifetime meter on the first frame and
+                    // tripped the energy watchdog at once. A partial poll with a
+                    // power sample has already brought that meter up to date.
                     tapo_telemetry_t base;
                     float baseline = (tapo_plug_get_telemetry(t, &base) == ESP_OK)
                                      ? base.energy_kwh : tapo_plug_energy_kwh(t);
@@ -1926,7 +1938,8 @@ static void resync_offline_logs(void) {
 }
 
 // ─── Plug reachability (fw 2.8.0, forensics F4) ──────────────────────────────
-// Called by the telemetry task after every poll of slot i: decides under
+// Called by the telemetry task after every poll of slot i, with ok = the poll
+// was whole (a partial one counts as a failure here): decides under
 // plugs_mutex, publishes outside it. An event counts as sent only once esp-mqtt
 // accepts it, so one raised while MQTT is down goes out on a later sweep, and an
 // outage's PLUG_RECOVERED always goes out before the next one's PLUG_UNREACHABLE.
@@ -1961,7 +1974,7 @@ static void plug_track_reachability(int i, bool ok) {
     xSemaphoreGive(plugs_mutex);
 
     if (failures == PLUG_UNREACHABLE_FAILURES) {
-        ESP_LOGW(TAG, "Plug %d unreachable: %u polls in a row failed", plug_id, failures);
+        ESP_LOGW(TAG, "Plug %d unreachable: %u polls in a row failed or partial", plug_id, failures);
     }
     if (back) {
         ESP_LOGI(TAG, "Plug %d reachable again after %lu s (%u failed polls)",
@@ -2024,13 +2037,25 @@ static void telemetry_task(void *pvParameters) {
             if (!in_use || backoff) continue;
 
             /* ALWAYS poll the plug — safety enforcement must not depend on MQTT.
-               A failed poll is skipped, never read as relay OFF (forensics F4):
-               the watchdogs, the unauthorized-on guard and the idle-baseline
-               reconcile all wait for the next good poll. */
+               A poll can come back whole, partial or empty (fw 2.8.0, forensics
+               F4). have_energy: the get_energy_usage sample (power, current,
+               counters) is real. have_state: the get_device_info reading (relay,
+               overheat/overcurrent statuses) is real. A missing half is never
+               read as 0 W or relay OFF. Only the checks that need it skip this
+               sweep. The duration and energy watchdogs run on every sweep, even
+               when the poll failed outright: the energy one then reads the
+               driver's meter as it stands, which can only lag, so it can't
+               false-trip. */
             tapo_telemetry_t telemetry;
-            bool poll_ok = tapo_plug_get_telemetry(t, &telemetry) == ESP_OK;
-            plug_track_reachability(i, poll_ok);
-            if (!poll_ok) continue;
+            esp_err_t poll_rc = tapo_plug_get_telemetry(t, &telemetry);
+            bool filled      = (poll_rc == ESP_OK || poll_rc == ESP_ERR_NOT_FINISHED);
+            bool have_energy = filled && telemetry.energy_valid;
+            bool have_state  = filled && telemetry.state_valid;
+            // Before plugs_mutex: tapo_plug_energy_kwh waits on the plug's own lock.
+            float meter_kwh  = filled ? telemetry.energy_kwh : tapo_plug_energy_kwh(t);
+            // Only a whole poll counts as reachable, so a plug that keeps failing
+            // get_device_info (the F4 pattern) still raises PLUG_UNREACHABLE.
+            plug_track_reachability(i, poll_rc == ESP_OK);
 
             /* Decide everything under the lock (reading the live session state),
                then do the network I/O — publish, force-off, alarm — after
@@ -2054,43 +2079,47 @@ static void telemetry_task(void *pvParameters) {
                    a monotonic meter persisted across reboots; the backend bills this
                    "kwh" as energy-consumed-this-session, so subtract the baseline
                    captured at ON (clamp against meter/NVS-restore skew). */
-                session_kwh = telemetry.energy_kwh - s->start_energy_kwh;
+                session_kwh = meter_kwh - s->start_energy_kwh;
                 if (session_kwh < 0.0f) session_kwh = 0.0f;
 
                 uint32_t elapsed_s    = now_seconds() - s->start_time_s;
-                float    consumed_kwh = telemetry.energy_kwh - s->start_energy_kwh;
+                float    consumed_kwh = meter_kwh - s->start_energy_kwh;
                 if (elapsed_s >= s->max_duration_s) {
                     ESP_LOGE(TAG, "WATCHDOG plug %d: max duration (%lu s) exceeded — local OFF.", plug_id, s->max_duration_s);
                     force_off = true; s->session_active = false;
                 } else if (consumed_kwh >= s->max_kwh) {
                     ESP_LOGE(TAG, "WATCHDOG plug %d: energy limit (%.3f kWh) reached — local OFF.", plug_id, s->max_kwh);
                     force_off = true; s->session_active = false;
-                } else if (telemetry.overheated) {
+                } else if (have_state && telemetry.overheated) {
                     ESP_LOGE(TAG, "THERMAL plug %d: overheat_status != normal — local OFF.", plug_id);
                     force_off = true; cutoff_alarm = "THERMAL_CUTOFF"; s->session_active = false;
-                } else if (telemetry.overcurrent) {
+                } else if (have_state && telemetry.overcurrent) {
                     ESP_LOGE(TAG, "OVERCURRENT plug %d: overcurrent_status != normal — local OFF.", plug_id);
                     force_off = true; cutoff_alarm = "OVERCURRENT_CUTOFF"; s->session_active = false;
-                } else if (telemetry.current_a > s->max_current_a + OVERCURRENT_CAP_MARGIN_A) {
+                } else if (have_energy) {
                     /* REC-03 per-plug sub-default cap on the REAL measured current.
                        Debounced over a few polls so brief inrush/measurement spikes
                        don't cut a healthy session; distinct from the plug's own
-                       hardware OVERCURRENT_CUTOFF above. */
-                    if (++s->cap_over_count >= OVERCURRENT_CAP_DEBOUNCE) {
-                        ESP_LOGE(TAG, "OVERCURRENT CAP plug %d: %.2f A over cap %.2f A (+%.2f) — local OFF.",
-                                 plug_id, telemetry.current_a, s->max_current_a, OVERCURRENT_CAP_MARGIN_A);
-                        force_off = true; cutoff_alarm = "OVERCURRENT_CAP"; s->session_active = false;
+                       hardware OVERCURRENT_CUTOFF above. A poll with no current
+                       reading leaves the debounce count as it is. */
+                    if (telemetry.current_a > s->max_current_a + OVERCURRENT_CAP_MARGIN_A) {
+                        if (++s->cap_over_count >= OVERCURRENT_CAP_DEBOUNCE) {
+                            ESP_LOGE(TAG, "OVERCURRENT CAP plug %d: %.2f A over cap %.2f A (+%.2f) — local OFF.",
+                                     plug_id, telemetry.current_a, s->max_current_a, OVERCURRENT_CAP_MARGIN_A);
+                            force_off = true; cutoff_alarm = "OVERCURRENT_CAP"; s->session_active = false;
+                        }
+                    } else {
+                        s->cap_over_count = 0;   // back under the cap — reset the debounce
                     }
-                } else {
-                    s->cap_over_count = 0;   // back under the cap — reset the debounce
                 }
                 if (force_off) persist_sessions_locked();
-            } else {
+            } else if (have_state) {
                 /* Unauthorized-use guard: relay physically ON with no session
                    (physical button / Tapo app / schedule / stale NVS resume). A
                    commercial charger must not deliver energy unauthorized: force
                    OFF every cycle until it stays off, and alarm once per episode
-                   (rising edge, reset when the relay is confirmed off). */
+                   (rising edge, reset when the relay is confirmed off). Without a
+                   relay reading the latch stays as it is. */
                 if (telemetry.device_on) {
                     unauth_off = true;
                     if (!s->unauthorized_flagged) { unauth_alarm = true; s->unauthorized_flagged = true; }
@@ -2115,9 +2144,14 @@ static void telemetry_task(void *pvParameters) {
                    only other writer and runs on the idle branch alone), and the
                    first idle poll after the driver stopped reported the WHOLE
                    session as unmetered consumption. */
-                tapo_plug_advance_metered_baseline(t, telemetry.today_energy_kwh,
-                                                   telemetry.month_energy_kwh);
-            } else {
+                if (have_energy) {
+                    tapo_plug_advance_metered_baseline(t, telemetry.today_energy_kwh,
+                                                       telemetry.month_energy_kwh);
+                }
+            } else if (poll_rc == ESP_OK) {
+                /* Idle, whole polls only. Skipping one loses nothing: the baseline
+                   moves only when this runs, so the next whole poll sees the same
+                   (or a larger) delta. */
                 tapo_energy_reconcile_t recon;
                 if (tapo_plug_reconcile_idle_baseline(t, telemetry.today_energy_kwh, telemetry.month_energy_kwh,
                                                        mqtt_connected, &recon) == ESP_OK &&
@@ -2136,24 +2170,34 @@ static void telemetry_task(void *pvParameters) {
                counters, included on every frame (idle or not) so the backend can
                reconcile them continuously, not just on the one-shot alarm below;
                unavailable on a plug that doesn't report them (0.0, harmless --
-               a flat 0-vs-0 delta never trips the backend's own check). */
-            char payload[384];
-            snprintf(payload, sizeof(payload),
-                     "{\"plug_id\":%d,\"watts\":%.1f,\"kwh\":%.4f,\"voltage\":%.1f,\"current\":%.2f,\"relay\":%s,\"status\":\"%s\",\"session_id\":\"%s\",\"today_kwh\":%.3f,\"month_kwh\":%.3f}",
-                     plug_id,
-                     telemetry.power_w,
-                     session_kwh,
-                     telemetry.voltage_v,
-                     telemetry.current_a,
-                     telemetry.device_on ? "true" : "false",
-                     sess_active ? "occupied" : "available",
-                     sess_active ? sid : "",
-                     telemetry.today_energy_kwh >= 0.0f ? telemetry.today_energy_kwh : 0.0f,
-                     telemetry.month_energy_kwh >= 0.0f ? telemetry.month_energy_kwh : 0.0f);
-
-            if (mqtt_connected) {
+               a flat 0-vs-0 delta never trips the backend's own check).
+               A frame needs the power sample (fw 2.8.0). With no relay reading,
+               a session's frame still goes out (billing and liveness), just
+               without "relay": the backend then takes relay from status, ON for
+               "occupied". An idle frame would read as relay OFF that way (the F4
+               false-OFF again, on the server), so an idle poll without a relay
+               reading sends nothing. */
+            bool send_frame = have_energy && (have_state || sess_active);
+            if (send_frame && mqtt_connected) {
+                char relay_kv[16] = "";   // "relay":<bool>, or nothing when unknown
+                if (have_state) {
+                    snprintf(relay_kv, sizeof(relay_kv), "\"relay\":%s,", telemetry.device_on ? "true" : "false");
+                }
+                char payload[384];
+                snprintf(payload, sizeof(payload),
+                         "{\"plug_id\":%d,\"watts\":%.1f,\"kwh\":%.4f,\"voltage\":%.1f,\"current\":%.2f,%s\"status\":\"%s\",\"session_id\":\"%s\",\"today_kwh\":%.3f,\"month_kwh\":%.3f}",
+                         plug_id,
+                         telemetry.power_w,
+                         session_kwh,
+                         telemetry.voltage_v,
+                         telemetry.current_a,
+                         relay_kv,
+                         sess_active ? "occupied" : "available",
+                         sess_active ? sid : "",
+                         telemetry.today_energy_kwh >= 0.0f ? telemetry.today_energy_kwh : 0.0f,
+                         telemetry.month_energy_kwh >= 0.0f ? telemetry.month_energy_kwh : 0.0f);
                 esp_mqtt_client_publish(mqtt_client, telemetry_topic, payload, 0, 0, 0);
-            } else {
+            } else if (send_frame) {
                 /* Offline: buffer the reading for later resync (session-relative
                    kwh, matching the online payload). */
                 offline_telemetry_entry_t log_entry = {
@@ -2174,7 +2218,9 @@ static void telemetry_task(void *pvParameters) {
             }
 
             /* Deferred actuation/alarms, outside the lock (a spurious extra OFF is
-               always safe). */
+               always safe). A watchdog OFF sent while the plug can't be reached
+               just fails. The session is already cleared, so the first poll that
+               reads the relay ON forces it OFF through the unauthorized-on guard. */
             if (force_off || unauth_off) {
                 if (unauth_off) ESP_LOGW(TAG, "UNAUTHORIZED ON plug %d: relay on with no session — forcing OFF.", plug_id);
                 tapo_plug_set_power(t, false);

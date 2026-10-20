@@ -615,11 +615,13 @@ esp_err_t tapo_plug_set_power(tapo_plug_t *plug, bool turn_on) {
 
 esp_err_t tapo_plug_get_telemetry(tapo_plug_t *plug, tapo_telemetry_t *out) {
     if (!plug || !out) return ESP_ERR_INVALID_ARG;
-    if (!s_initialized) { ESP_LOGE(TAG, "tapo_init not called"); return ESP_FAIL; }
-
+    /* Cleared before any return, so a caller never sees stale fields. */
     memset(out, 0, sizeof(*out));
     out->voltage_v = s_nominal_voltage;
     out->temperature_c = TAPO_NOMINAL_TEMP_C;
+    out->today_energy_kwh = -1.0f;
+    out->month_energy_kwh = -1.0f;
+    if (!s_initialized) { ESP_LOGE(TAG, "tapo_init not called"); return ESP_FAIL; }
 
     uint8_t *plain = malloc(KLAP_RESP_CAP);
     if (!plain) return ESP_ERR_NO_MEM;
@@ -639,19 +641,19 @@ esp_err_t tapo_plug_get_telemetry(tapo_plug_t *plug, tapo_telemetry_t *out) {
 
     xSemaphoreTake(plug->mutex, portMAX_DELAY);
 
-    /* 1) power (+ energy source, + real current/voltage). A plug-side error reply
-     *    (non-zero error_code) carries no readings; parsing it would report 0 W and
-     *    starve the integrator, so it fails the poll like a transport error. */
+    /* 1) power (+ energy source, + real current/voltage). A transport failure
+     *    ends the poll: the plug didn't answer, and a second request would only
+     *    add another timeout. A plug-side error reply (non-zero error_code)
+     *    carries no readings. Parsing it would report 0 W and starve the
+     *    integrator, so it leaves energy_valid false and the poll goes on to 2),
+     *    whose relay and safety statuses are still worth having. */
     esp_err_t rc = klap_request(plug->ip, &plug->sess, "{\"method\":\"get_energy_usage\"}", plain, KLAP_RESP_CAP, &plen);
-    if (rc == ESP_OK) {
-        int ec = response_error_code((const char *)plain);
-        if (ec != 0) {
-            ESP_LOGW(TAG, "plug %d: get_energy_usage error_code=%d", plug->plug_id, ec);
-            rc = ESP_ERR_INVALID_RESPONSE;
-        }
-    }
     if (rc != ESP_OK) { xSemaphoreGive(plug->mutex); free(plain); return rc; }
-    {
+    int ec = response_error_code((const char *)plain);
+    bool energy_ok = (ec == 0);
+    if (!energy_ok) {
+        ESP_LOGW(TAG, "plug %d: get_energy_usage error_code=%d", plug->plug_id, ec);
+    } else {
         long mw = 0;   /* get_energy_usage.current_power is in milliwatts */
         if (json_int((const char *)plain, "\"current_power\":", &mw)) power_w = (float)mw / 1000.0f;
         long cur_ma = 0;   /* current_ma: real RMS current in milliamps */
@@ -663,75 +665,83 @@ esp_err_t tapo_plug_get_telemetry(tapo_plug_t *plug, tapo_telemetry_t *out) {
         if (json_int((const char *)plain, "\"month_energy\":", &month_wh)) meas_month_kwh = (float)month_wh / 1000.0f;
     }
 
-    /* 2) state + safety statuses. This must succeed for the poll to count (fw
-     *    2.8.0, forensics F4): `out` was memset above, so carrying on after a
-     *    failed or error-coded get_device_info returned ESP_OK with device_on =
-     *    false and both safety statuses "normal" — a false relay-OFF reading. The
-     *    power sample from 1) is still real, so it is integrated below first. */
+    /* 2) state + safety statuses. Only a usable reply sets state_valid (fw 2.8.0,
+     *    forensics F4). Before, a failed or error-coded get_device_info left the
+     *    memset device_on=false and "normal" safety statuses in `out` and still
+     *    returned ESP_OK: a false relay-OFF reading. */
     rc = klap_request(plug->ip, &plug->sess, "{\"method\":\"get_device_info\"}", plain, KLAP_RESP_CAP, &plen);
+    bool state_ok = false;
     if (rc == ESP_OK) {
-        int ec = response_error_code((const char *)plain);
-        if (ec != 0 || !strstr((const char *)plain, "\"device_on\":")) {
+        ec = response_error_code((const char *)plain);
+        state_ok = (ec == 0) && strstr((const char *)plain, "\"device_on\":") != NULL;
+        if (state_ok) {
+            out->device_on   = json_true((const char *)plain, "\"device_on\":");
+            out->overheated  = json_status_abnormal((const char *)plain, "\"overheat_status\":");
+            out->overcurrent = json_status_abnormal((const char *)plain, "\"overcurrent_status\":");
+        } else {
             ESP_LOGW(TAG, "plug %d: get_device_info unusable (error_code=%d)", plug->plug_id, ec);
-            rc = ESP_ERR_INVALID_RESPONSE;
         }
-    }
-    if (rc == ESP_OK) {
-        out->device_on   = json_true((const char *)plain, "\"device_on\":");
-        out->overheated  = json_status_abnormal((const char *)plain, "\"overheat_status\":");
-        out->overcurrent = json_status_abnormal((const char *)plain, "\"overcurrent_status\":");
     }
 
     /* monotonic energy integrator (Wh) — robust vs the plug's daily today_energy
      * reset. Updated INSIDE the per-plug mutex: the telemetry task and the
      * ON-handler's baseline read both call tapo_plug_get_telemetry for the same
      * plug and can overlap, so an unlocked read-modify-write of
-     * energy_last_tick / energy_wh could double-count or drop an integration slice. */
-    TickType_t now = xTaskGetTickCount();
-    if (plug->energy_last_tick != 0) {
-        float dt_h = (float)(now - plug->energy_last_tick) * portTICK_PERIOD_MS / 3600000.0f;
-        /* Trapezoidal rule: average the previous and current power samples over
-         * the interval instead of holding the last sample constant (left
-         * rectangle). For a load that ramps between polls — the norm for EV
-         * charging at the default 10 s cadence — the rectangle rule systematically
-         * over/under-counts each ramp; the trapezoid halves that error for the
-         * same samples. First sample after boot has no predecessor, so it seeds
-         * energy_last_power_w without accruing. */
-        plug->energy_wh += ((double)plug->energy_last_power_w + (double)power_w) * 0.5 * dt_h;
-    }
-    plug->energy_last_tick = now;
-    plug->energy_last_power_w = power_w;
-    double energy_wh_snapshot = plug->energy_wh;
+     * energy_last_tick / energy_wh could double-count or drop an integration slice.
+     * Only a real power sample moves it. A poll without one leaves the last
+     * sample and tick alone, so the next good sample's trapezoid spans the gap,
+     * the same as after a poll that failed outright. */
+    if (energy_ok) {
+        TickType_t now = xTaskGetTickCount();
+        if (plug->energy_last_tick != 0) {
+            float dt_h = (float)(now - plug->energy_last_tick) * portTICK_PERIOD_MS / 3600000.0f;
+            /* Trapezoidal rule: average the previous and current power samples over
+             * the interval instead of holding the last sample constant (left
+             * rectangle). For a load that ramps between polls — the norm for EV
+             * charging at the default 10 s cadence — the rectangle rule systematically
+             * over/under-counts each ramp; the trapezoid halves that error for the
+             * same samples. First sample after boot has no predecessor, so it seeds
+             * energy_last_power_w without accruing. */
+            plug->energy_wh += ((double)plug->energy_last_power_w + (double)power_w) * 0.5 * dt_h;
+        }
+        plug->energy_last_tick = now;
+        plug->energy_last_power_w = power_w;
 
-    /* Persist across reboots (throttled by accrual threshold) so a mid-session
-     * crash doesn't disarm the energy watchdog. Kept under the lock so the NVS
-     * write and the energy_persisted_wh update stay consistent; it is rare
-     * (only every ENERGY_PERSIST_THRESHOLD_WH) and cheap next to the KLAP HTTP
-     * calls already made above under the same lock. */
-    if (plug->energy_wh - plug->energy_persisted_wh >= ENERGY_PERSIST_THRESHOLD_WH) {
-        energy_persist_nvs(plug);
+        /* Persist across reboots (throttled by accrual threshold) so a mid-session
+         * crash doesn't disarm the energy watchdog. Kept under the lock so the NVS
+         * write and the energy_persisted_wh update stay consistent; it is rare
+         * (only every ENERGY_PERSIST_THRESHOLD_WH) and cheap next to the KLAP HTTP
+         * calls already made above under the same lock. */
+        if (plug->energy_wh - plug->energy_persisted_wh >= ENERGY_PERSIST_THRESHOLD_WH) {
+            energy_persist_nvs(plug);
+        }
     }
+    double energy_wh_snapshot = plug->energy_wh;
 
     xSemaphoreGive(plug->mutex);
     free(plain);
-    if (rc != ESP_OK) return rc;   /* get_device_info failed: no relay/safety reading */
+    if (!energy_ok && !state_ok) return (rc != ESP_OK) ? rc : ESP_ERR_INVALID_RESPONSE;
 
-    out->power_w   = power_w;
-    /* Prefer the plug's REAL measured voltage/current; fall back to nominal /
-     * derived only when the P110 firmware doesn't report them. Both are published
-     * to 2 decimals by the telemetry task and consumed by the current-cap
-     * watchdog, so they must be the measured values whenever available. */
-    if (meas_voltage_v >= 0.0f) out->voltage_v = meas_voltage_v;
-    if (meas_current_a >= 0.0f) {
-        out->current_a = meas_current_a;
-    } else {
-        out->current_a = (out->voltage_v > 1.0f) ? power_w / out->voltage_v : 0.0f;
+    out->energy_valid = energy_ok;
+    out->state_valid  = state_ok;
+    out->energy_kwh   = (float)(energy_wh_snapshot / 1000.0);   /* the meter as it stands */
+    if (energy_ok) {
+        out->power_w   = power_w;
+        /* Prefer the plug's REAL measured voltage/current; fall back to nominal /
+         * derived only when the P110 firmware doesn't report them. Both are published
+         * to 2 decimals by the telemetry task and consumed by the current-cap
+         * watchdog, so they must be the measured values whenever available. */
+        if (meas_voltage_v >= 0.0f) out->voltage_v = meas_voltage_v;
+        if (meas_current_a >= 0.0f) {
+            out->current_a = meas_current_a;
+        } else {
+            out->current_a = (out->voltage_v > 1.0f) ? power_w / out->voltage_v : 0.0f;
+        }
+        out->today_energy_kwh = meas_today_kwh;
+        out->month_energy_kwh = meas_month_kwh;
     }
-    out->energy_kwh = (float)(energy_wh_snapshot / 1000.0);
-    out->today_energy_kwh = meas_today_kwh;
-    out->month_energy_kwh = meas_month_kwh;
 
-    return ESP_OK;
+    return (energy_ok && state_ok) ? ESP_OK : ESP_ERR_NOT_FINISHED;
 }
 
 float tapo_plug_energy_kwh(tapo_plug_t *plug) {
