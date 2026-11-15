@@ -158,6 +158,58 @@ describe('SessionMonitor — notices', () => {
     expect(screen.getByText(/Plug drew 18 A/)).toBeInTheDocument();
   });
 
+  it('never shows an info-level notice (fw 2.8.0 PLUG_RECOVERED) as an alarm banner', async () => {
+    useSession.mockReturnValue(
+      baseSession({
+        alarms: [
+          {
+            plug_id: 2,
+            event_type: 'PLUG_RECOVERED',
+            severity: 'info',
+            detail: 'Plug reachable again after ~95 s.',
+            received_at: Date.now(),
+          },
+        ],
+      })
+    );
+    await renderMonitor();
+    expect(screen.queryByText(/reachable again/)).not.toBeInTheDocument();
+    expect(document.querySelector('.banner-danger')).toBeNull();
+  });
+
+  it('shows a PLUG_UNREACHABLE warning, and lets a newer PLUG_RECOVERED clear it', async () => {
+    const unreachable = {
+      plug_id: 2,
+      event_type: 'PLUG_UNREACHABLE',
+      severity: 'warning',
+      detail: "Gateway couldn't get a complete reading from the plug 3 times in a row - readings may pause until it answers.",
+      received_at: Date.now() - 5000,
+    };
+    useSession.mockReturnValue(baseSession({ alarms: [unreachable] }));
+    const { unmount } = await renderMonitor();
+    expect(screen.getByText('Plug unreachable')).toBeInTheDocument();
+    unmount();
+
+    // Newest first, as SessionContext keeps them.
+    useSession.mockReturnValue(
+      baseSession({
+        alarms: [
+          {
+            plug_id: 2,
+            event_type: 'PLUG_RECOVERED',
+            severity: 'info',
+            detail: 'Plug reachable again after ~5 s.',
+            received_at: Date.now(),
+          },
+          unreachable,
+        ],
+      })
+    );
+    await renderMonitor();
+    expect(screen.queryByText('Plug unreachable')).not.toBeInTheDocument();
+    expect(document.querySelector('.banner-danger')).toBeNull();
+  });
+
   it('ignores an alarm for a different plug', async () => {
     useSession.mockReturnValue(
       baseSession({

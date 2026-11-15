@@ -2,7 +2,8 @@
 MQTTManager collaborator: inbound gateway alarm/event handling.
 
 Extracted verbatim from services/mqtt_manager.py (god-object split): parses
-the `.../alarms` topic (safety cutoffs + OTA lifecycle notices), persists a
+the `.../alarms` topic (safety cutoffs + OTA lifecycle notices + the fw 2.8.0
+boot / plug-reachability diagnostics), persists a
 GatewayEvent + broadcasts it, finalizes the session a hardware/agent cutoff
 already stopped locally, and — for genuine hardware faults only — force-enters
 the plug into MAINTENANCE. Mixed into MQTTManager; see services/mqtt/__init__.py
@@ -17,9 +18,19 @@ instead of a module-level import, so it always sees the live value.
 import asyncio
 import logging
 import math
-from typing import Any, Dict, Optional
+import re
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("amphive.mqtt")
+
+# GatewayEvent.detail is String(255) (database/models.py). Postgres rejects an
+# over-long value outright — and the except in _persist_gateway_event would
+# then drop the whole event — so every detail is capped to the column size.
+_DETAIL_MAX_LEN = 255
+
+# Characters allowed through _safe_token (fw version strings, reset-reason
+# names); every other run of characters collapses to "_".
+_TOKEN_UNSAFE = re.compile(r"[^A-Za-z0-9._+-]+")
 
 
 def _safe_float(v: Any) -> Optional[float]:
@@ -30,9 +41,79 @@ def _safe_float(v: Any) -> Optional[float]:
         return None
     try:
         f = float(v)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     return f if math.isfinite(f) else None
+
+
+def _safe_int(v: Any, lo: int, hi: int) -> Optional[int]:
+    """Best-effort int for an optional, untrusted alarm-payload field: rounded,
+    None when missing/malformed/non-finite/outside [lo, hi]. A JSON bool is
+    not a number here (Python would happily treat true as 1)."""
+    if isinstance(v, bool):
+        return None
+    f = _safe_float(v)
+    if f is None:
+        return None
+    i = int(round(f))
+    return i if lo <= i <= hi else None
+
+
+def _safe_token(v: Any, max_len: int) -> Optional[str]:
+    """A short identifier-like string (fw version, reset-reason name) from an
+    untrusted field: letters/digits/`._+-` only, capped at max_len; None when
+    missing or nothing usable is left."""
+    if v is None or isinstance(v, (dict, list, bool)):
+        return None
+    s = _TOKEN_UNSAFE.sub("_", str(v)[: max_len * 4]).strip("_")[:max_len]
+    return s or None
+
+
+def _plural(n: int, word: str) -> str:
+    return f"{n} {word}" if n == 1 else f"{n} {word}s"
+
+
+def _gateway_boot_detail(payload: Dict[str, Any]) -> str:
+    """Human-readable detail for the fw >= 2.8.0 boot report, e.g. "Gateway
+    booted (fw 2.8.0-direct): reset reason brownout [9], boot #42, Wi-Fi RSSI
+    -79 dBm after 3 attempts, last Wi-Fi failure reason 2, min free heap
+    123456 B." Every field is optional and untrusted: a missing/malformed one
+    just drops its clause. `uptime_s` is accepted but not shown (it is always
+    a few seconds at boot)."""
+    fw = _safe_token(payload.get("fw"), 32)
+    reason = _safe_token(payload.get("reset_reason"), 32)
+    code = _safe_int(payload.get("reset_code"), 0, 1000)
+    boot_count = _safe_int(payload.get("boot_count"), 0, 10**9)
+    rssi = _safe_int(payload.get("wifi_rssi"), -127, 0)
+    attempts = _safe_int(payload.get("wifi_attempts"), 1, 10**6)
+    # ESP-IDF Wi-Fi disconnect reason codes start at 1, so 0 means "none
+    # since boot" and is left out rather than printed.
+    wifi_reason = _safe_int(payload.get("last_wifi_reason"), 1, 1000)
+    min_heap = _safe_int(payload.get("min_free_heap"), 0, 10**9)
+
+    parts: List[str] = []
+    if reason and code is not None:
+        parts.append(f"reset reason {reason} [{code}]")
+    elif reason:
+        parts.append(f"reset reason {reason}")
+    elif code is not None:
+        parts.append(f"reset code {code}")
+    if boot_count is not None:
+        parts.append(f"boot #{boot_count}")
+    if rssi is not None:
+        wifi = f"Wi-Fi RSSI {rssi} dBm"
+        if attempts is not None:
+            wifi += f" after {_plural(attempts, 'attempt')}"
+        parts.append(wifi)
+    elif attempts is not None:
+        parts.append(f"Wi-Fi up after {_plural(attempts, 'attempt')}")
+    if wifi_reason is not None:
+        parts.append(f"last Wi-Fi failure reason {wifi_reason}")
+    if min_heap is not None:
+        parts.append(f"min free heap {min_heap} B")
+
+    head = f"Gateway booted (fw {fw})" if fw else "Gateway booted"
+    return f"{head}: {', '.join(parts)}." if parts else f"{head}."
 
 
 class MQTTAlarmMixin:
@@ -64,6 +145,13 @@ class MQTTAlarmMixin:
         # accountability signal on an otherwise-healthy plug, same severity
         # class as UNAUTHORIZED_ON (below), not a hardware fault.
         "UNMETERED_CONSUMPTION": "warning",
+        # [fw 2.8.0 diagnostics] Field-forensics reports, never faults: the
+        # boot report (why the chip reset) and a plug-side LAN outage/recovery.
+        # None of them finalizes, enters maintenance or rings a bell — they
+        # only land in the passive gateway_events feed like every alarm.
+        "GATEWAY_BOOT": "info",
+        "PLUG_UNREACHABLE": "warning",
+        "PLUG_RECOVERED": "info",
     }
 
     _EVENT_DETAIL = {
@@ -76,7 +164,24 @@ class MQTTAlarmMixin:
         # `kwh` (it always should, on fw >= 2.4.0) — kept as a fallback for a
         # malformed/future payload that omits it.
         "UNMETERED_CONSUMPTION": "Plug's energy counters advanced with no active session covering it — possible unmetered use while the gateway was unreachable.",
+        # Fallbacks for the fw 2.8.0 diagnostics when their numbers are
+        # missing/malformed; _handle_gateway_alarm builds the full text.
+        "GATEWAY_BOOT": "Gateway booted.",
+        "PLUG_UNREACHABLE": "Gateway couldn't get a complete reading from the plug - readings may pause until it answers.",
+        "PLUG_RECOVERED": "Plug reachable again.",
     }
+
+    # [fw 2.8.0 diagnostics] Forensic records, not alerts: stored already
+    # acknowledged so they stay out of the unacknowledged set the console
+    # fetches. That set is windowed server-side (CpoAlerts asks for the newest
+    # 50, newest first, and drops info rows only in the browser), so a boot
+    # report on every chip reset — or a brownout boot loop — would otherwise
+    # crowd an older unacknowledged critical (UNAUTHORIZED_ON, ...) out of the
+    # alert strip, and tick the Health nav badge each time. The rows are still
+    # persisted, broadcast and logged; the Health page shows them with
+    # "Unacknowledged only" unticked. PLUG_UNREACHABLE is a real warning and
+    # stays unacknowledged.
+    _PRE_ACKED_EVENT_TYPES = frozenset({"GATEWAY_BOOT", "PLUG_RECOVERED"})
 
     def _handle_gateway_alarm(self, gateway_id: str, payload: Dict[str, Any]):
         """
@@ -93,6 +198,16 @@ class MQTTAlarmMixin:
         folded into a human-readable `detail` string here (not a schema
         change to _persist_gateway_event, which every other alarm type also
         shares).
+
+        [fw 2.8.0 diagnostics] Three more `detail`-folded shapes, all
+        informational (no finalize / maintenance / bell):
+          {"event":"GATEWAY_BOOT","fw":..,"reset_reason":..,"reset_code":..,
+           "boot_count":..,"wifi_rssi":..,"last_wifi_reason":..,
+           "wifi_attempts":..,"min_free_heap":..,"uptime_s":..}
+          {"error":"PLUG_UNREACHABLE","plug_id":N,"failures":N}
+          {"event":"PLUG_RECOVERED","plug_id":N,"down_s":N}
+        Values are untrusted: coerced/sanitized field by field, a bad one just
+        drops its clause, and every detail is capped at _DETAIL_MAX_LEN.
         """
         event_type = payload.get("error") or payload.get("event")
         if not event_type:
@@ -114,11 +229,32 @@ class MQTTAlarmMixin:
                     f"billed session covering it — counters advanced while the "
                     f"gateway couldn't report (possible unauthorized use)."
                 )
+        elif event_type == "GATEWAY_BOOT":
+            detail = _gateway_boot_detail(payload)
+        elif event_type == "PLUG_UNREACHABLE":
+            # Firmware raises this after N polls in a row that weren't
+            # complete: no answer at all, or a partial one (e.g. the energy
+            # sample arrived but get_device_info failed). So the text claims
+            # an incomplete reading, not that the plug is off the LAN.
+            failures = _safe_int(payload.get("failures"), 1, 10**6)
+            if failures is not None:
+                detail = (
+                    f"Gateway couldn't get a complete reading from the plug "
+                    f"{_plural(failures, 'time')} in a row - readings may "
+                    f"pause until it answers."
+                )
+        elif event_type == "PLUG_RECOVERED":
+            down_s = _safe_int(payload.get("down_s"), 0, 10**9)
+            if down_s is not None:
+                detail = f"Plug reachable again after ~{down_s} s."
+
+        if detail is not None:
+            detail = detail[:_DETAIL_MAX_LEN]
 
         plug_id = payload.get("plug_id")
         try:
             plug_id = int(plug_id) if plug_id is not None else None
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, OverflowError):  # OverflowError: JSON Infinity
             plug_id = None
 
         logger.warning(
@@ -128,6 +264,9 @@ class MQTTAlarmMixin:
                 "plug_id": plug_id,
                 "event_type": event_type,
                 "severity": severity,
+                # Carries e.g. the GATEWAY_BOOT reset reason, so the backend
+                # log alone answers "why did the gateway restart?".
+                "detail": detail,
             },
         )
 
@@ -199,6 +338,7 @@ class MQTTAlarmMixin:
                     event_type=event_type,
                     severity=severity,
                     detail=detail,
+                    acknowledged=event_type in self._PRE_ACKED_EVENT_TYPES,
                 )
                 session.add(event)
                 await session.commit()

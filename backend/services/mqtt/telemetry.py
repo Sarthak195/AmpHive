@@ -189,7 +189,11 @@ class MQTTTelemetryMixin:
         # Map firmware status to telemetry store status
         telem_status = "charging" if status == "occupied" else "idle"
 
-        logger.info(
+        # DEBUG, not INFO: one line per frame per plug (~1-10 s) was 99% of the
+        # backend's log volume (2026-10-20 log forensic) and drowned out the
+        # lines that matter. Every owned-plug frame still lands in the
+        # telemetry_readings time series (see _persist_telemetry).
+        logger.debug(
             "Telemetry received",
             extra={
                 "gateway_id": gateway_id,

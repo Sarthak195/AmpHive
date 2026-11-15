@@ -32,8 +32,39 @@
 #
 # No top-level `version:` key: Compose Spec / the `docker compose` v2 plugin
 # ignores (warns on) it now, and every field used below (mem_limit,
-# depends_on.condition, healthcheck.start_period) works without one.
+# depends_on.condition, healthcheck.start_period, x- extension fields) works
+# without one.
+#
+# LIVE COPY DRIFT: the file actually running on the VM
+# (~/amphive-relay/docker-compose.relay.yml) has drifted from this one: it
+# uses compose-default container names (amphive-relay-<service>-1), is
+# image-pinned (amphive_backend:latest / amphive_frontend:latest, no build:
+# keys), and mounts the broker files from config/ (docs/DEPLOYMENT.md §1).
+# deploy.ps1 never ships this file, so a change made here (e.g. the logging
+# block below) has to be applied to the live copy by hand.
 # =============================================================================
+
+# Log rotation for EVERY service (2026-10-20; previously only mqtt and
+# backend had it). Docker's json-file driver keeps a container's stdout with
+# no size limit unless told otherwise, and this box's disk is as tight as its
+# RAM. db, backend, frontend and caddy keep at most 3 x 10 MB each
+# (x-logging) and mqtt 3 x 5 MB (x-logging-mqtt): about 135 MB in all, and
+# still under the retired prod files' 10m/5 (50 MB per container). These are
+# the values the live copy on the VM gets by hand (LIVE COPY DRIFT above).
+# Logging options apply when a container is CREATED: after changing them,
+# `docker compose up -d` recreates the containers, and the old json log
+# files are deleted along with the old containers.
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-logging-mqtt: &mqtt-logging
+  driver: "json-file"
+  options:
+    max-size: "5m"
+    max-file: "3"
 
 services:
   db:
@@ -41,6 +72,7 @@ services:
     container_name: amphive-db
     restart: unless-stopped
     mem_limit: 256m
+    logging: *default-logging
     # Tuned down from Postgres' stock defaults (128MB shared_buffers, 100 max
     # connections) — this box has no room for either, and a single-tenant
     # demo backend never approaches 20 concurrent connections.
@@ -95,12 +127,7 @@ services:
       timeout: 10s
       retries: 3
       start_period: 15s
-    # Bounded harder than prod (10m/5) — this box's disk is as tight as its RAM.
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "5m"
-        max-file: "3"
+    logging: *mqtt-logging
 
   backend:
     build:
@@ -143,11 +170,7 @@ services:
       timeout: 5s
       retries: 5
       start_period: 20s
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "5m"
-        max-file: "3"
+    logging: *default-logging
 
   frontend:
     build:
@@ -174,6 +197,7 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+    logging: *default-logging
 
   caddy:
     image: caddy:2-alpine
@@ -200,6 +224,7 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+    logging: *default-logging
 
 volumes:
   postgres_data:    # Real prod data, restored — THE volume that must not be lost.

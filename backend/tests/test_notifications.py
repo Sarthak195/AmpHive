@@ -258,8 +258,10 @@ async def test_orphan_off_notifies_tenant_cpos():
     Notification model docstring update."""
     MQTTManager._instance = None
 
+    # (plug_id, local_ip, name, current_power_w) — last seen drawing 1.5 kW,
+    # so this is a charge that may really have been running unbilled.
     plug_rows_result = MagicMock()
-    plug_rows_result.all.return_value = [(1, "10.0.0.11", "Bay 1")]
+    plug_rows_result.all.return_value = [(1, "10.0.0.11", "Bay 1", 1500.0)]
 
     active_result = MagicMock()
     active_result.scalars.return_value.all.return_value = []   # no ACTIVE session
@@ -284,7 +286,92 @@ async def test_orphan_off_notifies_tenant_cpos():
     notify_mock.assert_awaited_once()
     assert notify_mock.await_args.args[0] == 201
     assert notify_mock.await_args.args[1] == "orphan_off"
+    assert "1500 W" in notify_mock.await_args.args[3]   # says why it alerted
     assert notify_mock.await_args.kwargs.get("plug_id") == 1
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("last_power_w,should_bell", [
+    (None, False),     # never reported
+    (0.0, False),      # idle — the ESP32-reset-while-idle noise case
+    (4.9, False),      # standby draw, under the threshold
+    (5.0, True),       # at the threshold (>=)
+    (1500.0, True),    # really charging
+])
+async def test_orphan_off_bell_gated_on_last_known_power(monkeypatch, last_power_w, should_bell):
+    """[Orphan bell gating] On a REAL reconnect every session-less plug still
+    gets its OFF, but only one last seen drawing >= ORPHAN_ALERT_MIN_POWER_W
+    rings the CPO bell — an idle plug's OFF is routine (2026-10-20 log
+    forensic: most "Plug auto-recovered" bells were idle plugs after an ESP32
+    reset). For an idle plug the CPO lookup is not even issued."""
+    import backend.services.mqtt_manager as mm
+    monkeypatch.setattr(mm, "ORPHAN_ALERT_MIN_POWER_W", 5.0)
+    MQTTManager._instance = None
+
+    plug_rows_result = MagicMock()
+    plug_rows_result.all.return_value = [(1, "10.0.0.11", "Bay 1", last_power_w)]
+
+    active_result = MagicMock()
+    active_result.scalars.return_value.all.return_value = []   # no ACTIVE session
+
+    queued_result = MagicMock()
+    queued_result.all.return_value = []   # no queued charges
+
+    cpo_result = MagicMock()
+    cpo_result.scalars.return_value.all.return_value = [201]
+
+    db = _SeqRowsDB([plug_rows_result, active_result, queued_result, cpo_result])
+    mgr = MQTTManager(db_session_factory=lambda: db)
+    mgr.send_plug_command = MagicMock(return_value=True)
+
+    notify_mock = AsyncMock()
+    with patch("backend.services.mqtt.status.notify", notify_mock):
+        await mgr._republish_off_for_orphaned_plugs("gw-1", alert_operators=True)
+
+    # The safety OFF is unconditional.
+    mgr.send_plug_command.assert_called_once_with(
+        "gw-1", 1, "OFF", local_ip="10.0.0.11", wait=False
+    )
+    if should_bell:
+        notify_mock.assert_awaited_once()
+        assert notify_mock.await_args.args[1] == "orphan_off"
+        assert db._results == []                  # CPO lookup ran
+    else:
+        notify_mock.assert_not_awaited()
+        assert db._results == [cpo_result]        # CPO lookup never issued
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_orphan_off_bells_only_the_powered_plug_of_several():
+    """Two orphaned plugs on one gateway: both get OFF, only the one that was
+    drawing power gets the bell."""
+    MQTTManager._instance = None
+
+    plug_rows_result = MagicMock()
+    plug_rows_result.all.return_value = [
+        (1, "10.0.0.11", "Bay 1", 0.0),       # idle
+        (2, "10.0.0.12", "Bay 2", 2200.0),    # was charging
+    ]
+    active_result = MagicMock()
+    active_result.scalars.return_value.all.return_value = []
+    queued_result = MagicMock()
+    queued_result.all.return_value = []
+    cpo_result = MagicMock()
+    cpo_result.scalars.return_value.all.return_value = [201]
+
+    db = _SeqRowsDB([plug_rows_result, active_result, queued_result, cpo_result])
+    mgr = MQTTManager(db_session_factory=lambda: db)
+    mgr.send_plug_command = MagicMock(return_value=True)
+
+    notify_mock = AsyncMock()
+    with patch("backend.services.mqtt.status.notify", notify_mock):
+        await mgr._republish_off_for_orphaned_plugs("gw-1")
+
+    assert [c.args[1] for c in mgr.send_plug_command.call_args_list] == [1, 2]
+    notify_mock.assert_awaited_once()
+    assert notify_mock.await_args.kwargs.get("plug_id") == 2
     MQTTManager._instance = None
 
 
@@ -296,8 +383,9 @@ async def test_orphan_off_replay_offs_plug_but_skips_operator_alert():
     same plugs on every roll."""
     MQTTManager._instance = None
 
+    # Even a plug last seen drawing power: a replay never rings the bell.
     plug_rows_result = MagicMock()
-    plug_rows_result.all.return_value = [(1, "10.0.0.11", "Bay 1")]
+    plug_rows_result.all.return_value = [(1, "10.0.0.11", "Bay 1", 1500.0)]
 
     active_result = MagicMock()
     active_result.scalars.return_value.all.return_value = []   # no ACTIVE session

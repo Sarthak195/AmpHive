@@ -48,7 +48,12 @@ firmware/
 ## 1. Boot & tasks (`main/main.c`)
 
 `app_main`:
-1. `wifi_init()` — init NVS, load saved config, connect STA (blocking).
+0. `start_log_forwarding()` — first, before anything else (fw ≥ 2.8.0):
+   installs the WARN/ERROR log hook and starts the `log_forward` drain task.
+   Lines logged before MQTT is up are held in RAM (see below).
+1. `wifi_init()` — init NVS, load saved config (and bump the `boot_count`
+   counter), survey-scan the SSID, connect STA (blocking; up to
+   `BOOT_WIFI_ROUNDS` 6 rounds, see below).
 2. If no config / WiFi fails → `start_captive_portal()` and idle until the user
    submits the setup form (which triggers `esp_restart()`).
 3. `tapo_init()` (also restores the persisted energy integrator from NVS).
@@ -58,6 +63,7 @@ firmware/
 | Task | Stack | Prio | Core |
 |------|-------|------|------|
 | `telemetry_safety` | 8192 | 5 | floating |
+| `log_forward` | 6144 (4096 before 2.8.0) | 3 | floating |
 
 **Runtime Wi-Fi resilience (fw ≥ 2.5.0-direct):** the `MAXIMUM_RETRY` (5)
 burst on `WIFI_EVENT_STA_DISCONNECTED` exists only to give the two bounded
@@ -72,6 +78,60 @@ reboots as a last resort (the Wi-Fi driver itself may be wedged) — but never
 with an active charging session, same rule as OTA `REBOOT` — landing in the
 boot path, whose portal-idle loop retries STA every 10 min. esp-mqtt owns its
 own reconnection, so MQTT recovers as soon as IP is back.
+
+**Boot Wi-Fi window + diagnostics (fw ≥ 2.7.1-direct):** before the first
+connect, `wifi_init` scans for the configured SSID and logs one line per BSSID
+(channel, HT40 side, RSSI, security, PHY modes). Every
+`STA_DISCONNECTED` logs the reason code and RSSI, and boot logs
+`esp_reset_reason()`. The boot connect runs up to 6 rounds of the 5-retry burst,
+5 s apart (~2-3 min), each capped at 60 s so an attempt that associates but
+never gets a DHCP lease can't block boot. Only after that does it fall back to the
+portal; before 2.7.1 one ~11 s burst decided. The STA uses an all-channel
+scan sorted by signal, 20 MHz channels and no modem sleep (the gateway is
+mains-powered). Field note, 2026-10-20: at -81 to -89 dBm the gateway saw
+auth/assoc timeouts, lost EAPOL frames and no DHCP lease. It joined once, in
+round 3, and then never got an IP. That is a placement problem these settings
+cannot fix: keep the gateway where it hears the AP at about -70 dBm or better.
+
+**Boot report, MQTT errors, offline log ring (fw ≥ 2.8.0-direct).** The 45-day
+log forensics found the gateway resetting about once per powered hour with no
+recorded cause, and every forwarded log line written while MQTT was down was
+lost. So:
+- **`GATEWAY_BOOT`.** On the first MQTT connect of each boot (right after the
+  online status) the gateway publishes one `GATEWAY_BOOT` event on `/alarms`
+  (QoS 1, not retained). It carries the reset cause, the boot count, and how
+  the Wi-Fi join went. If esp-mqtt refuses the publish it is retried on the
+  next connect; once accepted it is not sent again that boot. `boot_count` is
+  a `u32` in NVS (`storage`/`boot_count`) bumped once per boot inside
+  `load_config_from_nvs()`, so portal and crash boots count too. It starts at 1
+  on the first 2.8.0 boot. Payload and field meanings: see the 2.8.0 entry at
+  the end of this file.
+- **`MQTT_EVENT_ERROR`** now logs one WARN line: `type` (the esp-mqtt error
+  type), `tls_err` (esp-tls `esp_err_t`, with its name), `tls_stack_err` (the
+  mbedTLS code), `sock_errno` and `connect_rc` (the broker's CONNACK code). That
+  covers a refused login, a TLS failure and a dead socket.
+- **Log forwarding survives MQTT outages.** The vprintf hook still only
+  enqueues: a zero-timeout queue send from a stack buffer, with no locks and no
+  logging of its own. It skips ISR context and the drain task's own lines. The
+  hook is installed first in `app_main`. When the drain task can't publish a
+  line (MQTT down, or the publish fails) it keeps it in a RAM ring of the last
+  **24** WARN/ERROR lines. It flushes them oldest-first, each prefixed
+  `[offline] ` and capped at 199 chars like a live line, within about 1 s of
+  the next connect. If the ring overflowed, a `[offline] (N older line(s) lost)`
+  line goes first. So boot-time Wi-Fi failures and crash-recovery warnings now
+  reach the backend. The drain task's stack went from 4096 to 6144: when a
+  publish fails, esp-mqtt runs the `MQTT_EVENT_ERROR` and `_DISCONNECTED`
+  handlers on the publishing task, on top of the flush. The flush buffer is
+  static for the same reason.
+- **Backend parsing of held lines.** A held line is `[offline] ` followed by
+  the line as logged, and `CONFIG_LOG_COLORS=y` puts the colour escape after
+  the prefix: `[offline] \033[0;33mW (1234) amphive: ...`. The backend's
+  `services/mqtt/logs.py` `_log_line_level` strips the optional leading
+  `[offline] ` before skipping the colour escape and reading the level letter
+  (branch `fix/connection-noise`, `backend/tests/test_gateway_log_level.py`), so
+  held WARN/ERROR lines keep their severity in the admin/CPO filters. The
+  synthetic `[offline] (N older line(s) lost)` line has neither a colour escape
+  nor a level letter, so it is stored as `info`.
 
 Broker endpoint (fw ≥ 2.3.0): `AMPHIVE_DIRECT_MQTT 1` → default `MQTT_BROKER_URL
 "mqtts://mqtt.amphive.app:8883"` — a **DNS name**, so the broker can move
@@ -268,7 +328,60 @@ driver's auth hash (see §4).
     it commands OFF every cycle and publishes
     `{"error":"UNAUTHORIZED_ON","plug_id":N}` once per episode (rising edge).
   - Since fw 1.5.0 the telemetry payload also includes `"relay":<bool>` — the
-    actual `device_on` state, distinct from `"status"` (session state).
+    actual `device_on` state, distinct from `"status"` (session state). Since
+    fw 2.8.0 a session frame from a poll with no relay reading leaves `"relay"`
+    out (see the next bullet).
+  - **Partial and failed polls (fw ≥ 2.8.0-direct, forensics F4).** A poll has
+    two halves (§4). The `get_energy_usage` half carries power, current,
+    voltage and the today/month counters. The `get_device_info` half carries
+    the relay and the overheat/over-current statuses. A half counts only when
+    the plug answered it with no `error_code`, and `get_device_info` must also
+    carry `device_on`. A missing half is never read as 0 W or relay OFF. Before
+    2.8.0 a failed `get_device_info` went out as `relay:false`, reset the
+    unauthorized-on latch, and checked the thermal/over-current cutoffs against
+    statuses that only defaulted to "normal". Each sweep runs what the poll
+    supports:
+
+    | Check | Runs when |
+    |-------|-----------|
+    | Duration watchdog | every sweep, even when the poll failed outright (it needs no reading) |
+    | Energy watchdog | every sweep. It reads this poll's meter, or the driver's integrator as it stands (`tapo_plug_energy_kwh`), which can only lag, so it can't false-trip |
+    | Thermal / over-current cutoffs | the `get_device_info` half is good |
+    | `OVERCURRENT_CAP` | the `get_energy_usage` half is good (real current). Without it the debounce count is left as it is |
+    | Unauthorized-on guard | the `get_device_info` half is good. Without it the latch is left as it is |
+    | Metered-baseline advance (session) | the `get_energy_usage` half is good |
+    | Idle-baseline reconcile | the poll is whole. Skipping one loses nothing (§4a) |
+    | Telemetry frame | the `get_energy_usage` half is good, and for an idle plug also the relay reading |
+
+    A session frame without a relay reading omits `"relay"`. The backend then
+    takes relay from `status` (ON for `occupied`), so billing and liveness
+    continue. An idle frame would read as relay OFF that way, so none is sent.
+    A watchdog OFF sent while the plug can't be reached just fails. The
+    session is already cleared, so the first poll that reads the relay ON
+    forces it OFF through the unauthorized-on guard, which also raises
+    `UNAUTHORIZED_ON`.
+  - **Plug reachability (fw ≥ 2.8.0-direct).** Only a whole poll counts as
+    reachable. A plug that answers `get_energy_usage` but keeps failing
+    `get_device_info`, the F4 pattern, counts as unreachable even while its
+    session frames keep flowing.
+    - After **3** polls in a row that weren't whole, the gateway publishes
+      `{"error":"PLUG_UNREACHABLE","plug_id":N,"failures":3}` **once**. If MQTT
+      is down it tries again on later failures until esp-mqtt accepts it, so
+      `failures` can then be above 3.
+    - While unreachable, a plug with **no** session is polled only every
+      **30 s** (`PLUG_IDLE_BACKOFF_MS`), so a dead plug's ~4 s timeouts don't
+      stretch every sweep. A plug with a session keeps the normal cadence. The
+      check is made every sweep, so an `ON` restores the cadence at once. A
+      roster or command IP change clears the backoff.
+    - The first whole poll after a **delivered** `PLUG_UNREACHABLE` publishes
+      `{"event":"PLUG_RECOVERED","plug_id":N,"down_s":<s since the first
+      failure>}`. It is retried each sweep until accepted, and always goes out
+      before a newer outage's `PLUG_UNREACHABLE`.
+  - **`ON` baseline (fw ≥ 2.8.0-direct).** The pre-session meter read falls
+    back to `tapo_plug_energy_kwh()` (the driver's own integrator) when the
+    poll isn't whole. Before 2.8.0 it fell back to 0, which billed the plug's
+    whole lifetime meter on the first frame and tripped the energy watchdog at
+    once.
 - On MQTT reconnect, buffered offline telemetry entries are drained and published
   with `"offline":true` and `"offline_ts"` so the backend can distinguish replayed data.
 
@@ -324,7 +437,28 @@ never be reused to act on plug B.
 - **`tapo_plug_set_power(plug, on)`** → `set_device_info {device_on}`.
 - **`tapo_plug_get_telemetry(plug, out)`** → `get_energy_usage` (real
   `current_power`, **milliwatts**) + `get_device_info` (`device_on`,
-  `overheat_status`, `overcurrent_status`).
+  `overheat_status`, `overcurrent_status`). Since fw 2.8.0 **each half is
+  judged on its own** and flagged in `out` (`energy_valid`, `state_valid`).
+  It returns `ESP_OK` when both are good and `ESP_ERR_NOT_FINISHED` when only
+  one is. Otherwise it returns an error and `out` holds no reading: the KLAP
+  error, or `ESP_ERR_INVALID_RESPONSE` when the plug answered but neither
+  reply was usable.
+  - A transport failure on `get_energy_usage` ends the poll there, because the
+    plug didn't answer.
+  - A non-zero `error_code` on `get_energy_usage` leaves `energy_valid` false,
+    and the poll still asks `get_device_info`. Before 2.8.0 that reply read as
+    0 W.
+  - A failed or error-coded `get_device_info`, or one without `device_on`,
+    leaves `state_valid` false. Before 2.8.0 it returned `ESP_OK` with the
+    memset `device_on=false` and "normal" safety statuses: a false relay-OFF
+    reading.
+  - Only a valid power sample advances the energy integrator. A poll without
+    one leaves it alone, so the next sample's trapezoid spans the gap.
+    `energy_kwh` is the meter as it stands whenever `out` is filled.
+- **`tapo_plug_energy_kwh(plug)`** (fw ≥ 2.8.0) returns the plug's energy
+  integrator with no round trip. The `ON` handler uses it as the session
+  baseline, and the telemetry task as the energy watchdog's meter, when a
+  poll doesn't fill `out` (§3).
 - **`tapo_plug_set_ip(plug, ip)`** rebinds a plug's IP (new DHCP lease) and
   invalidates its session so the next call re-handshakes.
 - **Addressing:** `ip` is normally a bare IPv4 (a real P110 only listens on
@@ -343,7 +477,7 @@ current, or temperature. So the `tapo_telemetry_t` fields map as:
 |-------|--------|
 | `power_w` | **real** — `current_power` (mW) ÷ 1000 |
 | `energy_kwh` | **real** — driver-side monotonic **lifetime** Wh integrator (robust vs the plug's daily `today_energy` reset); **per-plug**, persisted to NVS (key `wh_<plug_id>`) across reboots and updated under that plug's mutex. Since fw 1.5.0 it integrates with the **trapezoidal rule** (average of consecutive power samples × dt) instead of left-rectangle, reducing error on ramping loads at the 10 s poll cadence; the previous sample is held per-plug in the `tapo_plug_t` context |
-| `device_on` / `overheated` / `overcurrent` | **real** — from `get_device_info` status strings |
+| `device_on` / `overheated` / `overcurrent` | **real** — from `get_device_info` status strings. Valid only when `state_valid` is set (fw ≥ 2.8.0). A failed or error-coded `get_device_info` no longer reads as OFF / normal. |
 | `voltage_v` | **nominal** (configured, default 230 V) |
 | `current_a` | **derived** — `power_w / voltage_v` |
 | `temperature_c` | **nominal** — the P110 has no temperature sensor |
@@ -657,7 +791,7 @@ before flashing/OTA-ing a real unit); not yet OTA'd to a fielded gateway. See
 [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for the version-by-version
 matrix and on-device verification history.
 
-**Current: fw `2.6.0-direct` — security hardening (2026-08-06, deep-audit
+**fw `2.6.0-direct` — security hardening (2026-08-06, deep-audit
 remediation).** Source + docs only; **OTA to fielded units is operator-gated**
 and deferred — no field unit runs this yet. Three fixes, none of which change
 the shape described in §§1–4:
@@ -687,7 +821,7 @@ the shape described in §§1–4:
   serial-flash step at manufacture —
   [deploy/docs/firmware_flash_encryption.md](../deploy/docs/firmware_flash_encryption.md).
 
-**Current: fw `2.7.0-direct` — false `UNMETERED_CONSUMPTION` after every
+**fw `2.7.0-direct` (previous) — false `UNMETERED_CONSUMPTION` after every
 session (2026-08-13).** Ships everything in 2.6.0 (which was never built or
 released) plus one fix, and is the first of these actually OTA'd to the field.
 
@@ -705,3 +839,82 @@ Fix: the session branch now calls
 sweep, walking the baseline forward over energy a billed session is already
 accounting for (same NVS-flush throttle, never reports, never detects). Only
 energy delivered **outside** a session can produce a delta now. See §4a.
+
+**fw `2.7.1-direct` (previous) — Wi-Fi diagnostics + a longer boot Wi-Fi window
+(2026-10-20; USB-flashed to gw `1cc3abb4fb54`, not published for OTA).** A
+re-provisioned gateway kept falling back to the setup portal. Version 2.7.0
+logged only "WiFi connection dropped. Retrying..." and gave up after one ~11 s
+burst. 2.7.1 adds:
+- the boot survey scan;
+- reason code + RSSI on every disconnect;
+- `esp_reset_reason()` at boot (the forensics' unexplained hourly resets);
+- the ~2-3 min multi-round boot window with a per-round DHCP cap;
+- all-channel/strongest-BSSID selection, HT20 and no modem sleep (§1).
+
+The first capture showed the cause: the board heard the AP at -81 to -89 dBm.
+Placement fixes that, not firmware.
+
+**Current: fw `2.8.0-direct` — boot report, plug reachability, offline log ring
+(2026-10-20; build-verified only, not flashed or published for OTA).** Deploy
+the matching backend (branch `fix/connection-noise`, PR #130) **before**
+flashing or OTA-ing 2.8.0: an older backend stores the new events as untitled,
+unacknowledged warnings and parses the `[offline]` log replays as info.
+
+2.8.0 acts on the 45-day log forensics. The gateway reset itself about once
+per powered hour with no recorded cause (F1). A failed `get_device_info` was
+reported as relay OFF (F4). Nothing explained an MQTT failure, and forwarded
+logs were dropped while MQTT was down (F5). 2.8.0 adds:
+- a `GATEWAY_BOOT` event once per boot, on the first MQTT connect (§1);
+- `PLUG_UNREACHABLE` / `PLUG_RECOVERED` events and the 30 s idle-plug poll
+  backoff (§3);
+- partial polls instead of false readings (§3, §4). A failed or error-coded
+  `get_device_info` no longer reads as relay OFF, and an error-coded
+  `get_energy_usage` no longer reads as 0 W. Each half of a poll still feeds
+  the checks it can, so a session keeps its duration, energy and
+  `OVERCURRENT_CAP` watchdogs when only the relay reading is missing. The
+  duration and energy watchdogs run even when a poll fails outright. The `ON`
+  baseline falls back to the meter instead of 0;
+- a WARN line for every `MQTT_EVENT_ERROR` (§1);
+- forwarded logs that survive MQTT outages: a 24-line RAM ring, flushed with
+  the `[offline] ` prefix (§1). The `log_forward` stack goes from 4096 to 6144.
+
+The new events, all on `amphive/gateways/{gw}/alarms` (QoS 1, not retained).
+[MQTT_CONTRACT.md](MQTT_CONTRACT.md) is updated by the backend change that
+consumes them.
+
+```json
+{"event":"GATEWAY_BOOT","fw":"2.8.0-direct","reset_reason":"brownout","reset_code":9,"boot_count":42,"wifi_rssi":-67,"last_wifi_reason":2,"wifi_attempts":3,"min_free_heap":151208,"uptime_s":19}
+{"error":"PLUG_UNREACHABLE","plug_id":2,"failures":3}
+{"event":"PLUG_RECOVERED","plug_id":2,"down_s":95}
+```
+
+`GATEWAY_BOOT` fields, in this order:
+
+| Key | Meaning |
+|-----|---------|
+| `fw` | running app version (`PROJECT_VER`) |
+| `reset_reason` | `esp_reset_reason()` as a token: `poweron` (1), `ext` (2), `sw` (3, `esp_restart()`: OTA, portal save/idle, Wi-Fi last resort), `panic` (4), `int_wdt` (5), `task_wdt` (6), `wdt` (7, other watchdog), `deepsleep` (8), `brownout` (9); anything else is `other` |
+| `reset_code` | the raw `esp_reset_reason_t` value (the numbers in parentheses above) |
+| `boot_count` | NVS `storage`/`boot_count`, +1 every boot (1 on the first 2.8.0 boot) |
+| `wifi_rssi` | current AP RSSI in dBm (`esp_wifi_sta_get_ap_info`); **omitted** if unavailable |
+| `last_wifi_reason` | last STA disconnect reason this boot (`WIFI_REASON_*`), 0 if none |
+| `wifi_attempts` | STA attempts up to and including the one that got the first IP (1 = first try) |
+| `min_free_heap` | `esp_get_minimum_free_heap_size()`: lowest free heap since boot, bytes |
+| `uptime_s` | seconds since boot when sent |
+
+The boot line on serial prints the same token and code
+(`reset reason: brownout [9]`). Before 2.8.0 it printed a prose description.
+
+Two wire changes outside `/alarms`. Both are recorded in
+[MQTT_CONTRACT.md](MQTT_CONTRACT.md) by the matching backend change (branch
+`fix/connection-noise`, PR #130), and that backend handles both:
+- **`/telemetry`:** a session frame from a poll with no relay reading omits
+  `"relay"`. The backend's existing default (`status == "occupied"`) reads it
+  as ON. Idle frames always carry `"relay"`, because without a relay reading
+  none is sent (§3).
+- **`/logs`:** a line held through an MQTT outage arrives as
+  `[offline] <line as logged>`, colour escape included. After an overflow, a
+  synthetic `[offline] (N older line(s) lost)` line goes first. The backend's
+  `services/mqtt/logs.py` `_log_line_level` strips the prefix before reading
+  the level letter, so held WARN/ERROR lines keep their severity and the
+  synthetic line is stored as `info` (§1, "Backend parsing of held lines").

@@ -95,6 +95,14 @@ env/
 # Local test-account credentials (seeded fixture logins) - never commit
 TEST_ACCOUNTS.local.txt
 
+# Gateway USB provisioning (tools/gateway_provision/provision_nvs.py): the
+# secrets file, the NVS image and the generator's temporary CSV all hold the
+# Wi-Fi, Tapo and broker passwords in plain text. The tool refuses paths
+# inside the repo; these patterns are the backstop.
+*.local.txt
+nvs*.bin
+*.bin.csv
+
 # Local reference clones of third-party plug-API repos (see docs/PLUG_CONNECTIVITY_OPTIONS.md)
 research/
 
