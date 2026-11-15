@@ -29,6 +29,8 @@ def _user(user_id=1, token_version=0):
     u.email = "driver@amphive.test"
     u.token_version = token_version
     u.is_disabled = False  # a bare MagicMock attr is truthy → spurious 403
+    u.auth_provider = "password"
+    u.created_at = None
     return u
 
 
@@ -170,3 +172,29 @@ async def test_me_stops_renewing_past_max_session_age(monkeypatch):
     resp = await auth_router.get_me(user=user, db=AsyncMock(), credentials=creds)
 
     assert resp.token is None
+
+
+@pytest.mark.asyncio
+async def test_me_returns_auth_provider_and_created_at(monkeypatch):
+    """Account.jsx reads auth_provider (Google-only accounts skip the
+    close-account password prompt) and created_at ("Member since") from /me."""
+    from datetime import datetime, timezone
+
+    import backend.routers.auth as auth_router
+
+    monkeypatch.setattr(auth_router, "check_and_speed_up_active_session", AsyncMock())
+    monkeypatch.setattr(auth_router, "available_balance", AsyncMock(return_value=0))
+    user = _user(user_id=9, token_version=4)
+    user.full_name = "Driver"
+    user.role.value = "driver"
+    user.coin_balance = 10.0
+    user.auth_provider = "google"
+    user.created_at = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    sent = create_access_token(9, "driver", user.email, 4)
+    creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials=sent)
+
+    resp = await auth_router.get_me(user=user, db=AsyncMock(), credentials=creds)
+
+    body = resp.model_dump(mode="json")
+    assert body["auth_provider"] == "google"
+    assert body["created_at"].startswith("2026-07-01")

@@ -16,6 +16,24 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
   `token_version` check are unchanged; tokens issued before the swap still decode
   (`backend/tests/test_jwt_compat.py`). Removes python-jose, ecdsa, rsa and six from the lock, and the
   `--ignore-vuln PYSEC-2026-1325` from the CI pip-audit step.
+- **Login copy (C4, C5):** a wrong password on `/login` now shows the server's
+  "Invalid email or password." instead of "Authentication expired"
+  (`api/client.js` no longer treats a 401 from `/api/auth/login` itself as an
+  expired session). A `403 account_disabled` says the account is disabled
+  instead of offering "verify your email" and a resend button.
+- **`GET /api/auth/me` returns `auth_provider` and `created_at` (C6):** the
+  Account page now hides the close-account password prompt for a Google-only
+  account and shows "Member since".
+- **Google sign-in failures land on `/login` (C19):** every callback error
+  (cancelled consent, expired state, disabled account, different Google
+  account, token failures) redirects to `/login?google_error=<code>` instead of
+  a raw JSON page. `Login.jsx` maps known codes to fixed copy; unknown codes
+  get a generic line, so a crafted link cannot put text on the page.
+- **Unverified passwords are provisional (C7):** registering again with an
+  unverified email replaces the password and name and sends a new link
+  (verified emails still get the 400); the first Google link to an unverified
+  account drops its password, while a verified account keeps its password
+  and `auth_provider`. Residual in [SECURITY.md](SECURITY.md) §8.6.
 
 ---
 
