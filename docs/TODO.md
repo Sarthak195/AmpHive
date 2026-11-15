@@ -116,6 +116,11 @@ actions, and two deliberate deferrals.*
       HS256 on both encode and decode). CI ignores exactly that ID with a
       written justification. Migrating off python-jose would remove it
       entirely, but an auth-path swap did not belong in this batch.
+      Update 2026-11-15: python-jose 3.5.0 (latest) also carries PYSEC-2026-4298
+      (HS256 key-format confusion; no fix released). Unreachable here (random
+      symmetric secret, `algorithms=[HS256]`), but CI's pip-audit has no ignore
+      for it yet, so the security job stays red until the PyJWT migration lands
+      or the owner approves an ignore.
 - [ ] **`users.email` uniqueness is byte-exact, not case-insensitive.**
       `models.py` has a plain `unique=True` while every lookup uses
       `func.lower(User.email)`. Application code has normalised to lowercase
