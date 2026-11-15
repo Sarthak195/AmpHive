@@ -7,7 +7,7 @@ service-account identity.
 Shaped exactly like ``services/firmware_publish.py`` (read its docstring for the
 full rationale): keyless Application Default Credentials from the GCE metadata
 server, the GCS JSON API over an ``AuthorizedSession``, and deliberately NO
-``google-cloud-storage`` / ``boto3`` dependency — only ``google-auth`` +
+``google-cloud-storage`` / ``boto3`` dependency, only ``google-auth`` +
 ``requests``, both already required. The bucket is NOT public (no allUsers
 binding, ever): a pending photo must not be reachable before a CPO approves it.
 The backend serves the bytes itself (GET /api/plugs/{id}/photos/{pid}/image in
@@ -41,7 +41,7 @@ _TIMEOUT_SEC = 120
 
 
 class PhotoPublishError(RuntimeError):
-    """Uploading/deleting a plug photo to/from the storage bucket failed —
+    """Uploading/deleting a plug photo to/from the storage bucket failed:
     credential acquisition, the HTTP call itself, or a non-2xx GCS response.
     The router maps this to a 502."""
 
@@ -63,7 +63,7 @@ def _session():
 def upload_object(filename: str, data: bytes, content_type: str) -> str:
     """Upload ``data`` to ``gs://<bucket>/<filename>`` with the given
     ``content_type`` and return its ``gs://`` URI (not a public URL: the bucket
-    is private). Synchronous/blocking —
+    is private). Synchronous/blocking:
     call OFF the event loop (``asyncio.to_thread``). Raises ``PhotoPublishError``
     on any failure."""
     bucket = _bucket()
@@ -127,7 +127,7 @@ def download_object(filename: str) -> Optional[bytes]:
 
 
 def delete_object(filename: str) -> None:
-    """Delete ``gs://<bucket>/<filename>``. Synchronous/blocking — call OFF the
+    """Delete ``gs://<bucket>/<filename>``. Synchronous/blocking, call OFF the
     event loop. A 404 is treated as success (already gone). Raises
     ``PhotoPublishError`` on any other failure."""
     bucket = _bucket()
@@ -146,7 +146,7 @@ def delete_object(filename: str) -> None:
         ) from exc
 
     if resp.status_code == 404:
-        return  # already gone — deleting a rejected photo is idempotent
+        return  # already gone, deleting a rejected photo is idempotent
     if not (200 <= resp.status_code < 300):
         body = (resp.text or "")[:_MAX_ERR_CHARS]
         raise PhotoPublishError(

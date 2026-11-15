@@ -4,10 +4,10 @@ Adds the PlugReview model (database/models.py) backing POST
 /api/plugs/{plug_id}/reviews and the discovery-map aggregate (avg_rating,
 review_count on PublicPlugResponse/PlugResponse).
 
-Unlike plug_reports (0032 — any driver who can SEE a plug may flag it), a review
+Unlike plug_reports (0032, any driver who can SEE a plug may flag it), a review
 requires a finished ChargingSession on that plug: the router enforces the
 verified-charger gate, this table just stores the result. The UNIQUE index on
-(driver_user_id, plug_id) makes one review per driver per plug — a re-submit is
+(driver_user_id, plug_id) makes one review per driver per plug, a re-submit is
 an EDIT the router upserts on the IntegrityError (same idempotency as
 0031_user_favorites' uq_user_favorites_user_plug), so the aggregate can't be
 ballot-stuffed from one account.
@@ -17,7 +17,7 @@ database already has this table/index from the current models.py, so every
 statement is IF NOT EXISTS. Index/constraint names match the SQLAlchemy defaults
 so test_migrations.py sees no drift.
 
-Chained onto 0038_account_closure (the head at authoring time — verified by
+Chained onto 0038_account_closure (the head at authoring time, verified by
 reading versions/, per this repo's renumber-at-merge convention).
 
 Revision ID: 0039_plug_reviews

@@ -6,7 +6,7 @@ the _author_display / _has_completed_charge helpers).
 DB-free: db.execute is mocked and the collaborators (ensure_plug_group_access,
 _has_completed_charge, _plug_is_public) are patched. This covers the
 verified-charger gate, the anonymous-visibility rule, the PII-masking of the
-public author label, and the request-schema validation — the parts that live in
+public author label, and the request-schema validation, the parts that live in
 Python. The SQL (unique-index upsert, GROUP BY aggregate) is exercised by the
 DB-gated integration tests in CI.
 """
@@ -179,7 +179,7 @@ async def test_anon_cannot_list_reviews_of_private_plug():
                AsyncMock(return_value=False)):
         with pytest.raises(HTTPException) as exc:
             await list_plug_reviews(plug_id=1, db=db, user=None)
-    # 404 (not 403) — never reveal a private plug's existence to anon.
+    # 404 (not 403): never reveal a private plug's existence to anon.
     assert exc.value.status_code == 404
 
 

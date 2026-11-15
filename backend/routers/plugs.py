@@ -134,7 +134,7 @@ async def _reservation_fields_for_plugs(db, plug_ids, user_id, now):
 async def resolve_review_aggregates_batch(db, plug_ids):
     """
     [Reviews] avg_rating (mean PlugReview.rating, 1 dp) + review_count for a
-    batch of plugs in ONE grouped query — same N+1-free discipline as
+    batch of plugs in ONE grouped query, same N+1-free discipline as
     _reservation_fields_for_plugs / resolve_price_display_batch. Returns
     {plug_id: (avg_rating|None, review_count)}; a plug with no reviews is simply
     absent from the map, and the caller defaults it to (None, 0) so the UI can
@@ -189,9 +189,9 @@ def photo_image_path(plug_id: int, photo_id: int) -> str:
 
 
 # [Photos] Accepted image types, by leading magic bytes. Kept tiny and explicit
-# (no Pillow/imghdr dependency) — we only need to reject non-images before
+# (no Pillow/imghdr dependency): we only need to reject non-images before
 # spending a network round-trip storing them.
-_PHOTO_MAX_BYTES = 8 * 1024 * 1024  # 8 MiB — generous for a phone photo.
+_PHOTO_MAX_BYTES = 8 * 1024 * 1024  # 8 MiB, generous for a phone photo.
 _PHOTO_MAGIC = (
     (b"\xff\xd8\xff", "image/jpeg", "jpg"),
     (b"\x89PNG\r\n\x1a\n", "image/png", "png"),
@@ -215,7 +215,7 @@ def _sniff_image(data: bytes):
 def _author_display(full_name: Optional[str], email: Optional[str]) -> str:
     """Privacy-preserving label for a public review: the driver's first name if
     they have a real full_name, else their email local-part with the tail
-    masked (``sat***``). NEVER the full email or the user id — the reviews read
+    masked (``sat***``). NEVER the full email or the user id, the reviews read
     is unauthenticated."""
     name = (full_name or "").strip()
     if name:
@@ -383,7 +383,7 @@ async def get_available_plugs(
     )
 
     # [Reviews] avg_rating + review_count for the whole list in one grouped
-    # query — keeps this endpoint N+1-free (same shape as price_display above).
+    # query: keeps this endpoint N+1-free (same shape as price_display above).
     review_aggs = await resolve_review_aggregates_batch(
         db, [plug.id for plug, *_ in all_rows]
     )
@@ -499,7 +499,7 @@ async def get_public_plugs(db: AsyncSession = Depends(get_db)):
     )
 
     # [Reviews] Public aggregate rating for every mapped plug in one grouped
-    # query (unauthenticated — no per-user data leaves here, just a mean+count).
+    # query (unauthenticated: no per-user data leaves here, just a mean+count).
     review_aggs = await resolve_review_aggregates_batch(
         db, [plug.id for plug, _, _, _, _, _ in mappable]
     )
@@ -1036,12 +1036,12 @@ async def report_plug_problem(
 
 
 # ===========================================================================
-# Plug reviews — verified-charger star ratings (database/models.py PlugReview)
+# Plug reviews: verified-charger star ratings (database/models.py PlugReview)
 # ===========================================================================
 
 async def _plug_is_public(db, plug: Plug) -> bool:
     """A plug is publicly visible when it is ungrouped/legacy (group_id NULL) or
-    sits in a public ChargerGroup — the same rule get_public_plugs filters on.
+    sits in a public ChargerGroup, the same rule get_public_plugs filters on.
     Used to decide whether an ANONYMOUS caller may read a plug's reviews."""
     if plug.group_id is None:
         return True
@@ -1062,12 +1062,12 @@ async def list_plug_reviews(
     user: Optional[User] = Depends(get_current_user_optional),
 ):
     """
-    PUBLIC — the star reviews for one plug, newest first, for the discovery
+    PUBLIC: the star reviews for one plug, newest first, for the discovery
     "Photos & reviews" panel. No auth required (part of pre-signup discovery),
     rate-limited on the same public-map limiter as GET /api/plugs/public.
 
     Visibility mirrors the map: an ANONYMOUS caller may read reviews only for a
-    publicly-visible plug (ungrouped or public group) — a private/society plug
+    publicly-visible plug (ungrouped or public group), a private/society plug
     404s for them, exactly as it is absent from the public map. A SIGNED-IN
     caller is held to the normal per-plug access rule (ensure_plug_group_access,
     403 for a private group they haven't joined). `author_display` is a
@@ -1110,16 +1110,16 @@ async def create_or_update_plug_review(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Leave (or edit) a star review for a plug — VERIFIED CHARGERS ONLY. The
+    Leave (or edit) a star review for a plug, VERIFIED CHARGERS ONLY. The
     caller must be able to see the plug (ensure_plug_group_access, 403 for a
     private group) AND have at least one finished ChargingSession
-    (completed|paid) on it (_has_completed_charge, 403 otherwise) — a driver
+    (completed|paid) on it (_has_completed_charge, 403 otherwise), a driver
     can't rate a charger they never used.
 
     One standing review per driver per plug: a second POST is an EDIT, not a
     duplicate. We insert optimistically and, on the UNIQUE(driver_user_id,
     plug_id) IntegrityError, update the existing row instead (same idempotency
-    trick as favorite/watch) — so a double-tap race can't create two rows.
+    trick as favorite/watch), so a double-tap race can't create two rows.
     """
     plug = (await db.execute(select(Plug).where(Plug.id == plug_id))).scalar_one_or_none()
     if not plug:
@@ -1156,7 +1156,7 @@ async def create_or_update_plug_review(
     try:
         await db.commit()
     except IntegrityError:
-        # Already reviewed this plug — treat the second submit as an edit.
+        # Already reviewed this plug: treat the second submit as an edit.
         await db.rollback()
         existing = (await db.execute(
             select(PlugReview).where(
@@ -1188,7 +1188,7 @@ async def delete_my_plug_review(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Remove the caller's OWN review of this plug (idempotent — a 204 whether
+    """Remove the caller's OWN review of this plug (idempotent, a 204 whether
     or not a row existed, same shape as un-favoriting)."""
     await db.execute(
         delete(PlugReview).where(
@@ -1203,7 +1203,7 @@ async def delete_my_plug_review(
 
 
 # ===========================================================================
-# Plug photos — driver-submitted, held for approval (models.py PlugPhoto)
+# Plug photos: driver-submitted, held for approval (models.py PlugPhoto)
 # ===========================================================================
 
 def _plug_photo_response(photo: PlugPhoto, *, is_mine: bool = False) -> PlugPhotoResponse:
@@ -1270,8 +1270,8 @@ async def list_plug_photos(
     user: Optional[User] = Depends(get_current_user_optional),
 ):
     """
-    PUBLIC — a plug's photos for the "Photos & reviews" panel. Anonymous callers
-    see only APPROVED photos (and only for a publicly-visible plug — a private
+    PUBLIC: a plug's photos for the "Photos & reviews" panel. Anonymous callers
+    see only APPROVED photos (and only for a publicly-visible plug, a private
     plug 404s, same rule as list_plug_reviews). A SIGNED-IN caller additionally
     sees their OWN pending photos (so an uploader gets "waiting for review"
     feedback) and is held to the normal per-plug access rule.
@@ -1316,12 +1316,12 @@ async def upload_plug_photo(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Upload a photo of a charger — VERIFIED CHARGERS ONLY (same gate as reviews:
+    Upload a photo of a charger, VERIFIED CHARGERS ONLY (same gate as reviews:
     ensure_plug_group_access + a finished ChargingSession here). HELD FOR
     APPROVAL: the row lands PENDING and is invisible on the public map until a
     CPO/admin approves it (routers/cpo/_plug_photos.py).
 
-    RAW body, NOT multipart (no python-multipart dependency — same convention as
+    RAW body, NOT multipart (no python-multipart dependency, same convention as
     the admin firmware upload). The bytes are size-guarded (413) and magic-byte
     sniffed to a supported image type (JPEG/PNG/WebP, 400 otherwise) BEFORE being
     stored in the PRIVATE photo bucket (keyless, off the event loop via

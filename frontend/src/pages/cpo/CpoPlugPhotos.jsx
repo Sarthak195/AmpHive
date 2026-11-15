@@ -1,5 +1,5 @@
 /**
- * CpoPlugPhotos — moderation queue for driver-submitted charger photos
+ * CpoPlugPhotos: moderation queue for driver-submitted charger photos
  * (backend/database/models.py PlugPhoto; driver upload in
  * backend/routers/plugs.py: POST /api/plugs/{id}/photos). A photo lands PENDING
  * and is invisible on the public map until approved here.
@@ -84,7 +84,7 @@ const formatDateTime = (iso) =>
     ? new Date(iso).toLocaleString('en-IN', {
         month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
       })
-    : '—';
+    : '-';
 
 export default function CpoPlugPhotos() {
   const toast = useToast();

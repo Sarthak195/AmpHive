@@ -1,4 +1,4 @@
-/* StarRating — display (fractional overlay) + interactive input. Colors from
+/* StarRating: display (fractional overlay) + interactive input. Colors from
    primitives.css tokens with sane fallbacks; the empty star uses a muted text
    color, the filled star an amber accent. */
 .star-rating {

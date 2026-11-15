@@ -249,10 +249,10 @@ async def get_current_user_optional(
 ) -> Optional[User]:
     """
     Best-effort identity for a PUBLIC endpoint. Returns the authenticated User
-    when a valid, non-revoked, non-disabled token is present, else None — it
+    when a valid, non-revoked, non-disabled token is present, else None, it
     NEVER raises 401/403 for a missing or bad token (a public read must serve
     anonymous callers). Use it only to enrich a public response (e.g. mark the
-    caller's own review), never to gate access — for that use get_current_user.
+    caller's own review), never to gate access, for that use get_current_user.
     """
     if credentials is None:
         return None

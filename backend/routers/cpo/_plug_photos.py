@@ -1,5 +1,5 @@
 """
-CPO Plug Photo moderation routes (database/models.py PlugPhoto — driver-side
+CPO Plug Photo moderation routes (database/models.py PlugPhoto, driver-side
 upload lives in backend/routers/plugs.py: POST /api/plugs/{plug_id}/photos).
 
 Driver photos are HELD FOR APPROVAL: a new upload is PENDING and invisible on

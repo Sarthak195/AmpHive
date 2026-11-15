@@ -6,7 +6,7 @@ _sniff_image helper; CPO moderation in routers/cpo/_plug_photos.py).
 DB-free: db.execute is mocked, the verified-charger gate + storage upload are
 patched. Covers the image sniff (accept/reject), the size guard, the
 verified-charger gate, the pending-on-upload result, and the anonymous
-visibility rule. The GCS upload/delete never touch the network — upload_object /
+visibility rule. The GCS upload/delete never touch the network, upload_object /
 delete_object are patched.
 """
 from unittest.mock import AsyncMock, MagicMock, patch

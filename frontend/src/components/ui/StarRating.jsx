@@ -1,5 +1,5 @@
 /**
- * StarRating — two modes on one component, following the app's lucide `Star`
+ * StarRating: two modes on one component, following the app's lucide `Star`
  * fill idiom (fill="currentColor" vs "none", same as the favorite star in
  * MapComponent.jsx).
  *

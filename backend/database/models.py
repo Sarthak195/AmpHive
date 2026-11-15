@@ -1304,27 +1304,27 @@ class PlugReport(Base):
 
 class PlugReview(Base):
     """
-    Driver-authored star review of a public charger — POST
+    Driver-authored star review of a public charger, POST
     /api/plugs/{plug_id}/reviews. Shows on the discovery map (aggregate
     avg_rating + review_count) and in the plug's "Photos & reviews" panel.
 
     Trust model: VERIFIED CHARGERS ONLY. Unlike PlugReport (any driver who can
     SEE the plug may flag it), a review requires the author to have a finished
-    ChargingSession on this plug (status completed|paid) — the router enforces
+    ChargingSession on this plug (status completed|paid), the router enforces
     that gate, so a driver can't rate a charger they never used. Public read is
     unauthenticated (part of pre-signup discovery); writing needs sign-in.
 
     UNIQUE(driver_user_id, plug_id): one standing review per driver per plug.
     A re-submit is an EDIT (the router upserts on the IntegrityError, same
-    idempotency trick as UserFavorite/PlugWatch), never a duplicate row — so
+    idempotency trick as UserFavorite/PlugWatch), never a duplicate row, so
     the aggregate can't be ballot-stuffed by one account. Declared as a unique
     INDEX (not UniqueConstraint) so 0039's `CREATE UNIQUE INDEX` DDL matches the
-    model kind (test_migrations.py flags drift otherwise — see UserFavorite).
+    model kind (test_migrations.py flags drift otherwise, see UserFavorite).
 
     tenant_id is denormalized from the plug -> gateway -> tenant chain at
     creation (same convention as PlugReport) so any future CPO-scoped read
     filters on one indexed equality. rating is a plain Integer bounded 1..5 in
-    PlugReviewCreateRequest (no PG enum — same rationale as PlugReport.category).
+    PlugReviewCreateRequest (no PG enum, same rationale as PlugReport.category).
     body is nullable: a rating with no prose is allowed.
     """
     __tablename__ = "plug_reviews"
@@ -1352,7 +1352,7 @@ class PlugPhotoStatus(str, enum.Enum):
 
 class PlugPhoto(Base):
     """
-    A driver-submitted photo of a public charger — POST
+    A driver-submitted photo of a public charger, POST
     /api/plugs/{plug_id}/photos. HELD FOR APPROVAL: a new upload lands PENDING
     and is invisible on the public map until a CPO/admin approves it
     (routers/cpo/_plug_photos.py). Only APPROVED photos are shown to anonymous

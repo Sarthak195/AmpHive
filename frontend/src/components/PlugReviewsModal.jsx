@@ -1,12 +1,12 @@
 /**
- * PlugReviewsModal — the "Photos & reviews" panel opened from a map popup /
+ * PlugReviewsModal: the "Photos & reviews" panel opened from a map popup /
  * list row. Mirrors ReportProblemModal's shape (Modal + useToast +
  * apiErrorCopy, form reset on open) but reads/writes plug reviews.
  *
  * Reads are PUBLIC (GET /api/plugs/{id}/reviews works signed-out), so the list
  * shows for everyone. WRITING is verified-charger-only server-side: we show the
  * star+text form to any signed-in user and let the backend's 403 surface inline
- * as "you can only review a charger you've completed a session at" — the client
+ * as "you can only review a charger you've completed a session at", the client
  * can't know session history, and duplicating that gate here would just drift.
  * Anonymous visitors get a "Sign in to review" CTA routing to /login?next=/map
  * (same handoff as MapPage.handleSelectPlug).
@@ -134,7 +134,7 @@ export default function PlugReviewsModal({ open, onClose, plug, onSaved }) {
     e.target.value = ''; // allow re-picking the same file
     if (!file || uploading) return;
     if (file.size > 8 * 1024 * 1024) {
-      setError('That photo is larger than 8 MB — please pick a smaller one.');
+      setError('That photo is larger than 8 MB, please pick a smaller one.');
       return;
     }
     setError('');
@@ -142,7 +142,7 @@ export default function PlugReviewsModal({ open, onClose, plug, onSaved }) {
     try {
       const saved = await api.upload(`/api/plugs/${plugId}/photos`, file);
       setPhotos((prev) => [saved, ...prev]);
-      toast.ok("Photo submitted — it'll appear once an operator approves it.");
+      toast.ok("Photo submitted, it'll appear once an operator approves it.");
     } catch (err) {
       setError(apiErrorCopy(err));
     } finally {
