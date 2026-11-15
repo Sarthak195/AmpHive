@@ -17,9 +17,8 @@ tick delta and the duration watchdog `now_seconds()`, so an early sweep cannot
 miscount energy or time. `PROJECT_VER` is `2.9.0-direct`. The software gateway
 (`agent/amphive_agent/core.py`) gets the same wake, plus a gap clamp that allows
 the interval the cut-short sleep used (`agent/test_poll_wake.py`).
-**Not built:** the ESP-IDF v5.3.3 tree at `C:\esp\v5.3.3` is missing on the
-dev box, so there is no signed 2.9.0 image yet. The field gateway stays on
-2.8.0-direct. See [FIRMWARE.md](FIRMWARE.md) (§3 and §8).
+**Not yet built:** there is no signed 2.9.0 image yet (build with ESP-IDF
+v5.3.3, target esp32, as for 2.8.0). The field gateway stays on 2.8.0-direct. See [FIRMWARE.md](FIRMWARE.md) (§3 and §8).
 
 ## 0.00005 (2026-10-20) connection noise: debounced offline notices, gated orphan bells, fw 2.8.0 diagnostics
 
