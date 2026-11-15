@@ -116,3 +116,28 @@ async def test_logout_bumps_token_version():
     assert "token_version + " in stmt
     assert "RETURNING users.token_version" in stmt
     db.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_me_returns_renewed_token_at_current_epoch(monkeypatch):
+    """GET /api/auth/me re-mints the JWT (sliding renewal) at the user's
+    current epoch with a fresh exp, so an active device never hits the fixed
+    expiry while revocation still applies to the new token."""
+    from datetime import datetime, timedelta, timezone
+
+    import backend.routers.auth as auth_router
+    from backend.services.auth import JWT_EXPIRY_DAYS
+
+    monkeypatch.setattr(auth_router, "check_and_speed_up_active_session", AsyncMock())
+    monkeypatch.setattr(auth_router, "available_balance", AsyncMock(return_value=0))
+    user = _user(user_id=9, token_version=4)
+    user.full_name = "Driver"
+    user.role.value = "driver"
+    user.coin_balance = 10.0
+
+    resp = await auth_router.get_me(user=user, db=AsyncMock())
+
+    payload = jwt.decode(resp.token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
+    assert payload["sub"] == "9" and payload["tv"] == 4 and payload["role"] == "driver"
+    expected = datetime.now(timezone.utc) + timedelta(days=JWT_EXPIRY_DAYS)
+    assert abs(payload["exp"] - expected.timestamp()) < 60

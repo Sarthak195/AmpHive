@@ -147,6 +147,11 @@ class UserResponse(BaseModel):
     # /api/auth/me; Optional only for schema forward-safety (mirrors
     # PlugResponse.price_per_kwh's convention below).
     available_balance: Optional[float] = None
+    # Sliding renewal: /api/auth/me hands back a freshly minted JWT (same
+    # claims and token_version epoch) so an app that is opened at least once
+    # per JWT_EXPIRY_DAYS never hits the fixed expiry. Optional so other
+    # producers of this shape need not send one.
+    token: Optional[str] = None
 
 
 # --- Session Schemas ---

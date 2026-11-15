@@ -440,6 +440,10 @@ async def get_me(
         # figure a NEW session-start would actually be sized against.
         # Additive field: coin_balance is untouched for existing clients.
         available_balance=float(await available_balance(db, user.id)),
+        # Sliding renewal: get_current_user already checked the tv epoch and
+        # the disabled flag, so re-minting at the CURRENT epoch keeps every
+        # revocation path (logout, password reset, admin, closure) intact.
+        token=create_access_token(user.id, user.role.value, user.email, user.token_version),
     )
 
 

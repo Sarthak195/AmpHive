@@ -53,7 +53,9 @@ if not JWT_SECRET_KEY or JWT_SECRET_KEY in _KNOWN_INSECURE_SECRETS:
     )
 JWT_ALGORITHM = "HS256"
 # Env-configurable so an environment can shorten token lifetime. Kept at 7d
-# by default (mobile-first UX, no refresh flow); per-user revocation via the
+# by default (mobile-first UX). GET /api/auth/me re-mints the token on every
+# app open (sliding renewal), so only a device idle for this long has to sign
+# in again; per-user revocation via the
 # token_version epoch — see create_access_token / get_current_user — is the
 # substantive control that makes a long-lived token killable on demand.
 JWT_EXPIRY_DAYS = int(os.getenv("JWT_EXPIRY_DAYS", "7"))
