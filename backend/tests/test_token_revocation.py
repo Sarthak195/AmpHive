@@ -9,10 +9,10 @@ epoch 0 for backward compatibility.
 """
 from unittest.mock import AsyncMock, MagicMock
 
+import jwt
 import pytest
 from fastapi import HTTPException
 from fastapi.security import HTTPAuthorizationCredentials
-from jose import jwt
 
 from backend.routers.auth import logout
 from backend.services.auth import (
@@ -29,6 +29,8 @@ def _user(user_id=1, token_version=0):
     u.email = "driver@amphive.test"
     u.token_version = token_version
     u.is_disabled = False  # a bare MagicMock attr is truthy → spurious 403
+    u.auth_provider = "password"
+    u.created_at = None
     return u
 
 
@@ -116,3 +118,83 @@ async def test_logout_bumps_token_version():
     assert "token_version + " in stmt
     assert "RETURNING users.token_version" in stmt
     db.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_me_returns_renewed_token_at_current_epoch(monkeypatch):
+    """GET /api/auth/me re-mints the JWT (sliding renewal) at the user's
+    current epoch with a fresh exp, so an active device never hits the fixed
+    expiry while revocation still applies to the new token."""
+    from datetime import datetime, timedelta, timezone
+
+    import backend.routers.auth as auth_router
+    from backend.services.auth import JWT_EXPIRY_DAYS
+
+    monkeypatch.setattr(auth_router, "check_and_speed_up_active_session", AsyncMock())
+    monkeypatch.setattr(auth_router, "available_balance", AsyncMock(return_value=0))
+    user = _user(user_id=9, token_version=4)
+    user.full_name = "Driver"
+    user.role.value = "driver"
+    user.coin_balance = 10.0
+
+    signed_in = int(datetime.now(timezone.utc).timestamp()) - 86400
+    sent = create_access_token(9, "driver", user.email, 4, auth_time=signed_in)
+    creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials=sent)
+
+    resp = await auth_router.get_me(user=user, db=AsyncMock(), credentials=creds)
+
+    payload = jwt.decode(resp.token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
+    assert payload["sub"] == "9" and payload["tv"] == 4 and payload["role"] == "driver"
+    assert payload["auth_time"] == signed_in  # renewal keeps the original sign-in
+    expected = datetime.now(timezone.utc) + timedelta(days=JWT_EXPIRY_DAYS)
+    assert abs(payload["exp"] - expected.timestamp()) < 60
+
+
+@pytest.mark.asyncio
+async def test_me_stops_renewing_past_max_session_age(monkeypatch):
+    """Past JWT_MAX_SESSION_DAYS since the original sign-in, /me returns no
+    token, so the client keeps its current one until it expires."""
+    from datetime import datetime, timezone
+
+    import backend.routers.auth as auth_router
+    from backend.services.auth import JWT_MAX_SESSION_DAYS
+
+    monkeypatch.setattr(auth_router, "check_and_speed_up_active_session", AsyncMock())
+    monkeypatch.setattr(auth_router, "available_balance", AsyncMock(return_value=0))
+    user = _user(user_id=9, token_version=4)
+    user.full_name = "Driver"
+    user.role.value = "driver"
+    user.coin_balance = 10.0
+    old = int(datetime.now(timezone.utc).timestamp()) - (JWT_MAX_SESSION_DAYS + 1) * 86400
+    sent = create_access_token(9, "driver", user.email, 4, auth_time=old)
+    creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials=sent)
+
+    resp = await auth_router.get_me(user=user, db=AsyncMock(), credentials=creds)
+
+    assert resp.token is None
+
+
+@pytest.mark.asyncio
+async def test_me_returns_auth_provider_and_created_at(monkeypatch):
+    """Account.jsx reads auth_provider (Google-only accounts skip the
+    close-account password prompt) and created_at ("Member since") from /me."""
+    from datetime import datetime, timezone
+
+    import backend.routers.auth as auth_router
+
+    monkeypatch.setattr(auth_router, "check_and_speed_up_active_session", AsyncMock())
+    monkeypatch.setattr(auth_router, "available_balance", AsyncMock(return_value=0))
+    user = _user(user_id=9, token_version=4)
+    user.full_name = "Driver"
+    user.role.value = "driver"
+    user.coin_balance = 10.0
+    user.auth_provider = "google"
+    user.created_at = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    sent = create_access_token(9, "driver", user.email, 4)
+    creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials=sent)
+
+    resp = await auth_router.get_me(user=user, db=AsyncMock(), credentials=creds)
+
+    body = resp.model_dump(mode="json")
+    assert body["auth_provider"] == "google"
+    assert body["created_at"].startswith("2026-07-01")

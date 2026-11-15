@@ -22,6 +22,7 @@ import {
   ExternalLink,
   FileText,
   Flag,
+  Image,
   HeartPulse,
   LayoutDashboard,
   LogOut,
@@ -58,6 +59,7 @@ const NAV_GROUPS = [
       { to: '/cpo/groups', label: 'Groups', icon: Users, badge: 'pendingCapacity' },
       { to: '/cpo/health', label: 'Health', icon: HeartPulse, badge: 'unackedEvents' },
       { to: '/cpo/plug-reports', label: 'Plug reports', icon: Flag },
+      { to: '/cpo/plug-photos', label: 'Plug photos', icon: Image },
     ],
   },
   {

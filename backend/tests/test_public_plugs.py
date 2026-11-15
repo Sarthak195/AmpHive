@@ -57,11 +57,21 @@ async def test_get_public_plugs_projects_skips_no_coords_and_falls_back_to_gatew
     with patch("backend.routers.plugs.resolve_price_display_batch",
                AsyncMock(return_value={1: (Decimal("5.00"), None, None),
                                        2: (Decimal("5.00"), None, None)})), \
+         patch("backend.routers.plugs.resolve_review_aggregates_batch",
+               AsyncMock(return_value={1: (4.5, 2)})), \
+         patch("backend.routers.plugs.resolve_photo_thumbnails_batch",
+               AsyncMock(return_value={1: "https://storage.googleapis.com/amphive-plug-photos/x.jpg"})), \
          patch("backend.routers.plugs.gateway_is_live", return_value=True):
         out = await get_public_plugs(db=db)
 
     # p3 (no location) is dropped; p1/p2 returned in order.
     assert [r.id for r in out] == [1, 2]
+    # [Reviews] aggregate passes through for p1; p2 (absent) defaults to unrated.
+    assert (out[0].avg_rating, out[0].review_count) == (4.5, 2)
+    assert (out[1].avg_rating, out[1].review_count) == (None, 0)
+    # [Photos] approved-thumbnail passes through for p1; p2 (absent) stays None.
+    assert out[0].thumbnail_url.endswith("x.jpg")
+    assert out[1].thumbnail_url is None
     # Effective coords: p1 its own, p2 its gateway's.
     assert (out[0].latitude, out[0].longitude) == (12.9, 77.6)
     assert (out[1].latitude, out[1].longitude) == (13.0, 77.5)
@@ -86,6 +96,10 @@ async def test_get_public_plugs_marks_dead_gateway_offline():
 
     with patch("backend.routers.plugs.resolve_price_display_batch",
                AsyncMock(return_value={1: (Decimal("5.00"), None, None)})), \
+         patch("backend.routers.plugs.resolve_review_aggregates_batch",
+               AsyncMock(return_value={})), \
+         patch("backend.routers.plugs.resolve_photo_thumbnails_batch",
+               AsyncMock(return_value={})), \
          patch("backend.routers.plugs.gateway_is_live", return_value=False):
         out = await get_public_plugs(db=db)
 

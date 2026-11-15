@@ -131,9 +131,10 @@ const Dashboard = () => {
     }
   }, []);
 
-  useEffect(() => {
-    fetchUpNext();
-  }, [fetchUpNext]);
+  // Polled like the plugs: a queued charge can auto-start, expire or fail
+  // server-side at any time, and a push missed while the socket was down is
+  // never replayed. The 'notification' handler below refetches sooner.
+  usePoll(fetchUpNext, 30_000);
 
   // Tick the queued-charge countdowns once a second — only while showing.
   useEffect(() => {
@@ -181,13 +182,20 @@ const Dashboard = () => {
         prev ? prev.map((p) => (p.id === plug_id ? { ...p, gateway_online } : p)) : prev
       );
     };
+    // A queued charge or reservation changed state server-side.
+    const handleNotification = (n) => {
+      const type = n?.type || '';
+      if (type.startsWith('queued_charge_') || type.startsWith('reservation_')) fetchUpNext();
+    };
     socket.on('plug_status', handlePlugStatus);
     socket.on('plug_connectivity', handlePlugConnectivity);
+    socket.on('notification', handleNotification);
     return () => {
       socket.off('plug_status', handlePlugStatus);
       socket.off('plug_connectivity', handlePlugConnectivity);
+      socket.off('notification', handleNotification);
     };
-  }, [socket]);
+  }, [socket, fetchUpNext]);
 
   /* ---- segments + filters ------------------------------------------------ */
   const [seg, setSeg] = useState(null); // null = auto

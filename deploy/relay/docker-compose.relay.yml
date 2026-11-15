@@ -72,6 +72,9 @@ services:
     container_name: amphive-db
     restart: unless-stopped
     mem_limit: 256m
+    # Postgres needs more than docker's default 10 s to checkpoint and shut
+    # down on this box; a SIGKILL mid-checkpoint forces crash recovery.
+    stop_grace_period: 60s
     logging: *default-logging
     # Tuned down from Postgres' stock defaults (128MB shared_buffers, 100 max
     # connections) — this box has no room for either, and a single-tenant

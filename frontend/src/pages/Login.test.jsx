@@ -185,6 +185,31 @@ describe('Login unverified-email (403) handling', () => {
     expect(await screen.findByText('Incorrect email or password.')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Resend verification email' })).not.toBeInTheDocument();
   });
+
+  it('says the account is disabled on a 403 account_disabled (no resend affordance)', async () => {
+    const err = new Error('account_disabled');
+    err.status = 403;
+    loginSpy.mockRejectedValue(err);
+    renderLogin('/login');
+    await submitLogin();
+
+    expect(await screen.findByText(/this account has been disabled/i)).toBeInTheDocument();
+    expect(screen.queryByText(/please verify your email address/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Resend verification email' })).not.toBeInTheDocument();
+  });
+});
+
+describe('Login ?google_error= banner', () => {
+  it('shows fixed copy for a known code', () => {
+    renderLogin('/login?google_error=cancelled');
+    expect(screen.getByRole('alert')).toHaveTextContent('Google sign-in was cancelled.');
+  });
+
+  it('shows a generic line for an unknown code, never the raw parameter', () => {
+    renderLogin('/login?google_error=Call%20this%20number');
+    expect(screen.getByRole('alert')).toHaveTextContent('Google sign-in did not complete. Please try again.');
+    expect(screen.queryByText(/call this number/i)).not.toBeInTheDocument();
+  });
 });
 
 describe('Google sign-in button (config-gated)', () => {

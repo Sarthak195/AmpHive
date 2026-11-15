@@ -1122,3 +1122,54 @@ async def test_sweep_late_scheduled_start_reports_time_and_rate():
     assert started == 1
     assert notify.await_args.args[2] == "Your scheduled charge started late"
     assert "4.00 coins/kWh" in notify.await_args.args[3]
+
+
+# --- C13: CPO plug edit can clear the per-plug overrides back to "inherit" ---
+
+
+def _override_plug():
+    p = MagicMock()
+    p.id = 7
+    p.name = "Bay 1"
+    p.status = PlugStatus.AVAILABLE
+    p.group_id = None
+    p.queued_charging_enabled = True
+    p.auto_start_delay_min = 5
+    return p
+
+
+async def _put_plug_update(**body):
+    from backend.routers.cpo import cpo_update_plug
+    from backend.schemas import CpoPlugUpdateRequest
+
+    plug = _override_plug()
+    res = MagicMock()
+    res.scalar_one_or_none.return_value = plug
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=res)
+    user = MagicMock(tenant_id=1, id=42, email="cpo@amphive.test")
+    await cpo_update_plug(7, CpoPlugUpdateRequest(**body), user, db)
+    return plug
+
+
+@pytest.mark.asyncio
+async def test_plug_update_explicit_null_clears_queued_overrides():
+    plug = await _put_plug_update(queued_charging_enabled=None, auto_start_delay_min=None)
+    assert plug.queued_charging_enabled is None
+    assert plug.auto_start_delay_min is None
+
+
+@pytest.mark.asyncio
+async def test_plug_update_omitted_queued_fields_are_left_unchanged():
+    plug = await _put_plug_update(name="Renamed")
+    assert plug.queued_charging_enabled is True
+    assert plug.auto_start_delay_min == 5
+
+
+@pytest.mark.asyncio
+async def test_plug_update_sets_queued_overrides_and_zero_still_clears_delay():
+    plug = await _put_plug_update(queued_charging_enabled=False, auto_start_delay_min=10)
+    assert plug.queued_charging_enabled is False
+    assert plug.auto_start_delay_min == 10
+    plug = await _put_plug_update(auto_start_delay_min=0)
+    assert plug.auto_start_delay_min is None

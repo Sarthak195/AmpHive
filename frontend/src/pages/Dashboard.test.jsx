@@ -387,3 +387,32 @@ describe('Dashboard — sessions banner and rail', () => {
     expect(screen.getByRole('link', { name: 'Add credit' })).toHaveAttribute('href', '/credit');
   });
 });
+
+describe('Dashboard: up next stays current (C10)', () => {
+  it('refetches the queue when a queued charge starts, expires or fails server-side', async () => {
+    const handlers = {};
+    const socket = {
+      on: vi.fn((event, cb) => { handlers[event] = cb; }),
+      off: vi.fn(),
+    };
+    useSession.mockReturnValue({
+      activeSessions: [],
+      sessionData: null,
+      sessionId: null,
+      switchSession: vi.fn(),
+      startSession: vi.fn(),
+      socket,
+    });
+    api.listQueuedCharges.mockResolvedValue([
+      { id: 5, plug_id: 4, plug_name: 'Basement Plug', expires_at: new Date(Date.now() + 3600_000).toISOString() },
+    ]);
+    renderDash();
+    expect(await screen.findByText(/Waiting for power/)).toBeInTheDocument();
+
+    // The reaper auto-started it: the queue is now empty server-side.
+    api.listQueuedCharges.mockResolvedValue([]);
+    handlers.notification({ type: 'queued_charge_started', plug_id: 4 });
+
+    await waitFor(() => expect(screen.queryByText(/Waiting for power/)).not.toBeInTheDocument());
+  });
+});

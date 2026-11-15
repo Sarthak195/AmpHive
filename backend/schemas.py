@@ -147,6 +147,16 @@ class UserResponse(BaseModel):
     # /api/auth/me; Optional only for schema forward-safety (mirrors
     # PlugResponse.price_per_kwh's convention below).
     available_balance: Optional[float] = None
+    # Sliding renewal: /api/auth/me hands back a freshly minted JWT (same
+    # claims and token_version epoch) so an app that is opened at least once
+    # per JWT_EXPIRY_DAYS never hits the fixed expiry. Optional so other
+    # producers of this shape need not send one.
+    token: Optional[str] = None
+    # Account page: 'google' hides the close-account password prompt for a
+    # Google-only account (it has no usable password), and created_at drives
+    # the "Member since" row.
+    auth_provider: Optional[str] = None
+    created_at: Optional[datetime] = None
 
 
 # --- Session Schemas ---
@@ -316,6 +326,16 @@ class PlugResponse(BaseModel):
     # (one-shot, self-clears). services/... none yet: plain CRUD on
     # UserFavorite.
     is_favorite: bool = False
+    # [Reviews] Aggregate driver rating for this plug: mean of PlugReview.rating
+    # rounded to 1 dp, and the number of reviews. avg_rating is None (not 0) when
+    # there are no reviews yet, so the UI can distinguish "unrated" from "rated 0".
+    # Both come from one grouped query (resolve_review_aggregates_batch), no N+1.
+    avg_rating: Optional[float] = None
+    review_count: int = 0
+    # [Photos] One APPROVED photo's image URL (the relative backend route
+    # /api/plugs/{id}/photos/{photo_id}/image) to use as the plug's thumbnail on
+    # the map/list. None when the plug has no approved photo yet.
+    thumbnail_url: Optional[str] = None
 
 
 class PublicPlugResponse(BaseModel):
@@ -339,6 +359,12 @@ class PublicPlugResponse(BaseModel):
     # not network detail). Same meaning as PlugResponse's fields.
     rated_power_w: Optional[int] = Field(default=None, ge=0)
     connector_type: Optional[str] = Field(default=None, max_length=32)
+    # [Reviews] Public aggregate rating: safe to expose (an anonymous mean +
+    # count, no per-user data). None when unrated. Same meaning as PlugResponse's.
+    avg_rating: Optional[float] = None
+    review_count: int = 0
+    # [Photos] One APPROVED photo URL for the map thumbnail (backend image route).
+    thumbnail_url: Optional[str] = None
 
 
 class GatewayEventResponse(BaseModel):
@@ -793,6 +819,48 @@ class PlugReportResponse(BaseModel):
     created_at: Optional[str] = None
     resolved_at: Optional[str] = None
     resolved_by_user_id: Optional[int] = None
+
+
+# --- Plug reviews (verified-charger star ratings) ---
+
+class PlugReviewCreateRequest(BaseModel):
+    """Body for POST /api/plugs/{plug_id}/reviews. `rating` is a whole-star
+    1..5 (the router still enforces the same range for defence in depth).
+    `body` is optional free text, length-bounded like PlugReportCreateRequest's
+    description, a rating with no prose is allowed."""
+    rating: int = Field(ge=1, le=5)
+    body: Optional[str] = Field(default=None, max_length=1000)
+
+
+class PlugReviewResponse(BaseModel):
+    """One driver's star review of a plug. `author_display` is a
+    privacy-preserving label (first name, else a masked email), the public
+    read must never leak a full email or the driver's user id."""
+    id: int
+    plug_id: int
+    rating: int
+    body: Optional[str] = None
+    author_display: str
+    created_at: Optional[str] = None
+    # True only in the authenticated projection, when this review is the
+    # caller's own: lets the UI show "your review" + an edit/delete affordance.
+    is_mine: bool = False
+
+
+# --- Plug photos (driver-submitted, held for approval) ---
+
+class PlugPhotoResponse(BaseModel):
+    """One plug photo. In the public/driver list `status` is included so the
+    uploader's own PENDING photo can render a "waiting for review" badge; the
+    anonymous read only ever contains APPROVED rows. In the CPO moderation queue
+    the same shape carries the pending rows to review. `url` is always the
+    backend image route, which serves pending bytes to moderators only."""
+    id: int
+    plug_id: int
+    url: str
+    status: str
+    created_at: Optional[str] = None
+    is_mine: bool = False
 
 
 # --- CPO Offline (cash) Top-ups ---

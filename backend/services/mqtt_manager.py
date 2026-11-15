@@ -51,10 +51,10 @@ AUTO_STOP_ON_LIMITS = os.getenv("AUTO_STOP_ON_LIMITS", "true").lower() in ("1", 
 # has already force-OFF'd the plug locally in firmware — auto-flip it to
 # MAINTENANCE so a new session can't be *started* on it (session-start already
 # 409s any non-AVAILABLE plug) until an operator clears it via
-# POST /api/cpo/plugs/{id}/maintenance. Runs AFTER the safety-cutoff
-# auto-finalize below (same coroutine, sequenced) so it isn't raced/overwritten
-# by finalize_charging_session's own plug.status = AVAILABLE. Env-toggleable;
-# on by default.
+# POST /api/cpo/plugs/{id}/maintenance. Runs BEFORE the safety-cutoff
+# auto-finalize (same coroutine, sequenced); finalize_charging_session keeps a
+# MAINTENANCE status, so watchers never hear a faulted plug is free.
+# Env-toggleable; on by default.
 AUTO_MAINTENANCE_ON_CRITICAL_ALARM = os.getenv("AUTO_MAINTENANCE_ON_CRITICAL_ALARM", "true").lower() in ("1", "true", "yes")
 
 # [Plug power] A plug counts as powered only while its firmware keeps reporting

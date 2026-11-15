@@ -33,9 +33,9 @@
 import { useEffect } from 'react';
 import { MapContainer, TileLayer, Marker, Popup, useMap } from 'react-leaflet';
 import L from 'leaflet';
-import { Flag, Navigation, Star } from 'lucide-react';
+import { Flag, MessageSquare, Navigation, Star } from 'lucide-react';
 import 'leaflet/dist/leaflet.css';
-import { StatusDot, Money, ReliabilityBadge } from './ui';
+import { StatusDot, Money, ReliabilityBadge, StarRating } from './ui';
 import { useConfig } from '../contexts/ConfigContext';
 import { AVAILABILITY_CSS_VAR, getPlugAvailability } from '../utils/plugAvailability';
 import { googleMapsDirUrl } from '../utils/navHandoff';
@@ -71,7 +71,7 @@ function ViewController({ flyTo }) {
   return null;
 }
 
-export default function MapComponent({ plugs, authed, onSelectPlug, onReportPlug, onToggleFavorite, flyTo, userLocation }) {
+export default function MapComponent({ plugs, authed, onSelectPlug, onReportPlug, onToggleFavorite, onOpenReviews, flyTo, userLocation }) {
   const { coin_inr_rate: rate } = useConfig();
 
   // Center roughly on India, or a default location, when nothing has coordinates.
@@ -118,12 +118,28 @@ export default function MapComponent({ plugs, authed, onSelectPlug, onReportPlug
             <Marker key={plug.id} position={[plug.latitude, plug.longitude]} icon={markerIcon(state)}>
               <Popup>
                 <div className="map-popup">
+                  {plug.thumbnail_url && (
+                    <img
+                      className="map-popup-thumb"
+                      src={plug.thumbnail_url}
+                      alt={`${plug.name} charger`}
+                      loading="lazy"
+                    />
+                  )}
                   <strong className="map-popup-name">{plug.name}</strong>
                   <StatusDot state={state} label />
                   {plug.price_per_kwh != null && (
                     <div className="map-popup-price">
                       <Money coins={plug.price_per_kwh} rate={rate} />
                       <span>/kWh</span>
+                    </div>
+                  )}
+                  {plug.review_count > 0 && (
+                    <div className="map-popup-rating">
+                      <StarRating value={plug.avg_rating} size={13} />
+                      <span>
+                        {Number(plug.avg_rating).toFixed(1)} ({plug.review_count})
+                      </span>
                     </div>
                   )}
                   {authed && <ReliabilityBadge plugId={plug.id} />}
@@ -166,6 +182,16 @@ export default function MapComponent({ plugs, authed, onSelectPlug, onReportPlug
                       onClick={() => onSelectPlug(plug.id)}
                     >
                       Sign in to charge
+                    </button>
+                  )}
+                  {onOpenReviews && (
+                    <button
+                      type="button"
+                      className="btn btn-ghost btn-sm btn-full"
+                      onClick={() => onOpenReviews(plug)}
+                    >
+                      <MessageSquare size={14} aria-hidden="true" />
+                      Photos &amp; reviews
                     </button>
                   )}
                   {authed && onReportPlug && (

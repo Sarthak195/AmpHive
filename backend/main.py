@@ -16,6 +16,7 @@ Phase 2 additions:
 
 import logging
 import os
+import re
 import uuid
 from contextlib import asynccontextmanager
 
@@ -166,6 +167,12 @@ MAX_REQUEST_BODY_BYTES = int(os.getenv("MAX_REQUEST_BODY_BYTES", 1024 * 1024))
 FIRMWARE_UPLOAD_MAX_BYTES = int(os.getenv("FIRMWARE_UPLOAD_MAX_BYTES", 4 * 1024 * 1024))
 _FIRMWARE_UPLOAD_PATH = "/api/admin/firmware-releases/upload"
 
+# [Plug photos] POST /api/plugs/{id}/photos takes a raw phone photo (routers/
+# plugs.py _PHOTO_MAX_BYTES, 8 MiB, re-checked on the real body). Same idea as
+# the firmware carve-out, matching the nginx location in frontend/nginx.conf.
+PLUG_PHOTO_UPLOAD_MAX_BYTES = 8 * 1024 * 1024
+_PLUG_PHOTO_UPLOAD_RE = re.compile(r"^/api/plugs/\d+/photos$")
+
 
 @app.middleware("http")
 async def max_body_size_middleware(request: Request, call_next):
@@ -178,11 +185,13 @@ async def max_body_size_middleware(request: Request, call_next):
         except ValueError:
             declared_length = None
         if declared_length is not None:
-            cap = (
-                FIRMWARE_UPLOAD_MAX_BYTES
-                if request.url.path == _FIRMWARE_UPLOAD_PATH
-                else MAX_REQUEST_BODY_BYTES
-            )
+            path = request.url.path
+            if path == _FIRMWARE_UPLOAD_PATH:
+                cap = FIRMWARE_UPLOAD_MAX_BYTES
+            elif request.method == "POST" and _PLUG_PHOTO_UPLOAD_RE.match(path):
+                cap = PLUG_PHOTO_UPLOAD_MAX_BYTES
+            else:
+                cap = MAX_REQUEST_BODY_BYTES
             if declared_length > cap:
                 return JSONResponse(
                     status_code=413,
