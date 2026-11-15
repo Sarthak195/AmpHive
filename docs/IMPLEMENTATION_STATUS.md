@@ -12,6 +12,10 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 - Ops housekeeping: `stop_grace_period: 60s` on the postgres `db` service in the relay, prod and dev compose files (the live VM compose needs the same line by hand, see DEPLOYMENT.md).
 - Docs and deploy instructions now name the new GCP project (`project-6e290ffd-5954-4d48-aa9`), compute SA `626015685685-compute@developer.gserviceaccount.com`, IP `8.235.4.66` and the `-2` buckets; dated historical records are unchanged.
 - New known-limit items (U0-U6, F10, firmware SET_INTERVAL wake, boot round trips) added to TODO.md.
+- JWT library swapped from python-jose to PyJWT (`backend/services/auth.py`). Claims, HS256 and the
+  `token_version` check are unchanged; tokens issued before the swap still decode
+  (`backend/tests/test_jwt_compat.py`). Removes python-jose, ecdsa, rsa and six from the lock, and the
+  `--ignore-vuln PYSEC-2026-1325` from the CI pip-audit step.
 
 ---
 

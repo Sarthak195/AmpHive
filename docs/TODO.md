@@ -127,12 +127,13 @@ actions, and two deliberate deferrals.*
       root-owned `firmware_images` volume must be chowned first. Needs a
       dedicated infra deploy, not a bundle. (`backend/Dockerfile`,
       `agent/Dockerfile` still have no `USER`.)
-- [ ] **`python-jose` -> PyJWT.** The one remaining dependency advisory is
-      `ecdsa` PYSEC-2026-1325, which has NO upstream fix, arrives transitively
-      via python-jose, and is unreachable here (ES*-only; `JWT_ALGORITHM` pins
-      HS256 on both encode and decode). CI ignores exactly that ID with a
-      written justification. Migrating off python-jose would remove it
-      entirely, but an auth-path swap did not belong in this batch.
+- [x] **`python-jose` -> PyJWT.** Done 2026-11-15: `backend/services/auth.py`
+      and the auth tests now use PyJWT (`import jwt`, HS256, `jwt.PyJWTError`).
+      python-jose PYSEC-2026-4298 (no fixed release) and its `ecdsa` dependency
+      PYSEC-2026-1325 are gone from the lock (`rsa` and `six` went with them), and
+      CI's pip-audit no longer carries any `--ignore-vuln`. Tokens minted by
+      python-jose still decode (`backend/tests/test_jwt_compat.py`), so the
+      deploy does not sign anyone out.
 - [ ] **`users.email` uniqueness is byte-exact, not case-insensitive.**
       `models.py` has a plain `unique=True` while every lookup uses
       `func.lower(User.email)`. Application code has normalised to lowercase

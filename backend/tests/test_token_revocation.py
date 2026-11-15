@@ -9,10 +9,10 @@ epoch 0 for backward compatibility.
 """
 from unittest.mock import AsyncMock, MagicMock
 
+import jwt
 import pytest
 from fastapi import HTTPException
 from fastapi.security import HTTPAuthorizationCredentials
-from jose import jwt
 
 from backend.routers.auth import logout
 from backend.services.auth import (
