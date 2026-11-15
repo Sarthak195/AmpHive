@@ -7,6 +7,30 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 
 ---
 
+## 0 - 2026-11-15 fix batch
+
+- **Session end keeps an out-of-service plug out of service (C1).**
+  `finalize_charging_session` now locks and re-reads the plug and frees it
+  only from OCCUPIED. AVAILABLE stays AVAILABLE; MAINTENANCE and OFFLINE
+  (an operator change made mid-session, or auto-maintenance) persist. The
+  `plug_status` emit, the "notify me when free" fan-out and the capacity
+  fan-out run only when the final status is AVAILABLE. For
+  THERMAL_CUTOFF / OVERCURRENT_CUTOFF, auto-maintenance now runs BEFORE the
+  post-cutoff finalize, so watchers are no longer told a faulted plug is free.
+- **Telemetry persist no longer deadlocks against finalize (F17).**
+  `_persist_telemetry` wrote the plug row before its session
+  `SELECT ... FOR UPDATE`, so autoflush locked plug then session while
+  finalize locks session then plug (prod deadlocks 2026-10-25 and
+  2026-10-28). The plug writes now follow the session lock; no retry loop.
+- **Live kWh and cost follow billed energy (C16).** The TelemetryStore is
+  fed the session's monotonic billed energy (REC-01 reset offset included)
+  instead of the raw wire counter, so a gateway counter regression no
+  longer makes the live display read below the final bill.
+- **Finished sessions are not streamed (C15).** `subscribe_session` on a
+  session that is no longer ACTIVE sends one `completed` frame from the
+  session's own row and joins no room, so it cannot show the plug's next
+  driver's live figures (see [SECURITY.md](SECURITY.md) section 4).
+
 ## 0. Latest — 2026-10-20 connection noise: debounced offline notices, gated orphan bells, fw 2.8.0 diagnostics
 
 A 45-day forensic pass over the prod logs (one user, who is driver, operator
