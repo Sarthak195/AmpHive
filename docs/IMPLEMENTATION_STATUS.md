@@ -26,8 +26,8 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
   unverified email replaces the password and name and sends a new link
   (verified emails still get the 400). The first Google link to any existing
   password account, verified or not, still drops its password, bumps
-  `token_version` and sets `auth_provider='google'`, and now also marks an
-  unverified account verified. Residual in [SECURITY.md](SECURITY.md) §8.6.
+  `token_version`, sets `auth_provider='google'` and marks an unverified
+  account verified. Residual in [SECURITY.md](SECURITY.md) §8.6.
 
 ## 0. Latest — 2026-10-20 connection noise: debounced offline notices, gated orphan bells, fw 2.8.0 diagnostics
 
