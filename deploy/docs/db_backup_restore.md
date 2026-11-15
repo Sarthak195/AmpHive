@@ -101,8 +101,8 @@ gcloud compute instances set-service-account amphive-vm-in --zone=asia-south1-a 
 gcloud compute instances start amphive-vm-in --zone=asia-south1-a
 
 # Bucket-scoped IAM for the VM's identity (create + read, no delete/overwrite):
-gcloud storage buckets add-iam-policy-binding gs://amphive-db-backups --member="serviceAccount:930756667383-compute@developer.gserviceaccount.com" --role=roles/storage.objectCreator
-gcloud storage buckets add-iam-policy-binding gs://amphive-db-backups --member="serviceAccount:930756667383-compute@developer.gserviceaccount.com" --role=roles/storage.objectViewer
+gcloud storage buckets add-iam-policy-binding gs://amphive-db-backups-2 --member="serviceAccount:626015685685-compute@developer.gserviceaccount.com" --role=roles/storage.objectCreator
+gcloud storage buckets add-iam-policy-binding gs://amphive-db-backups-2 --member="serviceAccount:626015685685-compute@developer.gserviceaccount.com" --role=roles/storage.objectViewer
 ```
 
 **Gotcha found doing this:** gsutil caches the metadata-server token in

@@ -18,7 +18,7 @@ there; the previous paid `amphive-vm-in` / static-IP setup is deleted).
 | Resource | Value |
 |----------|-------|
 | Compute VM | `amphive-relay`, zone `us-west1-a`, `e2-micro` (2 shared vCPU / 1 GB RAM + 2 GB swapfile), always-free tier — hosting cost $0/mo |
-| Public IP | `136.117.94.209` — **reserved/static** (`gcloud compute addresses list` shows `amphive-relay-ip`, IN_USE). This doc previously said "ephemeral"; that was wrong, and it matters now that an **MX record** points here — a changing IP would silently break mail, not just the web. Verified across a stop/start during the 2026-08-18 resize: the address held. A records: `@`, `cpo`, `mqtt`, `mail`. |
+| Public IP | `8.235.4.66`, **reserved/static** (`gcloud compute addresses list` shows `amphive-relay-ip`, IN_USE). This doc previously said "ephemeral"; that was wrong, and it matters now that an **MX record** points here, a changing IP would silently break mail, not just the web. Verified across a stop/start during the 2026-08-18 resize: the address held. A records: `@`, `cpo`, `mqtt`, `mail`. |
 | Database | PostgreSQL 15 as a Docker container. Data persists in the `amphive-relay_pgdata` named volume; nightly pg_dump → GCS + a recovery disk snapshot exist (see runbooks). |
 
 The VM runs `deploy/relay/docker-compose.relay.yml` from `~/amphive-relay/`
@@ -39,7 +39,10 @@ stdout log is capped by the json-file driver: 3 files of 10 MB for db,
 backend, frontend, caddy and the fake plug, 3 files of 5 MB for mqtt (the
 `x-logging` / `x-logging-mqtt` anchors in the repo compose, 2026-10-20; the
 live copy on the VM gets the same values by hand, since deploy.ps1 doesn't
-ship the compose file). mosquitto logs to **stdout only** (no file mirror on
+ship the compose file). The same applies to `stop_grace_period: 60s` on the
+`db` service (added 2026-11-15 so `docker stop` does not SIGKILL Postgres
+mid-checkpoint): add that line to the live compose on the VM by hand and
+recreate `db`. mosquitto logs to **stdout only** (no file mirror on
 this stack). Restart policy `unless-stopped`.
 
 | Container | Image/build | Port | Notes |

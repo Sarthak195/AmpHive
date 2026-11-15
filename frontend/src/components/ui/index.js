@@ -11,5 +11,6 @@ export { default as ErrorState } from './ErrorState';
 export { default as Skeleton, SkeletonTitle } from './Skeleton';
 export { default as StatusDot } from './StatusDot';
 export { default as ReliabilityBadge } from './ReliabilityBadge';
+export { default as StarRating } from './StarRating';
 export { default as Money } from './Money';
 export { default as PageHeader } from './PageHeader';

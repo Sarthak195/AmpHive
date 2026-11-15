@@ -159,19 +159,9 @@ jobs:
 
       - name: Audit Python dependencies (pip-audit)
         # Audits the LOCKFILE — the exact set the production image installs.
-        #
-        # ecdsa PYSEC-2026-1325 (Minerva timing side-channel) is ignored
-        # DELIBERATELY and is the only exception: upstream has published NO
-        # fixed version, it arrives transitively via python-jose, and it is
-        # only reachable for ES* algorithms. AmpHive pins HS256 on both the
-        # encode and decode side (backend/services/auth.py JWT_ALGORITHM), so
-        # the vulnerable code path is never entered. Re-check this when
-        # python-jose is replaced or ecdsa ships a fix; do not add further
-        # ignores without the same kind of written justification.
         run: |
           pip install pip-audit
           pip-audit -r backend/requirements.lock.txt \
-            --ignore-vuln PYSEC-2026-1325 \
             --progress-spinner off
 
       - uses: actions/setup-node@v4

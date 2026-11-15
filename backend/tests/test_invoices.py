@@ -152,6 +152,45 @@ def _db(*results):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "refunded, expected_total, expected_taxable, expected_gst",
+    [
+        (Decimal("0"), Decimal("118.00"), Decimal("100.00"), Decimal("18.00")),
+        (Decimal("59.00"), Decimal("59.00"), Decimal("50.00"), Decimal("9.00")),
+        (Decimal("118.00"), Decimal("0.00"), Decimal("0.00"), Decimal("0.00")),
+    ],
+)
+async def test_first_issue_nets_approved_dispute_refunds(
+    monkeypatch, refunded, expected_total, expected_taxable, expected_gst
+):
+    """C11: a dispute approved BEFORE the invoice exists leaves
+    adjust_invoice_for_session_refund nothing to adjust, so the first issue
+    itself must net the approved refunds off the invoice."""
+    monkeypatch.delenv("GST_RATE_PCT", raising=False)  # 18%
+    session = _session_mock(coins_spent=Decimal("118.00"))
+    session.energy_kwh = 2.0
+    session.rate_coins_per_kwh = Decimal("5.00")
+    tenant_result = MagicMock()
+    tenant_result.one_or_none.return_value = (1, "INV", "Seller Pvt Ltd", None)
+    refund_result = MagicMock()
+    refund_result.scalar_one.return_value = refunded
+    db = MagicMock()
+    # existing-invoice check, session, refund SUM, tenant row, seq bump
+    db.execute = AsyncMock(
+        side_effect=[_result(None), _result(session), refund_result, tenant_result, MagicMock()]
+    )
+    db.commit = AsyncMock()
+    db.refresh = AsyncMock()
+
+    invoice = await invoices_service.issue_invoice_for_session(db, 1)
+
+    assert invoice.amount_coins == expected_total
+    assert invoice.total_inr == expected_total
+    assert invoice.taxable_value_inr == expected_taxable
+    assert invoice.gst_amount_inr == expected_gst
+
+
+@pytest.mark.asyncio
 async def test_foreign_driver_gets_404():
     """A driver who doesn't own the session is rejected by the router's own
     session-select before the service (issue_invoice_for_session) is ever

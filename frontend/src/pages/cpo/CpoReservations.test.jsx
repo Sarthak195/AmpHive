@@ -153,6 +153,21 @@ describe('CpoReservations — Day view', () => {
     expect(await screen.findByText('Booked')).toBeInTheDocument(); // legend badge
   });
 
+  it('refetches the Day data on every re-entry, so a list-view cancel is not drawn stale', async () => {
+    render(<CpoReservations />);
+    await screen.findByText('Garage plug');
+    await userEvent.click(screen.getByRole('button', { name: 'Day' }));
+    await screen.findByText('Booked');
+    await userEvent.click(screen.getByRole('button', { name: 'List' }));
+    api.get.mockClear();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Day' }));
+
+    await waitFor(() =>
+      expect(api.get).toHaveBeenCalledWith(expect.stringContaining('/api/cpo/reservations?limit=200'))
+    );
+  });
+
   it('renders one row per charger, with a booking placed only on its own day', async () => {
     render(<CpoReservations />);
     await screen.findByText('Garage plug');

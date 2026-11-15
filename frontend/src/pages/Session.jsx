@@ -18,12 +18,12 @@ import SessionMonitor from '../components/SessionMonitor';
 import SessionReceipt from '../components/SessionReceipt';
 import { useSession } from '../contexts/SessionContext';
 import { useConfig } from '../contexts/ConfigContext';
-import { PageHeader, EmptyState } from '../components/ui';
+import { PageHeader, EmptyState, Skeleton } from '../components/ui';
 import { formatINR, coinsToINR } from '../utils/money';
 import './Session.css';
 
 const Session = () => {
-  const { isActive, sessionData, activeSessions, sessionId, switchSession, receipt } =
+  const { isActive, sessionData, activeSessions, sessionId, switchSession, receipt, restoring } =
     useSession();
   const { coin_inr_rate } = useConfig();
 
@@ -88,6 +88,12 @@ const Session = () => {
           )}
           <SessionMonitor />
         </>
+      ) : restoring ? (
+        // Still asking the backend whether a session is running: a loading
+        // placeholder, not a "No active charge" flash for a live session.
+        <div role="status" aria-label="Loading your charging session">
+          <Skeleton lines={3} />
+        </div>
       ) : (
         <EmptyState
           icon={PlugZap}

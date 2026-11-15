@@ -70,19 +70,49 @@ export const SessionProvider = ({ children }) => {
   const [alarms, setAlarms] = useState([]);
   // The final billing summary from the most recent stop, shown as a receipt.
   const [receipt, setReceipt] = useState(null);
+  // True until the first /api/sessions/active restore settles, so the page
+  // shows a loading state instead of flashing "No active charge" for a
+  // session that is in fact running.
+  const [restoring, setRestoring] = useState(true);
+  // Effects below key on the user's id, not the user object: refreshUser()
+  // (after login, stop, limit edits, top-ups) always builds a new object, and
+  // keying on it tore down the socket and zeroed the monitor each time.
+  const userId = user?.id ?? null;
+  // Epoch ms since which the monitor has been waiting on the live feed: set
+  // on every subscribe, including the re-subscribe after a socket reconnect.
+  // SessionMonitor uses it to tell a gateway still waking from its 10 s idle
+  // cadence (a small "Updating" hint) from a feed that has really dropped.
+  const [watchSince, setWatchSince] = useState(null);
+
+  // Mirrors for socket handlers, which must read current state without
+  // re-subscribing on every change. sessionIdRef also keeps
+  // refreshActiveSessions from depending on `sessionId` (which would
+  // re-trigger the mount-restore effect below on every start or switch).
+  const sessionIdRef = useRef(null);
+  const isActiveRef = useRef(false);
+  const activeSessionsRef = useRef([]);
+  useEffect(() => {
+    sessionIdRef.current = sessionId;
+    isActiveRef.current = isActive;
+    activeSessionsRef.current = activeSessions;
+  }, [sessionId, isActive, activeSessions]);
+  // The session whose stop the driver started from this tab: stopSession owns
+  // its receipt, refocus and wallet refresh, so the ended path below skips it.
+  const stoppingIdRef = useRef(null);
 
   // Manage the Socket.io lifecycle (connect on login, disconnect on logout).
   // The cleanup below disconnects the previous socket on every user change,
   // so the logout branch only has to clear the state handle.
   useEffect(() => {
-    if (!user) {
+    if (!userId) {
       setSocket(null);
       return;
     }
 
-    const token = localStorage.getItem('amphive_token');
+    // Read the token on every (re)connect: the socket now outlives a
+    // same-user re-login, which can store a new token.
     const newSocket = io(API_BASE, {
-      auth: { token },
+      auth: (cb) => cb({ token: localStorage.getItem('amphive_token') }),
       transports: ['websocket', 'polling'],
     });
 
@@ -112,45 +142,7 @@ export const SessionProvider = ({ children }) => {
       newSocket.off('gateway_alarm', handleAlarm);
       newSocket.disconnect();
     };
-  }, [user]);
-
-  // Manage telemetry subscription reactively
-  useEffect(() => {
-    if (!socket || !sessionId || !isActive) return;
-
-    const handleTelemetry = (data) => {
-      setSessionData(data);
-      setLastFrameAt(Date.now());
-      // The backend can end THIS session out from under the driver — a
-      // limit/wallet/hold-exhaustion auto-stop, or the stale-session reaper
-      // — with no client-initiated stop call. Without this, the UI never
-      // learns: it keeps showing a live "Stop charging" button that 400s
-      // ("This session is not active") when clicked. Mark it ended so the
-      // page falls back to the no-active-session view instead.
-      if (isTerminalStatus(data?.status)) {
-        setIsActive(false);
-        setActiveSessions((prev) => prev.filter((s) => s.session_id !== sessionId));
-      }
-    };
-
-    socket.on('telemetry', handleTelemetry);
-    socket.emit('subscribe_session', { session_id: sessionId });
-    console.log(`Subscribed to Socket.io telemetry for session ${sessionId}`);
-
-    return () => {
-      socket.off('telemetry', handleTelemetry);
-      socket.emit('unsubscribe_session', { session_id: sessionId });
-      console.log(`Unsubscribed from Socket.io telemetry for session ${sessionId}`);
-    };
-  }, [socket, sessionId, isActive]);
-
-  // Tracks the *focused* session id without making refreshActiveSessions
-  // depend on `sessionId` (which would change its identity on every
-  // start/switch and re-trigger the mount-restore effect below).
-  const sessionIdRef = useRef(null);
-  useEffect(() => {
-    sessionIdRef.current = sessionId;
-  }, [sessionId]);
+  }, [userId]);
 
   const refreshActiveSessions = useCallback(async (focusSessionId = null) => {
     const res = await api.get('/api/sessions/active');
@@ -194,17 +186,84 @@ export const SessionProvider = ({ children }) => {
     );
     setFocusedHoldCoins(session.hold_coins ?? null);
     setLastFrameAt(null);
+    // Seed from the REST row (/api/sessions/active carries energy_kwh and
+    // cost_coins) so a restored session shows its real kWh and cost at once;
+    // live telemetry frames overwrite this as they arrive. Power stays 0 until
+    // the first frame, since the row has no instantaneous reading.
     setSessionData({
       plug_id: session.plug_id,
       plug_name: session.plug_name,
       status: 'charging',
       duration_sec: 0,
       power_w: 0.0,
-      energy_kwh: 0.0,
+      energy_kwh: Number(session.energy_kwh) || 0,
       current_a: 0.0,
-      cost_coins: 0.0
+      cost_coins: Number(session.cost_coins) || 0,
     });
   }, []);
+
+  // The backend ended the focused session (limit, wallet or hold exhaustion
+  // auto-stop, the stale-session reaper, a reservation clear-out) with no
+  // stop call from this tab. Refocus a still-charging sibling, or show this
+  // session's bill (GET /api/sessions/{id} has the stop response's receipt
+  // shape), and refresh the wallet the session was just debited from.
+  // `remaining` defaults to the local list minus the ended session.
+  const endFocusedSession = useCallback((endedId, remaining) => {
+    if (stoppingIdRef.current === endedId) return;
+    const rest = remaining ?? activeSessionsRef.current.filter((s) => s.session_id !== endedId);
+    setActiveSessions(rest);
+    refreshUser().catch(() => {});
+    if (rest.length > 0) {
+      switchSession(rest[0]);
+      return;
+    }
+    // Leave the monitor only once the bill is in, so the page goes straight
+    // to the receipt with no "No active charge" in between. Skipped if the
+    // driver has started or focused another session since.
+    const settle = (bill) => {
+      if (sessionIdRef.current !== endedId) return;
+      if (bill) setReceipt(bill);
+      setIsActive(false);
+    };
+    api.get(`/api/sessions/${endedId}`).then(settle).catch(() => settle(null));
+  }, [refreshUser, switchSession]);
+
+  // Manage the telemetry subscription for the focused session.
+  useEffect(() => {
+    if (!socket || !sessionId || !isActive) return;
+
+    const handleTelemetry = (data) => {
+      // Frames carry plug_id but no session id: drop a late frame for a
+      // session this view has just switched away from.
+      const plugId = activeSessionsRef.current.find((s) => s.session_id === sessionId)?.plug_id;
+      if (plugId != null && data?.plug_id != null && data.plug_id !== plugId) return;
+      // Merge, not replace: a frame has no plug_name, so replacing dropped
+      // the charger name the REST row seeded.
+      setSessionData((prev) => ({ ...prev, ...data }));
+      setLastFrameAt(Date.now());
+      // Without this the UI never learns the backend ended the session: it
+      // keeps a live "Stop charging" button that 400s when clicked.
+      if (isTerminalStatus(data?.status)) endFocusedSession(sessionId);
+    };
+
+    // socket.io fires 'connect' again on every auto-reconnect, and the new
+    // sid is in no rooms (the server joins only user_{id} on connect), so
+    // re-subscribe each time or live telemetry stays dead after a blip.
+    const subscribe = () => {
+      setWatchSince(Date.now());
+      socket.emit('subscribe_session', { session_id: sessionId });
+    };
+    socket.on('telemetry', handleTelemetry);
+    socket.on('connect', subscribe);
+    if (socket.connected) subscribe();
+    else setWatchSince(Date.now());
+
+    return () => {
+      socket.off('telemetry', handleTelemetry);
+      socket.off('connect', subscribe);
+      socket.emit('unsubscribe_session', { session_id: sessionId });
+    };
+  }, [socket, sessionId, isActive, endFocusedSession]);
 
   // Optional `limits`: { max_kwh?, max_duration_seconds? } — a user-chosen
   // stop condition ("only charge 1 kWh"). Keys are only sent when set.
@@ -250,7 +309,12 @@ export const SessionProvider = ({ children }) => {
       // refresh below (or a switchSession) fills it in.
       setFocusedHoldCoins(result.hold_coins ?? null);
       setLastFrameAt(null);
-      setSessionData(null);
+      // A fresh session is at zero; the plug name must be seeded because
+      // frames (merged over this) carry none.
+      setSessionData({
+        plug_id: result.plug_id, plug_name: result.plug_name, status: 'starting',
+        power_w: 0, energy_kwh: 0, cost_coins: 0,
+      });
       // The start response may omit hold_coins/cost_coins entirely — pull
       // the enriched /api/sessions/active so the low-balance warning has a
       // real threshold for THIS session without waiting for a full reload.
@@ -266,6 +330,7 @@ export const SessionProvider = ({ children }) => {
     setError(null);
     try {
       if (sessionId) {
+        stoppingIdRef.current = sessionId;
         const result = await api.post('/api/sessions/stop', { session_id: sessionId });
         const remaining = activeSessions.filter(s => s.session_id !== sessionId);
         setActiveSessions(remaining);
@@ -289,6 +354,7 @@ export const SessionProvider = ({ children }) => {
       }
     } catch (err) {
       setError(err.message);
+      stoppingIdRef.current = null;
       // The stop may have failed because the session was already finalized
       // server-side (reaper/other tab), or transiently (network blip) while
       // it's still very much ACTIVE. Blanket setIsActive(false) here would
@@ -335,10 +401,17 @@ export const SessionProvider = ({ children }) => {
       max_kwh: result?.max_kwh ?? null,
       max_duration_seconds: result?.max_duration_seconds ?? null,
     };
+    // The PATCH may resize this session's hold; keep the focused hold in step
+    // with the new limits, or the low-balance check compares a raised limit
+    // against the old, smaller hold and warns too early.
+    if (result && 'hold_coins' in result) next.hold_coins = result.hold_coins;
     if (id === sessionId) {
       setFocusedLimits(
-        next.max_kwh != null || next.max_duration_seconds != null ? next : null
+        next.max_kwh != null || next.max_duration_seconds != null
+          ? { max_kwh: next.max_kwh, max_duration_seconds: next.max_duration_seconds }
+          : null
       );
+      if ('hold_coins' in next) setFocusedHoldCoins(next.hold_coins);
     }
     setActiveSessions((prev) =>
       prev.map((s) => (s.session_id === id ? { ...s, ...next } : s))
@@ -368,14 +441,16 @@ export const SessionProvider = ({ children }) => {
   // Check for active sessions on mount or auth change; focus the newest.
   useEffect(() => {
     const checkActiveSession = async () => {
-      if (!user) {
+      if (!userId) {
         setActiveSessions([]);
         setSessionData(null);
         setSessionId(null);
         setIsActive(false);
+        setRestoring(false);
         return;
       }
 
+      setRestoring(true);
       try {
         const res = await refreshActiveSessions();
         if (res.active) {
@@ -383,17 +458,62 @@ export const SessionProvider = ({ children }) => {
         }
       } catch (err) {
         console.error('Failed to restore active session:', err);
+      } finally {
+        setRestoring(false);
       }
     };
 
     checkActiveSession();
-  }, [user, refreshActiveSessions, switchSession]);
+  }, [userId, refreshActiveSessions, switchSession]);
+
+  // Re-sync with the backend when something may have changed that this tab
+  // was not told about: a queued charge auto-started, expired or failed, a
+  // backend stop, or a socket reconnect (pushes sent while it was down are
+  // lost).
+  const resync = useCallback(async () => {
+    // Captured before the await: a session started while this GET is in
+    // flight is missing from its list but is not ended.
+    const focusedId = sessionIdRef.current;
+    try {
+      const res = await refreshActiveSessions();
+      const sessions = res.sessions || [];
+      if (sessionIdRef.current !== focusedId) return;
+      if (isActiveRef.current && !sessions.some((s) => s.session_id === focusedId)) {
+        endFocusedSession(focusedId, sessions);
+        return;
+      }
+      refreshUser().catch(() => {});
+      if (!isActiveRef.current && sessions.length > 0) switchSession(sessions[0]);
+    } catch {
+      // The next push, reconnect or reload re-syncs.
+    }
+  }, [refreshActiveSessions, refreshUser, switchSession, endFocusedSession]);
+
+  useEffect(() => {
+    if (!socket) return undefined;
+    const handleNotification = (n) => {
+      const type = n?.type || '';
+      if (type.startsWith('queued_charge_') || type === 'session_stopped') resync();
+    };
+    // The first connect is covered by the mount restore above.
+    let connectedBefore = !!socket.connected;
+    const handleConnect = () => {
+      if (connectedBefore) resync();
+      connectedBefore = true;
+    };
+    socket.on('notification', handleNotification);
+    socket.on('connect', handleConnect);
+    return () => {
+      socket.off('notification', handleNotification);
+      socket.off('connect', handleConnect);
+    };
+  }, [socket, resync]);
 
   return (
     <SessionContext.Provider value={{
       socket,
-      activeSessions, sessionData, sessionId, isActive, error,
-      lastFrameAt, focusedStartedAt, focusedLimits, focusedHoldCoins, alarms, receipt,
+      activeSessions, sessionData, sessionId, isActive, error, restoring,
+      lastFrameAt, watchSince, focusedStartedAt, focusedLimits, focusedHoldCoins, alarms, receipt,
       startSession, stopSession, updateLimits, clearSession, switchSession, dismissReceipt,
     }}>
       {children}
