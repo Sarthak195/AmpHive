@@ -6,9 +6,10 @@ Driver photos are HELD FOR APPROVAL: a new upload is PENDING and invisible on
 the public map until a CPO/admin approves it here. Mirrors _plug_reports.py's
 tenant-scoped list + lifecycle shape. `tenant_id` is denormalized onto PlugPhoto
 at upload (plug -> gateway -> tenant), so the queue is a single indexed equality
-filter, no join. Rejecting also deletes the stored bytes from the public bucket
-(services/photo_publish.delete_object) — a rejected photo must actually leave
-storage, not just be hidden.
+filter, no join. Rejecting also deletes the stored bytes from the private bucket
+(services/photo_publish.delete_object): a rejected photo must actually leave
+storage, not just be hidden. Reject also works on an APPROVED photo (takedown)
+and on a REJECTED one (retries a delete that failed); approve is pending-only.
 """
 import asyncio
 from datetime import datetime, timezone
@@ -72,9 +73,9 @@ async def cpo_list_plug_photos(
     return [_photo_response(p) for p in result.scalars().all()]
 
 
-async def _load_pending_photo(db, photo_id: int, tenant_id: Optional[int]) -> PlugPhoto:
-    """Load a tenant-owned photo locked for update, or 404. 409 if it has
-    already been moderated (approved/rejected) — moderation is one-shot."""
+async def _load_photo(db, photo_id: int, tenant_id: Optional[int], allowed) -> PlugPhoto:
+    """Load a tenant-owned photo locked for update, or 404. 409 if its status
+    is not in ``allowed`` (approve: pending only; reject: any)."""
     result = await db.execute(
         select(PlugPhoto)
         .where(and_(PlugPhoto.id == photo_id, PlugPhoto.tenant_id == tenant_id))
@@ -83,7 +84,7 @@ async def _load_pending_photo(db, photo_id: int, tenant_id: Optional[int]) -> Pl
     photo = result.scalar_one_or_none()
     if not photo:
         raise HTTPException(status_code=404, detail="Plug photo not found or access denied.")
-    if photo.status != PlugPhotoStatus.PENDING:
+    if photo.status not in allowed:
         raise HTTPException(
             status_code=409,
             detail=f"This photo is already {photo.status.value}.",
@@ -97,9 +98,9 @@ async def cpo_approve_plug_photo(
     user: User = Depends(require_role("cpo", "admin")),
     db: AsyncSession = Depends(get_db),
 ):
-    """Approve a pending photo — it becomes publicly visible on the map/panel.
-    Tenant-scoped; one-shot (409 if already moderated)."""
-    photo = await _load_pending_photo(db, photo_id, user.tenant_id)
+    """Approve a pending photo: it becomes publicly visible on the map/panel.
+    Tenant-scoped; pending only (409 if already approved or rejected)."""
+    photo = await _load_photo(db, photo_id, user.tenant_id, {PlugPhotoStatus.PENDING})
     photo.status = PlugPhotoStatus.APPROVED
     photo.reviewed_at = datetime.now(timezone.utc)
     photo.reviewed_by_user_id = user.id
@@ -115,11 +116,14 @@ async def cpo_reject_plug_photo(
     user: User = Depends(require_role("cpo", "admin")),
     db: AsyncSession = Depends(get_db),
 ):
-    """Reject a pending photo — mark it REJECTED and delete the stored bytes from
-    the public bucket. The GCS delete is best-effort (idempotent on 404); a
-    storage error is logged but does not block the rejection, so a bad photo is
-    always taken out of the queue even if cleanup needs a retry."""
-    photo = await _load_pending_photo(db, photo_id, user.tenant_id)
+    """Reject a photo: mark it REJECTED and delete the stored bytes from the
+    bucket. Works on a pending photo, on an APPROVED one (takes it off the map
+    when it was approved by mistake or found abusive later), and on an already
+    REJECTED one (re-runs the delete). The GCS delete is best-effort
+    (idempotent on 404); a storage error is logged but does not block the
+    rejection, and the image route never serves a rejected photo to the public,
+    so a failed delete only leaves private bytes behind until a retry."""
+    photo = await _load_photo(db, photo_id, user.tenant_id, set(PlugPhotoStatus))
     photo.status = PlugPhotoStatus.REJECTED
     photo.reviewed_at = datetime.now(timezone.utc)
     photo.reviewed_by_user_id = user.id

@@ -237,3 +237,40 @@ async def test_anon_cannot_list_photos_of_private_plug():
         with pytest.raises(HTTPException) as exc:
             await list_plug_photos(plug_id=1, db=db, user=None)
     assert exc.value.status_code == 404
+
+
+# --- CPO moderation: takedown + delete retry (C18) ---
+
+def _cpo_db(photo):
+    db = _photo_db(photo)
+    db.commit = AsyncMock()
+    db.refresh = AsyncMock()
+    return db
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["pending", "approved", "rejected"])
+async def test_reject_works_from_any_status_and_deletes_the_object(status):
+    from backend.database.models import PlugPhotoStatus
+    from backend.routers.cpo._plug_photos import cpo_reject_plug_photo
+
+    photo = _photo(status)
+    photo.created_at = None
+    with patch("backend.routers.cpo._plug_photos.delete_object") as rm:
+        out = await cpo_reject_plug_photo(
+            photo_id=5, user=_role_user("cpo"), db=_cpo_db(photo))
+    assert photo.status == PlugPhotoStatus.REJECTED
+    assert out.status == "rejected"
+    assert out.url == "/api/plugs/1/photos/5/image"
+    rm.assert_called_once_with("plug-1/abc.jpg")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["approved", "rejected"])
+async def test_approve_stays_pending_only(status):
+    from backend.routers.cpo._plug_photos import cpo_approve_plug_photo
+
+    with pytest.raises(HTTPException) as exc:
+        await cpo_approve_plug_photo(
+            photo_id=5, user=_role_user("cpo"), db=_cpo_db(_photo(status)))
+    assert exc.value.status_code == 409
