@@ -7,6 +7,14 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 
 ---
 
+## 0 - 2026-11-15 fix batch
+
+- Ops housekeeping: `stop_grace_period: 60s` on the postgres `db` service in the relay, prod and dev compose files (the live VM compose needs the same line by hand, see DEPLOYMENT.md).
+- Docs and deploy instructions now name the new GCP project (`project-6e290ffd-5954-4d48-aa9`), compute SA `626015685685-compute@developer.gserviceaccount.com`, IP `8.235.4.66` and the `-2` buckets; dated historical records are unchanged.
+- New known-limit items (U0-U6, F10, firmware SET_INTERVAL wake, boot round trips) added to TODO.md.
+
+---
+
 ## 0. Latest — 2026-10-20 connection noise: debounced offline notices, gated orphan bells, fw 2.8.0 diagnostics
 
 A 45-day forensic pass over the prod logs (one user, who is driver, operator
@@ -274,7 +282,7 @@ matching admin-portal UI:
   the world-readable GCS bucket, the on-device ECDSA app signature is the
   trust anchor). Publishing is now: build locally → drag the `.bin` into
   Admin → Firmware Releases → push from any gateway page picker.
-  `gs://amphive-fw` remains valid for already-registered URLs and as the
+  `gs://amphive-fw-2` remains valid for already-registered URLs and as the
   script fallback (`deploy/scripts/publish_firmware.ps1`).
 - **Frontend:** new **Admin → Chargers** page (`/admin/chargers`) listing
   all public+private chargers with filters; an **"Update firmware"

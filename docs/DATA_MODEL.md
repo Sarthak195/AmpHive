@@ -320,7 +320,7 @@ full column list of each:
 - **`firmware_releases`** (`0036_firmware_releases.py`, feat/ota-version-
   picker) — an admin-registered firmware release catalog (`FirmwareRelease`:
   `version` UNIQUE, `url` the already-published `https://` image location —
-  `gs://amphive-fw` or the backend's own image host, see
+  `gs://amphive-fw-2` or the backend's own image host, see
   [FIRMWARE.md](FIRMWARE.md) §7 — `notes`,
   `is_active` soft-deactivate flag). Not tenant-scoped: one firmware fleet.
   Replaces hand-pasting a firmware URL with a version dropdown on the CPO
@@ -333,7 +333,7 @@ full column list of each:
   only URLs, never binary blobs — since feat/admin-dashboard (2026-08-04)
   `POST /api/admin/firmware-releases/upload` accepts the `.bin` itself and
   auto-registers a row; since 2026-08-11 (PR #115) that upload **publishes
-  the bytes to `gs://amphive-fw`** and registers the bucket URL (the
+  the bytes to `gs://amphive-fw-2`** and registers the bucket URL (the
   2026-08-04 backend-volume host `GET /api/firmware/images/{filename}` is
   kept only as legacy back-compat for URLs registered before the switch).
   Re-uploading/re-registering a **deactivated** version overwrites

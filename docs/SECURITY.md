@@ -350,7 +350,7 @@ BFG + force-push) to purge the dead values entirely.
     transport + signing.** Both halves of the earlier TODO are implemented
     (fw ≥ 1.4.0):
     * **HTTPS-only images**: hosted on the public-read GCS bucket
-      `gs://amphive-fw` (`https://storage.googleapis.com/amphive-fw/...`,
+      `gs://amphive-fw-2` (`https://storage.googleapis.com/amphive-fw-2/...`,
       public-CA cert the firmware's Mozilla bundle validates; public-read
       user-approved 2026-07-10 — images hold no secrets and are signed).
       Plain `http://` is refused by the firmware

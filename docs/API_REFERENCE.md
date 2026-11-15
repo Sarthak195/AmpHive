@@ -326,7 +326,7 @@ surface in the tenant-scoped `GET /api/cpo/audit`).
 **Public firmware-image host (`routers/firmware_images.py`, feat/admin-dashboard, 2026-08-04 — legacy back-compat since 2026-08-11).**
 `GET /api/firmware/images/{filename}` — **auth: none, unauthenticated by design** —
 serves images stored under `FIRMWARE_IMAGE_DIR` by the pre-PR-#115 upload
-endpoint. New uploads publish to `gs://amphive-fw` instead (see the upload row
+endpoint. New uploads publish to `gs://amphive-fw-2` instead (see the upload row
 above), so this endpoint remains only so any already-registered
 `/api/firmware/images/...` release URL keeps resolving.
 `filename` is constrained by a whitelist regex plus path containment (no
@@ -336,7 +336,7 @@ bucket: the device trusts its embedded **ECDSA app-signature** check (see
 access control. It lives in its **own** router (`firmware_images.py`), **not**
 `routers/admin.py` — see [SECURITY.md](SECURITY.md) §3. Because
 `firmware_releases.url` stores the full URL, backend-hosted images and
-`gs://amphive-fw`-hosted images coexist.
+`gs://amphive-fw-2`-hosted images coexist.
 
 ---
 
@@ -361,9 +361,9 @@ access control. It lives in its **own** router (`firmware_images.py`), **not**
 | `FRONTEND_ORIGIN` | `https://amphive.app` | Base URL for links in outbound email (`/reset-password?token=...`) and the Google OAuth callback redirect (`/auth/google/callback#token=...`) |
 | `APP_DB_PASSWORD` | `""` | **(2026-08-04, DB privilege separation)** When set, requests serve through a NON-superuser role (`APP_DB_USER`, default `amphive_app`, DML-only — cannot DROP/ALTER tables) instead of the `DATABASE_URL` owner; the app provisions the role at startup and verifies it before serving. Unset = prior behavior (serve as the owner role). See SECURITY.md §2 |
 | `APP_DB_USER` | `amphive_app` | **(2026-08-04)** Name of the least-privilege runtime role (validated as a plain SQL identifier). Only used when `APP_DB_PASSWORD` is set |
-| `PUBLIC_API_ORIGIN` | `""` | **(feat/admin-dashboard, 2026-08-04; unused since 2026-08-11, PR #115)** Was the base URL stamped into uploaded firmware-release image URLs (`/api/firmware/images/...`); uploads now register `gs://amphive-fw` bucket URLs, so the backend no longer reads this |
-| `FIRMWARE_GCS_BUCKET` | `amphive-fw` | **(2026-08-11, PR #115)** Public-read GCS bucket `POST /api/admin/firmware-releases/upload` publishes `.bin` images to (keyless VM service-account ADC — `services/firmware_publish.py`; one-time IAM grant in [deploy/docs/ota_image_publishing.md](../deploy/docs/ota_image_publishing.md)) |
-| `FIRMWARE_IMAGE_DIR` | `data/firmware-images` | **(feat/admin-dashboard, 2026-08-04)** Where the pre-PR-#115 upload endpoint stored `.bin` images (a docker volume in `docker-compose.relay.yml`); still served by the legacy back-compat `GET /api/firmware/images/{filename}` — new uploads go to `gs://amphive-fw` instead |
+| `PUBLIC_API_ORIGIN` | `""` | **(feat/admin-dashboard, 2026-08-04; unused since 2026-08-11, PR #115)** Was the base URL stamped into uploaded firmware-release image URLs (`/api/firmware/images/...`); uploads now register `gs://amphive-fw-2` bucket URLs, so the backend no longer reads this |
+| `FIRMWARE_GCS_BUCKET` | `amphive-fw` (prod sets `amphive-fw-2`) | **(2026-08-11, PR #115)** Public-read GCS bucket `POST /api/admin/firmware-releases/upload` publishes `.bin` images to (keyless VM service-account ADC, `services/firmware_publish.py`; one-time IAM grant in [deploy/docs/ota_image_publishing.md](../deploy/docs/ota_image_publishing.md)) |
+| `FIRMWARE_IMAGE_DIR` | `data/firmware-images` | **(feat/admin-dashboard, 2026-08-04)** Where the pre-PR-#115 upload endpoint stored `.bin` images (a docker volume in `docker-compose.relay.yml`); still served by the legacy back-compat `GET /api/firmware/images/{filename}`, new uploads go to `gs://amphive-fw-2` instead |
 | `FIRMWARE_UPLOAD_MAX_BYTES` | `4194304` | **(feat/admin-dashboard, 2026-08-04)** Per-path body-cap carve-out for the firmware upload route — the global `MAX_REQUEST_BODY_BYTES` (1 MiB) would 413 a ~1 MB signed image at the middleware; nginx has a matching 8m `location` carve-out |
 | `RESET_TOKEN_TTL_MIN` | `30` | Minutes a password-reset link stays valid (single use) |
 | `EMAIL_VERIFICATION_TTL_MIN` | `1440` | **(2026-08-11)** Minutes an emailed `verify-email` link stays valid (single use); 24 h default since a new user may not click immediately |
