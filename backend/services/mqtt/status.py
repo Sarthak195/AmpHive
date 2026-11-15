@@ -424,6 +424,11 @@ class MQTTStatusMixin:
                     .where(
                         QueuedCharge.plug_id.in_(list(plug_ips.keys())),
                         QueuedCharge.status == QueuedChargeStatus.WAITING,
+                        # [Scheduled start] Never hold the OFF for a scheduled
+                        # row: an OFF to an idle plug can't fight the sweep's
+                        # later ON, and a stale plug whose relay restored ON
+                        # would otherwise charge at peak with nothing billing.
+                        QueuedCharge.not_before.is_(None),
                     )
                 )
                 queued_hold_plug_ids = set()

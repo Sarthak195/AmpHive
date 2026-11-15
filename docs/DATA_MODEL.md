@@ -292,6 +292,10 @@ full column list of each:
   request on a plug with no line power but a live gateway (`QueuedCharge`;
   `waiting → started | cancelled | expired | failed`, reaped by
   `services/session_reaper.py`). Backs `/api/sessions/queue*`.
+  `not_before TIMESTAMPTZ NULL` (`0041_queued_not_before.py`,
+  2026-11-15): NULL = outage queue; set = a scheduled start on a
+  powered plug that the sweep never begins before this instant (its
+  `expires_at` is `not_before + min(queue_ttl_min, SCHEDULE_START_GRACE_MIN)`).
 - **`password_reset_tokens`** (`0023_password_reset_tokens.py`) — a
   single-use, SHA-256-digest-only "forgot password" token
   (`PasswordResetToken`). Backs `POST /api/auth/forgot-password` +

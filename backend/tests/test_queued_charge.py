@@ -43,6 +43,7 @@ def _tenant(enabled=False, delay=2, ttl=720):
     t.queued_charging_enabled = enabled
     t.auto_start_delay_min = delay
     t.queue_ttl_min = ttl
+    t.timezone = "Asia/Kolkata"
     return t
 
 
@@ -126,8 +127,8 @@ def _db(*results):
     return db
 
 
-def _req(plug_id=1):
-    return QueueChargeRequest(plug_id=plug_id)
+def _req(plug_id=1, **kw):
+    return QueueChargeRequest(plug_id=plug_id, **kw)
 
 
 # --------------------------------------------------------------------------
@@ -227,6 +228,7 @@ async def test_queue_success_creates_waiting_row():
         _one((Decimal("100"), Decimal("0"))),
         _s1(0),                                 # under the cap
         _s1n(None),                             # no existing WAITING row
+        _s1n(None),                             # no other driver's schedule
     )
     with patch("backend.services.notifications.notify", AsyncMock()) as notify:
         resp = await queue_charge(_req(), _user(), db)
@@ -260,7 +262,8 @@ async def test_list_queued_returns_waiting_rows():
     qc.max_kwh = 30.0
     qc.max_duration_seconds = 14400
     rows = MagicMock()
-    rows.all.return_value = [(qc, "Bay 1")]
+    qc.not_before = None
+    rows.all.return_value = [(qc, "Bay 1", "Asia/Kolkata")]
     db = _db(rows)
 
     out = await get_queued_charges(_user(), db)
@@ -343,7 +346,8 @@ def _reservation(user_id):
     return r
 
 
-def _qc(status=QueuedChargeStatus.WAITING, expires_in_min=60, plug_id=1, user_id=5):
+def _qc(status=QueuedChargeStatus.WAITING, expires_in_min=60, plug_id=1, user_id=5,
+        not_before=None):
     qc = MagicMock()
     qc.id = 1
     qc.status = status
@@ -353,6 +357,7 @@ def _qc(status=QueuedChargeStatus.WAITING, expires_in_min=60, plug_id=1, user_id
     qc.max_kwh = 30.0
     qc.max_duration_seconds = 14400
     qc.expires_at = datetime.now(timezone.utc) + timedelta(minutes=expires_in_min)
+    qc.not_before = not_before   # None = outage queue (a MagicMock attr would be truthy)
     return qc
 
 
@@ -400,7 +405,7 @@ async def test_sweep_starts_debounced_row():
     gateway = _gateway()
     row_db = _row_db(
         _s1n(qc), _s1n(user), _s1(0), _s1n(plug), _s1(tenant),
-        _upd(), _s1n(None), _s1(gateway),
+        _upd(), _s1n(None), _s1n(None), _s1(gateway),
     )
     svc = SessionReaperService(_factory(_scan_db([1]), row_db), AsyncMock())
 
@@ -428,7 +433,7 @@ async def test_sweep_expires_on_balance_failure():
     tenant = _tenant(delay=2)
     row_db = _row_db(
         _s1n(qc), _s1n(_user()), _s1(0), _s1n(plug), _s1(tenant),
-        _upd(), _s1n(None), _s1(_gateway()),
+        _upd(), _s1n(None), _s1n(None), _s1(_gateway()),
     )
     svc = SessionReaperService(_factory(_scan_db([1]), row_db), AsyncMock())
 
@@ -451,7 +456,7 @@ async def test_sweep_fails_on_caps_failure():
     tenant = _tenant(delay=2)
     row_db = _row_db(
         _s1n(qc), _s1n(_user()), _s1(0), _s1n(plug), _s1(tenant),
-        _upd(), _s1n(None), _s1(_gateway()),
+        _upd(), _s1n(None), _s1n(None), _s1(_gateway()),
     )
     svc = SessionReaperService(_factory(_scan_db([1]), row_db), AsyncMock())
 
@@ -495,7 +500,7 @@ async def test_sweep_defers_when_another_users_reservation_covers_plug():
     session.id = 99
     row_db = _row_db(
         _s1n(qc), _s1n(_user(user_id=5)), _s1(0), _s1n(plug), _s1(tenant),
-        _upd(), _s1n(someone_elses_reservation),
+        _upd(), _s1n(someone_elses_reservation), _s1n(None),
         _s1(gateway),  # only reached if the reservation gate fails to defer
     )
     svc = SessionReaperService(_factory(_scan_db([1]), row_db), AsyncMock())
@@ -541,7 +546,7 @@ async def test_sweep_defers_when_user_at_active_session_cap():
     session.id = 99
     row_db = _row_db(
         _s1n(qc), _s1n(_user(user_id=5)), _s1(2),   # already at the cap
-        _s1n(plug), _s1(tenant), _upd(), _s1n(None), _s1(gateway),
+        _s1n(plug), _s1(tenant), _upd(), _s1n(None), _s1n(None), _s1(gateway),
     )
     svc = SessionReaperService(_factory(_scan_db([1]), row_db), AsyncMock())
 
@@ -682,6 +687,471 @@ async def test_orphan_off_no_orphans_skips_cpo_lookup_and_notify():
     mgr.send_plug_command.assert_not_called()
     notify_mock.assert_not_awaited()
     MQTTManager._instance = None
+
+
+# --------------------------------------------------------------------------
+# [Scheduled start] POST /api/sessions/queue with not_before (powered plug)
+# --------------------------------------------------------------------------
+
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _soon(hours=2):
+    return datetime.now(timezone.utc) + timedelta(hours=hours)
+
+
+def _sched_req(**kw):
+    kw.setdefault("not_before", _soon())
+    kw.setdefault("max_duration_seconds", 3600)
+    return _req(**kw)
+
+
+def _sched_prefix(plug=None, tenant=None):
+    """plug (locked), gateway, tenant: the shared head of the endpoint."""
+    return (
+        _s1n(plug if plug is not None else _plug(powered=True)),
+        _s1(_gateway()),
+        _s1(tenant if tenant is not None else _tenant(enabled=True, ttl=720)),
+    )
+
+
+def test_schedule_request_rejects_naive_not_before():
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError):
+        QueueChargeRequest(plug_id=1, not_before=datetime(2026, 11, 15, 22, 0))
+    ok = QueueChargeRequest(plug_id=1, not_before="2026-11-15T22:00:00+05:30")
+    assert ok.not_before.utcoffset() == timedelta(hours=5, minutes=30)
+
+
+@pytest.mark.asyncio
+async def test_schedule_rejects_unpowered_plug():
+    db = _db(*_sched_prefix(plug=_plug(powered=False)))
+    with pytest.raises(HTTPException) as exc:
+        await queue_charge(_sched_req(), _user(), db)
+    assert exc.value.status_code == 409
+    assert exc.value.detail["code"] == "plug_unpowered"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status,code", [
+    (PlugStatus.OCCUPIED, "plug_in_use"),
+    (PlugStatus.MAINTENANCE, "plug_out_of_service"),
+])
+async def test_schedule_rejects_busy_or_out_of_service_plug(status, code):
+    db = _db(*_sched_prefix(plug=_plug(powered=True, status=status)))
+    with pytest.raises(HTTPException) as exc:
+        await queue_charge(_sched_req(), _user(), db)
+    assert exc.value.detail["code"] == code
+
+
+@pytest.mark.asyncio
+async def test_schedule_requires_a_limit():
+    """Nobody is at the plug when a schedule fires: an unlimited session on an
+    absent car would keep the socket live and the whole wallet held."""
+    db = _db(*_sched_prefix())
+    with pytest.raises(HTTPException) as exc:
+        await queue_charge(_req(not_before=_soon()), _user(), db)
+    assert exc.value.status_code == 422
+    assert exc.value.detail["code"] == "schedule_needs_limit"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("offset", [timedelta(minutes=-1), timedelta(hours=24, minutes=1)])
+async def test_schedule_rejects_out_of_range_time(offset):
+    db = _db(*_sched_prefix())
+    with pytest.raises(HTTPException) as exc:
+        await queue_charge(
+            _sched_req(not_before=datetime.now(timezone.utc) + offset), _user(), db
+        )
+    assert exc.value.status_code == 400
+    assert exc.value.detail["code"] == "schedule_out_of_range"
+
+
+@pytest.mark.asyncio
+async def test_schedule_rejects_other_drivers_overlapping_booking():
+    db = _db(*_sched_prefix(), _s1n(11))         # a BOOKED window overlaps
+    with pytest.raises(HTTPException) as exc:
+        await queue_charge(_sched_req(), _user(), db)
+    assert exc.value.detail["code"] == "plug_reserved"
+
+
+@pytest.mark.asyncio
+async def test_schedule_rejects_booking_between_now_and_not_before():
+    """The scheduled car holds the socket from now, and the walk-up refusal
+    blocks other drivers from now, so a booking made earlier that sits wholly
+    between now and not_before must refuse the schedule (else its holder is
+    locked out of their own window)."""
+    import operator
+
+    now = datetime.now(timezone.utc)
+    nb = now + timedelta(hours=6)
+    b_start, b_end = now + timedelta(hours=1), now + timedelta(hours=2)
+    db = _db(*_sched_prefix(), _s1n(11))
+    with pytest.raises(HTTPException) as exc:
+        await queue_charge(_sched_req(not_before=nb), _user(), db)
+    assert exc.value.detail["code"] == "plug_reserved"
+
+    # The mocked DB returns the row regardless, so check the overlap window the
+    # reservation query actually asks for against this booking.
+    stmt = db.execute.call_args_list[3].args[0]
+    bounds = {}
+    for clause in stmt.whereclause.clauses:
+        key = getattr(clause.left, "key", None)
+        if key in ("start_at", "end_at"):
+            bounds[(key, clause.operator)] = clause.right.effective_value
+    start_lt = bounds[("start_at", operator.lt)]
+    end_gt = bounds[("end_at", operator.gt)]
+    assert end_gt <= datetime.now(timezone.utc)      # window opens now, not at nb
+    assert b_start < start_lt and b_end > end_gt     # the booking matches
+
+
+@pytest.mark.asyncio
+async def test_schedule_rejects_when_another_driver_holds_the_socket():
+    db = _db(*_sched_prefix(), _s1n(None), _s1n(12))   # other user's WAITING row
+    with pytest.raises(HTTPException) as exc:
+        await queue_charge(_sched_req(), _user(), db)
+    assert exc.value.detail["code"] == "plug_scheduled"
+
+
+@pytest.mark.asyncio
+async def test_schedule_success_persists_not_before_and_grace_expiry():
+    now = datetime.now(timezone.utc)
+    nb = now.replace(hour=16, minute=30, second=0, microsecond=0)
+    if nb <= now + timedelta(minutes=1):
+        nb += timedelta(days=1)                   # next 16:30Z = 22:00 IST
+    db = _db(
+        *_sched_prefix(),
+        _s1n(None),                               # no overlapping booking
+        _s1n(None),                               # no other driver's row
+        _one((Decimal("100"), Decimal("0"))),     # available balance
+        _s1(0),                                   # under the cap
+        _s1n(None),                               # no own WAITING row
+    )
+    # The venv has no IANA database, so pin the tenant zone to +05:30.
+    with patch("backend.services.pricing._zone", lambda _tz: IST), \
+         patch("backend.services.pricing.zone_name", lambda _tz: "Asia/Kolkata"), \
+         patch("backend.services.notifications.notify", AsyncMock()) as notify:
+        resp = await queue_charge(_sched_req(not_before=nb), _user(), db)
+
+    queued = db.add.call_args.args[0]
+    assert queued.not_before == nb
+    # min(queue_ttl 720, SCHEDULE_START_GRACE_MIN 30): a late start is bounded.
+    assert queued.expires_at == nb + timedelta(minutes=30)
+    assert queued.max_duration_seconds == 3600
+    assert resp["tenant_timezone"] == "Asia/Kolkata"
+    body = notify.await_args.args[3]
+    assert "22:00" in body and "Asia/Kolkata" in body
+
+
+@pytest.mark.asyncio
+async def test_outage_queue_refused_when_another_driver_scheduled_the_socket():
+    db = _db(
+        _s1n(_plug()),
+        _s1(_gateway()),
+        _s1(_tenant(enabled=True)),
+        _one((Decimal("100"), Decimal("0"))),
+        _s1(0),
+        _s1n(None),                               # no own WAITING row
+        _s1n(12),                                 # another driver's schedule
+    )
+    with pytest.raises(HTTPException) as exc:
+        await queue_charge(_req(), _user(), db)
+    assert exc.value.detail["code"] == "plug_scheduled"
+    db.add.assert_not_called()
+
+
+def _has_tz_db():
+    try:
+        from zoneinfo import ZoneInfo
+        ZoneInfo("Europe/London")
+        return True
+    except Exception:
+        return False
+
+
+@pytest.mark.skipif(not _has_tz_db(), reason="no IANA tz database on this host")
+def test_zone_name_resolves_like_billing():
+    from backend.services.pricing import zone_name
+    assert zone_name("Europe/London") == "Europe/London"
+    assert zone_name("Bad/Zone") == "Asia/Kolkata"      # billing's fallback
+
+
+def test_zone_name_last_resort_is_utc():
+    from backend.services.pricing import zone_name
+    with patch("backend.services.pricing._zone", lambda _tz: timezone.utc):
+        assert zone_name("Asia/Kolkata") == "UTC"
+
+
+# --------------------------------------------------------------------------
+# [Scheduled start] Sweep: the not_before gate and scheduled-row handling
+# --------------------------------------------------------------------------
+
+def _due_plug(powered_for_min=120, status=PlugStatus.AVAILABLE):
+    plug = _plug(powered=True, status=status)
+    plug.powered_since = datetime.now(timezone.utc) - timedelta(minutes=powered_for_min)
+    return plug
+
+
+def _started_session(rate=Decimal("4.00")):
+    session = MagicMock()
+    session.id = 99
+    session.rate_coins_per_kwh = rate
+    return session
+
+
+async def _sweep(row_db, begin=None):
+    svc = SessionReaperService(_factory(_scan_db([1]), row_db), AsyncMock())
+    begin = begin or AsyncMock(return_value=_started_session())
+    with patch("backend.services.session_start.begin_active_session", begin), \
+         patch("backend.services.notifications.notify", AsyncMock()) as notify:
+        started = await svc.reap_queued_starts_once()
+    return started, begin, notify
+
+
+def _scheduled_start_chain(qc, plug, tenant=None, gateway=None):
+    """qc, user, active count, plug, tenant, reservation expiry, covering
+    booking, gateway. (No outage-row guard: the row is scheduled.)"""
+    return _row_db(
+        _s1n(qc), _s1n(_user()), _s1(0), _s1n(plug),
+        _s1(tenant or _tenant(enabled=True, delay=2)),
+        _upd(), _s1n(None), _s1(gateway or _gateway()),
+    )
+
+
+def _ago(**kw):
+    return datetime.now(timezone.utc) - timedelta(**kw)
+
+
+@pytest.mark.asyncio
+async def test_sweep_leaves_not_yet_due_schedule_without_user_lock():
+    qc = _qc(not_before=_soon(hours=3), expires_in_min=210)
+    row_db = _row_db(_s1n(qc))
+    started, begin, _ = await _sweep(row_db)
+    assert started == 0
+    assert qc.status == QueuedChargeStatus.WAITING
+    assert row_db.execute.await_count == 1        # only the qc row lock
+    begin.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sweep_starts_schedule_at_not_before_when_power_never_dropped():
+    qc = _qc(not_before=_ago(seconds=30))
+    started, begin, notify = await _sweep(_scheduled_start_chain(qc, _due_plug()))
+    assert started == 1
+    assert begin.await_args.kwargs == {"max_kwh": 30.0, "max_duration_seconds": 14400}
+    assert qc.status == QueuedChargeStatus.STARTED
+    assert notify.await_args.args[1] == "queued_charge_started"
+    assert notify.await_args.args[2] == "Your scheduled charge started"
+
+
+@pytest.mark.asyncio
+async def test_sweep_debounce_runs_from_powered_since_not_from_not_before():
+    """Power back 1 min before not_before, 2 min debounce. A Wi-Fi blip that
+    re-baselines powered_since (telemetry gap > 90 s) behaves the same way."""
+    # At not_before: powered only 1 min, so still debouncing.
+    qc = _qc(not_before=_ago(seconds=5))
+    row_db = _row_db(_s1n(qc), _s1n(_user()), _s1(0), _s1n(_due_plug(powered_for_min=1)),
+                     _s1(_tenant(enabled=True, delay=2)))
+    started, begin, _ = await _sweep(row_db)
+    assert started == 0 and qc.status == QueuedChargeStatus.WAITING
+    begin.assert_not_awaited()
+    # At not_before + 1 min: powered 2 min, so it starts with no fresh
+    # debounce counted from not_before.
+    qc = _qc(not_before=_ago(minutes=1))
+    started, _, _ = await _sweep(_scheduled_start_chain(qc, _due_plug(powered_for_min=2)))
+    assert started == 1
+
+
+@pytest.mark.asyncio
+async def test_sweep_expires_schedule_past_its_grace_with_scheduled_copy():
+    qc = _qc(not_before=_ago(minutes=31), expires_in_min=-1)
+    _, _, notify = await _sweep(_row_db(_s1n(qc)))
+    assert qc.status == QueuedChargeStatus.EXPIRED
+    assert notify.await_args.args[1] == "queued_charge_expired"
+    assert "in time" in notify.await_args.args[3]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("holder,status,notified", [
+    (5, QueuedChargeStatus.CANCELLED, False),    # the owner started now
+    (77, QueuedChargeStatus.FAILED, True),       # someone else's car
+])
+async def test_sweep_scheduled_row_on_occupied_plug(holder, status, notified):
+    qc = _qc(not_before=_ago(seconds=30))
+    row_db = _row_db(_s1n(qc), _s1n(_user()), _s1(0),
+                     _s1n(_due_plug(status=PlugStatus.OCCUPIED)),
+                     _s1(_tenant(enabled=True, delay=2)), _s1n(holder))
+    _, begin, notify = await _sweep(row_db)
+    assert qc.status == status
+    assert notify.await_count == (1 if notified else 0)
+    begin.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sweep_fails_schedule_when_another_driver_booked_the_window():
+    qc = _qc(not_before=_ago(seconds=30))
+    row_db = _row_db(_s1n(qc), _s1n(_user()), _s1(0), _s1n(_due_plug()),
+                     _s1(_tenant(enabled=True, delay=2)), _upd(),
+                     _s1n(_reservation(user_id=99)), _s1(_gateway()))
+    _, begin, notify = await _sweep(row_db)
+    assert qc.status == QueuedChargeStatus.FAILED
+    assert notify.await_args.args[1] == "queued_charge_failed"
+    begin.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sweep_fails_schedule_when_cpo_disabled_queued_charging():
+    qc = _qc(not_before=_ago(seconds=30))
+    _, begin, _ = await _sweep(
+        _scheduled_start_chain(qc, _due_plug(), tenant=_tenant(enabled=False, delay=2))
+    )
+    assert qc.status == QueuedChargeStatus.FAILED
+    begin.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sweep_never_starts_on_a_dead_gateway():
+    qc = _qc(not_before=_ago(seconds=30))
+    started, begin, _ = await _sweep(
+        _scheduled_start_chain(qc, _due_plug(), gateway=_gateway(online=False))
+    )
+    assert started == 0 and qc.status == QueuedChargeStatus.WAITING
+    begin.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sweep_outage_row_waits_while_another_driver_is_scheduled():
+    qc = _qc()                                     # outage row (not_before None)
+    row_db = _row_db(_s1n(qc), _s1n(_user()), _s1(0), _s1n(_due_plug()),
+                     _s1(_tenant(delay=2)), _upd(), _s1n(None),
+                     _s1n(12),                     # another driver's schedule
+                     _s1(_gateway()))              # reached only if the guard fails
+    _, begin, _ = await _sweep(row_db)
+    assert qc.status == QueuedChargeStatus.WAITING
+    begin.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sweep_claims_started_before_the_helper_commits():
+    """A cancel can land once the helper's commit releases the qc row lock, so
+    STARTED must already be what that commit writes."""
+    qc = _qc(not_before=_ago(seconds=30))
+    seen = {}
+
+    async def begin(*_a, **_kw):
+        seen["status"] = qc.status
+        return _started_session()
+
+    started, _, _ = await _sweep(_scheduled_start_chain(qc, _due_plug()),
+                                 begin=AsyncMock(side_effect=begin))
+    assert seen["status"] == QueuedChargeStatus.STARTED
+    assert started == 1 and qc.started_session_id == 99
+
+
+@pytest.mark.asyncio
+async def test_sweep_publish_failure_overwrites_the_started_claim():
+    qc = _qc(not_before=_ago(seconds=30))
+    started, _, notify = await _sweep(
+        _scheduled_start_chain(qc, _due_plug()),
+        begin=AsyncMock(side_effect=HTTPException(status_code=500, detail="pub")),
+    )
+    assert started == 0
+    assert qc.status == QueuedChargeStatus.FAILED
+    assert notify.await_args.args[2] == "Scheduled charge couldn't start"
+
+
+@pytest.mark.asyncio
+async def test_orphan_off_hold_ignores_scheduled_rows():
+    """The reconnect OFF is never held for a scheduled row: an OFF to an idle
+    plug can't fight the sweep's later ON, and a stale, self-resumed relay
+    would otherwise charge unbilled. Only outage rows (not_before IS NULL) are
+    considered for the hold."""
+    from backend.services.mqtt_manager import MQTTManager
+
+    gw = MagicMock()
+    gw.status = GatewayStatus.ONLINE
+    mgr = _manager([
+        _result_scalar_one_or_none(gw),
+        _result_rows([(1, "10.0.0.11", "Bay 1", 0.0)]),
+        _result_scalars([]),
+        _result_rows([]),                 # the hold query (SQL asserted below)
+    ])
+    with patch("backend.services.mqtt.status.notify", AsyncMock()):
+        await mgr._persist_gateway_status("gw-1", "online")
+    db = mgr.db_session_factory.return_value.__aenter__.return_value
+    hold_sql = str(db.execute.await_args_list[3].args[0])
+    assert "queued_charges.not_before IS NULL" in hold_sql
+    assert [c.args[1] for c in mgr.send_plug_command.call_args_list] == [1]
+    MQTTManager._instance = None
+
+
+# --------------------------------------------------------------------------
+# [Scheduled start] POST /api/sessions/start contention
+# --------------------------------------------------------------------------
+
+def _start_db(plug, scheduled_rows, *tail):
+    rows = MagicMock()
+    rows.all.return_value = scheduled_rows
+    return _db(
+        _s1(_user()), _s1(0), _s1n(plug),      # user lock, active count, plug lock
+        _upd(), _s1n(None),                    # reservation expiry, no covering booking
+        _s1(_gateway()),                       # live gateway
+        rows,                                  # WAITING scheduled rows on the plug
+        *tail,
+    )
+
+
+def _row(qc_id, user_id):
+    r = MagicMock()
+    r.id = qc_id
+    r.user_id = user_id
+    return r
+
+
+@pytest.mark.asyncio
+async def test_start_refused_when_another_driver_scheduled_the_plug():
+    from backend.routers.sessions import start_charging_session
+    from backend.schemas import SessionStartRequest
+    db = _start_db(_plug(powered=True), [_row(3, 77)])
+    with patch("backend.routers.sessions.begin_active_session", AsyncMock()) as begin:
+        with pytest.raises(HTTPException) as exc:
+            await start_charging_session(SessionStartRequest(plug_id=1), _user(), db)
+    assert exc.value.status_code == 409
+    assert exc.value.detail["code"] == "plug_scheduled"
+    begin.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_owner_start_now_cancels_own_schedule_only_after_success():
+    from backend.routers.sessions import start_charging_session
+    from backend.schemas import SessionStartRequest
+    session = _started_session()
+    session.max_kwh = None
+    session.max_duration_seconds = None
+    db = _start_db(_plug(powered=True), [_row(3, 5)], _upd(), _s1n(None))
+    with patch("backend.routers.sessions.begin_active_session",
+               AsyncMock(return_value=session)):
+        resp = await start_charging_session(SessionStartRequest(plug_id=1), _user(), db)
+    assert resp["status"] == "started"
+    cancel_sql = str(db.execute.await_args_list[7].args[0])
+    assert cancel_sql.startswith("UPDATE queued_charges")
+
+    # A failed start (publish 500) must leave the schedule alone.
+    db = _start_db(_plug(powered=True), [_row(3, 5)])
+    with patch("backend.routers.sessions.begin_active_session",
+               AsyncMock(side_effect=HTTPException(status_code=500, detail="pub"))):
+        with pytest.raises(HTTPException):
+            await start_charging_session(SessionStartRequest(plug_id=1), _user(), db)
+    assert db.execute.await_count == 7          # no UPDATE after the failure
+
+
+@pytest.mark.asyncio
+async def test_sweep_late_scheduled_start_reports_time_and_rate():
+    qc = _qc(not_before=_ago(minutes=20))
+    started, _, notify = await _sweep(_scheduled_start_chain(qc, _due_plug()))
+    assert started == 1
+    assert notify.await_args.args[2] == "Your scheduled charge started late"
+    assert "4.00 coins/kWh" in notify.await_args.args[3]
 
 
 # --- C13: CPO plug edit can clear the per-plug overrides back to "inherit" ---

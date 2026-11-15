@@ -71,6 +71,12 @@ gaps.*
 - `test_reservations.py`, `test_reservation_reaper.py` — book-ahead
   reservation gate + expiry sweep (DB-gated)
 - `test_queued_charge.py` — queue-during-outage auto-start/expiry
+  (DB-free), plus scheduled (off-peak) start: the `not_before` gate ahead of the
+  debounce, grace expiry, contention (`plug_scheduled`), the STARTED-before-ON
+  claim, the start-route refusal and owner supersede, and the orphan-OFF hold
+  that skips scheduled rows. Tenant-zone copy patches `pricing._zone` because the
+  Windows venv has no IANA database; `test_zone_name_resolves_like_billing`
+  skips there.
 
 **CPO operator & platform-admin surfaces**
 - `test_cpo_gap_endpoints.py`, `test_driver_gap_endpoints.py` — redesign

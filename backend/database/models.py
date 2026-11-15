@@ -1706,9 +1706,14 @@ class QueuedCharge(Base):
     max_duration_seconds: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     status: Mapped[QueuedChargeStatus] = mapped_column(SQLEnum(QueuedChargeStatus, name="queued_charge_status", values_callable=lambda x: [e.value for e in x]), default=QueuedChargeStatus.WAITING, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
-    # created_at + queue_ttl; a queued charge that never sees restored power
-    # EXPIRES here rather than lingering (services/session_reaper.py).
+    # created_at + queue_ttl (a scheduled row: not_before + its start grace);
+    # a queued charge that never starts in time EXPIRES here rather than
+    # lingering (services/session_reaper.py).
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # [Scheduled start] NULL = outage queue (start when power returns). Set = a
+    # scheduled start on a powered plug: the sweep never starts it before this
+    # instant (routers/sessions.py queue_charge; migration 0041_queued_not_before).
+    not_before: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     # Linked once the reaper starts the session; SET NULL keeps the queue
     # history row if the session is later deleted.
     started_session_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("charging_sessions.id", ondelete="SET NULL"), nullable=True)

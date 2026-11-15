@@ -1,0 +1,26 @@
+"""queued_not_before: queued_charges.not_before for scheduled (off-peak) starts.
+
+NULL = today's outage queue (start when power returns). Set = do not start
+before this instant (a scheduled start on a powered plug). No index: WAITING
+rows are a handful and the sweep already scans them all. No GRANT needed (no
+new object class, same reasoning as 0038). IF NOT EXISTS so a
+create_all()-built database migrates cleanly (the 0038 idempotency idiom).
+
+Revision ID: 0041_queued_not_before
+Revises: 0040_plug_photos
+Create Date: 2026-11-15
+"""
+from alembic import op
+
+revision = "0041_queued_not_before"
+down_revision = "0040_plug_photos"
+branch_labels = None
+depends_on = None
+
+
+def upgrade() -> None:
+    op.execute("ALTER TABLE queued_charges ADD COLUMN IF NOT EXISTS not_before TIMESTAMPTZ")
+
+
+def downgrade() -> None:
+    op.execute("ALTER TABLE queued_charges DROP COLUMN IF EXISTS not_before")

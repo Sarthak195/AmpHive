@@ -86,6 +86,21 @@ def queue_ttl(tenant: Tenant, plug: Optional[Plug]) -> int:
     return tenant.queue_ttl_min
 
 
+# [Scheduled start] How late (MINUTES) after its chosen time a scheduled start
+# may still begin: expires_at = not_before + min(queue_ttl, this). The driver
+# consented to "start at 22:00", not "any time in the next 12 h" (a gateway that
+# reconnects at 09:30 would otherwise energize at the peak rate, unattended).
+# Set it >= queue_ttl_min to get "not_before + queue TTL" exactly.
+SCHEDULE_START_GRACE_MIN = int(os.getenv("SCHEDULE_START_GRACE_MIN") or "30")
+# How far ahead a start may be scheduled.
+SCHEDULE_MAX_AHEAD_HOURS = 24
+
+
+def schedule_ttl(tenant: Tenant, plug: Optional[Plug]) -> int:
+    """MINUTES a scheduled row stays WAITING after its not_before."""
+    return min(queue_ttl(tenant, plug), SCHEDULE_START_GRACE_MIN)
+
+
 async def begin_active_session(
     db: AsyncSession,
     user: User,
