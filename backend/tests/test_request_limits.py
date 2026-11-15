@@ -193,6 +193,15 @@ def test_nginx_photo_location_is_nested_in_the_api_block():
     assert "client_max_body_size 9m;" in api_block
 
 
+def test_csp_img_src_allows_blob_for_moderation_thumbnails():
+    """The CPO photo queue renders pending photos from blob: URLs (fetched with
+    the Bearer token), so every CSP copy must allow blob: images."""
+    conf = (Path(__file__).resolve().parents[2] / "frontend" / "nginx.conf").read_text(encoding="utf-8")
+    copies = conf.count("img-src ")
+    assert copies == 5
+    assert conf.count("img-src 'self' data: blob: https:;") == copies
+
+
 def test_other_paths_keep_the_global_cap(monkeypatch):
     """The carve-out is path-exact — every other endpoint still enforces
     MAX_REQUEST_BODY_BYTES."""

@@ -17,7 +17,9 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
   `Cache-Control: public, max-age=86400`; pending and rejected photos only to a
   CPO of the plug's tenant or an admin (`private, no-store`), 404 for everyone
   else. Every photo `url` and `thumbnail_url` is that relative route. The CPO
-  page loads images with the Bearer token; the uploader's own pending photo
+  page loads images with the Bearer token and shows them from `blob:` URLs, so
+  the CSP `img-src` (all copies in `frontend/nginx.conf`, the Caddyfile example
+  and `deploy-relay.sh`) now allows `blob:`; the uploader's own pending photo
   shows a placeholder.
 - **Photo uploads up to 8 MiB actually reach the backend.** nginx allows 9m on
   `/api/plugs/<id>/photos` (nested in the `/api/` block) and the body-size
