@@ -8,7 +8,7 @@ claims sub, role, email, tv, iat, exp; no auth_time) and is checked in verbatim.
 
 import backend.services.auth as auth
 
-FIXTURE_SECRET = "fixture-secret-for-jose-compat-test-0123456789"
+FIXTURE_SECRET = "fixture-secret-for-jose-compat-test-0123456789"  # gitleaks:allow
 # exp is in the year 2100 so this never expires.
 FIXTURE_TOKEN = (
     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
