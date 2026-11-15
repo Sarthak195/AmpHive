@@ -40,25 +40,6 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
   `token_version`, sets `auth_provider='google'` and marks an unverified
   account verified. Residual in [SECURITY.md](SECURITY.md) §8.6.
 
-- **Per-device logout:** Log out now signs out only this app in this
-  browser. Every sign-in (password login, email verification, Google
-  callback) mints a random `sid` claim that `/me` renewals carry unchanged;
-  `POST /api/auth/logout` inserts it into the new `revoked_sessions` table
-  (migration `0042_revoked_sessions`, after the off-peak
-  `0041_queued_not_before`). `get_current_user` (401,
-  same detail as a `token_version` mismatch), `get_current_user_optional`
-  (anonymous, same as a mismatch there), Socket.io `connect` and the socket
-  re-auth all reject a revoked sid with one PK lookup. A token minted before
-  this has no sid and its logout falls back to the global bump
-  (`scope:"all"`). New `POST /api/auth/logout-everywhere` keeps the global
-  `token_version` bump, offered behind a confirm step on the driver Account
-  page and on CPO Settings (the only place cpo/admin users can reach it,
-  their console being on the other origin). Every existing `token_version`
-  bump is unchanged. Rollback runbook step and residuals in
-  [SECURITY.md](SECURITY.md) §2. Tests:
-  `backend/tests/test_per_device_logout.py` (DB-free plus DB-gated),
-  `frontend/src/components/LogoutEverywhere.test.jsx`.
-
 Session page (two driver reports on the live session page):
 
 - **Reloading a running session took about 10 s to look live.** Three causes
@@ -254,6 +235,39 @@ miscount energy or time. `PROJECT_VER` is `2.9.0-direct`. The software gateway
 the interval the cut-short sleep used (`agent/test_poll_wake.py`).
 **Not yet built:** there is no signed 2.9.0 image yet (build with ESP-IDF
 v5.3.3, target esp32, as for 2.8.0). The field gateway stays on 2.8.0-direct. See [FIRMWARE.md](FIRMWARE.md) (§3 and §8).
+
+### Per-device logout (`feat/per-device-logout`)
+
+Log out now signs out only this app in this
+browser. Every sign-in (password login, email verification, Google
+callback) mints a random `sid` claim that `/me` renewals carry unchanged;
+`POST /api/auth/logout` inserts it into the new `revoked_sessions` table
+(migration `0042_revoked_sessions`, after the off-peak
+`0041_queued_not_before`). `get_current_user` (401,
+same detail as a `token_version` mismatch), `get_current_user_optional`
+(anonymous, same as a mismatch there), Socket.io `connect` and the socket
+re-auth all reject a revoked sid with one PK lookup. A token minted before
+this has no sid and its logout falls back to the global bump
+(`scope:"all"`). New `POST /api/auth/logout-everywhere` keeps the global
+`token_version` bump, offered behind a confirm step on the driver Account
+page and on CPO Settings (the only place cpo/admin users can reach it,
+their console being on the other origin). Every existing `token_version`
+bump is unchanged. Rollback runbook step and residuals in
+[SECURITY.md](SECURITY.md) §2. Tests:
+`backend/tests/test_per_device_logout.py` (DB-free plus DB-gated),
+`frontend/src/components/LogoutEverywhere.test.jsx`.
+
+### Backup failure and staleness alerts (`feat/backup-alerts`)
+
+`deploy/scripts/backup_db.sh` mails the operator (`ALERT_TO`, default
+`support@amphive.app`, via the host `sendmail`) when the nightly backup exits
+non-zero, naming the failed step and the log tail. The new
+`deploy/scripts/check_backup_fresh.sh` (cron, 01:00 UTC) mails when the
+last-success marker is older than `MAX_AGE_HOURS` (default 26), which catches a
+backup that never ran. Both run on the VM they watch, so a down VM or a broken
+Postfix sends nothing. Tests: `deploy/scripts/test_backup_alerts.sh`. Install
+steps in [deploy/docs/db_backup_restore.md](../deploy/docs/db_backup_restore.md);
+the live VM script differs and is merged by hand.
 
 ### Scheduled (off-peak) start (`feat/offpeak-start`)
 
