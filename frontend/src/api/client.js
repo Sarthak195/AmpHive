@@ -144,7 +144,9 @@ export const api = {
   // --- Queued charges ---
   // Queue a charge on an unpowered plug (gateway online, no line power). The
   // backend auto-starts it, after a CPO debounce, once power returns. Body:
-  // { plug_id, max_kwh?, max_duration_seconds? }.
+  // { plug_id, max_kwh?, max_duration_seconds?, not_before? }. [Scheduled
+  // start] not_before (an ISO instant WITH an offset, within 24 h) schedules a
+  // start on a POWERED plug instead, and then needs a time or energy limit.
   queueCharge: (body) =>
     apiRequest('/api/sessions/queue', { method: 'POST', body: JSON.stringify(body) }),
   // The signed-in driver's WAITING queued charges (with expiry).

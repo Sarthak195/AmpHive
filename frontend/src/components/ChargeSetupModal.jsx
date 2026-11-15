@@ -19,6 +19,12 @@
  * via apiErrorCopy, and a `circuit_full` rejection additionally offers
  * "Ask for capacity" (POST /api/plugs/{id}/request-capacity) instead of a
  * dead end.
+ *
+ * [Scheduled start] In start mode, when the plug reports schedule_available
+ * and a tenant_timezone, a "Start: Now | At a time" choice appears. "At a time"
+ * takes a wall-clock time in the TENANT's zone, requires a time or energy
+ * limit (nobody is at the plug when it switches on; 8h is preselected), and
+ * calls `onConfirm(plugId, limits, notBeforeIso)`. "Now" keeps the two-arg call.
  */
 
 import { useEffect, useState } from 'react';
@@ -29,6 +35,7 @@ import api from '../api/client';
 import { useConfig } from '../contexts/ConfigContext';
 import { useWallet } from '../contexts/WalletContext';
 import { apiErrorCopy } from '../utils/statusCopy';
+import { fmtTimeInZone, nextOccurrenceInZone } from '../utils/reservationTime';
 
 const TIME_PRESETS = [
   { id: 'none', label: 'No limit', minutes: null },
@@ -57,6 +64,12 @@ const COPY = {
     busy: 'Starting…',
     intro: 'Set a stop limit if you want one — you can change it anytime while charging.',
   },
+  schedule: {
+    title: 'Set up your charge',
+    confirm: 'Schedule charge',
+    busy: 'Scheduling…',
+    intro: 'Leave your car plugged in. Charging starts at the time you pick.',
+  },
   queue: {
     title: 'Queue this charge',
     confirm: 'Join the queue',
@@ -77,6 +90,8 @@ export default function ChargeSetupModal({ open, onClose, plug, mode = 'start', 
   const [circuitFull, setCircuitFull] = useState(false);
   const [capacityAsked, setCapacityAsked] = useState(false);
   const [asking, setAsking] = useState(false);
+  const [startAt, setStartAt] = useState('now');
+  const [atTime, setAtTime] = useState('');
 
   // Fresh form every time the modal opens (or for a different plug).
   useEffect(() => {
@@ -89,11 +104,17 @@ export default function ChargeSetupModal({ open, onClose, plug, mode = 'start', 
     setCircuitFull(false);
     setCapacityAsked(false);
     setAsking(false);
+    setStartAt('now');
+    setAtTime('');
   }, [open, plug?.id]);
 
   if (!open || !plug) return null;
 
-  const copy = COPY[mode] || COPY.start;
+  const tz = plug.tenant_timezone;
+  const canSchedule = mode === 'start' && Boolean(plug.schedule_available && tz);
+  const scheduling = canSchedule && startAt === 'later';
+  const copy = scheduling ? COPY.schedule : COPY[mode] || COPY.start;
+  const nextStart = scheduling && atTime ? nextOccurrenceInZone(atTime, tz) : null;
 
   // Coverage line: the plug's own price (falling back to the global rate).
   // A real 0 (free charging) is a valid rate — only null/undefined/non-numeric
@@ -113,6 +134,15 @@ export default function ChargeSetupModal({ open, onClose, plug, mode = 'start', 
   const kwhNum = kwh !== '' ? parseFloat(kwh) : null;
   const kwhOutOfRange = kwhNum !== null && (kwhNum <= 0 || kwhNum > 100);
   const kwhInvalid = kwhNum !== null && kwhNum <= 0;
+  const presetMinutes = TIME_PRESETS.find((p) => p.id === timePreset)?.minutes;
+  const hasLimit = Boolean(presetMinutes || customMinutes || (kwhNum !== null && kwhNum > 0));
+  const scheduleBlocked = scheduling && (!atTime || !hasLimit);
+
+  const chooseStart = (value) => {
+    setStartAt(value);
+    // A scheduled charge must stop on its own: move off "No limit".
+    if (value === 'later' && timePreset === 'none' && kwh === '') setTimePreset('8h');
+  };
 
   const handleConfirm = async () => {
     const limits = {};
@@ -128,7 +158,13 @@ export default function ChargeSetupModal({ open, onClose, plug, mode = 'start', 
     setError('');
     setCircuitFull(false);
     try {
-      await onConfirm(plug.id, Object.keys(limits).length ? limits : null);
+      const chosen = Object.keys(limits).length ? limits : null;
+      if (scheduling) {
+        // Re-resolve at confirm time so a modal left open stays correct.
+        await onConfirm(plug.id, chosen, nextOccurrenceInZone(atTime, tz).iso);
+      } else {
+        await onConfirm(plug.id, chosen);
+      }
       onClose?.();
     } catch (err) {
       setError(apiErrorCopy(err));
@@ -165,7 +201,7 @@ export default function ChargeSetupModal({ open, onClose, plug, mode = 'start', 
             type="button"
             className="btn btn-primary"
             onClick={handleConfirm}
-            disabled={busy || customInvalid || kwhOutOfRange}
+            disabled={busy || customInvalid || kwhOutOfRange || scheduleBlocked}
           >
             {busy ? copy.busy : copy.confirm}
           </button>
@@ -182,6 +218,47 @@ export default function ChargeSetupModal({ open, onClose, plug, mode = 'start', 
         </div>
 
         <p className="text-2 text-sm">{copy.intro}</p>
+
+        {canSchedule && (
+          <div className="field">
+            <span className="field-label" id="charge-start-label">
+              Start
+            </span>
+            <div className="charge-setup-chips" role="group" aria-labelledby="charge-start-label">
+              {[
+                ['now', 'Now'],
+                ['later', 'At a time'],
+              ].map(([value, label]) => (
+                <button
+                  key={value}
+                  type="button"
+                  className={`btn btn-sm ${startAt === value ? 'btn-primary' : 'btn-quiet'}`}
+                  aria-pressed={startAt === value}
+                  onClick={() => chooseStart(value)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            {scheduling && (
+              <>
+                <input
+                  className="input"
+                  type="time"
+                  step="60"
+                  value={atTime}
+                  onChange={(e) => setAtTime(e.target.value)}
+                  aria-label="Start time"
+                />
+                <p className="field-hint text-sm">
+                  {nextStart
+                    ? `Times are in ${tz}. Starts ${nextStart.tomorrow ? 'tomorrow' : 'today'} at ${fmtTimeInZone(nextStart.iso, tz)}.`
+                    : `Times are in ${tz}.`}
+                </p>
+              </>
+            )}
+          </div>
+        )}
 
         <div className="field">
           <span className="field-label" id="charge-time-label">
@@ -200,7 +277,7 @@ export default function ChargeSetupModal({ open, onClose, plug, mode = 'start', 
               </button>
             ))}
           </div>
-          {timePreset === 'none' && (
+          {timePreset === 'none' && !scheduling && (
             <p className="field-hint text-sm">
               Charges until you stop it — no time limit
             </p>
@@ -246,12 +323,16 @@ export default function ChargeSetupModal({ open, onClose, plug, mode = 'start', 
               {kwhInvalid ? 'Energy limit must be greater than 0.' : 'Maximum 100 kWh.'}
             </p>
           )}
-          {kwh === '' && (
+          {kwh === '' && !scheduling && (
             <p className="field-hint text-sm">
               Charges until you stop it — no energy limit
             </p>
           )}
         </div>
+
+        {scheduling && !hasLimit && (
+          <p className="field-hint text-sm">A scheduled charge needs a time or energy limit.</p>
+        )}
 
         {error && (
           <p className="field-error" role="alert">

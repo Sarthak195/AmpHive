@@ -39,8 +39,18 @@ vi.mock('../contexts/WalletContext', () => ({ useWallet: () => ({ balance: 500 }
 // The two modals have their own test files — stub them so these tests assert
 // only that Dashboard opens them with the right plug + mode.
 vi.mock('../components/ChargeSetupModal', () => ({
-  default: ({ open, mode, plug }) =>
-    open ? <div data-testid="setup-modal">{`${mode}:${plug.id}`}</div> : null,
+  default: ({ open, mode, plug, onConfirm }) =>
+    open ? (
+      <div data-testid="setup-modal">
+        {`${mode}:${plug.id}`}
+        {/* [Scheduled start] stand-in for picking "At a time" + confirming */}
+        <button
+          type="button"
+          aria-label="stub schedule"
+          onClick={() => onConfirm(plug.id, { max_duration_seconds: 3600 }, '2030-06-01T16:30:00.000Z')}
+        />
+      </div>
+    ) : null,
 }));
 vi.mock('../components/ReserveModal', () => ({
   default: ({ open, plug }) =>
@@ -277,6 +287,18 @@ describe('Dashboard — up next strip', () => {
     );
   });
 
+  it('a scheduled up-next row shows its start time in the tenant zone', async () => {
+    api.listQueuedCharges.mockResolvedValue([
+      {
+        id: 6, plug_id: 1, plug_name: 'Lobby Plug', tenant_timezone: 'Asia/Kolkata',
+        not_before: '2030-06-01T16:30:00Z', expires_at: '2030-06-01T17:00:00Z',
+      },
+    ]);
+    renderDash();
+    expect(await screen.findByText(/Starts at (22:00|10:00\s?PM)/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Waiting for power/)).not.toBeInTheDocument();
+  });
+
   it('cancelling a queued charge goes through a ConfirmDialog then DELETEs it', async () => {
     api.listQueuedCharges.mockResolvedValue([
       { id: 5, plug_id: 4, plug_name: 'Basement Plug', expires_at: new Date(Date.now() + 3600_000).toISOString() },
@@ -290,6 +312,32 @@ describe('Dashboard — up next strip', () => {
     expect(screen.getByRole('dialog', { name: 'Cancel this queued charge?' })).toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: 'Cancel queued charge' }));
     await waitFor(() => expect(api.cancelQueuedCharge).toHaveBeenCalledWith(5));
+  });
+});
+
+describe('Dashboard: scheduled start', () => {
+  it('a scheduled confirm queues with not_before and stays on the home page', async () => {
+    setRoute('/api/plugs/7', () =>
+      Promise.resolve({
+        id: 7, name: 'Visitor Plug', status: 'available', gateway_online: true, plug_powered: true,
+        price_per_kwh: 9, schedule_available: true, tenant_timezone: 'Asia/Kolkata',
+      })
+    );
+    api.queueCharge.mockResolvedValue({
+      id: 9, status: 'waiting', not_before: '2030-06-01T16:30:00+00:00', tenant_timezone: 'Asia/Kolkata',
+    });
+    renderDash('/?plug=7');
+    await screen.findByText('Visitor Plug');
+    await userEvent.click(screen.getByRole('button', { name: 'Start charging' }));
+    await userEvent.click(screen.getByRole('button', { name: 'stub schedule' }));
+
+    await waitFor(() =>
+      expect(api.queueCharge).toHaveBeenCalledWith({
+        plug_id: 7, max_duration_seconds: 3600, not_before: '2030-06-01T16:30:00.000Z',
+      })
+    );
+    expect(useSession().startSession).not.toHaveBeenCalled();
+    expect(screen.queryByText('session page')).not.toBeInTheDocument();
   });
 });
 
