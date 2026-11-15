@@ -175,3 +175,26 @@ describe('api convenience methods', () => {
     expect(fetch.mock.calls[1][1]).toMatchObject({ body: JSON.stringify({ user_id: 5 }) });
   });
 });
+
+describe('apiRequest: 401 handling', () => {
+  it('shows the server detail for a 401 sent without a token (wrong password)', async () => {
+    fetch.mockResolvedValue(jsonResponse({ detail: 'Invalid email or password.' }, { ok: false, status: 401 }));
+
+    await expect(apiRequest('/api/auth/login', { method: 'POST' })).rejects.toMatchObject({
+      message: 'Invalid email or password.',
+      status: 401,
+    });
+  });
+
+  it('clears the stored session on a 401 to a request that sent a token', async () => {
+    window.history.pushState({}, '', '/login'); // stay put: no navigation in jsdom
+    localStorage.setItem('amphive_token', 'stale');
+    localStorage.setItem('amphive_user', '{}');
+    fetch.mockResolvedValue(jsonResponse({ detail: 'Session has been revoked.' }, { ok: false, status: 401 }));
+
+    await expect(apiRequest('/api/auth/me')).rejects.toMatchObject({ status: 401 });
+    expect(localStorage.getItem('amphive_token')).toBeNull();
+    expect(localStorage.getItem('amphive_user')).toBeNull();
+    window.history.pushState({}, '', '/');
+  });
+});
