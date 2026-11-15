@@ -776,6 +776,36 @@ async def test_schedule_rejects_other_drivers_overlapping_booking():
 
 
 @pytest.mark.asyncio
+async def test_schedule_rejects_booking_between_now_and_not_before():
+    """The scheduled car holds the socket from now, and the walk-up refusal
+    blocks other drivers from now, so a booking made earlier that sits wholly
+    between now and not_before must refuse the schedule (else its holder is
+    locked out of their own window)."""
+    import operator
+
+    now = datetime.now(timezone.utc)
+    nb = now + timedelta(hours=6)
+    b_start, b_end = now + timedelta(hours=1), now + timedelta(hours=2)
+    db = _db(*_sched_prefix(), _s1n(11))
+    with pytest.raises(HTTPException) as exc:
+        await queue_charge(_sched_req(not_before=nb), _user(), db)
+    assert exc.value.detail["code"] == "plug_reserved"
+
+    # The mocked DB returns the row regardless, so check the overlap window the
+    # reservation query actually asks for against this booking.
+    stmt = db.execute.call_args_list[3].args[0]
+    bounds = {}
+    for clause in stmt.whereclause.clauses:
+        key = getattr(clause.left, "key", None)
+        if key in ("start_at", "end_at"):
+            bounds[(key, clause.operator)] = clause.right.effective_value
+    start_lt = bounds[("start_at", operator.lt)]
+    end_gt = bounds[("end_at", operator.gt)]
+    assert end_gt <= datetime.now(timezone.utc)      # window opens now, not at nb
+    assert b_start < start_lt and b_end > end_gt     # the booking matches
+
+
+@pytest.mark.asyncio
 async def test_schedule_rejects_when_another_driver_holds_the_socket():
     db = _db(*_sched_prefix(), _s1n(None), _s1n(12))   # other user's WAITING row
     with pytest.raises(HTTPException) as exc:

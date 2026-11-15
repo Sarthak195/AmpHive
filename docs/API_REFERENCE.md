@@ -151,8 +151,9 @@ a zone.
   409 `plug_in_use`, 409 `plug_out_of_service`, 422 `schedule_needs_limit` (a
   schedule must carry `max_kwh` or `max_duration_seconds`: nobody is at the plug
   when it switches on), 400 `schedule_out_of_range`, 409 `plug_reserved` (another
-  driver's booking overlaps `[not_before, not_before + max_duration]`, or the walk-up
-  lookahead when only `max_kwh` is set), 409 `plug_scheduled` (another driver
+  driver's booking overlaps `[now, not_before + max_duration]`, or the walk-up
+  lookahead when only `max_kwh` is set; the window starts now because the car holds
+  the socket from the moment it is scheduled), 409 `plug_scheduled` (another driver
   already has a WAITING queued charge on this plug). Then the shared
   `queue_disabled`, `insufficient_balance`, `queue_limit`, `already_queued`. The
   outage path also refuses `plug_scheduled` when another driver's schedule holds the

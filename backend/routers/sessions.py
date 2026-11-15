@@ -768,8 +768,10 @@ async def _check_schedule(db: AsyncSession, req: QueueChargeRequest, user: User,
         raise _conflict(
             "schedule_out_of_range", "Pick a start time within the next 24 hours.", status_code=400
         )
-    # Another driver's booking that overlaps [nb, nb + expected run] would
+    # Another driver's booking that overlaps [now, nb + expected run] would
     # force-stop this session when its window opens (or block it outright).
+    # The window starts at now, not nb: the scheduled car holds the socket from
+    # now on, and the walk-up refusal would lock an earlier booking's holder out.
     run_min = (req.max_duration_seconds / 60) if req.max_duration_seconds else RESERVATION_WALKUP_WARN_LOOKAHEAD_MIN
     reserved = (await db.execute(
         select(Reservation.id).where(and_(
@@ -777,7 +779,7 @@ async def _check_schedule(db: AsyncSession, req: QueueChargeRequest, user: User,
             Reservation.status == ReservationStatus.BOOKED,
             Reservation.user_id != user.id,
             Reservation.start_at < nb + timedelta(minutes=run_min),
-            Reservation.end_at > nb,
+            Reservation.end_at > now,
         )).limit(1)
     )).scalar_one_or_none()
     if reserved is not None:
