@@ -142,15 +142,15 @@ Turned the discovery map into a trust surface: public plugs now carry driver
   /api/plugs/{id}/photos` (raw body, magic-byte-sniffed JPEG/PNG/WebP ≤ 8 MiB,
   no multipart); moderation at `GET /api/cpo/plug-photos` + `.../approve|reject`
   (CPO console → **Plug photos**). Bytes live in the public bucket
-  `gs://amphive-plug-photos` (keyless, `services/photo_publish.py`); one approved
+  `gs://amphive-plug-photos-2` (keyless, `services/photo_publish.py`; set `PLUG_PHOTO_GCS_BUCKET`); one approved
   photo becomes each plug's `thumbnail_url`.
 - **Frontend:** a `StarRating` component, a `PlugReviewsModal` (reviews + photo
   gallery + upload) opened from the map popup/list, popup thumbnail + rating, and
   the `CpoPlugPhotos` moderation page.
 - **DB:** migrations `0039_plug_reviews` + `0040_plug_photos` (idempotent,
   chained on `0038_account_closure`).
-- **INFRA (operator, one-time):** create `gs://amphive-plug-photos` public-read
-  + grant the compute SA `roles/storage.objectAdmin` — see
+- **INFRA (operator, one-time):** bucket `gs://amphive-plug-photos-2` (exists, asia-south1) needs
+  `allUsers` `objectViewer` (public read) + `PLUG_PHOTO_GCS_BUCKET=amphive-plug-photos-2` in the VM `.env`; the compute SA already has `roles/storage.objectAdmin` — see
   [../deploy/docs/plug_photo_publishing.md](../deploy/docs/plug_photo_publishing.md).
   Until then, photo uploads 502.
 

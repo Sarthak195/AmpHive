@@ -18,32 +18,44 @@ object, so the service needs delete as well as create.
 
 ## INFRA PREREQUISITE (apply once, BEFORE deploying the feature)
 
-1. **Create the bucket** (public-read, uniform bucket-level access):
+Since the September 2026 GCP migration the bucket is
+**`gs://amphive-plug-photos-2`** (asia-south1, project
+`project-6e290ffd-5954-4d48-aa9`, compute SA
+`626015685685-compute@developer.gserviceaccount.com`). The code default is still
+the pre-migration name `amphive-plug-photos`, so **prod must set the env var**
+(step 3). State as read on 2026-11-15: the bucket exists with uniform
+bucket-level access and `public_access_prevention: inherited` (public read is
+allowed), and the compute SA already holds `roles/storage.objectAdmin`; the
+public-read binding (step 1b) is the missing piece.
+
+1. **Create the bucket** (skip 1a if it already exists) and make it public-read:
 
    ```bash
-   # asia-south1 (Mumbai) — same region as gs://amphive-fw, close to the users.
-   gcloud storage buckets create gs://amphive-plug-photos \
-       --location=asia-south1 --uniform-bucket-level-access
-   gcloud storage buckets add-iam-policy-binding gs://amphive-plug-photos \
-       --member=allUsers --role=roles/storage.objectViewer
+   P=project-6e290ffd-5954-4d48-aa9
+   # 1a. asia-south1 (Mumbai), close to the users.
+   gcloud storage buckets create gs://amphive-plug-photos-2 --project $P        --location=asia-south1 --uniform-bucket-level-access
+   # 1b. public read so the map can load approved photos by URL.
+   gcloud storage buckets add-iam-policy-binding gs://amphive-plug-photos-2 --project $P        --member=allUsers --role=roles/storage.objectViewer
    ```
 
-2. **Grant the compute service account create + delete** on it — unlike
-   firmware (which only needs `objectCreator`), rejecting a photo must delete
-   the object, so grant `objectAdmin`:
+2. **Grant the compute service account create + delete** on it. Unlike firmware
+   (which only needs `objectCreator`), rejecting a photo must delete the object,
+   so grant `objectAdmin`:
 
    ```bash
-   gcloud storage buckets add-iam-policy-binding gs://amphive-plug-photos \
-       --member=serviceAccount:930756667383-compute@developer.gserviceaccount.com \
-       --role=roles/storage.objectAdmin
+   gcloud storage buckets add-iam-policy-binding gs://amphive-plug-photos-2 --project $P        --member=serviceAccount:626015685685-compute@developer.gserviceaccount.com        --role=roles/storage.objectAdmin
    ```
 
    The VM's `devstorage.read_write` access scope is already set (it backs the
    firmware upload + DB backups).
 
+3. **Point the backend at the bucket** in the VM's `.env`, then recreate the
+   backend container: `PLUG_PHOTO_GCS_BUCKET=amphive-plug-photos-2`.
+
 Without step 2 the upload endpoint returns **502 "Failed to store the photo"**
-(the GCS POST 403s). The bucket name is overridable via the
-`PLUG_PHOTO_GCS_BUCKET` env var (default `amphive-plug-photos`).
+(the GCS POST 403s). Without step 3 it targets the non-existent old bucket and
+also 502s. Without step 1b uploads succeed but approved photos 403 in the
+browser.
 
 ## Notes
 
