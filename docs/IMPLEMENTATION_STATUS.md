@@ -9,6 +9,28 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 
 ---
 
+## 0 - 2026-11-15 fix batch
+
+- **Plug photos: private bucket, gated image route (PR #127).** The photo
+  bucket stays private (no `allUsers` binding). Bytes are served by
+  `GET /api/plugs/{id}/photos/{photo_id}/image`: approved photos to anyone with
+  `Cache-Control: public, max-age=86400`; pending and rejected photos only to a
+  CPO of the plug's tenant or an admin (`private, no-store`), 404 for everyone
+  else. Every photo `url` and `thumbnail_url` is that relative route. The CPO
+  page loads images with the Bearer token; the uploader's own pending photo
+  shows a placeholder.
+- **Photo uploads up to 8 MiB actually reach the backend.** nginx allows 9m on
+  `/api/plugs/<id>/photos` (nested in the `/api/` block) and the body-size
+  middleware allows 8 MiB on that POST; the rest of the API keeps 1 MiB.
+- **Review edits work.** Re-submitting a review no longer 500s: the handler no
+  longer reads ORM attributes that the IntegrityError rollback expired.
+- **Photo takedown.** A CPO can reject an approved photo (removes it from the
+  map and deletes the object), and re-rejecting a rejected photo retries a
+  failed delete. Approve stays pending-only. Rejected rows show a "Removed"
+  placeholder instead of a broken image.
+
+---
+
 ## 0. Latest — 2026-10-20 connection noise: debounced offline notices, gated orphan bells, fw 2.8.0 diagnostics
 
 A 45-day forensic pass over the prod logs (one user, who is driver, operator
@@ -141,16 +163,17 @@ Turned the discovery map into a trust surface: public plugs now carry driver
   `pending` and is invisible publicly until a CPO/admin approves it. `POST/GET
   /api/plugs/{id}/photos` (raw body, magic-byte-sniffed JPEG/PNG/WebP ≤ 8 MiB,
   no multipart); moderation at `GET /api/cpo/plug-photos` + `.../approve|reject`
-  (CPO console → **Plug photos**). Bytes live in the public bucket
-  `gs://amphive-plug-photos-2` (keyless, `services/photo_publish.py`; set `PLUG_PHOTO_GCS_BUCKET`); one approved
+  (CPO console, **Plug photos**). Bytes live in the private bucket
+  `gs://amphive-plug-photos-2` (keyless, `services/photo_publish.py`; set `PLUG_PHOTO_GCS_BUCKET`) and are
+  served by the gated image route (see the 2026-11-15 fix batch); one approved
   photo becomes each plug's `thumbnail_url`.
 - **Frontend:** a `StarRating` component, a `PlugReviewsModal` (reviews + photo
   gallery + upload) opened from the map popup/list, popup thumbnail + rating, and
   the `CpoPlugPhotos` moderation page.
 - **DB:** migrations `0039_plug_reviews` + `0040_plug_photos` (idempotent,
   chained on `0038_account_closure`).
-- **INFRA (operator, one-time):** bucket `gs://amphive-plug-photos-2` (exists, asia-south1) needs
-  `allUsers` `objectViewer` (public read) + `PLUG_PHOTO_GCS_BUCKET=amphive-plug-photos-2` in the VM `.env`; the compute SA already has `roles/storage.objectAdmin` — see
+- **INFRA (operator, one-time):** bucket `gs://amphive-plug-photos-2` (exists, asia-south1, private: never
+  add `allUsers`) needs only `PLUG_PHOTO_GCS_BUCKET=amphive-plug-photos-2` in the VM `.env`; the compute SA already has `roles/storage.objectAdmin`, see
   [../deploy/docs/plug_photo_publishing.md](../deploy/docs/plug_photo_publishing.md).
   Until then, photo uploads 502.
 
