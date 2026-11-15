@@ -636,8 +636,10 @@ async def delete_my_account(
 # No separate identities table: a Google-only signup gets hashed_password set
 # to a random unusable hash (secrets.token_urlsafe(32) through hash_password
 # — the same trick as services.auth._DUMMY_PASSWORD_HASH), so the existing
-# /api/auth/login route refuses it with zero changes. A password-created
-# account can additionally link a google_sub without losing its password.
+# /api/auth/login route refuses it with zero changes. When a password-created
+# account first links a google_sub, its stored password is replaced with the
+# same unusable hash (and token_version bumps), so from then on it signs in
+# with Google, or sets a new password through forgot-password.
 #
 # Unset GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET/GOOGLE_OAUTH_REDIRECT_URI ⇒ the
 # feature is hidden everywhere: GET /api/config's google_login_enabled is
