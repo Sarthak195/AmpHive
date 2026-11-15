@@ -750,6 +750,7 @@ class MQTTTelemetryMixin:
             await self._maybe_auto_stop_on_exhaustion(
                 updated_session_id, updated_user_id, updated_energy_kwh, updated_rate,
                 updated_hold_coins, updated_settled, updated_segment_start,
+                max_kwh=updated_max_kwh,
             )
             # [Session limits] User-set stop conditions, mirrored backend-side
             # (see _maybe_auto_stop_on_limits). Sequenced AFTER the exhaustion
@@ -768,7 +769,8 @@ class MQTTTelemetryMixin:
                                               rate_coins_per_kwh: Optional[Decimal] = None,
                                               hold_coins: Optional[Decimal] = None,
                                               settled_cost_coins: Optional[Decimal] = None,
-                                              rate_segment_start_kwh: Optional[float] = None):
+                                              rate_segment_start_kwh: Optional[float] = None,
+                                              max_kwh: Optional[float] = None):
         """Finalize an ACTIVE session once its accrued cost meets/exceeds its
         exhaustion threshold. No-op when disabled, when the threshold still
         covers the energy, or when the session is already gone (finalize
@@ -811,14 +813,12 @@ class MQTTTelemetryMixin:
             # session that crossed a TOD boundary stops at the RIGHT accrued
             # cost, not a flat re-multiply. NULL segment fields (flat/legacy)
             # collapse session_cost to energy_cost(energy_kwh, rate) exactly.
-            accrued_cost = session_cost(
-                SimpleNamespace(
-                    rate_coins_per_kwh=rate_coins_per_kwh,
-                    settled_cost_coins=settled_cost_coins,
-                    rate_segment_start_kwh=rate_segment_start_kwh,
-                ),
-                energy_kwh,
+            segments = SimpleNamespace(
+                rate_coins_per_kwh=rate_coins_per_kwh,
+                settled_cost_coins=settled_cost_coins,
+                rate_segment_start_kwh=rate_segment_start_kwh,
             )
+            accrued_cost = session_cost(segments, energy_kwh)
             if accrued_cost <= 0:
                 return
             if hold_coins is not None:
@@ -838,8 +838,22 @@ class MQTTTelemetryMixin:
                 # Still covered — maybe warn (once per session) as the cost
                 # approaches the threshold, so the driver sees the auto-stop
                 # coming even with the app closed.
+                #
+                # Only when the WALLET is what will stop it: with a kWh limit
+                # the hold is sized to that limit's cost whenever the wallet
+                # can afford it (services/session_start.py), so a hold running
+                # down then just means the driver's own limit is near. If
+                # reaching max_kwh at the current rate fits inside the hold,
+                # the limit stops the session first: stay quiet (and do not
+                # mark it warned, so a later limit raise can still warn).
+                limit_bound = (
+                    hold_coins is not None
+                    and max_kwh is not None
+                    and session_cost(segments, max_kwh) <= threshold
+                )
                 if (
                     LOW_BALANCE_WARN_FRACTION > 0
+                    and not limit_bound
                     and float(accrued_cost) >= float(threshold) * LOW_BALANCE_WARN_FRACTION
                     and session_id not in self._low_balance_warned
                 ):
@@ -847,7 +861,8 @@ class MQTTTelemetryMixin:
                         self._low_balance_warned.clear()
                     self._low_balance_warned.add(session_id)
                     remaining = to_money(threshold - accrued_cost)
-                    kwh_left = float(remaining) / COINS_PER_KWH if COINS_PER_KWH else 0.0
+                    rate = float(rate_coins_per_kwh) if rate_coins_per_kwh else COINS_PER_KWH
+                    kwh_left = float(remaining) / rate if rate else 0.0
                     from backend.services.notifications import notify
                     await notify(
                         user_id,

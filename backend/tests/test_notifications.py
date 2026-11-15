@@ -204,6 +204,45 @@ async def test_low_balance_no_warning_below_threshold():
     MQTTManager._instance = None
 
 
+@pytest.mark.asyncio
+async def test_low_balance_silent_when_own_kwh_limit_stops_first():
+    """A well-funded wallet with a kWh limit: the hold is sized to the limit's
+    cost (2 kWh x 5 = 10), so 90% of the hold used means the limit is near,
+    not the wallet. No "Balance running low" notice, no finalize."""
+    MQTTManager._instance = None
+    mgr = MQTTManager(db_session_factory=lambda: None)  # hold path reads no DB
+
+    notify_mock = AsyncMock()
+    with patch("backend.services.notifications.notify", notify_mock):
+        await mgr._maybe_auto_stop_on_exhaustion(
+            session_id=8, user_id=3, energy_kwh=1.8, rate_coins_per_kwh=Decimal("5"),
+            hold_coins=Decimal("10"), max_kwh=2.0,
+        )
+
+    notify_mock.assert_not_awaited()
+    assert 8 not in mgr._low_balance_warned  # a later limit raise can still warn
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_low_balance_warns_when_wallet_capped_the_hold_below_the_limit():
+    """The limit (5 kWh x 5 = 25) costs more than the 10-coin hold the wallet
+    could cover, so the wallet is what will stop the session: warn."""
+    MQTTManager._instance = None
+    mgr = MQTTManager(db_session_factory=lambda: None)
+
+    notify_mock = AsyncMock()
+    with patch("backend.services.notifications.notify", notify_mock):
+        await mgr._maybe_auto_stop_on_exhaustion(
+            session_id=9, user_id=3, energy_kwh=1.8, rate_coins_per_kwh=Decimal("5"),
+            hold_coins=Decimal("10"), max_kwh=5.0,
+        )
+
+    assert notify_mock.await_count == 1
+    assert notify_mock.await_args.args[1] == "low_balance"
+    MQTTManager._instance = None
+
+
 # ------------------------------------------------- gateway offline notify ---
 
 @pytest.mark.asyncio
