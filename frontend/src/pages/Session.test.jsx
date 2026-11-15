@@ -62,7 +62,7 @@ describe('Session page — no active charge', () => {
   });
 });
 
-describe('Session page — restoring', () => {
+describe('Session page: restoring', () => {
   it('shows a loading placeholder, not "No active charge", while the restore is in flight', () => {
     useSession.mockReturnValue({ ...base, restoring: true });
     renderPage();

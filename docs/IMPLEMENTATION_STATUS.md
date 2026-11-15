@@ -7,7 +7,38 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 
 ---
 
-## 0. Latest — 2026-10-20 connection noise: debounced offline notices, gated orphan bells, fw 2.8.0 diagnostics
+## 0. Latest: 2026-11-15 session page (branch `fix/session-page`, not merged or deployed)
+
+Two driver reports on the live session page, fixed in one branch:
+
+- **Reloading a running session took about 10 s to look live.** Three causes
+  stacked. (1) `SessionContext.switchSession` seeded the monitor with zeros and
+  ignored the `energy_kwh`/`cost_coins` that `/api/sessions/active` returns; it
+  now renders those at once, and the page shows a loading placeholder (not
+  "No active charge") until the restore settles. (2) On reload the old stream
+  task's teardown sent `SET_INTERVAL 10000` before the new page subscribed, and
+  the firmware sleeps out the whole 10 s before honouring the next `1000`. The
+  last listener is now released after `TELEMETRY_SLOWDOWN_GRACE_SEC` (default
+  30 s), so a reload never slows the gateway. (3) The socket and restore effects
+  keyed on the `user` object, so every `refreshUser()` (stop, limit edit, login)
+  reconnected the socket and zeroed the monitor; they key on the user id now.
+  Also `set_plug_telemetry_interval` always publishes, so a gateway that
+  rebooted to its 10 s default is told 1 s again on the next page open.
+- **"Low balance" near the end of a kWh-limited session with plenty of credit.**
+  With a kWh limit the hold is sized to the limit's cost whenever the wallet
+  can afford it, and both the monitor banner and the `low_balance` notification
+  measured that hold, so they fired as the driver's own limit approached. Both
+  now stay quiet when reaching `max_kwh` at the current rate fits inside the
+  hold (the Limit banner already shows that progress), and warn as before when
+  the wallet capped the hold or there is no kWh limit. `PATCH /limits` returns
+  the resized `hold_coins` so the client compares against the new hold. Hold
+  sizing, auto-stop and billing are unchanged.
+- **Still open:** the firmware poll loop's `vTaskDelay` is not woken by
+  `SET_INTERVAL`, so after a real idle period (no viewer for over 30 s) the
+  first fresh frame can still take up to 10 s; fixing it needs a firmware
+  change and an OTA.
+
+## 0a. 2026-10-20 connection noise: debounced offline notices, gated orphan bells, fw 2.8.0 diagnostics
 
 A 45-day forensic pass over the prod logs (one user, who is driver, operator
 and admin at once) found that most of the bells were noise, and why:
@@ -558,7 +589,7 @@ the `cpo.py` god router + `MQTTManager` god object; a backend deps lockfile.
 | CPO load analytics: current (amps) | ✅ | `/api/cpo/analytics/telemetry` now also aggregates `avg_current_a`/`max_current_a` per bucket; the dashboard load chart header shows peak W **and** A. |
 | Razorpay top-up flow | ✅ | CDN script + `window.Razorpay`; key comes from backend order. Formats and displays decimal coin balances. |
 | Pricing clarity | ✅ | `GET /api/config` (public) feeds a `ConfigProvider`; Home shows the tariff (`coins_per_kwh`) + what the driver's balance covers (≈ kWh) with a top-up nudge below the minimum, and the session monitor reads the rate from config instead of hardcoding it. The session-start minimum is now env-driven (`MIN_START_BALANCE_COINS`) and the 402 message matches the displayed number (2026-07-10). |
-| Low-balance live warning | ✅ | The session monitor warns (with remaining coins ≈ kWh) as accrued cost nears the wallet balance, pairing with the backend auto-stop so the driver sees it coming. Tests in `SessionMonitor.test.jsx`. |
+| Low-balance live warning | ✅ | The session monitor warns (with remaining coins ≈ kWh) as accrued cost nears the session's hold (or the wallet for legacy unheld sessions), pairing with the backend auto-stop so the driver sees it coming. Since 2026-11-15 it warns only when the wallet is what will stop the session: a kWh-limited session whose limit fits inside its hold stays quiet (the Limit banner covers it), matching the backend `low_balance` notification. Tests in `SessionMonitor.test.jsx` and `test_notifications.py`. |
 | Driver-set charging limit at start (kWh / time), opt-in | ✅ | **2026-07-12, superseded by the redesign-v3 `ChargeSetupModal` and made opt-in 2026-08-02:** the shared start/queue setup dialog (`frontend/src/components/ChargeSetupModal.jsx`) offers time-limit preset chips (No limit / 30m / 1h / 2h / 4h / 8h / Custom hh:mm, defaulting to "No limit") and a plain kWh field (blank by default); the coverage line uses the plug's own resolved `price_per_kwh`. Sent as `max_kwh`/`max_duration_seconds` through `SessionContext.startSession` — **only the keys the driver actually set**; no limit chosen → neither key is sent → `SessionStartRequest` persists NULL/NULL (charge until stopped), not a hidden default duration/energy (before 2026-08-02 an omitted field defaulted to 14400 s / 30 kWh). The gateway/software-agent ON command still always carries concrete numeric watchdog values — the driver's limit, or an UNLIMITED sentinel when none was set (`services/mqtt_manager.py firmware_duration`/`firmware_max_kwh`) — since neither the firmware nor the AmpHive Agent has a wire representation for "no limit" (omitted → their own old hard default; `0` → an instant on-device cutoff). The session monitor shows live progress toward the focused session's limits when one is set ("0.42 / 1.00 kWh · stops automatically", `focusedLimits` restored from `/api/sessions/active`) and an indeterminate ring / "Set a charging limit" affordance when it isn't. Tests in `ChargeSetupModal.test.jsx`, `SessionMonitor.test.jsx`, `SessionContext.test.jsx`, `backend/tests/test_session_limits.py`. |
 | Driver notification bell + Web Push opt-in | ✅ | 2026-07-11: navbar `NotificationBell` — unread badge, dropdown feed (`GET /api/notifications`), live prepend from the Socket.io `notification` user-room event, mark-read/mark-all, and an enable-push flow (permission → `sw.js` service worker → `pushManager.subscribe` with the backend-derived VAPID key). `frontend/public/sw.js` is push-only (no fetch interception). Tests in `NotificationBell.test.jsx`. |
 | Post-session receipt | ✅ | `finalize_charging_session` now returns a full receipt (plug name, energy, peak power, duration, coins charged + any forgiven shortfall, balance before → after, timestamps, stop reason); the Session page shows a `SessionReceipt` card on stop (with an auto-stop notice when applicable) and refreshes the wallet. **Verified live end-to-end 2026-07-10** — a real billed session on the fake plug (0.101 kWh → 0.51 coins, balance 499.47 → 498.96, reconciled in the ledger). Tests in `SessionReceipt.test.jsx`. |
