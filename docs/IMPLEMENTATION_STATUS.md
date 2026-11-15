@@ -9,44 +9,6 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 
 ---
 
-## 0 (pending) - 2026-11-15 scheduled (off-peak) start (branch `feat/offpeak-start`, not merged)
-
-The driver plugs in now and picks a start time; the backend energizes the plug
-then. Built on the queued-charge machinery (`QueuedCharge.not_before`, migration
-`0041_queued_not_before`, on top of `0040_plug_photos`). API in
-[API_REFERENCE.md](API_REFERENCE.md#queued-charges-servicessession_reaperpy-queue-a-charge-during-an-outage),
-design record in
-[proposals/queued-charge-offline-plug.md](proposals/queued-charge-offline-plug.md#scheduled-off-peak-start).
-
-- Start modal: "Start: Now | At a time" on a schedulable plug, time entered and
-  shown in the tenant zone; a time or energy limit is required (8h preselected).
-- Sweep: not due -> WAITING; due -> the existing debounce, caps, balance floor and
-  hold; someone else on the socket or a covering booking -> FAILED; flag turned
-  off -> FAILED. Every auto-start (outage rows too) now replays the gateway
-  liveness gate, and STARTED is written in the same commit as the session claim.
-- Start route: 409 `plug_scheduled` for other drivers; the owner's start cancels
-  their own schedule after it succeeds. The reconnect orphan-OFF is never held for
-  a scheduled row.
-- **Deviation from the settled decision "expires_at = not_before + queue TTL":** a
-  scheduled row expires `min(queue_ttl_min, SCHEDULE_START_GRACE_MIN = 30)` after
-  `not_before`, so a dark plug or a late gateway does not start an unattended peak
-  charge hours later. Set `SCHEDULE_START_GRACE_MIN` >= `queue_ttl_min` to revert.
-- Not built: "start at the next cheaper rate" (the setup modal only gets the next
-  price boundary later today, not the tariff's slot list).
-
-Known limits (one-user project, so multi-driver items are documented, not fixed):
-24 h max lookahead; a schedule blocks other drivers' manual starts on that plug
-and other drivers see the plug AVAILABLE until they get the 409; bookings made
-after the schedule are not refused (the schedule FAILs at due time); a Wi-Fi blip
-right before `not_before` re-baselines `powered_since` and delays the start by the
-debounce; a fault (MAINTENANCE) is only reported at due time; the relay is not
-verified OFF while waiting (a Tapo-app press charges unbilled until reconcile, as
-for any idle plug); no zero-draw auto-stop, so a car that never draws runs to its
-limit; outage rows still do not re-check the queued-charging flag at auto-start;
-tenant time depends on the prod image shipping tzdata (unverified).
-
----
-
 ## 0 - 2026-11-15 fix batch
 
 **Production state:** prod == `origin/main` at `825f27e` (the 2026-11-15 bug-fix release), alembic head `0040_plug_photos`, deployed 2026-11-15.
@@ -208,6 +170,8 @@ Plug photos and reviews:
   failed delete. Approve stays pending-only. Rejected rows show a "Removed"
   placeholder instead of a broken image.
 
+---
+
 ## 0b. 2026-11-15 feature batch
 
 Merged on `release/2026-11-15-features` on top of the 2026-11-15 fix release
@@ -271,6 +235,42 @@ miscount energy or time. `PROJECT_VER` is `2.9.0-direct`. The software gateway
 the interval the cut-short sleep used (`agent/test_poll_wake.py`).
 **Not yet built:** there is no signed 2.9.0 image yet (build with ESP-IDF
 v5.3.3, target esp32, as for 2.8.0). The field gateway stays on 2.8.0-direct. See [FIRMWARE.md](FIRMWARE.md) (§3 and §8).
+
+### Scheduled (off-peak) start (`feat/offpeak-start`)
+
+The driver plugs in now and picks a start time; the backend energizes the plug
+then. Built on the queued-charge machinery (`QueuedCharge.not_before`, migration
+`0041_queued_not_before`, on top of `0040_plug_photos`). API in
+[API_REFERENCE.md](API_REFERENCE.md#queued-charges-servicessession_reaperpy-queue-a-charge-during-an-outage),
+design record in
+[proposals/queued-charge-offline-plug.md](proposals/queued-charge-offline-plug.md#scheduled-off-peak-start).
+
+- Start modal: "Start: Now | At a time" on a schedulable plug, time entered and
+  shown in the tenant zone; a time or energy limit is required (8h preselected).
+- Sweep: not due -> WAITING; due -> the existing debounce, caps, balance floor and
+  hold; someone else on the socket or a covering booking -> FAILED; flag turned
+  off -> FAILED. Every auto-start (outage rows too) now replays the gateway
+  liveness gate, and STARTED is written in the same commit as the session claim.
+- Start route: 409 `plug_scheduled` for other drivers; the owner's start cancels
+  their own schedule after it succeeds. The reconnect orphan-OFF is never held for
+  a scheduled row.
+- **Deviation from the settled decision "expires_at = not_before + queue TTL":** a
+  scheduled row expires `min(queue_ttl_min, SCHEDULE_START_GRACE_MIN = 30)` after
+  `not_before`, so a dark plug or a late gateway does not start an unattended peak
+  charge hours later. Set `SCHEDULE_START_GRACE_MIN` >= `queue_ttl_min` to revert.
+- Not built: "start at the next cheaper rate" (the setup modal only gets the next
+  price boundary later today, not the tariff's slot list).
+
+Known limits (one-user project, so multi-driver items are documented, not fixed):
+24 h max lookahead; a schedule blocks other drivers' manual starts on that plug
+and other drivers see the plug AVAILABLE until they get the 409; bookings made
+after the schedule are not refused (the schedule FAILs at due time); a Wi-Fi blip
+right before `not_before` re-baselines `powered_since` and delays the start by the
+debounce; a fault (MAINTENANCE) is only reported at due time; the relay is not
+verified OFF while waiting (a Tapo-app press charges unbilled until reconcile, as
+for any idle plug); no zero-draw auto-stop, so a car that never draws runs to its
+limit; outage rows still do not re-check the queued-charging flag at auto-start;
+tenant time depends on the prod image shipping tzdata (unverified).
 
 ---
 
