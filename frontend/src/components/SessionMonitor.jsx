@@ -133,14 +133,25 @@ const SessionMonitor = () => {
   // hold left). Legacy/unheld sessions (hold_coins null) fall back to
   // availableBalance, matching the backend's own fallback. The kWh-left
   // estimate uses the plug's price_now when known.
+  //
+  // Limit-bound sessions never warn: with a kWh limit the hold is sized to
+  // that limit's cost when the wallet can afford it (services/session_start.py),
+  // so the hold running down just means the driver's own limit is near (the
+  // Limit banner below shows that). Only when reaching max_kwh would cost MORE
+  // than the hold is the wallet what stops the session. Same rule as the
+  // backend notification (services/mqtt/telemetry.py).
   const walletBalance = Number(availableBalance) || 0;
   const hasHold = focusedHoldCoins != null;
   const headroomBase = hasHold ? Number(focusedHoldCoins) : walletBalance;
   const remainingCoins = headroomBase - costCoins;
-  const lowBalance = isActive && costCoins > 0 &&
-    remainingCoins <= Math.max(10, headroomBase * 0.15);
   const priceNow = tariff?.price_now != null ? Number(tariff.price_now) : null;
   const kwhLeft = priceNow > 0 ? Math.max(0, remainingCoins) / priceNow : null;
+  const limitKwh = focusedLimits?.max_kwh;
+  const rateNow = priceNow > 0 ? priceNow : (energyNum > 0 ? costCoins / energyNum : null);
+  const limitBound = hasHold && limitKwh != null && rateNow != null &&
+    costCoins + Math.max(0, Number(limitKwh) - energyNum) * rateNow <= headroomBase + 0.01;
+  const lowBalance = isActive && costCoins > 0 && !limitBound &&
+    remainingCoins <= Math.max(10, headroomBase * 0.15);
 
   // The most recent alarm for this plug (last 2 minutes) — shown only when it
   // is not info-level. Info events (fw 2.8.0 PLUG_RECOVERED / GATEWAY_BOOT,

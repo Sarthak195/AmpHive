@@ -70,19 +70,28 @@ export const SessionProvider = ({ children }) => {
   const [alarms, setAlarms] = useState([]);
   // The final billing summary from the most recent stop, shown as a receipt.
   const [receipt, setReceipt] = useState(null);
+  // True until the first /api/sessions/active restore settles, so the page
+  // shows a loading state instead of flashing "No active charge" for a
+  // session that is in fact running.
+  const [restoring, setRestoring] = useState(true);
+  // Effects below key on the user's id, not the user object: refreshUser()
+  // (after login, stop, limit edits, top-ups) always builds a new object, and
+  // keying on it tore down the socket and zeroed the monitor each time.
+  const userId = user?.id ?? null;
 
   // Manage the Socket.io lifecycle (connect on login, disconnect on logout).
   // The cleanup below disconnects the previous socket on every user change,
   // so the logout branch only has to clear the state handle.
   useEffect(() => {
-    if (!user) {
+    if (!userId) {
       setSocket(null);
       return;
     }
 
-    const token = localStorage.getItem('amphive_token');
+    // Read the token on every (re)connect: the socket now outlives a
+    // same-user re-login, which can store a new token.
     const newSocket = io(API_BASE, {
-      auth: { token },
+      auth: (cb) => cb({ token: localStorage.getItem('amphive_token') }),
       transports: ['websocket', 'polling'],
     });
 
@@ -112,7 +121,7 @@ export const SessionProvider = ({ children }) => {
       newSocket.off('gateway_alarm', handleAlarm);
       newSocket.disconnect();
     };
-  }, [user]);
+  }, [userId]);
 
   // Manage telemetry subscription reactively
   useEffect(() => {
@@ -194,15 +203,19 @@ export const SessionProvider = ({ children }) => {
     );
     setFocusedHoldCoins(session.hold_coins ?? null);
     setLastFrameAt(null);
+    // Seed from the REST row (/api/sessions/active carries energy_kwh and
+    // cost_coins) so a restored session shows its real kWh and cost at once;
+    // live telemetry frames overwrite this as they arrive. Power stays 0 until
+    // the first frame, since the row has no instantaneous reading.
     setSessionData({
       plug_id: session.plug_id,
       plug_name: session.plug_name,
       status: 'charging',
       duration_sec: 0,
       power_w: 0.0,
-      energy_kwh: 0.0,
+      energy_kwh: Number(session.energy_kwh) || 0,
       current_a: 0.0,
-      cost_coins: 0.0
+      cost_coins: Number(session.cost_coins) || 0,
     });
   }, []);
 
@@ -335,10 +348,17 @@ export const SessionProvider = ({ children }) => {
       max_kwh: result?.max_kwh ?? null,
       max_duration_seconds: result?.max_duration_seconds ?? null,
     };
+    // The PATCH may resize this session's hold; keep the focused hold in step
+    // with the new limits, or the low-balance check compares a raised limit
+    // against the old, smaller hold and warns too early.
+    if (result && 'hold_coins' in result) next.hold_coins = result.hold_coins;
     if (id === sessionId) {
       setFocusedLimits(
-        next.max_kwh != null || next.max_duration_seconds != null ? next : null
+        next.max_kwh != null || next.max_duration_seconds != null
+          ? { max_kwh: next.max_kwh, max_duration_seconds: next.max_duration_seconds }
+          : null
       );
+      if ('hold_coins' in next) setFocusedHoldCoins(next.hold_coins);
     }
     setActiveSessions((prev) =>
       prev.map((s) => (s.session_id === id ? { ...s, ...next } : s))
@@ -368,14 +388,16 @@ export const SessionProvider = ({ children }) => {
   // Check for active sessions on mount or auth change; focus the newest.
   useEffect(() => {
     const checkActiveSession = async () => {
-      if (!user) {
+      if (!userId) {
         setActiveSessions([]);
         setSessionData(null);
         setSessionId(null);
         setIsActive(false);
+        setRestoring(false);
         return;
       }
 
+      setRestoring(true);
       try {
         const res = await refreshActiveSessions();
         if (res.active) {
@@ -383,16 +405,18 @@ export const SessionProvider = ({ children }) => {
         }
       } catch (err) {
         console.error('Failed to restore active session:', err);
+      } finally {
+        setRestoring(false);
       }
     };
 
     checkActiveSession();
-  }, [user, refreshActiveSessions, switchSession]);
+  }, [userId, refreshActiveSessions, switchSession]);
 
   return (
     <SessionContext.Provider value={{
       socket,
-      activeSessions, sessionData, sessionId, isActive, error,
+      activeSessions, sessionData, sessionId, isActive, error, restoring,
       lastFrameAt, focusedStartedAt, focusedLimits, focusedHoldCoins, alarms, receipt,
       startSession, stopSession, updateLimits, clearSession, switchSession, dismissReceipt,
     }}>

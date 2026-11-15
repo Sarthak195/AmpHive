@@ -2038,7 +2038,9 @@ async def test_set_plug_telemetry_interval_uses_lifespan_singleton(monkeypatch):
     MQTTManager._instance = None
 
     ts = MagicMock()
-    ts.get_interval.return_value = 10000  # differs from target -> proceeds
+    # Already 1000 in the store: still publishes, so a gateway that rebooted
+    # to its 10 s default is told 1 s again.
+    ts.get_interval.return_value = 1000
     monkeypatch.setattr(state, "telemetry_store", ts)
 
     built = MagicMock()

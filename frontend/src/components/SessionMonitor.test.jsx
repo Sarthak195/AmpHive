@@ -274,6 +274,37 @@ describe('SessionMonitor — notices', () => {
     expect(screen.getByText(/Low balance/)).toBeInTheDocument();
   });
 
+  it('does not warn about low balance when the driver’s own kWh limit, not the wallet, will stop the session', async () => {
+    // Hold sized to the limit (10 kWh x 5 = 50) on a well-funded wallet: the
+    // hold running down only means the limit is near.
+    api.get.mockResolvedValue({ base_price_per_kwh: 5, price_now: 5, slots: [] });
+    useWallet.mockReturnValue({ balance: 1000, availableBalance: 950 });
+    useSession.mockReturnValue(
+      baseSession({
+        sessionData: { ...baseData, energy_kwh: 9.5, cost_coins: 47.5, is_stale: false },
+        focusedHoldCoins: 50,
+        focusedLimits: { max_kwh: 10, max_duration_seconds: null },
+      })
+    );
+    await renderMonitor();
+    expect(screen.queryByText(/Low balance/)).not.toBeInTheDocument();
+  });
+
+  it('still warns when the wallet capped the hold below the cost of the kWh limit', async () => {
+    // Limit 10 kWh would cost 50, but the wallet only covered a 20-coin hold.
+    api.get.mockResolvedValue({ base_price_per_kwh: 5, price_now: 5, slots: [] });
+    useWallet.mockReturnValue({ balance: 20, availableBalance: 0 });
+    useSession.mockReturnValue(
+      baseSession({
+        sessionData: { ...baseData, energy_kwh: 3.6, cost_coins: 18, is_stale: false },
+        focusedHoldCoins: 20,
+        focusedLimits: { max_kwh: 10, max_duration_seconds: null },
+      })
+    );
+    await renderMonitor();
+    expect(screen.getByText(/Low balance/)).toBeInTheDocument();
+  });
+
   it('does not warn when the session hold comfortably covers the accrued cost, even with a tight wallet', async () => {
     // The wallet is nearly empty, but this session reserved its own hold up
     // front — a sibling session's spending shouldn't false-trigger this one.

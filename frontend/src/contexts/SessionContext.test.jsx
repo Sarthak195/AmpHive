@@ -13,8 +13,8 @@ import api from '../api/client';
 vi.mock('../api/client', () => ({
   default: { get: vi.fn(), post: vi.fn(), put: vi.fn(), patch: vi.fn(), delete: vi.fn() },
 }));
-// The user object must be render-stable: SessionProvider keys effects on
-// [user], so a fresh object each call would loop the socket effect forever.
+// The user object is kept render-stable (SessionProvider keys its effects on
+// the user id, so this is belt and braces).
 // mockRefreshUser is likewise a single shared spy (not re-created per render)
 // so tests can assert on its call count.
 const { MOCK_USER, mockRefreshUser } = vi.hoisted(() => ({
@@ -49,10 +49,13 @@ const TWO_SESSIONS = {
 const Probe = () => {
   const {
     activeSessions, sessionId, isActive, focusedLimits, focusedHoldCoins,
-    startSession, stopSession, switchSession, updateLimits,
+    startSession, stopSession, switchSession, updateLimits, sessionData, restoring,
   } = useSession();
   return (
     <div>
+      <div data-testid="restoring">{String(restoring)}</div>
+      <div data-testid="kwh">{String(sessionData?.energy_kwh)}</div>
+      <div data-testid="cost">{String(sessionData?.cost_coins)}</div>
       <div data-testid="focused">{String(sessionId)}</div>
       <div data-testid="isActive">{String(isActive)}</div>
       <div data-testid="limits">{JSON.stringify(focusedLimits) || 'null'}</div>
@@ -94,6 +97,30 @@ describe('restore on mount', () => {
     expect(screen.getByText('Plug A')).toBeInTheDocument();
     expect(screen.getByText('Plug B')).toBeInTheDocument();
     expect(screen.getByTestId('isActive')).toHaveTextContent('true');
+  });
+
+  it('shows the REST kWh and cost of a running session before any telemetry frame', async () => {
+    let resolveActive;
+    api.get.mockReturnValue(new Promise((r) => { resolveActive = r; }));
+    renderProbe();
+    // Still restoring: the page shows a loader, not "No active charge".
+    expect(screen.getByTestId('restoring')).toHaveTextContent('true');
+
+    await act(async () => {
+      resolveActive({
+        active: true,
+        sessions: [{
+          session_id: 5, plug_id: 3, plug_name: 'Plug L',
+          started_at: '2026-07-12T09:00:00+00:00',
+          energy_kwh: 1.42, cost_coins: 8.52,
+        }],
+      });
+    });
+
+    expect(screen.getByTestId('focused')).toHaveTextContent('5');
+    expect(screen.getByTestId('kwh')).toHaveTextContent('1.42');
+    expect(screen.getByTestId('cost')).toHaveTextContent('8.52');
+    expect(screen.getByTestId('restoring')).toHaveTextContent('false');
   });
 
   it('stays idle with no active sessions', async () => {
@@ -309,6 +336,19 @@ describe('updateLimits', () => {
     await userEvent.click(screen.getByText('update-focused-limit'));
 
     await waitFor(() => expect(mockRefreshUser).toHaveBeenCalled());
+  });
+
+  it('takes the resized hold from the PATCH response, so the low-balance check is not measured against the old hold', async () => {
+    api.get.mockResolvedValue(TWO_SESSIONS);
+    api.patch.mockResolvedValue({
+      status: 'updated', session_id: 2, max_kwh: 2.5, max_duration_seconds: null, hold_coins: 12.5,
+    });
+    renderProbe();
+    await waitFor(() => expect(screen.getByTestId('focused')).toHaveTextContent('2'));
+
+    await userEvent.click(screen.getByText('update-focused-limit'));
+
+    expect(screen.getByTestId('holdCoins')).toHaveTextContent('12.5');
   });
 });
 

@@ -47,10 +47,12 @@ async def set_plug_telemetry_interval(db: AsyncSession, plug_id: int, interval_m
     """
     Update the polling interval for a specific plug in telemetry_store
     and publish the SET_INTERVAL MQTT command to the gateway.
-    """
-    if state.telemetry_store.get_interval(plug_id) == interval_ms:
-        return
 
+    Always publishes, even when the store already holds `interval_ms`: the
+    store only records what was last SENT, so a gateway that rebooted (fw
+    default 10 s) or missed the command would otherwise never be told 1 s
+    again for the rest of the session. One small QoS1 message per call.
+    """
     result = await db.execute(select(Plug).where(Plug.id == plug_id))
     plug = result.scalar_one_or_none()
     if not plug:
