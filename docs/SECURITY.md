@@ -747,7 +747,11 @@ guardrail below was honored — recorded here so the invariants are auditable:
   account whose password the squatter knows, until the owner resets it via
   forgot-password. Repeated re-registration can also keep voiding the
   owner's pending link (bounded by the per-IP register limit and the
-  per-email cap). Before verification a Google sign-in evicts the squatter;
+  per-email cap). Because re-registration shares the per-email resend
+  bucket, a squatter who fills it also makes the owner's own signup and
+  resend return 429 until the window passes, while the squatter's password
+  and newest link stay live; the cap is kept because dropping it would
+  reopen the mail-bomb path resend-verification closes. Before verification a Google sign-in evicts the squatter;
   after it, only forgot-password does (a Google link to a verified account
   keeps the password). Tests: `backend/tests/test_email_verification.py`,
   `backend/tests/test_google_oauth.py`.

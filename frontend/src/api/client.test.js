@@ -177,7 +177,8 @@ describe('api convenience methods', () => {
 });
 
 describe('apiRequest: 401 handling', () => {
-  it('shows the server detail for a 401 sent without a token (wrong password)', async () => {
+  it('shows the server detail for a login 401 (wrong password), even with a stale token stored', async () => {
+    localStorage.setItem('amphive_token', 'stale');
     fetch.mockResolvedValue(jsonResponse({ detail: 'Invalid email or password.' }, { ok: false, status: 401 }));
 
     await expect(apiRequest('/api/auth/login', { method: 'POST' })).rejects.toMatchObject({
@@ -186,7 +187,7 @@ describe('apiRequest: 401 handling', () => {
     });
   });
 
-  it('clears the stored session on a 401 to a request that sent a token', async () => {
+  it('clears the stored session on a 401 from any other endpoint', async () => {
     window.history.pushState({}, '', '/login'); // stay put: no navigation in jsdom
     localStorage.setItem('amphive_token', 'stale');
     localStorage.setItem('amphive_user', '{}');

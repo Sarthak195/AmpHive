@@ -11,8 +11,8 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 
 - **Login copy (C4, C5):** a wrong password on `/login` now shows the server's
   "Invalid email or password." instead of "Authentication expired"
-  (`api/client.js` clears the session and redirects only on a 401 to a request
-  that sent a token). A `403 account_disabled` says the account is disabled
+  (`api/client.js` no longer treats a 401 from `/api/auth/login` itself as an
+  expired session). A `403 account_disabled` says the account is disabled
   instead of offering "verify your email" and a resend button.
 - **`GET /api/auth/me` returns `auth_provider` and `created_at` (C6):** the
   Account page now hides the close-account password prompt for a Google-only

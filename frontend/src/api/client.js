@@ -9,10 +9,10 @@
  * - API base URL comes from VITE_API_URL env var or defaults to
  *   the current origin (for same-domain Docker deployments).
  * - JWT token is stored in localStorage under 'amphive_token'.
- * - On a 401 to a request that sent a token, the token is cleared and the
- *   user is redirected to the login page (current location preserved as
- *   ?next= so Login can send them back). A 401 with no token, such as a wrong
- *   password, is thrown with the server's detail like any other error.
+ * - On a 401 response, the token is cleared and the user is redirected to
+ *   the login page (current location preserved as ?next= so Login can send
+ *   them back). A 401 from /api/auth/login itself (a wrong password) is
+ *   thrown with the server's detail like any other error.
  * - Every request carries a 20s AbortController timeout so a dead backend
  *   surfaces as a friendly error (err.code === 'timeout') instead of an
  *   indefinite spinner.
@@ -69,10 +69,10 @@ export async function apiRequest(endpoint, options = {}) {
     clearTimeout(timeoutId);
   }
 
-  // A 401 on a request that carried a token means the session expired or was
-  // revoked: clear it and send the user to sign in. A 401 without a token (a
-  // wrong password on /login) falls through so the server's detail is shown.
-  if (response.status === 401 && token) {
+  // A 401 means the session expired, was revoked or is missing: clear it and
+  // send the user to sign in. A 401 from the login call itself is a wrong
+  // password, so it falls through and the server's detail is shown.
+  if (response.status === 401 && endpoint !== '/api/auth/login') {
     localStorage.removeItem('amphive_token');
     localStorage.removeItem('amphive_user');
     // Redirect to login page if not already there, preserving the current
