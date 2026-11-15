@@ -97,6 +97,20 @@ config/passwd/ACL under `config/` — those are operator-managed on the VM
 accounts: `add_gateway_user.ps1`). To add/rotate `.env` keys, append on the VM
 and `docker compose up -d backend`.
 
+**Rolling back across `0041_revoked_sessions` (per-device logout,
+2026-11-15).** An image rollback keeps the table but pre-feature code ignores
+it, which silently un-revokes every per-device logout whose token has not
+expired. Before starting the old image, run once on the owner connection:
+
+```sql
+UPDATE users SET token_version = token_version + 1 WHERE id IN (SELECT DISTINCT user_id FROM revoked_sessions WHERE expires_at > now());
+```
+
+It converts each live per-device revocation into a global one for the
+affected users (they are signed out on every device). The migration's
+`downgrade()` runs the same statement before dropping the table. Details in
+[SECURITY.md](SECURITY.md) §2.
+
 **Total time:** ~10–15 min, dominated by the on-box image builds (mostly
 cache-hits when only a few files changed). **DNS:** `amphive.app` (driver),
 `cpo.amphive.app` (CPO portal), `mqtt.amphive.app` (direct-MQTT broker) and

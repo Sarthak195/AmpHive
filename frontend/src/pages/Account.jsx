@@ -3,8 +3,9 @@
  * fakes one), a password-reset trigger that reuses the existing
  * forgot-password flow, the web-push opt-in (moved here from
  * NotificationBell's footer per the redesign contract), a driver-only
- * link out to the host console, and the self-service data rights
- * ("Your data": export + account closure).
+ * link out to the host console, "Log out everywhere" (Security card; the
+ * normal Log out only signs out this device), and the self-service data
+ * rights ("Your data": export + account closure).
  *
  * Why the data-rights controls live HERE and not behind an email request:
  * the Privacy Policy promises the user can get a copy of their data and
@@ -26,6 +27,7 @@ import {
   Download,
   Trash2,
 } from 'lucide-react';
+import LogoutEverywhere from '../components/LogoutEverywhere';
 import PageHeader from '../components/ui/PageHeader';
 import Skeleton from '../components/ui/Skeleton';
 import Money from '../components/ui/Money';
@@ -259,8 +261,9 @@ export default function Account() {
       // uses — it clears both localStorage keys AND the context state, which
       // hand-rolled localStorage.removeItem calls would leave half-done.
       // Its server-side revoke will 401 (closure already bumped
-      // token_version, which is exactly what /logout does); logout() swallows
-      // that and clears locally regardless.
+      // token_version, which signs out every device like
+      // /logout-everywhere); logout() swallows that and clears locally
+      // regardless.
       await logout();
 
       // A full-page replace, not navigate(): every provider still mounted
@@ -333,6 +336,9 @@ export default function Account() {
                 Check your inbox — the link expires after a short while.
               </div>
             )}
+          </div>
+          <div className="account-security-everywhere">
+            <LogoutEverywhere />
           </div>
         </section>
 

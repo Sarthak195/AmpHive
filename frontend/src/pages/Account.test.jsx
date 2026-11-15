@@ -32,8 +32,9 @@ vi.mock('../contexts/ConfigContext', () => ({ useConfig: () => ({ coin_inr_rate:
 
 let mockUser;
 const logoutSpy = vi.fn();
+const logoutEverywhereSpy = vi.fn();
 vi.mock('../contexts/AuthContext', () => ({
-  useAuth: () => ({ user: mockUser, logout: logoutSpy }),
+  useAuth: () => ({ user: mockUser, logout: logoutSpy, logoutEverywhere: logoutEverywhereSpy }),
 }));
 
 const baseUser = {
@@ -191,6 +192,19 @@ describe('notifications card — push supported', () => {
     window.Notification.permission = 'denied';
     renderAccount();
     expect(await screen.findByText(/blocked/)).toBeInTheDocument();
+  });
+});
+
+describe('security card: log out everywhere', () => {
+  it('offers log out everywhere behind a confirm step', async () => {
+    renderAccount();
+    await userEvent.click(screen.getByRole('button', { name: 'Log out everywhere' }));
+
+    const dialog = screen.getByRole('dialog');
+    expect(within(dialog).getByText(/every device and browser/i)).toBeInTheDocument();
+    expect(logoutEverywhereSpy).not.toHaveBeenCalled();
+    // The plain sign-out (this device only) is not what this control calls.
+    expect(logoutSpy).not.toHaveBeenCalled();
   });
 });
 

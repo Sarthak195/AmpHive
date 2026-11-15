@@ -316,6 +316,21 @@ full column list of each:
   (re-registering replaces it, a Google link drops it; residual in
   SECURITY.md §8.6). Backs `POST /api/auth/register` + `verify-email` +
   `resend-verification`.
+- **`revoked_sessions`** (`0041_revoked_sessions.py`, 2026-11-15,
+  **provisional numbering**: renumbered `0042` after the off-peak `0041` at
+  integration). Per-device logout's revocation list (`RevokedSession`):
+  `sid` TEXT PRIMARY KEY (the JWT `sid` claim, a random sign-in session id),
+  `user_id` FK `users` ON DELETE CASCADE (indexed,
+  `ix_revoked_sessions_user_id`), `revoked_at` TIMESTAMPTZ default now,
+  `expires_at` TIMESTAMPTZ (indexed, `ix_revoked_sessions_expires_at`) =
+  `auth_time + JWT_MAX_SESSION_DAYS + JWT_EXPIRY_DAYS`, floored at the
+  token's `exp`. Written by `POST /api/auth/logout`; read (one PK lookup) by
+  every token-accepting path; rows past `expires_at` are pruned after each
+  insert. Not exported by `GET /api/auth/me/export` (credential metadata,
+  like the token digests) and not purged at closure (closure's
+  `token_version` bump already kills every sid; rows age out). Its
+  `downgrade()` bumps `token_version` for every user with a live row before
+  the DROP, so a downgrade does not un-revoke anyone (SECURITY.md §2).
 - **`offline_topups`** (`0026_offline_topups.py`) — a CPO's cash top-up of a
   driver's coin wallet, funded from the tenant's own unsettled net earnings
   (`OfflineTopup`; `actor_user_id`/`driver_user_id` nullable + SET NULL, same

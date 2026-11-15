@@ -23,11 +23,14 @@ import bcrypt
 import jwt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from sqlalchemy import select
+from sqlalchemy import delete, exists, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database.db import get_db
-from backend.database.models import User
+from backend.database.models import RevokedSession, User
+
+logger = logging.getLogger("amphive.auth")
 
 # --- Configuration ---
 
@@ -55,9 +58,10 @@ JWT_ALGORITHM = "HS256"
 # Env-configurable so an environment can shorten token lifetime. Kept at 7d
 # by default (mobile-first UX). GET /api/auth/me re-mints the token on every
 # app open (sliding renewal), so only a device idle for this long has to sign
-# in again; per-user revocation via the
-# token_version epoch — see create_access_token / get_current_user — is the
-# substantive control that makes a long-lived token killable on demand.
+# in again. Revocation is the substantive control that makes a long-lived
+# token killable on demand: per-user via the token_version epoch (log out
+# everywhere) and per-device via the sid claim plus revoked_sessions (see
+# create_access_token, revoke_session and get_current_user).
 JWT_EXPIRY_DAYS = int(os.getenv("JWT_EXPIRY_DAYS", "7"))
 # Absolute cap on that sliding renewal: /me stops re-minting once the original
 # sign-in (the auth_time claim, carried across renewals) is this old, so a
@@ -126,8 +130,33 @@ def normalize_email(email: str) -> str:
 
 # --- JWT Token Management ---
 
+# Random per-sign-in session id (the `sid` claim): 16 bytes of entropy, which
+# token_urlsafe renders as 22 url-safe characters.
+SESSION_ID_BYTES = 16
+
+
+def new_session_id() -> str:
+    """A fresh, unguessable sign-in session id for the `sid` claim. Minted
+    once per sign-in (login, email verification, Google callback) and carried
+    unchanged across /me renewals, so revoking it ends that one device's
+    session without touching the user's other devices."""
+    return secrets.token_urlsafe(SESSION_ID_BYTES)
+
+
+def token_sid(payload: dict) -> Optional[str]:
+    """The token's `sid` claim, or None when it is absent or malformed (a
+    token minted before per-device sessions existed carries none)."""
+    sid = payload.get("sid")
+    return sid if isinstance(sid, str) and sid else None
+
+
 def create_access_token(
-    user_id: int, role: str, email: str, token_version: int = 0, auth_time: Optional[int] = None
+    user_id: int,
+    role: str,
+    email: str,
+    token_version: int = 0,
+    auth_time: Optional[int] = None,
+    sid: Optional[str] = None,
 ) -> str:
     """
     Create a signed JWT access token containing user claims.
@@ -142,6 +171,11 @@ def create_access_token(
     - iat: issued-at timestamp
     - auth_time: when the user actually signed in (epoch seconds); renewals
       keep it, which bounds a session at JWT_MAX_SESSION_DAYS
+    - sid: the sign-in session id (only when `sid` is passed). Sign-in paths
+      pass new_session_id(); renewals pass the old token's sid through. None
+      omits the claim, so a token minted before per-device sessions stays
+      sid-less across renewals. POST /api/auth/logout revokes it
+      (revoked_sessions).
     """
     now = datetime.now(timezone.utc)
     payload = {
@@ -153,6 +187,8 @@ def create_access_token(
         "iat": now,
         "exp": now + timedelta(days=JWT_EXPIRY_DAYS),
     }
+    if sid is not None:
+        payload["sid"] = sid
     return jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
 
 
@@ -160,11 +196,22 @@ def renewed_access_token(payload: dict, user: User) -> Optional[str]:
     """Sliding renewal for GET /api/auth/me: re-mint at the user's CURRENT
     token_version, keeping the original sign-in time. None once that sign-in
     is older than JWT_MAX_SESSION_DAYS (tokens minted before auth_time existed
-    fall back to iat), so the client keeps its token until it expires."""
+    fall back to iat), so the client keeps its token until it expires.
+
+    The sign-in session id (`sid`) is carried through unchanged and never
+    minted here: a sid-less token stays sid-less, so a copy of it taken before
+    per-device sessions existed cannot outlive a later per-device logout."""
     auth_time = int(payload.get("auth_time") or payload.get("iat") or 0)
     if datetime.now(timezone.utc).timestamp() - auth_time > JWT_MAX_SESSION_DAYS * 86400:
         return None
-    return create_access_token(user.id, user.role.value, user.email, user.token_version, auth_time=auth_time)
+    return create_access_token(
+        user.id,
+        user.role.value,
+        user.email,
+        user.token_version,
+        auth_time=auth_time,
+        sid=token_sid(payload),
+    )
 
 
 def decode_access_token(token: str) -> Optional[dict]:
@@ -177,6 +224,81 @@ def decode_access_token(token: str) -> Optional[dict]:
         return payload
     except jwt.PyJWTError:
         return None
+
+
+# --- Per-device session revocation (the `sid` claim) ---
+
+# One detail for every revoked-token 401 (token_version mismatch or revoked
+# sid), so a client cannot tell which mechanism killed its token.
+REVOKED_DETAIL = "Session has been revoked. Please sign in again."
+
+
+async def is_sid_revoked(db: AsyncSession, sid: Optional[str]) -> bool:
+    """True when this sign-in session was revoked by per-device logout. One
+    primary-key lookup, no cache; a sid-less (legacy) token issues no query.
+
+    The `is True` identity check is load-bearing: the mocked-DB test suites
+    hand back an AsyncMock session whose `scalar` resolves to a MagicMock,
+    which must read as "not revoked" rather than as a truthy hit."""
+    if sid is None:
+        return False
+    found = await db.scalar(select(exists().where(RevokedSession.sid == sid)))
+    return found is True
+
+
+def revoked_session_expiry(payload: dict) -> datetime:
+    """When a revoked_sessions row for this token's session stops mattering.
+
+    Normally auth_time + JWT_MAX_SESSION_DAYS + JWT_EXPIRY_DAYS: renewal stops
+    at the max-session cap and the last renewed token lives JWT_EXPIRY_DAYS
+    past that. Floored at the presented token's own exp and at now +
+    JWT_EXPIRY_DAYS, so a missing auth_time or a later cut to either setting
+    can never prune the row while a token of this session is still valid."""
+    now = datetime.now(timezone.utc)
+    auth_time = int(payload.get("auth_time") or payload.get("iat") or 0)
+    candidates = [
+        datetime.fromtimestamp(auth_time, timezone.utc)
+        + timedelta(days=JWT_MAX_SESSION_DAYS + JWT_EXPIRY_DAYS),
+        now + timedelta(days=JWT_EXPIRY_DAYS),
+    ]
+    exp = payload.get("exp")
+    if isinstance(exp, (int, float)):
+        candidates.append(datetime.fromtimestamp(exp, timezone.utc))
+    return max(candidates)
+
+
+async def revoke_session(db: AsyncSession, user_id: int, payload: dict) -> None:
+    """Revoke the sign-in session named by this token's sid (per-device
+    logout). Commits the revocation FIRST, then prunes expired rows as a
+    separate best-effort step: a failure in the cleanup (lock or statement
+    timeout) must never cost the revocation, because the SPA's logout is
+    best-effort and clears local state whatever the server answers.
+
+    ON CONFLICT DO NOTHING absorbs two concurrent logouts with one token.
+    Never log the sid itself: it names a live session until it expires."""
+    sid = token_sid(payload)
+    if sid is None:
+        raise ValueError("revoke_session needs a token that carries a sid claim")
+    await db.execute(
+        pg_insert(RevokedSession)
+        .values(sid=sid, user_id=user_id, expires_at=revoked_session_expiry(payload))
+        .on_conflict_do_nothing(index_elements=[RevokedSession.sid])
+    )
+    await db.commit()
+
+    try:
+        await db.execute(
+            delete(RevokedSession)
+            .where(RevokedSession.expires_at < datetime.now(timezone.utc))
+            .execution_options(synchronize_session=False)
+        )
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        logger.warning(
+            "revoked_sessions cleanup failed (revocation already committed)",
+            exc_info=True,
+        )
 
 
 # --- FastAPI Authentication Dependency ---
@@ -232,16 +354,25 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    # Reject tokens issued before the user's current token epoch (logout /
-    # password change / admin revoke bumps token_version). Tokens minted
-    # before this claim existed carry no `tv`; treat them as epoch 0 so a
-    # deploy doesn't force-log-out everyone — the first revoke still kills them
-    # (epoch moves to 1). This is a per-user "log out everywhere", not a
-    # per-token blacklist.
+    # Reject tokens issued before the user's current token epoch (log out
+    # everywhere / password change / admin revoke / closure bumps
+    # token_version). Tokens minted before this claim existed carry no `tv`;
+    # treat them as epoch 0 so a deploy doesn't force-log-out everyone: the
+    # first revoke still kills them (epoch moves to 1).
     if payload.get("tv", 0) != user.token_version:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Session has been revoked. Please sign in again.",
+            detail=REVOKED_DETAIL,
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    # Per-device logout: this sign-in session (sid claim) was revoked while
+    # the user's other devices stay signed in. Same 401 as a tv mismatch.
+    # Checked after tv so an already-dead token costs no extra query.
+    if await is_sid_revoked(db, token_sid(payload)):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=REVOKED_DETAIL,
             headers={"WWW-Authenticate": "Bearer"},
         )
 
@@ -295,6 +426,10 @@ async def get_current_user_optional(
     # Same revocation + disabled checks as get_current_user, but a failure just
     # degrades to anonymous rather than raising.
     if payload.get("tv", 0) != user.token_version or user.is_disabled:
+        return None
+    # A revoked sign-in session (per-device logout) degrades to anonymous too,
+    # exactly like a tv mismatch here: this dependency never raises.
+    if await is_sid_revoked(db, token_sid(payload)):
         return None
 
     return user
