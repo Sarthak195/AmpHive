@@ -328,7 +328,7 @@ class _AlarmDB:
 async def test_auto_maintenance_trigger_by_event_type(event_type, plug_id, should_trigger):
     """
     Only THERMAL_CUTOFF/OVERCURRENT_CUTOFF with a resolved plug_id call
-    _auto_enter_maintenance — from _persist_gateway_event (sequenced after
+    _auto_enter_maintenance, from _persist_gateway_event (sequenced before
     the safety-cutoff finalize; see _handle_gateway_alarm/_persist_gateway_event
     for why this can't be an independently-scheduled task). UNAUTHORIZED_ON,
     OTA_* events, and a missing plug_id must never trigger it.
@@ -372,14 +372,13 @@ async def test_auto_maintenance_disabled_by_flag(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_finalize_runs_before_auto_maintenance():
+async def test_auto_maintenance_runs_before_finalize():
     """
-    Regression test for the ordering fix: auto-maintenance must be sequenced
-    strictly AFTER the safety-cutoff finalize, in the same coroutine — NOT
-    raced as an independently-scheduled task. finalize_charging_session sets
-    the plug back to PlugStatus.AVAILABLE; if auto-maintenance ran first (or
-    concurrently), that AVAILABLE write could land after the MAINTENANCE
-    flip and silently undo it.
+    [C1] auto-maintenance is sequenced strictly BEFORE the safety-cutoff
+    finalize, in the same coroutine (not an independently scheduled task).
+    finalize_charging_session keeps a MAINTENANCE status (it only frees an
+    OCCUPIED plug), so running maintenance first means the faulted plug never
+    commits as AVAILABLE and its watchers are never told it is "now free".
     """
     MQTTManager._instance = None
     db = _AlarmDB()
@@ -399,7 +398,7 @@ async def test_finalize_runs_before_auto_maintenance():
     with patch("backend.services.socketio_manager.emit_gateway_alarm", AsyncMock()):
         await mgr._persist_gateway_event("gw-9", 5, "THERMAL_CUTOFF", "critical", None)
 
-    assert order == ["finalize", "auto_maintenance"]
+    assert order == ["auto_maintenance", "finalize"]
     MQTTManager._instance = None
 
 
