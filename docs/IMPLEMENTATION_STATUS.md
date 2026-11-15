@@ -170,12 +170,17 @@ Plug photos and reviews:
   failed delete. Approve stays pending-only. Rejected rows show a "Removed"
   placeholder instead of a broken image.
 
-## 0b. 2026-09-28 Cloudflare front door for amphive.app / cpo.amphive.app (LIVE — DNS cut over)
+## 0b. 2026-11-15 feature batch
+
+Merged on `release/2026-11-15-features` on top of the 2026-11-15 fix release
+(`825f27e`). One subsection per feature branch.
+
+### Cloudflare front door for amphive.app / cpo.amphive.app (LIVE since 2026-09-28, DNS cut over)
 
 Moving `amphive.app` + `cpo.amphive.app` behind Cloudflare's free HTTP proxy
 to cut latency for Indian users (origin is a `us-west1` e2-micro, ~240 ms RTT
 to India). `mqtt.amphive.app` and `mail.amphive.app` stay DNS-only / grey
-cloud — MQTT 8883 and SMTP/IMAP can't traverse the CF HTTP proxy. DNS is
+cloud: MQTT 8883 and SMTP/IMAP can't traverse the CF HTTP proxy. DNS is
 now served by Cloudflare's nameservers (`harlee`/`ridge.ns.cloudflare.com`,
 cut over from name.com 2026-09-28; the old name.com records were left in
 place, so switching the nameservers back is the rollback).
@@ -188,7 +193,7 @@ updated; live Caddyfile hand-edited to match, verified with `caddy validate`
 + reload, semantics tested on caddy v2.11.4 in a throwaway container). From a
 Cloudflare peer the upstream XFF collapses to the vouched `CF-Connecting-IP`
 value only (a spoofed XFF is discarded); from an untrusted peer
-`CF-Connecting-IP` is ignored and XFF falls back to the real peer IP —
+`CF-Connecting-IP` is ignored and XFF falls back to the real peer IP.
 `backend/services/rate_limit.py`'s `TRUSTED_PROXY_HOPS=2` is unchanged
 (Caddy still appends one hop, frontend-nginx the other), only its topology
 comments were updated. Cloudflare dashboard: SSL/TLS Full (strict), Always
@@ -196,25 +201,38 @@ Use HTTPS OFF (Caddy already redirects; keeps ACME HTTP-01 on :80 flowing
 through CF untouched), Rocket Loader / Email Obfuscation / Bot Fight Mode
 OFF (conflict with the strict CSP / would JS-challenge API clients),
 WebSockets ON (Socket.io). GCP firewall on 80/443 was **deliberately not**
-locked to Cloudflare's ranges — the origin IP stays directly reachable
+locked to Cloudflare's ranges: the origin IP stays directly reachable
 because `mail.amphive.app`'s Let's Encrypt HTTP-01 renewal needs :80 open
 directly, not routed through Cloudflare. See
-[DEPLOYMENT.md](DEPLOYMENT.md#cloudflare-front-door-amphiveapp-cpoamphiveapp--added-2026-09-28)
+[DEPLOYMENT.md](DEPLOYMENT.md#cloudflare-front-door-amphiveapp-cpoamphiveapp-added-2026-09-28)
 and [SECURITY.md](SECURITY.md#6-operational-notes) for the full write-up.
 
 **Verified after cutover (2026-09-28):** `.app` registry delegates to
 Cloudflare; apex + `cpo` resolve to Cloudflare anycast, `mqtt`/`mail` to the
 VM. HTTPS 200 on both hosts via the edge (the Universal SSL edge cert took a
-few minutes to appear after activation — expect a short TLS-handshake-failure
+few minutes to appear after activation; expect a short TLS-handshake-failure
 window on a fresh zone), HSTS/CSP pass through, `/assets/*` `cf-cache-status:
 HIT` after the first fetch, `/api/*` `DYNAMIC` + `no-store`, Socket.io
 handshake offers the websocket upgrade, Google OAuth redirect intact, broker
 TLS on 8883 direct. Client IP: a marked request via Cloudflare and one direct
 to the origin both reached frontend-nginx with `X-Forwarded-For` = the real
-client IP. Measured from an Indian connection (edge colo MRS — Marseille; Indian
+client IP. Measured from an Indian connection (edge colo MRS, Marseille; Indian
 traffic on the free plan is often not served from an Indian colo): median fresh
 connection page TTFB 728 → 582 ms, API 733 → 559 ms, main JS bundle total
 2925 → 954 ms (edge-cached).
+
+### fw 2.9.0-direct, SET_INTERVAL wakes the poll loop (source only)
+
+`firmware/main/main.c`: the telemetry task now sleeps in `ulTaskNotifyTake`
+with the interval as the timeout, and `SET_INTERVAL` notifies it when the value
+changes, so a session's 1 s cadence starts at once instead of after the current
+idle sleep (up to 10 s). Timing audit: the energy integrator uses the measured
+tick delta and the duration watchdog `now_seconds()`, so an early sweep cannot
+miscount energy or time. `PROJECT_VER` is `2.9.0-direct`. The software gateway
+(`agent/amphive_agent/core.py`) gets the same wake, plus a gap clamp that allows
+the interval the cut-short sleep used (`agent/test_poll_wake.py`).
+**Not yet built:** there is no signed 2.9.0 image yet (build with ESP-IDF
+v5.3.3, target esp32, as for 2.8.0). The field gateway stays on 2.8.0-direct. See [FIRMWARE.md](FIRMWARE.md) (§3 and §8).
 
 ---
 
@@ -819,7 +837,7 @@ the `cpo.py` god router + `MQTTManager` god object; a backend deps lockfile.
 | MQTT ingestion crash-isolation | ✅ | **2026-08-11 (PR #117).** A non-*object* JSON payload (`5`, `[]`, `"x"`, `true`, `null`) parses fine, then hits `payload.get(...)` in a topic handler and raises `AttributeError` on the paho network-loop thread; paho 2.1.0 runs with `suppress_exceptions=False`, so that escape killed the loop thread and **froze ALL MQTT ingestion for every tenant**, telemetry, billing accrual, auto-stop, status, alarms/safety-finalize, discovery, until the backend was restarted. Reachable by any single gateway credential publishing one 1-byte frame to its own topic. `services/mqtt/router.py` `_on_message` now rejects non-dict payloads before dispatch **and** wraps the whole decode+route+handler body in a catch-all `except Exception` that logs and drops just that frame, so no current-or-future handler bug can escape into the paho thread (`BaseException` still propagates). The non-JSON logs path and the oversized-frame gate stay outside the dict guard. Tests: `backend/tests/test_mqtt_payload_guard.py`. |
 | MQTT inbound alarm handling + CPO events feed | ✅ | Subscribes `amphive/gateways/+/alarms` (2026-07-10): `_handle_gateway_alarm` maps `{"error"\|"event"}` → severity, persists a `gateway_events` row (tenant resolved from the gateway), and broadcasts a `gateway_alarm` Socket.io event. CPO reads via `GET /api/cpo/events` (filters: `unacknowledged_only`, `severity`) and clears with `POST /api/cpo/events/{id}/ack`. **Verified live in prod 2026-07-10** (synthetic `UNAUTHORIZED_ON` → persisted event id, retrieved + acked via API). **2026-08-02:** `UNMETERED_CONSUMPTION` (offline-consumption detection, above) additionally bell-notifies every CPO of the tenant directly (`notify()`) — the first alarm type to do so, on top of the passive feed every type gets. **2026-10-20:** fw 2.8.0 diagnostics `GATEWAY_BOOT` / `PLUG_UNREACHABLE` / `PLUG_RECOVERED` (§0); the two info ones are stored already acknowledged (`_PRE_ACKED_EVENT_TYPES`), so they never occupy the unacknowledged window the CPO alert strip and Health badge read. |
 | MQTT inbound firmware log-line diagnostics (TD#28) | ✅ | Subscribes `amphive/gateways/+/logs` (QoS 0, plain text — not JSON, matched before the JSON parse in `services/mqtt/router.py`). `services/mqtt/logs.py` `MQTTLogsMixin` parses the ESP-IDF level letter (E/W/I/D/V → error/warning/info, skipping a leading ANSI colour escape) and persists a `gateway_logs` row (tenant resolved from the gateway) — no notify/socket fan-out, a diagnostics feed distinct from the alarm/event feed above. CPO reads via `GET /api/cpo/gateways/{gateway_id}/logs`; admin cross-tenant via `GET /api/admin/gateway-logs`. Pruned after `GATEWAY_LOGS_RETENTION_DAYS` (default 14) by the session reaper's `reap_gateway_logs_once()`. |
-| Orphan-OFF operator alert | ✅ | `mqtt/status.py._republish_off_for_orphaned_plugs` (reconnect-time OFF republish for plugs with no ACTIVE session) now also notifies every CPO of the gateway's tenant — one `orphan_off` bell notification (`services/notifications.py notify()`) per (plug, CPO) pair, only when at least one plug was actually OFF'd. First CPO-targeted `notify()` call site (previously driver-only); delivered via the existing NotificationBell/Socket.io path, no frontend change needed. **2026-10-20:** the bell now also needs the plug to have been last seen drawing power (`plugs.current_power_w >= ORPHAN_ALERT_MIN_POWER_W`, default 5 W) on top of the existing real-OFFLINE→ONLINE-transition gate (a retained `online` replay never bells). An idle plug still gets its OFF, with only an INFO log (§0). |
+| Orphan-OFF operator alert | ✅ | `mqtt/status.py._republish_off_for_orphaned_plugs` (reconnect-time OFF republish for plugs with no ACTIVE session) now also notifies every CPO of the gateway's tenant: one `orphan_off` bell notification (`services/notifications.py notify()`) per (plug, CPO) pair, only when at least one plug was actually OFF'd. First CPO-targeted `notify()` call site (previously driver-only); delivered via the existing NotificationBell/Socket.io path, no frontend change needed. **2026-10-20:** the bell now also needs the plug to have been last seen drawing power (`plugs.current_power_w >= ORPHAN_ALERT_MIN_POWER_W`, default 5 W) on top of the existing real-OFFLINE→ONLINE-transition gate (a retained `online` replay never bells). An idle plug still gets its OFF, with only an INFO log (§0a). |
 | Plug maintenance workflow (fault console) | ✅ | **2026-07-12**: a THERMAL_CUTOFF/OVERCURRENT_CUTOFF alarm now auto-enters the plug into MAINTENANCE (`MQTTManager._auto_enter_maintenance`; excludes `UNAUTHORIZED_ON` and OTA events; env-gate `AUTO_MAINTENANCE_ON_CRITICAL_ALARM`, default on) — session-start already 409s any non-AVAILABLE plug, so this blocks new sessions until an operator clears it. Operators drive enter/clear via `POST /api/cpo/plugs/{id}/maintenance` (`clear` 409s while an ACTIVE session exists); both paths audit (`plug.maintenance_enter`/`plug.maintenance_clear`) and broadcast the status flip like any other plug-status change. |
 | Gateway reachability in the driver plug API | ✅ | `GET /api/plugs/available` and `/api/plugs/{id}` now return `gateway_online` (via `gateway_is_live`: ONLINE + `last_seen_at` within the liveness window), so the driver UI can flag an unreachable charger before a start attempt rather than only via a 409. **Verified in prod** (live gateways → true, never-connected gateway → false). |
 | Live gateway connectivity push (faster-gateway-offline-detection) | ✅ | See [proposals/faster-gateway-offline-detection.md](proposals/faster-gateway-offline-detection.md) — levers 1+3 shipped: `mqtt/status.py` emits `plug_connectivity` on every real online↔offline transition, and `services/session_reaper.py reap_gateway_silence_once()` closes the silence-case gap (TCP-connected but telemetry wedged, no LWT) by reusing `gateway_is_live()` per reaper tick with a bounded in-memory dedup (`_silence_pushed`). Dashboard/CpoGateways/CpoChargers all patch in place on the socket event plus a 30s `usePoll` backstop. Lever 2 (tighter keepalive/liveness-window constants) deliberately held pending field data. **2026-10-20:** the offline direction is debounced. It waits `GATEWAY_OFFLINE_NOTIFY_DELAY_SEC` (default 120 s) and is dropped if the gateway is back by then; the online direction still fires at once (§0). The silence sweep only looks at gateways stored ONLINE, so it does not bypass the debounce. |

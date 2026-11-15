@@ -116,6 +116,11 @@ class AmpHiveAgent:
         self.devices: dict[int, PlugDevice] = {}   # assigned plug_id -> device
         self.pending: dict[str, PlugDevice] = {}    # unique_id -> device awaiting assignment
         self._poll_s = config.poll_s
+        # The interval the poll loop last slept with. After SET_INTERVAL the next
+        # gap is up to the OLD interval, so the integrator's clamp must allow it.
+        self._slept_s = config.poll_s
+        # Set by SET_INTERVAL so the poll loop wakes at once (like fw 2.9.0).
+        self._wake = asyncio.Event()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._stop = asyncio.Event()
 
@@ -189,7 +194,10 @@ class AmpHiveAgent:
 
         if action == "SET_INTERVAL":
             ms = int(cmd.get("interval_ms", self._poll_s * 1000))
-            self._poll_s = min(60.0, max(0.5, ms / 1000.0))
+            new_s = min(60.0, max(0.5, ms / 1000.0))
+            if new_s != self._poll_s:
+                self._poll_s = new_s
+                self._wake.set()  # start the new cadence now, not after this sleep
             log.info("poll interval -> %.1fs", self._poll_s)
             return
 
@@ -303,7 +311,8 @@ class AmpHiveAgent:
                     log.warning("poll failed for plug %s", plug_id)
                     continue
                 await self._watchdog_and_publish(plug_id, dev, state)
-            await self._sleep_or_stop(self._poll_s)
+            self._slept_s = self._poll_s
+            await self._sleep_or_wake(self._slept_s)
 
     async def _watchdog_and_publish(self, plug_id: int, dev: PlugDevice, state: PlugState):
         """Local safety watchdog + telemetry, mirroring the firmware loop.
@@ -336,7 +345,8 @@ class AmpHiveAgent:
             if not session.get("has_meter") and state.watts > 0.0:
                 last = float(session.get("last_poll_ts") or now)
                 dt = now - last
-                if 0.0 < dt <= _INTEGRATION_MAX_GAP_POLLS * self._poll_s:
+                gap_s = max(self._poll_s, self._slept_s)
+                if 0.0 < dt <= _INTEGRATION_MAX_GAP_POLLS * gap_s:
                     session["integrated_kwh"] = (
                         float(session.get("integrated_kwh", 0.0))
                         + (state.watts / 1000.0) * (dt / 3600.0)
@@ -401,6 +411,15 @@ class AmpHiveAgent:
             await asyncio.wait_for(self._stop.wait(), timeout=seconds)
         except asyncio.TimeoutError:
             pass
+
+    async def _sleep_or_wake(self, seconds: float):
+        """Sleep until timeout, stop, or a SET_INTERVAL wake (which is consumed)."""
+        waits = [asyncio.ensure_future(self._stop.wait()),
+                 asyncio.ensure_future(self._wake.wait())]
+        await asyncio.wait(waits, timeout=seconds, return_when=asyncio.FIRST_COMPLETED)
+        for w in waits:
+            w.cancel()
+        self._wake.clear()
 
     # ---- lifecycle ----
     async def run(self):

@@ -294,6 +294,14 @@ driver's auth hash (see §4).
   from tripping first.
 - `telemetry_safety` runs at a **configurable interval** (`telemetry_interval_ms`, default **10 s** / 10000 ms) and, each sweep, **polls every known plug regardless of MQTT connectivity** (with many plugs at a fast session cadence the sweep may exceed one interval, which just stretches the effective cadence — safety still runs every sweep):
   - If a `"SET_INTERVAL"` command with `"interval_ms"` is received, the interval is updated (clamped between 500 ms and 60000 ms).
+    Since fw 2.9.0-direct a changed interval also wakes the loop at once: the
+    task sleeps in `ulTaskNotifyTake(pdTRUE, interval)` and the handler calls
+    `xTaskNotifyGive` on it, so a session's 1 s cadence starts immediately
+    instead of after the current (up to 10 s) idle sleep. An unchanged interval
+    does not wake it. Early sweeps are safe: the energy integrator uses the
+    measured tick delta and the duration watchdog uses `now_seconds()`; only
+    the poll-counted debounces (`OVERCURRENT_CAP_DEBOUNCE`,
+    `PLUG_UNREACHABLE_FAILURES`) see one extra sample.
   - The published telemetry `kwh` is **session-relative** (`meter − start_energy_kwh`,
     clamped ≥ 0; 0 when idle), and the active `session_id` is echoed back — see
     [MQTT_CONTRACT.md](MQTT_CONTRACT.md). The raw lifetime meter is never billed.
@@ -854,8 +862,18 @@ burst. 2.7.1 adds:
 The first capture showed the cause: the board heard the AP at -81 to -89 dBm.
 Placement fixes that, not firmware.
 
-**Current: fw `2.8.0-direct` — boot report, plug reachability, offline log ring
-(2026-10-20; build-verified only, not flashed or published for OTA).** Deploy
+**Current source: fw `2.9.0-direct`: SET_INTERVAL wakes the poll loop
+(2026-11-15; not yet built, flashed or published).** The telemetry task slept
+`vTaskDelay(telemetry_interval_ms)`, so after a session's `SET_INTERVAL 1000`
+the 1 s cadence began only when the current idle sleep (up to 10 s) ended. 2.9.0
+sleeps in `ulTaskNotifyTake` with the interval as the timeout and the handler
+notifies the task when the value changes (§3). No wire change, no backend
+change. The software gateway got the same wake (`agent/test_poll_wake.py`).
+The field gateway stays on 2.8.0 until 2.9.0 is built with ESP-IDF v5.3.3,
+signature-verified and rolled out.
+
+**fw `2.8.0-direct` (in the field): boot report, plug reachability, offline log ring
+(2026-10-20; USB-flashed to gw `1cc3abb4fb54`, not published for OTA).** Deploy
 the matching backend (branch `fix/connection-noise`, PR #130) **before**
 flashing or OTA-ing 2.8.0: an older backend stores the new events as untitled,
 unacknowledged warnings and parses the `[offline]` log replays as info.
