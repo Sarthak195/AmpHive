@@ -152,6 +152,11 @@ class UserResponse(BaseModel):
     # per JWT_EXPIRY_DAYS never hits the fixed expiry. Optional so other
     # producers of this shape need not send one.
     token: Optional[str] = None
+    # Account page: 'google' hides the close-account password prompt for a
+    # Google-only account (it has no usable password), and created_at drives
+    # the "Member since" row.
+    auth_provider: Optional[str] = None
+    created_at: Optional[datetime] = None
 
 
 # --- Session Schemas ---

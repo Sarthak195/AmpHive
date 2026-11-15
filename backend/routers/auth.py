@@ -450,6 +450,8 @@ async def get_me(
         # revocation path (logout, password reset, admin, closure) intact.
         # None past JWT_MAX_SESSION_DAYS since the original sign-in.
         token=renewed_access_token(decode_access_token(credentials.credentials) or {}, user),
+        auth_provider=user.auth_provider,
+        created_at=user.created_at,
     )
 
 
