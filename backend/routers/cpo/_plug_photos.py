@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database.db import get_db
 from backend.database.models import PlugPhoto, PlugPhotoStatus, User
+from backend.routers.plugs import photo_image_path
 from backend.schemas import PlugPhotoResponse
 from backend.services.photo_publish import PhotoPublishError, delete_object
 from backend.services.rbac import require_role
@@ -33,7 +34,7 @@ def _photo_response(photo: PlugPhoto) -> PlugPhotoResponse:
     return PlugPhotoResponse(
         id=photo.id,
         plug_id=photo.plug_id,
-        url=photo.url,
+        url=photo_image_path(photo.plug_id, photo.id),
         status=photo.status.value,
         created_at=photo.created_at.isoformat() if photo.created_at else None,
     )

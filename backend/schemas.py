@@ -304,7 +304,8 @@ class PlugResponse(BaseModel):
     # Both come from one grouped query (resolve_review_aggregates_batch), no N+1.
     avg_rating: Optional[float] = None
     review_count: int = 0
-    # [Photos] One APPROVED photo's public URL to use as the plug's thumbnail on
+    # [Photos] One APPROVED photo's image URL (the relative backend route
+    # /api/plugs/{id}/photos/{photo_id}/image) to use as the plug's thumbnail on
     # the map/list. None when the plug has no approved photo yet.
     thumbnail_url: Optional[str] = None
 
@@ -334,7 +335,7 @@ class PublicPlugResponse(BaseModel):
     # count, no per-user data). None when unrated. Same meaning as PlugResponse's.
     avg_rating: Optional[float] = None
     review_count: int = 0
-    # [Photos] One APPROVED photo URL for the map thumbnail (public-read bucket).
+    # [Photos] One APPROVED photo URL for the map thumbnail (backend image route).
     thumbnail_url: Optional[str] = None
 
 
@@ -824,7 +825,8 @@ class PlugPhotoResponse(BaseModel):
     """One plug photo. In the public/driver list `status` is included so the
     uploader's own PENDING photo can render a "waiting for review" badge; the
     anonymous read only ever contains APPROVED rows. In the CPO moderation queue
-    the same shape carries the pending rows to review."""
+    the same shape carries the pending rows to review. `url` is always the
+    backend image route, which serves pending bytes to moderators only."""
     id: int
     plug_id: int
     url: str

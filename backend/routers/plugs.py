@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -48,6 +48,7 @@ from backend.services.auth import (
 )
 from backend.services.photo_publish import (
     PhotoPublishError,
+    download_object,
     upload_object,
 )
 from backend.services.pricing import resolve_price_display, resolve_price_display_batch
@@ -159,14 +160,15 @@ async def resolve_review_aggregates_batch(db, plug_ids):
 
 async def resolve_photo_thumbnails_batch(db, plug_ids):
     """[Photos] One APPROVED photo URL per plug (the most recent) for the
-    map/list thumbnail, in ONE query — same N+1-free discipline as the review
-    aggregate. Returns {plug_id: url}; a plug with no approved photo is absent
-    (the caller defaults thumbnail_url to None)."""
+    map/list thumbnail, in ONE query, same N+1-free discipline as the review
+    aggregate. Returns {plug_id: url} where url is the backend image route
+    (photo_image_path); a plug with no approved photo is absent (the caller
+    defaults thumbnail_url to None)."""
     if not plug_ids:
         return {}
 
     rows = await db.execute(
-        select(PlugPhoto.plug_id, PlugPhoto.url)
+        select(PlugPhoto.plug_id, PlugPhoto.id)
         .where(
             PlugPhoto.plug_id.in_(plug_ids),
             PlugPhoto.status == PlugPhotoStatus.APPROVED,
@@ -174,10 +176,16 @@ async def resolve_photo_thumbnails_batch(db, plug_ids):
         .order_by(PlugPhoto.plug_id, PlugPhoto.created_at.desc())
     )
     out = {}
-    for plug_id, url in rows.all():
+    for plug_id, photo_id in rows.all():
         # Rows are ordered newest-first within each plug; keep the first seen.
-        out.setdefault(plug_id, url)
+        out.setdefault(plug_id, photo_image_path(plug_id, photo_id))
     return out
+
+
+def photo_image_path(plug_id: int, photo_id: int) -> str:
+    """[Photos] The one URL a client ever gets for a photo: the backend image
+    route (get_plug_photo_image), never the private bucket."""
+    return f"/api/plugs/{plug_id}/photos/{photo_id}/image"
 
 
 # [Photos] Accepted image types, by leading magic bytes. Kept tiny and explicit
@@ -188,6 +196,9 @@ _PHOTO_MAGIC = (
     (b"\xff\xd8\xff", "image/jpeg", "jpg"),
     (b"\x89PNG\r\n\x1a\n", "image/png", "png"),
 )
+# Content type by stored extension (the extension was chosen from the sniffed
+# type at upload), so the image route never trusts remote object metadata.
+_PHOTO_TYPES = {ext: ct for _, ct, ext in _PHOTO_MAGIC} | {"webp": "image/webp"}
 
 
 def _sniff_image(data: bytes):
@@ -1199,11 +1210,53 @@ def _plug_photo_response(photo: PlugPhoto, *, is_mine: bool = False) -> PlugPhot
     return PlugPhotoResponse(
         id=photo.id,
         plug_id=photo.plug_id,
-        url=photo.url,
+        url=photo_image_path(photo.plug_id, photo.id),
         status=photo.status.value,
         created_at=photo.created_at.isoformat() if photo.created_at else None,
         is_mine=is_mine,
     )
+
+
+@router.get("/api/plugs/{plug_id}/photos/{photo_id}/image")
+async def get_plug_photo_image(
+    plug_id: int,
+    photo_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: Optional[User] = Depends(get_current_user_optional),
+):
+    """
+    The image bytes for one photo, read keylessly from the PRIVATE bucket
+    (services/photo_publish.download_object). APPROVED: anyone, browser-cached
+    for a day (``Cache-Control: public, max-age=86400``; setting the header here
+    makes security_headers_middleware leave its ``no-store`` default off).
+    PENDING or REJECTED: only a CPO of the plug's tenant or an admin, with
+    ``private, no-store``; everyone else gets the same 404 as a missing photo.
+    """
+    photo = (await db.execute(
+        select(PlugPhoto).where(PlugPhoto.id == photo_id, PlugPhoto.plug_id == plug_id)
+    )).scalar_one_or_none()
+    not_found = HTTPException(status_code=404, detail="Photo not found.")
+    if photo is None:
+        raise not_found
+
+    if photo.status == PlugPhotoStatus.APPROVED:
+        cache_control = "public, max-age=86400"
+    else:
+        role = user.role.value if user is not None else None
+        if not (role == "admin" or (role == "cpo" and user is not None and user.tenant_id == photo.tenant_id)):
+            raise not_found
+        cache_control = "private, no-store"
+
+    object_name = photo.object_name
+    try:
+        data = await asyncio.to_thread(download_object, object_name)
+    except PhotoPublishError:
+        logger.exception("Failed to read plug photo %s (%s)", photo_id, object_name)
+        raise HTTPException(status_code=502, detail="Could not load the photo.")
+    if data is None:
+        raise not_found
+    media_type = _PHOTO_TYPES.get(object_name.rsplit(".", 1)[-1], "application/octet-stream")
+    return Response(content=data, media_type=media_type, headers={"Cache-Control": cache_control})
 
 
 @router.get(
@@ -1271,8 +1324,9 @@ async def upload_plug_photo(
     RAW body, NOT multipart (no python-multipart dependency — same convention as
     the admin firmware upload). The bytes are size-guarded (413) and magic-byte
     sniffed to a supported image type (JPEG/PNG/WebP, 400 otherwise) BEFORE being
-    published to the public bucket gs://amphive-plug-photos (keyless, off the
-    event loop via asyncio.to_thread — services/photo_publish.py).
+    stored in the PRIVATE photo bucket (keyless, off the event loop via
+    asyncio.to_thread, services/photo_publish.py). Clients only ever see the
+    backend image route, which gates pending bytes to moderators.
     """
     plug = (await db.execute(select(Plug).where(Plug.id == plug_id))).scalar_one_or_none()
     if not plug:

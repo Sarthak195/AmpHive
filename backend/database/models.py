@@ -1361,13 +1361,16 @@ class PlugPhoto(Base):
     Same verified-charger gate as PlugReview (the router enforces a finished
     ChargingSession on this plug) and the same denormalized tenant_id (plug ->
     gateway -> tenant) so the CPO moderation queue filters on one indexed
-    equality. `object_name` is the GCS object key (kept alongside the public
-    `url`) so a REJECT can delete the stored bytes, not just hide the row —
-    unlike a review, a rejected photo must actually leave storage.
+    equality. `object_name` is the GCS object key (kept alongside `url`, the
+    object's gs:// URI, which is never sent to clients) so a REJECT can delete
+    the stored bytes, not just hide the row: unlike a review, a rejected photo
+    must actually leave storage.
 
-    Bytes live in the public-read bucket gs://amphive-plug-photos
-    (services/photo_publish.py); this table stores only metadata + the moderation
-    lifecycle (pending -> approved | rejected, with reviewed_at/by).
+    Bytes live in the PRIVATE bucket (PLUG_PHOTO_GCS_BUCKET,
+    services/photo_publish.py) and are served only through
+    GET /api/plugs/{id}/photos/{photo_id}/image; this table stores only metadata
+    + the moderation lifecycle (pending -> approved | rejected, with
+    reviewed_at/by).
     """
     __tablename__ = "plug_photos"
 
