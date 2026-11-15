@@ -109,7 +109,7 @@ of this server is genuinely internet-facing and genuinely works.
 > **The largest gap is DNS: none of the mail records are published.** Queried
 > against `8.8.8.8` on 2026-08-18:
 >
-> - `amphive.app` **A** → `8.235.4.66` ✅ (the apex exists — it serves the web app)
+> - `amphive.app` **A** → `8.235.4.66` ✅ (the apex exists, it serves the web app)
 > - `mail.amphive.app` **A** → **NXDOMAIN**
 > - `amphive.app` **MX** → **none** (authority section only)
 > - `amphive.app` **TXT** → **none** (no SPF)
@@ -673,7 +673,7 @@ reports until every legitimate source shows as passing and aligned →
 `p=quarantine` → `p=reject`. The `rua=mailto:dmarc@amphive.app` is what makes
 the first step useful, which is why that alias must be deliverable (§3.3).
 
-**Reverse DNS — a gap, and a nuance.** The PTR for `8.235.4.66 (the old box's IP, 136.117.94.209, before the 2026-09 move; re-check the PTR for the new IP)` is
+**Reverse DNS, a gap, and a nuance.** The PTR for the old box's IP `136.117.94.209` (before the 2026-09 move to `8.235.4.66`; re-check the PTR for the new IP) is
 `209.94.117.136.bc.googleusercontent.com` (verified), the GCP-generic default;
 `publicPtrDomainName` is unset on the instance. Many receivers penalise or
 reject mail from a host whose forward and reverse DNS do not match (FCrDNS).

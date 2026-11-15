@@ -11,7 +11,7 @@ been fixed by the 2026-07-08…11 work — see the shipped sections below).*
 
 ---
 
-## OPEN — 2026-11-15 known limits (fix batch follow-ups)
+## OPEN, 2026-11-15 known limits (fix batch follow-ups)
 
 *Low severity. U0-U6 are from the 2026-11-15 review and were NOT independently verified; F10 is a known false-alarm class.*
 

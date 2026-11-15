@@ -656,11 +656,11 @@ UI-based: build + sign locally, then drag the signed
 `esp_app_desc` magic `0xABCD5432`), reads the **version and project name out
 of the binary itself** (`project_name` must be `amphive-gateway` — no typo'd
 version strings), **publishes the bytes to the public-read GCS bucket
-`gs://amphive-fw-2`** (keyless — the VM's own compute service-account identity
+`gs://amphive-fw-2`** (keyless, the VM's own compute service-account identity
 via ADC, no key file; `backend/services/firmware_publish.py`; a failed bucket
 write is a 502 and nothing is registered), and **auto-registers** the
 `FirmwareRelease` pointing at
-`https://storage.googleapis.com/amphive-fw-2/amphive-gateway-<version>.bin` —
+`https://storage.googleapis.com/amphive-fw-2/amphive-gateway-<version>.bin` , 
 the same valid public-CA TLS host every historically-successful OTA fetched
 from. Then push from the version picker on any gateway page (CPO portal, or
 the cross-tenant admin picker — `POST /api/admin/gateways/{gateway_id}/ota`).
@@ -669,7 +669,7 @@ bytes, overwrites `url`/`notes`, and reactivates the release
 (`POST /api/admin/firmware-releases/{id}/reactivate` also exists as the
 direct inverse of `deactivate`). **One-time IAM prerequisite:** the VM's
 compute service account needs `roles/storage.objectCreator` on
-`gs://amphive-fw-2` — the exact `gcloud` command is in
+`gs://amphive-fw-2`, the exact `gcloud` command is in
 [deploy/docs/ota_image_publishing.md](../deploy/docs/ota_image_publishing.md).
 
 **Fallback / manual path — publish to the bucket yourself.** The same
