@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -261,6 +261,24 @@ async def start_charging_session(
             detail="This charger has no power right now. Try again once power is restored.",
         )
 
+    # [Scheduled start] Another driver's car is scheduled on this socket, so
+    # refuse; the caller's own schedule is superseded by this start (cancelled
+    # below, only once the start succeeded). A plain read: locking the qc row
+    # here would invert the sweep's qc -> user -> plug order. The plug lock
+    # already serializes this against a concurrent scheduled create.
+    from backend.database.models import QueuedCharge, QueuedChargeStatus
+
+    scheduled = (await db.execute(
+        select(QueuedCharge.id, QueuedCharge.user_id).where(and_(
+            QueuedCharge.plug_id == plug.id,
+            QueuedCharge.status == QueuedChargeStatus.WAITING,
+            QueuedCharge.not_before.is_not(None),
+        ))
+    )).all()
+    if any(row.user_id != user.id for row in scheduled):
+        raise _conflict("plug_scheduled", "Another driver's car is scheduled to charge on this plug.")
+    own_scheduled = [row.id for row in scheduled]
+
     # [Session start refactor] Steps 3-5 — circuit admission, rate resolve +
     # snapshot, authorization-hold sizing (incl. the MIN_START_BALANCE_COINS
     # 402 floor), create the ACTIVE session, claim the plug OCCUPIED (fulfilling
@@ -276,6 +294,19 @@ async def start_charging_session(
         max_duration_seconds=req.max_duration_seconds,
         covering_reservation=covering_reservation,
     )
+    if own_scheduled:
+        # After success only: begin_active_session commits its claim before the
+        # publish, so cancelling first would lose the schedule on a 500. A crash
+        # between the two commits is caught by the sweep (OCCUPIED by owner).
+        await db.execute(
+            update(QueuedCharge)
+            .where(and_(
+                QueuedCharge.id.in_(own_scheduled),
+                QueuedCharge.status == QueuedChargeStatus.WAITING,
+            ))
+            .values(status=QueuedChargeStatus.CANCELLED)
+        )
+        await db.commit()
 
     logger.info(
         "Session started",

@@ -1031,6 +1031,91 @@ async def test_sweep_publish_failure_overwrites_the_started_claim():
 
 
 @pytest.mark.asyncio
+async def test_orphan_off_hold_ignores_scheduled_rows():
+    """The reconnect OFF is never held for a scheduled row: an OFF to an idle
+    plug can't fight the sweep's later ON, and a stale, self-resumed relay
+    would otherwise charge unbilled. Only outage rows (not_before IS NULL) are
+    considered for the hold."""
+    from backend.services.mqtt_manager import MQTTManager
+
+    gw = MagicMock()
+    gw.status = GatewayStatus.ONLINE
+    mgr = _manager([
+        _result_scalar_one_or_none(gw),
+        _result_rows([(1, "10.0.0.11", "Bay 1", 0.0)]),
+        _result_scalars([]),
+        _result_rows([]),                 # the hold query (SQL asserted below)
+    ])
+    with patch("backend.services.mqtt.status.notify", AsyncMock()):
+        await mgr._persist_gateway_status("gw-1", "online")
+    db = mgr.db_session_factory.return_value.__aenter__.return_value
+    hold_sql = str(db.execute.await_args_list[3].args[0])
+    assert "queued_charges.not_before IS NULL" in hold_sql
+    assert [c.args[1] for c in mgr.send_plug_command.call_args_list] == [1]
+    MQTTManager._instance = None
+
+
+# --------------------------------------------------------------------------
+# [Scheduled start] POST /api/sessions/start contention
+# --------------------------------------------------------------------------
+
+def _start_db(plug, scheduled_rows, *tail):
+    rows = MagicMock()
+    rows.all.return_value = scheduled_rows
+    return _db(
+        _s1(_user()), _s1(0), _s1n(plug),      # user lock, active count, plug lock
+        _upd(), _s1n(None),                    # reservation expiry, no covering booking
+        _s1(_gateway()),                       # live gateway
+        rows,                                  # WAITING scheduled rows on the plug
+        *tail,
+    )
+
+
+def _row(qc_id, user_id):
+    r = MagicMock()
+    r.id = qc_id
+    r.user_id = user_id
+    return r
+
+
+@pytest.mark.asyncio
+async def test_start_refused_when_another_driver_scheduled_the_plug():
+    from backend.routers.sessions import start_charging_session
+    from backend.schemas import SessionStartRequest
+    db = _start_db(_plug(powered=True), [_row(3, 77)])
+    with patch("backend.routers.sessions.begin_active_session", AsyncMock()) as begin:
+        with pytest.raises(HTTPException) as exc:
+            await start_charging_session(SessionStartRequest(plug_id=1), _user(), db)
+    assert exc.value.status_code == 409
+    assert exc.value.detail["code"] == "plug_scheduled"
+    begin.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_owner_start_now_cancels_own_schedule_only_after_success():
+    from backend.routers.sessions import start_charging_session
+    from backend.schemas import SessionStartRequest
+    session = _started_session()
+    session.max_kwh = None
+    session.max_duration_seconds = None
+    db = _start_db(_plug(powered=True), [_row(3, 5)], _upd(), _s1n(None))
+    with patch("backend.routers.sessions.begin_active_session",
+               AsyncMock(return_value=session)):
+        resp = await start_charging_session(SessionStartRequest(plug_id=1), _user(), db)
+    assert resp["status"] == "started"
+    cancel_sql = str(db.execute.await_args_list[7].args[0])
+    assert cancel_sql.startswith("UPDATE queued_charges")
+
+    # A failed start (publish 500) must leave the schedule alone.
+    db = _start_db(_plug(powered=True), [_row(3, 5)])
+    with patch("backend.routers.sessions.begin_active_session",
+               AsyncMock(side_effect=HTTPException(status_code=500, detail="pub"))):
+        with pytest.raises(HTTPException):
+            await start_charging_session(SessionStartRequest(plug_id=1), _user(), db)
+    assert db.execute.await_count == 7          # no UPDATE after the failure
+
+
+@pytest.mark.asyncio
 async def test_sweep_late_scheduled_start_reports_time_and_rate():
     qc = _qc(not_before=_ago(minutes=20))
     started, _, notify = await _sweep(_scheduled_start_chain(qc, _due_plug()))
