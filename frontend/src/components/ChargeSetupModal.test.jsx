@@ -265,4 +265,13 @@ describe('ChargeSetupModal: scheduled start', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Start charging' }));
     expect(onConfirm).toHaveBeenCalledWith(7, null);
   });
+
+  it('going back to "Now" undoes the 8h preselect', async () => {
+    const { onConfirm } = renderModal({ plug: SCHED_PLUG });
+    await userEvent.click(screen.getByRole('button', { name: 'At a time' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Now' }));
+    expect(screen.getByRole('button', { name: 'No limit' })).toHaveAttribute('aria-pressed', 'true');
+    await userEvent.click(screen.getByRole('button', { name: 'Start charging' }));
+    expect(onConfirm).toHaveBeenCalledWith(7, null);
+  });
 });

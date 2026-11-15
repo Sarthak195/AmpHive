@@ -92,6 +92,7 @@ export default function ChargeSetupModal({ open, onClose, plug, mode = 'start', 
   const [asking, setAsking] = useState(false);
   const [startAt, setStartAt] = useState('now');
   const [atTime, setAtTime] = useState('');
+  const [autoLimit, setAutoLimit] = useState(false);
 
   // Fresh form every time the modal opens (or for a different plug).
   useEffect(() => {
@@ -106,6 +107,7 @@ export default function ChargeSetupModal({ open, onClose, plug, mode = 'start', 
     setAsking(false);
     setStartAt('now');
     setAtTime('');
+    setAutoLimit(false);
   }, [open, plug?.id]);
 
   if (!open || !plug) return null;
@@ -140,8 +142,15 @@ export default function ChargeSetupModal({ open, onClose, plug, mode = 'start', 
 
   const chooseStart = (value) => {
     setStartAt(value);
-    // A scheduled charge must stop on its own: move off "No limit".
-    if (value === 'later' && timePreset === 'none' && kwh === '') setTimePreset('8h');
+    // A scheduled charge must stop on its own: move off "No limit", and undo
+    // that preselect if the driver goes back to "Now" without touching it.
+    if (value === 'later' && timePreset === 'none' && kwh === '') {
+      setTimePreset('8h');
+      setAutoLimit(true);
+    } else if (value === 'now' && autoLimit && timePreset === '8h') {
+      setTimePreset('none');
+      setAutoLimit(false);
+    }
   };
 
   const handleConfirm = async () => {
