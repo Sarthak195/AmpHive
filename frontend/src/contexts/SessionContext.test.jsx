@@ -591,17 +591,21 @@ describe('telemetry frames', () => {
 describe('backend auto-stop (C8)', () => {
   it('shows the bill and refreshes the wallet when the last session ends server-side', async () => {
     const { fire } = await mockSocket(true);
+    let resolveBill;
     api.get.mockImplementation((url) =>
-      Promise.resolve(
-        url === '/api/sessions/1'
-          ? { session_id: 1, coins_spent: 7.5, energy_kwh: 1.5, reason: 'limit_reached' }
-          : ONE_SESSION
-      )
+      url === '/api/sessions/1'
+        ? new Promise((r) => { resolveBill = r; })
+        : Promise.resolve(ONE_SESSION)
     );
     renderProbe();
     await waitFor(() => expect(screen.getByTestId('focused')).toHaveTextContent('1'));
 
     fire('telemetry', { plug_id: 10, status: 'completed', energy_kwh: 1.5, cost_coins: 7.5 });
+    // Still on the monitor while the bill loads: no "No active charge" flash.
+    expect(screen.getByTestId('isActive')).toHaveTextContent('true');
+    await act(async () => {
+      resolveBill({ session_id: 1, coins_spent: 7.5, energy_kwh: 1.5, reason: 'limit_reached' });
+    });
 
     await waitFor(() => expect(screen.getByTestId('receipt')).toHaveTextContent('7.5'));
     expect(api.get).toHaveBeenCalledWith('/api/sessions/1');

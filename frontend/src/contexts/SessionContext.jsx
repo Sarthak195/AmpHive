@@ -217,13 +217,15 @@ export const SessionProvider = ({ children }) => {
       switchSession(rest[0]);
       return;
     }
-    setIsActive(false);
-    api.get(`/api/sessions/${endedId}`)
-      .then((bill) => {
-        // Only if the driver has not started or focused another session since.
-        if (sessionIdRef.current === endedId && !isActiveRef.current) setReceipt(bill);
-      })
-      .catch(() => {});
+    // Leave the monitor only once the bill is in, so the page goes straight
+    // to the receipt with no "No active charge" in between. Skipped if the
+    // driver has started or focused another session since.
+    const settle = (bill) => {
+      if (sessionIdRef.current !== endedId) return;
+      if (bill) setReceipt(bill);
+      setIsActive(false);
+    };
+    api.get(`/api/sessions/${endedId}`).then(settle).catch(() => settle(null));
   }, [refreshUser, switchSession]);
 
   // Manage the telemetry subscription for the focused session.
@@ -307,7 +309,12 @@ export const SessionProvider = ({ children }) => {
       // refresh below (or a switchSession) fills it in.
       setFocusedHoldCoins(result.hold_coins ?? null);
       setLastFrameAt(null);
-      setSessionData({ plug_id: result.plug_id, plug_name: result.plug_name });
+      // A fresh session is at zero; the plug name must be seeded because
+      // frames (merged over this) carry none.
+      setSessionData({
+        plug_id: result.plug_id, plug_name: result.plug_name, status: 'starting',
+        power_w: 0, energy_kwh: 0, cost_coins: 0,
+      });
       // The start response may omit hold_coins/cost_coins entirely — pull
       // the enriched /api/sessions/active so the low-balance warning has a
       // real threshold for THIS session without waiting for a full reload.
@@ -464,10 +471,13 @@ export const SessionProvider = ({ children }) => {
   // backend stop, or a socket reconnect (pushes sent while it was down are
   // lost).
   const resync = useCallback(async () => {
+    // Captured before the await: a session started while this GET is in
+    // flight is missing from its list but is not ended.
+    const focusedId = sessionIdRef.current;
     try {
       const res = await refreshActiveSessions();
       const sessions = res.sessions || [];
-      const focusedId = sessionIdRef.current;
+      if (sessionIdRef.current !== focusedId) return;
       if (isActiveRef.current && !sessions.some((s) => s.session_id === focusedId)) {
         endFocusedSession(focusedId, sessions);
         return;
