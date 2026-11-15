@@ -54,7 +54,7 @@ main.py  (app assembly only since 2026-07-07: lifespan, CORS, health, router inc
 ├── database/reset_db.py        destructive dev-only reset (drop_all + create_all; confirmation-gated)
 ├── migrations/                 Alembic env.py + versions/ (0001_baseline .. 0026_offline_topups + later)
 │
-├── services/auth.py            JWT (python-jose, HS256, token_version epoch) + bcrypt (pyca, direct) + get_current_user
+├── services/auth.py            JWT (PyJWT, HS256, token_version epoch) + bcrypt (pyca, direct) + get_current_user
 ├── services/rbac.py            require_role(...) dependency factory → guards all /api/cpo/* and /api/admin/* routes
 ├── services/rate_limit.py      in-process sliding-window rate limiting for auth endpoints
 ├── services/mqtt_manager.py    MQTTManager — the one class every call site/test targets; composes the mixins below
@@ -99,7 +99,7 @@ main.py  (app assembly only since 2026-07-07: lifespan, CORS, health, router inc
 | `alembic` | Schema migrations (`backend/migrations/`) |
 | `pydantic`, `email-validator` | Request/response validation + `EmailStr` syntax checking |
 | `paho-mqtt>=2.1` | MQTT client (backend ↔ gateway, direct `mqtts://` broker) |
-| `python-jose[cryptography]` | JWT encode/decode (HS256) |
+| `PyJWT` | JWT encode/decode (HS256); replaced python-jose 2026-11-15 |
 | `bcrypt>=4.1` | Password hashing — pyca/bcrypt called directly (passlib dropped 2026-07-21: abandoned upstream, was pinning bcrypt to 4.0.1) |
 | `python-dotenv` | `.env` loading |
 | `razorpay` | Payment gateway SDK (top-ups) |

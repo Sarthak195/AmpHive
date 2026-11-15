@@ -36,8 +36,8 @@ import { formatINR, coinsToINR, formatKw, formatKwh, formatDuration } from '../u
 // Matches the backend TELEMETRY_STALE_AFTER_SEC default (15 s).
 const STALE_AFTER_MS = 15000;
 
-// Live status pill — Charging / Reconnecting… / Completed.
-const StatusPill = ({ isActive, isStale }) => {
+// Live status pill: Charging / Updating… / Reconnecting… / Completed.
+const StatusPill = ({ isActive, isStale, updating }) => {
   if (!isActive) {
     return (
       <span className="session-status text-3">
@@ -52,6 +52,13 @@ const StatusPill = ({ isActive, isStale }) => {
       </span>
     );
   }
+  if (updating) {
+    return (
+      <span className="session-status text-2">
+        <span className="dot dot-ok" aria-hidden="true" /> Updating…
+      </span>
+    );
+  }
   return (
     <span className="session-status text-2">
       <span className="dot dot-ok dot-live" aria-hidden="true" /> Charging
@@ -62,7 +69,7 @@ const StatusPill = ({ isActive, isStale }) => {
 const SessionMonitor = () => {
   const {
     sessionData, sessionId, isActive, stopSession, updateLimits,
-    lastFrameAt, focusedStartedAt, focusedLimits, focusedHoldCoins, alarms,
+    lastFrameAt, watchSince, focusedStartedAt, focusedLimits, focusedHoldCoins, alarms,
   } = useSession();
   const { coin_inr_rate } = useConfig();
   const { availableBalance } = useWallet();
@@ -115,11 +122,22 @@ const SessionMonitor = () => {
     ? Math.max(0, Math.floor((now - new Date(focusedStartedAt).getTime()) / 1000))
     : (sessionData?.duration_sec || 0);
 
-  // Stale when the server flags it OR no frame has arrived recently.
-  const noFrameFor = lastFrameAt ? now - lastFrameAt : null;
-  const isStale = isActive && (
+  // Stale when the server flags it OR no frame has arrived recently. For the
+  // first STALE_AFTER_MS after (re)subscribing, a missing, stale or old frame
+  // is the gateway still leaving its 10 s idle cadence (the firmware sleeps
+  // out the slow interval before the 1 s one starts), so the numbers already
+  // on screen (REST row or cached frame) stay up with a small "Updating" hint
+  // instead of the "Live readings paused" banner.
+  const sinceWatch = watchSince ? now - watchSince : null;
+  const warmingUp = sinceWatch !== null && sinceWatch < STALE_AFTER_MS;
+  const noFrameFor = lastFrameAt ? now - lastFrameAt : sinceWatch;
+  const isStale = isActive && !warmingUp && (
     sessionData?.is_stale === true ||
     (noFrameFor !== null && noFrameFor > STALE_AFTER_MS)
+  );
+  const noFreshFrame = lastFrameAt == null || (watchSince != null && lastFrameAt < watchSince);
+  const updating = isActive && warmingUp && (
+    noFreshFrame || sessionData?.is_stale === true || Number(sessionData?.age_sec) > 3
   );
 
   // Low balance: the wallet is only debited on stop, so remaining is
@@ -133,19 +151,35 @@ const SessionMonitor = () => {
   // hold left). Legacy/unheld sessions (hold_coins null) fall back to
   // availableBalance, matching the backend's own fallback. The kWh-left
   // estimate uses the plug's price_now when known.
+  //
+  // Limit-bound sessions never warn: with a kWh limit the hold is sized to
+  // that limit's cost when the wallet can afford it (services/session_start.py),
+  // so the hold running down just means the driver's own limit is near (the
+  // Limit banner below shows that). Only when reaching max_kwh would cost MORE
+  // than the hold is the wallet what stops the session. Same rule as the
+  // backend notification (services/mqtt/telemetry.py).
   const walletBalance = Number(availableBalance) || 0;
   const hasHold = focusedHoldCoins != null;
   const headroomBase = hasHold ? Number(focusedHoldCoins) : walletBalance;
   const remainingCoins = headroomBase - costCoins;
-  const lowBalance = isActive && costCoins > 0 &&
-    remainingCoins <= Math.max(10, headroomBase * 0.15);
   const priceNow = tariff?.price_now != null ? Number(tariff.price_now) : null;
   const kwhLeft = priceNow > 0 ? Math.max(0, remainingCoins) / priceNow : null;
+  const limitKwh = focusedLimits?.max_kwh;
+  const rateNow = priceNow > 0 ? priceNow : (energyNum > 0 ? costCoins / energyNum : null);
+  const limitBound = hasHold && limitKwh != null && rateNow != null &&
+    costCoins + Math.max(0, Number(limitKwh) - energyNum) * rateNow <= headroomBase + 0.01;
+  const lowBalance = isActive && costCoins > 0 && !limitBound &&
+    remainingCoins <= Math.max(10, headroomBase * 0.15);
 
-  // The most recent alarm for this plug (last 2 minutes).
-  const recentAlarm = (alarms || []).find(
+  // The most recent alarm for this plug (last 2 minutes) — shown only when it
+  // is not info-level. Info events (fw 2.8.0 PLUG_RECOVERED / GATEWAY_BOOT,
+  // OTA notices) are routine diagnostics, never a red banner; a newer one
+  // still supersedes an older warning, so PLUG_RECOVERED clears the
+  // PLUG_UNREACHABLE banner instead of leaving it up.
+  const latestAlarm = (alarms || []).find(
     (a) => a.plug_id === plugId && now - (a.received_at || 0) < 120000
   );
+  const recentAlarm = latestAlarm && latestAlarm.severity !== 'info' ? latestAlarm : null;
 
   // Ring progress toward the auto-stop target — the backend stops at whichever
   // limit trips first, so show the nearer of the two. No limit → indeterminate.
@@ -213,9 +247,15 @@ const SessionMonitor = () => {
   const handleStop = async () => {
     setStopping(true);
     try {
-      await stopSession();
+      const bill = await stopSession();
       setConfirmStop(false);
-      toast.ok('Charging stopped.');
+      // With a second session still charging, focus moves to it and no
+      // receipt shows, so the toast carries this session's bill.
+      toast.ok(
+        bill?.coins_spent != null
+          ? `Charging stopped. Billed ${formatKwh(Number(bill.energy_kwh) || 0)}, ${formatINR(coinsToINR(Number(bill.coins_spent), coin_inr_rate))}.`
+          : 'Charging stopped.'
+      );
     } catch (err) {
       setConfirmStop(false);
       toast.error(apiErrorCopy(err));
@@ -227,7 +267,7 @@ const SessionMonitor = () => {
   return (
     <section className="session-monitor card anim-fade" aria-label="Live charging session">
       <div className="session-monitor-top">
-        <StatusPill isActive={isActive} isStale={isStale} />
+        <StatusPill isActive={isActive} isStale={isStale} updating={updating} />
       </div>
 
       {/* Hero: the ring with ₹ + kWh in the center. */}
@@ -251,7 +291,7 @@ const SessionMonitor = () => {
       <dl className="session-meters">
         <div className="session-meter">
           <dt className="text-3 text-xs">Power now</dt>
-          <dd className="num">{formatKw(powerW)}</dd>
+          <dd className="num">{lastFrameAt == null ? '-' : formatKw(powerW)}</dd>
         </div>
         <div className="session-meter">
           <dt className="text-3 text-xs">Elapsed</dt>

@@ -189,7 +189,11 @@ class MQTTTelemetryMixin:
         # Map firmware status to telemetry store status
         telem_status = "charging" if status == "occupied" else "idle"
 
-        logger.info(
+        # DEBUG, not INFO: one line per frame per plug (~1-10 s) was 99% of the
+        # backend's log volume (2026-10-20 log forensic) and drowned out the
+        # lines that matter. Every owned-plug frame still lands in the
+        # telemetry_readings time series (see _persist_telemetry).
+        logger.debug(
             "Telemetry received",
             extra={
                 "gateway_id": gateway_id,
@@ -426,51 +430,6 @@ class MQTTTelemetryMixin:
                     )
                     return
 
-                # [H1] Feed the live-stream TelemetryStore now that ownership is
-                # proven. The store's snapshot drives the SSE stream; feeding it
-                # in the handler BEFORE this check (as it used to, synchronously)
-                # let any tenant publish a victim plug_id on its OWN topic and
-                # poison that plug's shared live snapshot for another driver.
-                # Deferred here so it only ever runs for a plug this gateway
-                # actually owns. This coroutine runs ON the event loop (scheduled
-                # via run_coroutine_threadsafe), so update() — which signals the
-                # stream's asyncio.Events — is safe to call directly, without the
-                # call_soon_threadsafe hop the no-DB handler path needs.
-                # current/voltage/status ride on the handler-built `sample`;
-                # cost_coins is auto-calc'd by the store from the session's rate.
-                if self.telemetry_store is not None and sample is not None:
-                    telem_status = (
-                        "charging" if sample.get("status") == "occupied" else "idle"
-                    )
-                    self.telemetry_store.update(
-                        plug_id=plug_id,
-                        power_w=watts,
-                        current_a=sample.get("current_a", 0.0),
-                        energy_kwh=kwh,
-                        status=telem_status,
-                        voltage_v=sample.get("voltage_v", 230.0),
-                        relay_on=relay_on,
-                    )
-
-                # [Plug power] Stamp the per-plug liveness clock. powered_since
-                # re-baselines to now whenever telemetry resumes after a gap
-                # longer than PLUG_POWER_STALE_SEC (a mains/relay power-cycle);
-                # last_telemetry_at is the freshness signal plug_is_powered()
-                # reads. Distinct from the never-written plugs.last_seen_at.
-                # Skipped for offline-resync frames (TD#24): those are buffered
-                # HISTORICAL readings, not proof the plug is live right now — a
-                # backlog of replayed frames must not make a de-powered plug
-                # look freshly powered to plug_is_powered().
-                if not is_offline:
-                    now = datetime.now(timezone.utc)
-                    prev = plug.last_telemetry_at
-                    if prev is None or (now - prev).total_seconds() > PLUG_POWER_STALE_SEC:
-                        plug.powered_since = now
-                    plug.last_telemetry_at = now
-
-                # Update plug's current power reading
-                plug.current_power_w = watts
-
                 # Raw time-series sample — enqueue now that ownership is proven.
                 if self.telemetry_persistence and sample is not None:
                     self.telemetry_persistence.enqueue(sample)
@@ -494,6 +453,31 @@ class MQTTTelemetryMixin:
                     select(ChargingSession).where(where_clause).with_for_update()
                 )
                 active_session = sess_result.scalar_one_or_none()
+
+                # [F17] The plug writes below come AFTER the session row lock
+                # above, never before it: a dirty Plug would autoflush its
+                # UPDATE plugs ahead of the SELECT ... FOR UPDATE, locking plug
+                # then session while finalize_charging_session locks session
+                # then plug (prod deadlocks 2026-10-25 and 2026-10-28).
+                #
+                # [Plug power] Stamp the per-plug liveness clock. powered_since
+                # re-baselines to now whenever telemetry resumes after a gap
+                # longer than PLUG_POWER_STALE_SEC (a mains/relay power-cycle);
+                # last_telemetry_at is the freshness signal plug_is_powered()
+                # reads. Distinct from the never-written plugs.last_seen_at.
+                # Skipped for offline-resync frames (TD#24): those are buffered
+                # HISTORICAL readings, not proof the plug is live right now: a
+                # backlog of replayed frames must not make a de-powered plug
+                # look freshly powered to plug_is_powered().
+                if not is_offline:
+                    now = datetime.now(timezone.utc)
+                    prev = plug.last_telemetry_at
+                    if prev is None or (now - prev).total_seconds() > PLUG_POWER_STALE_SEC:
+                        plug.powered_since = now
+                    plug.last_telemetry_at = now
+
+                # Update plug's current power reading
+                plug.current_power_w = watts
 
                 # [REC-05] An idle frame — no session_id AND relay off (firmware
                 # emits session_id="" + session_kwh=0 when its session_active is
@@ -622,6 +606,38 @@ class MQTTTelemetryMixin:
                             extra={"gateway_id": gateway_id, "plug_id": plug_id},
                         )
 
+                # [H1] Feed the live-stream TelemetryStore now that ownership is
+                # proven. The store's snapshot drives the SSE stream; feeding it
+                # in the handler BEFORE this check (as it used to, synchronously)
+                # let any tenant publish a victim plug_id on its OWN topic and
+                # poison that plug's shared live snapshot for another driver.
+                # Deferred here so it only ever runs for a plug this gateway
+                # actually owns. This coroutine runs ON the event loop (scheduled
+                # via run_coroutine_threadsafe), so update() (which signals the
+                # stream's asyncio.Events) is safe to call directly, without the
+                # call_soon_threadsafe hop the no-DB handler path needs.
+                # current/voltage/status ride on the handler-built `sample`;
+                # cost_coins is auto-calc'd by the store from the session's rate.
+                # [C16] Fed AFTER the session block so it gets the session's
+                # monotonic billed energy (REC-01 offset included), not the raw
+                # wire counter that drops after a gateway reboot; the raw value
+                # is kept only when no session took this frame.
+                if self.telemetry_store is not None and sample is not None:
+                    telem_status = (
+                        "charging" if sample.get("status") == "occupied" else "idle"
+                    )
+                    self.telemetry_store.update(
+                        plug_id=plug_id,
+                        power_w=watts,
+                        current_a=sample.get("current_a", 0.0),
+                        energy_kwh=(
+                            updated_energy_kwh if updated_energy_kwh is not None else kwh
+                        ),
+                        status=telem_status,
+                        voltage_v=sample.get("voltage_v", 230.0),
+                        relay_on=relay_on,
+                    )
+
                 # [Unmetered consumption] Continuous cross-check: the P110's OWN
                 # today/month energy counters (get_energy_usage.today_energy/
                 # month_energy — see firmware/main/tapo_protocol.c) advance
@@ -746,6 +762,7 @@ class MQTTTelemetryMixin:
             await self._maybe_auto_stop_on_exhaustion(
                 updated_session_id, updated_user_id, updated_energy_kwh, updated_rate,
                 updated_hold_coins, updated_settled, updated_segment_start,
+                max_kwh=updated_max_kwh,
             )
             # [Session limits] User-set stop conditions, mirrored backend-side
             # (see _maybe_auto_stop_on_limits). Sequenced AFTER the exhaustion
@@ -764,7 +781,8 @@ class MQTTTelemetryMixin:
                                               rate_coins_per_kwh: Optional[Decimal] = None,
                                               hold_coins: Optional[Decimal] = None,
                                               settled_cost_coins: Optional[Decimal] = None,
-                                              rate_segment_start_kwh: Optional[float] = None):
+                                              rate_segment_start_kwh: Optional[float] = None,
+                                              max_kwh: Optional[float] = None):
         """Finalize an ACTIVE session once its accrued cost meets/exceeds its
         exhaustion threshold. No-op when disabled, when the threshold still
         covers the energy, or when the session is already gone (finalize
@@ -807,14 +825,12 @@ class MQTTTelemetryMixin:
             # session that crossed a TOD boundary stops at the RIGHT accrued
             # cost, not a flat re-multiply. NULL segment fields (flat/legacy)
             # collapse session_cost to energy_cost(energy_kwh, rate) exactly.
-            accrued_cost = session_cost(
-                SimpleNamespace(
-                    rate_coins_per_kwh=rate_coins_per_kwh,
-                    settled_cost_coins=settled_cost_coins,
-                    rate_segment_start_kwh=rate_segment_start_kwh,
-                ),
-                energy_kwh,
+            segments = SimpleNamespace(
+                rate_coins_per_kwh=rate_coins_per_kwh,
+                settled_cost_coins=settled_cost_coins,
+                rate_segment_start_kwh=rate_segment_start_kwh,
             )
+            accrued_cost = session_cost(segments, energy_kwh)
             if accrued_cost <= 0:
                 return
             if hold_coins is not None:
@@ -830,12 +846,25 @@ class MQTTTelemetryMixin:
                     if user is None:
                         return
                     threshold = user.coin_balance
+            # Is the driver's own kWh limit (not the wallet) what stops this
+            # session? With a kWh limit the hold is sized to that limit's cost
+            # whenever the wallet can afford it (services/session_start.py), so
+            # a hold running down then just means the limit is near. True when
+            # reaching max_kwh at the current rate fits inside the hold.
+            limit_bound = (
+                hold_coins is not None
+                and max_kwh is not None
+                and session_cost(segments, max_kwh) <= threshold
+            )
             if accrued_cost < threshold:
-                # Still covered — maybe warn (once per session) as the cost
+                # Still covered: maybe warn (once per session) as the cost
                 # approaches the threshold, so the driver sees the auto-stop
-                # coming even with the app closed.
+                # coming even with the app closed. Only when the wallet is what
+                # will stop it; a limit-bound session stays quiet and is not
+                # marked warned, so a later limit raise can still warn.
                 if (
                     LOW_BALANCE_WARN_FRACTION > 0
+                    and not limit_bound
                     and float(accrued_cost) >= float(threshold) * LOW_BALANCE_WARN_FRACTION
                     and session_id not in self._low_balance_warned
                 ):
@@ -843,7 +872,8 @@ class MQTTTelemetryMixin:
                         self._low_balance_warned.clear()
                     self._low_balance_warned.add(session_id)
                     remaining = to_money(threshold - accrued_cost)
-                    kwh_left = float(remaining) / COINS_PER_KWH if COINS_PER_KWH else 0.0
+                    rate = float(rate_coins_per_kwh) if rate_coins_per_kwh else COINS_PER_KWH
+                    kwh_left = float(remaining) / rate if rate else 0.0
                     from backend.services.notifications import notify
                     await notify(
                         user_id,
@@ -860,10 +890,15 @@ class MQTTTelemetryMixin:
             # (own txn; row-locks + re-checks ACTIVE so a concurrent user stop
             # or the reaper settles this exactly once).
             from backend.services.session_lifecycle import finalize_charging_session
-            reason = (
-                "auto-stopped: session hold exhausted" if hold_coins is not None
-                else "auto-stopped: wallet balance exhausted"
-            )
+            # A limit-bound hold runs out on the same frame the kWh limit is
+            # reached (this check runs before _maybe_auto_stop_on_limits), so
+            # label it as the limit, not as the balance being used up.
+            if limit_bound:
+                reason = "auto-stopped: energy limit reached"
+            elif hold_coins is not None:
+                reason = "auto-stopped: session hold exhausted"
+            else:
+                reason = "auto-stopped: wallet balance exhausted"
             async with self.db_session_factory() as db:
                 outcome = await finalize_charging_session(
                     db, session_id, reason=reason

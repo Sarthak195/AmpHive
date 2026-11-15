@@ -13,8 +13,8 @@ import api from '../api/client';
 vi.mock('../api/client', () => ({
   default: { get: vi.fn(), post: vi.fn(), put: vi.fn(), patch: vi.fn(), delete: vi.fn() },
 }));
-// The user object must be render-stable: SessionProvider keys effects on
-// [user], so a fresh object each call would loop the socket effect forever.
+// The user object is kept render-stable (SessionProvider keys its effects on
+// the user id, so this is belt and braces).
 // mockRefreshUser is likewise a single shared spy (not re-created per render)
 // so tests can assert on its call count.
 const { MOCK_USER, mockRefreshUser } = vi.hoisted(() => ({
@@ -49,10 +49,15 @@ const TWO_SESSIONS = {
 const Probe = () => {
   const {
     activeSessions, sessionId, isActive, focusedLimits, focusedHoldCoins,
-    startSession, stopSession, switchSession, updateLimits,
+    startSession, stopSession, switchSession, updateLimits, sessionData, restoring, receipt,
   } = useSession();
   return (
     <div>
+      <div data-testid="receipt">{receipt ? String(receipt.coins_spent) : 'none'}</div>
+      <div data-testid="plugName">{`name:${sessionData?.plug_name}`}</div>
+      <div data-testid="restoring">{String(restoring)}</div>
+      <div data-testid="kwh">{String(sessionData?.energy_kwh)}</div>
+      <div data-testid="cost">{String(sessionData?.cost_coins)}</div>
       <div data-testid="focused">{String(sessionId)}</div>
       <div data-testid="isActive">{String(isActive)}</div>
       <div data-testid="limits">{JSON.stringify(focusedLimits) || 'null'}</div>
@@ -94,6 +99,30 @@ describe('restore on mount', () => {
     expect(screen.getByText('Plug A')).toBeInTheDocument();
     expect(screen.getByText('Plug B')).toBeInTheDocument();
     expect(screen.getByTestId('isActive')).toHaveTextContent('true');
+  });
+
+  it('shows the REST kWh and cost of a running session before any telemetry frame', async () => {
+    let resolveActive;
+    api.get.mockReturnValue(new Promise((r) => { resolveActive = r; }));
+    renderProbe();
+    // Still restoring: the page shows a loader, not "No active charge".
+    expect(screen.getByTestId('restoring')).toHaveTextContent('true');
+
+    await act(async () => {
+      resolveActive({
+        active: true,
+        sessions: [{
+          session_id: 5, plug_id: 3, plug_name: 'Plug L',
+          started_at: '2026-07-12T09:00:00+00:00',
+          energy_kwh: 1.42, cost_coins: 8.52,
+        }],
+      });
+    });
+
+    expect(screen.getByTestId('focused')).toHaveTextContent('5');
+    expect(screen.getByTestId('kwh')).toHaveTextContent('1.42');
+    expect(screen.getByTestId('cost')).toHaveTextContent('8.52');
+    expect(screen.getByTestId('restoring')).toHaveTextContent('false');
   });
 
   it('stays idle with no active sessions', async () => {
@@ -310,6 +339,19 @@ describe('updateLimits', () => {
 
     await waitFor(() => expect(mockRefreshUser).toHaveBeenCalled());
   });
+
+  it('takes the resized hold from the PATCH response, so the low-balance check is not measured against the old hold', async () => {
+    api.get.mockResolvedValue(TWO_SESSIONS);
+    api.patch.mockResolvedValue({
+      status: 'updated', session_id: 2, max_kwh: 2.5, max_duration_seconds: null, hold_coins: 12.5,
+    });
+    renderProbe();
+    await waitFor(() => expect(screen.getByTestId('focused')).toHaveTextContent('2'));
+
+    await userEvent.click(screen.getByText('update-focused-limit'));
+
+    expect(screen.getByTestId('holdCoins')).toHaveTextContent('12.5');
+  });
 });
 
 describe('stopSession', () => {
@@ -467,5 +509,165 @@ describe('handleTelemetry — backend-driven auto-stop', () => {
 
     expect(screen.getByTestId('isActive')).toHaveTextContent('true');
     expect(screen.getByTestId('sessions').children).toHaveLength(2);
+  });
+});
+
+// A socket mock that keeps every handler per event (several effects listen on
+// 'connect') so a test can fire an event the way socket.io would.
+const mockSocket = async (connected = true) => {
+  const handlers = {};
+  const sock = {
+    connected,
+    on: vi.fn((event, cb) => { (handlers[event] ||= []).push(cb); }),
+    off: vi.fn((event, cb) => {
+      handlers[event] = (handlers[event] || []).filter((h) => h !== cb);
+    }),
+    emit: vi.fn(),
+    disconnect: vi.fn(),
+    id: 'sid-test',
+  };
+  const { io } = await import('socket.io-client');
+  io.mockReturnValueOnce(sock);
+  const fire = (event, payload) => act(() => { (handlers[event] || []).forEach((h) => h(payload)); });
+  return { sock, fire };
+};
+
+const ONE_SESSION = {
+  active: true,
+  sessions: [
+    { session_id: 1, plug_id: 10, plug_name: 'Plug A', started_at: '2026-07-07T12:00:00+00:00' },
+  ],
+};
+const NO_SESSIONS = { active: false, sessions: [] };
+
+const subscribeCalls = (sock) =>
+  sock.emit.mock.calls.filter(([event]) => event === 'subscribe_session');
+
+describe('socket reconnect (C0)', () => {
+  it('re-joins the session room on every reconnect and re-syncs the session list', async () => {
+    const { sock, fire } = await mockSocket(true);
+    api.get.mockResolvedValue(ONE_SESSION);
+    renderProbe();
+    await waitFor(() => expect(subscribeCalls(sock)).toHaveLength(1));
+    const listCalls = api.get.mock.calls.length;
+
+    // socket.io auto-reconnected with a new sid that is in no rooms.
+    fire('connect');
+
+    expect(subscribeCalls(sock)).toHaveLength(2);
+    expect(subscribeCalls(sock)[1][1]).toEqual({ session_id: 1 });
+    await waitFor(() => expect(api.get.mock.calls.length).toBeGreaterThan(listCalls));
+    expect(api.get).toHaveBeenLastCalledWith('/api/sessions/active');
+  });
+
+  it('subscribes on the first connect when the socket was still connecting', async () => {
+    const { sock, fire } = await mockSocket(false);
+    api.get.mockResolvedValue(ONE_SESSION);
+    renderProbe();
+    await waitFor(() => expect(screen.getByTestId('focused')).toHaveTextContent('1'));
+    expect(subscribeCalls(sock)).toHaveLength(0);
+    fire('connect');
+    expect(subscribeCalls(sock)).toHaveLength(1);
+  });
+});
+
+describe('telemetry frames', () => {
+  it('keeps the REST plug name (frames carry none) and ignores a late frame for another plug', async () => {
+    const { fire } = await mockSocket(true);
+    api.get.mockResolvedValue(ONE_SESSION);
+    renderProbe();
+    await waitFor(() => expect(screen.getByTestId('focused')).toHaveTextContent('1'));
+
+    fire('telemetry', { plug_id: 10, status: 'charging', energy_kwh: 0.4, cost_coins: 2 });
+    expect(screen.getByTestId('plugName')).toHaveTextContent('name:Plug A');
+    expect(screen.getByTestId('kwh')).toHaveTextContent('0.4');
+
+    fire('telemetry', { plug_id: 99, status: 'completed', energy_kwh: 9, cost_coins: 50 });
+    expect(screen.getByTestId('kwh')).toHaveTextContent('0.4');
+    expect(screen.getByTestId('isActive')).toHaveTextContent('true');
+  });
+});
+
+describe('backend auto-stop (C8)', () => {
+  it('shows the bill and refreshes the wallet when the last session ends server-side', async () => {
+    const { fire } = await mockSocket(true);
+    let resolveBill;
+    api.get.mockImplementation((url) =>
+      url === '/api/sessions/1'
+        ? new Promise((r) => { resolveBill = r; })
+        : Promise.resolve(ONE_SESSION)
+    );
+    renderProbe();
+    await waitFor(() => expect(screen.getByTestId('focused')).toHaveTextContent('1'));
+
+    fire('telemetry', { plug_id: 10, status: 'completed', energy_kwh: 1.5, cost_coins: 7.5 });
+    // Still on the monitor while the bill loads: no "No active charge" flash.
+    expect(screen.getByTestId('isActive')).toHaveTextContent('true');
+    await act(async () => {
+      resolveBill({ session_id: 1, coins_spent: 7.5, energy_kwh: 1.5, reason: 'limit_reached' });
+    });
+
+    await waitFor(() => expect(screen.getByTestId('receipt')).toHaveTextContent('7.5'));
+    expect(api.get).toHaveBeenCalledWith('/api/sessions/1');
+    expect(mockRefreshUser).toHaveBeenCalled();
+    expect(screen.getByTestId('isActive')).toHaveTextContent('false');
+  });
+
+  it('refocuses a still-charging sibling instead of showing "No active charge"', async () => {
+    const { fire } = await mockSocket(true);
+    api.get.mockResolvedValue(TWO_SESSIONS);
+    renderProbe();
+    await waitFor(() => expect(screen.getByTestId('focused')).toHaveTextContent('2'));
+
+    fire('telemetry', { plug_id: 20, status: 'completed' });
+
+    await waitFor(() => expect(screen.getByTestId('focused')).toHaveTextContent('1'));
+    expect(screen.getByTestId('isActive')).toHaveTextContent('true');
+    expect(screen.getByTestId('sessions').children).toHaveLength(1);
+    expect(mockRefreshUser).toHaveBeenCalled();
+  });
+
+  it('leaves a driver-initiated stop to stopSession (no second bill fetch)', async () => {
+    const { fire } = await mockSocket(true);
+    api.get.mockResolvedValue(ONE_SESSION);
+    let resolveStop;
+    api.post.mockReturnValue(new Promise((r) => { resolveStop = r; }));
+    renderProbe();
+    await waitFor(() => expect(screen.getByTestId('focused')).toHaveTextContent('1'));
+
+    await userEvent.click(screen.getByText('stop'));
+    // finalize commits, then the completed frame can beat the POST response.
+    fire('telemetry', { plug_id: 10, status: 'completed' });
+    await act(async () => { resolveStop({ session_id: 1, coins_spent: 3 }); });
+
+    expect(screen.getByTestId('receipt')).toHaveTextContent('3');
+    expect(api.get).not.toHaveBeenCalledWith('/api/sessions/1');
+  });
+});
+
+describe('queued charge pushes (C10)', () => {
+  it('focuses a queued charge that auto-started while the app was open', async () => {
+    const { fire } = await mockSocket(true);
+    api.get.mockResolvedValue(NO_SESSIONS);
+    renderProbe();
+    await waitFor(() => expect(screen.getByTestId('restoring')).toHaveTextContent('false'));
+    expect(screen.getByTestId('isActive')).toHaveTextContent('false');
+
+    api.get.mockResolvedValue(ONE_SESSION);
+    fire('notification', { type: 'queued_charge_started', plug_id: 10 });
+
+    await waitFor(() => expect(screen.getByTestId('focused')).toHaveTextContent('1'));
+    expect(screen.getByTestId('isActive')).toHaveTextContent('true');
+    expect(mockRefreshUser).toHaveBeenCalled();
+  });
+
+  it('ignores unrelated notifications', async () => {
+    const { fire } = await mockSocket(true);
+    api.get.mockResolvedValue(NO_SESSIONS);
+    renderProbe();
+    await waitFor(() => expect(screen.getByTestId('restoring')).toHaveTextContent('false'));
+    const calls = api.get.mock.calls.length;
+    fire('notification', { type: 'topup_credited' });
+    expect(api.get.mock.calls.length).toBe(calls);
   });
 });

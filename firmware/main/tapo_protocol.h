@@ -28,6 +28,11 @@
  *                         advancing regardless of whether THIS gateway is polling —
  *                         see tapo_plug_reconcile_idle_baseline() below, the
  *                         offline/unmetered-consumption detector that reads them.
+ *
+ * A poll can be partial (fw >= 2.8.0): energy_valid covers the get_energy_usage
+ * fields (power_w, voltage_v, current_a, today/month), state_valid covers the
+ * get_device_info ones (device_on, overheated, overcurrent). A field whose flag
+ * is false holds no reading: never treat it as 0 W or relay OFF.
  */
 typedef struct {
     float voltage_v;
@@ -40,6 +45,8 @@ typedef struct {
     bool  device_on;     /**< current relay state as reported by the plug */
     float today_energy_kwh;  /**< plug-side calendar-day counter (kWh); <0 = not reported */
     float month_energy_kwh;  /**< plug-side calendar-month counter (kWh); <0 = not reported */
+    bool  energy_valid;  /**< get_energy_usage answered without an error_code this poll */
+    bool  state_valid;   /**< get_device_info answered with device_on and no error_code */
 } tapo_telemetry_t;
 
 /*
@@ -139,9 +146,33 @@ esp_err_t tapo_plug_set_power(tapo_plug_t *plug, bool turn_on);
  * Issues get_energy_usage (power) and get_device_info (state + safety statuses)
  * over the plug's KLAP session and maps them into out_telemetry; advances the
  * plug's monotonic energy integrator (trapezoidal) and throttled NVS persist.
- * @return ESP_OK on success
+ *
+ * Each half is judged on its own (fw >= 2.8.0). A non-zero error_code from
+ * get_energy_usage leaves energy_valid false and the poll goes on to
+ * get_device_info. A failed or error-coded get_device_info, or one without
+ * device_on, leaves state_valid false. Before 2.8.0 that case returned ESP_OK
+ * with device_on=false, a false relay-OFF reading. A transport failure on
+ * get_energy_usage ends the poll there, since the plug didn't answer.
+ * energy_kwh is the integrator as it stands whenever out_telemetry is filled;
+ * only a valid power sample advances it. For a meter reading without a round
+ * trip, see tapo_plug_energy_kwh().
+ * @return ESP_OK when both halves are valid; ESP_ERR_NOT_FINISHED when only one
+ *         is (check energy_valid / state_valid); otherwise the klap error, or
+ *         ESP_ERR_INVALID_RESPONSE when the plug answered but neither reply was
+ *         usable. On any other code out_telemetry holds no reading.
  */
 esp_err_t tapo_plug_get_telemetry(tapo_plug_t *plug, tapo_telemetry_t *out_telemetry);
+
+/**
+ * @brief The plug's monotonic energy integrator (kWh) as it stands, with no
+ *        network round trip — the same value tapo_plug_get_telemetry() reports
+ *        as energy_kwh.
+ *
+ * For when a poll doesn't fill out_telemetry: main.c's ON handler (the session
+ * baseline) and the telemetry task's energy watchdog. The value can only lag
+ * the true meter (no accrual since the last good power sample), never lead it.
+ */
+float tapo_plug_energy_kwh(tapo_plug_t *plug);
 
 /**
  * @brief Reconcile a plug's today/month energy counters against the

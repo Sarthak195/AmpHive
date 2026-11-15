@@ -14,9 +14,9 @@
  *   start/end). Fetches a single generous page of reservations + the plug
  *   list once per view-entry and filters/positions everything client-side —
  *   there's no server-side date filter to page against. That page is capped
- *   at the house limit (200), so a tenant with more upcoming bookings than
- *   that may not see every one of them on far-out days; fine for the
- *   near-term scheduling glance this view is for.
+ *   at the house limit (200) and is newest-first, so a tenant with more than
+ *   200 reservations in total sees an empty timeline for the oldest past
+ *   days; fine for the near-term scheduling glance this view is for.
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
@@ -138,7 +138,6 @@ export default function CpoReservations() {
   const [dayPlugs, setDayPlugs] = useState([]);
   const [dayLoading, setDayLoading] = useState(true);
   const [dayError, setDayError] = useState(null);
-  const [dayLoaded, setDayLoaded] = useState(false);
 
   const fetchDay = useCallback(async () => {
     setDayLoading(true);
@@ -150,7 +149,6 @@ export default function CpoReservations() {
       ]);
       setDayReservations(Array.isArray(resvRes) ? resvRes : resvRes?.items || []);
       setDayPlugs(Array.isArray(plugsRes) ? plugsRes : []);
-      setDayLoaded(true);
     } catch (err) {
       setDayError(err);
     } finally {
@@ -158,9 +156,11 @@ export default function CpoReservations() {
     }
   }, []);
 
+  // Refetch on every entry to the Day view so a cancel made in the List view
+  // (or a booking a driver made meanwhile) is never drawn from stale data.
   useEffect(() => {
-    if (view === 'day' && !dayLoaded) fetchDay();
-  }, [view, dayLoaded, fetchDay]);
+    if (view === 'day') fetchDay();
+  }, [view, fetchDay]);
 
   const shiftDay = (delta) => {
     setSelectedDate((prev) => {

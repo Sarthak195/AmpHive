@@ -728,7 +728,10 @@ class GatewayEvent(Base):
     - tenant_id is denormalized (gateway -> tenant) so the CPO feed filters
       without a join. plug_id is nullable (some events are gateway-wide).
     - acknowledged lets an operator clear an alert from the active feed
-      without deleting the audit row.
+      without deleting the audit row. Pure forensic records (the fw 2.8.0
+      GATEWAY_BOOT / PLUG_RECOVERED reports) are inserted already
+      acknowledged, so True does not always mean an operator acted
+      (services/mqtt/alarms.py _PRE_ACKED_EVENT_TYPES).
     """
     __tablename__ = "gateway_events"
 
@@ -1296,6 +1299,95 @@ class PlugReport(Base):
     __table_args__ = (
         Index("ix_plug_reports_tenant_created", "tenant_id", "created_at"),
         Index("ix_plug_reports_plug", "plug_id"),
+    )
+
+
+class PlugReview(Base):
+    """
+    Driver-authored star review of a public charger, POST
+    /api/plugs/{plug_id}/reviews. Shows on the discovery map (aggregate
+    avg_rating + review_count) and in the plug's "Photos & reviews" panel.
+
+    Trust model: VERIFIED CHARGERS ONLY. Unlike PlugReport (any driver who can
+    SEE the plug may flag it), a review requires the author to have a finished
+    ChargingSession on this plug (status completed|paid), the router enforces
+    that gate, so a driver can't rate a charger they never used. Public read is
+    unauthenticated (part of pre-signup discovery); writing needs sign-in.
+
+    UNIQUE(driver_user_id, plug_id): one standing review per driver per plug.
+    A re-submit is an EDIT (the router upserts on the IntegrityError, same
+    idempotency trick as UserFavorite/PlugWatch), never a duplicate row, so
+    the aggregate can't be ballot-stuffed by one account. Declared as a unique
+    INDEX (not UniqueConstraint) so 0039's `CREATE UNIQUE INDEX` DDL matches the
+    model kind (test_migrations.py flags drift otherwise, see UserFavorite).
+
+    tenant_id is denormalized from the plug -> gateway -> tenant chain at
+    creation (same convention as PlugReport) so any future CPO-scoped read
+    filters on one indexed equality. rating is a plain Integer bounded 1..5 in
+    PlugReviewCreateRequest (no PG enum, same rationale as PlugReport.category).
+    body is nullable: a rating with no prose is allowed.
+    """
+    __tablename__ = "plug_reviews"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    plug_id: Mapped[int] = mapped_column(Integer, ForeignKey("plugs.id", ondelete="CASCADE"), nullable=False)
+    tenant_id: Mapped[int] = mapped_column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    driver_user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    rating: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    body: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+
+    __table_args__ = (
+        Index("uq_plug_reviews_user_plug", "driver_user_id", "plug_id", unique=True),
+        Index("ix_plug_reviews_plug", "plug_id"),
+    )
+
+
+class PlugPhotoStatus(str, enum.Enum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+
+class PlugPhoto(Base):
+    """
+    A driver-submitted photo of a public charger, POST
+    /api/plugs/{plug_id}/photos. HELD FOR APPROVAL: a new upload lands PENDING
+    and is invisible on the public map until a CPO/admin approves it
+    (routers/cpo/_plug_photos.py). Only APPROVED photos are shown to anonymous
+    callers; the uploader also sees their own PENDING ones.
+
+    Same verified-charger gate as PlugReview (the router enforces a finished
+    ChargingSession on this plug) and the same denormalized tenant_id (plug ->
+    gateway -> tenant) so the CPO moderation queue filters on one indexed
+    equality. `object_name` is the GCS object key (kept alongside `url`, the
+    object's gs:// URI, which is never sent to clients) so a REJECT can delete
+    the stored bytes, not just hide the row: unlike a review, a rejected photo
+    must actually leave storage.
+
+    Bytes live in the PRIVATE bucket (PLUG_PHOTO_GCS_BUCKET,
+    services/photo_publish.py) and are served only through
+    GET /api/plugs/{id}/photos/{photo_id}/image; this table stores only metadata
+    + the moderation lifecycle (pending -> approved | rejected, with
+    reviewed_at/by).
+    """
+    __tablename__ = "plug_photos"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    plug_id: Mapped[int] = mapped_column(Integer, ForeignKey("plugs.id", ondelete="CASCADE"), nullable=False)
+    tenant_id: Mapped[int] = mapped_column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    uploaded_by_user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    url: Mapped[str] = mapped_column(String(500), nullable=False)
+    object_name: Mapped[str] = mapped_column(String(300), nullable=False)
+    status: Mapped[PlugPhotoStatus] = mapped_column(SQLEnum(PlugPhotoStatus, name="plug_photo_status", values_callable=lambda x: [e.value for e in x]), default=PlugPhotoStatus.PENDING, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+    reviewed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    reviewed_by_user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+
+    __table_args__ = (
+        Index("ix_plug_photos_tenant_status", "tenant_id", "status"),
+        Index("ix_plug_photos_plug_status", "plug_id", "status"),
     )
 
 

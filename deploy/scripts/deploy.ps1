@@ -44,7 +44,7 @@ $VM_NAME           = "amphive-relay"
 $VM_ZONE           = "us-west1-a"
 $REMOTE_DIR        = "~/amphive-relay"
 $COMPOSE_FILE      = "docker-compose.relay.yml"
-$EXPECTED_PROJECT  = "project-7ee69f02-c0cf-4f51-952"
+$EXPECTED_PROJECT  = "project-6e290ffd-5954-4d48-aa9"
 $BUILD_TIMEOUT_MIN = 25
 
 function Fail($msg) { Write-Host "ERROR: $msg" -ForegroundColor Red; exit 1 }

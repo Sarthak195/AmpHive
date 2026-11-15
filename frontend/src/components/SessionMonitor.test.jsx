@@ -9,6 +9,7 @@ import { render, screen, fireEvent, act, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 
 import SessionMonitor from './SessionMonitor';
+import { toastBus } from './ui';
 import { useSession } from '../contexts/SessionContext';
 import { useWallet } from '../contexts/WalletContext';
 import api from '../api/client';
@@ -158,6 +159,58 @@ describe('SessionMonitor — notices', () => {
     expect(screen.getByText(/Plug drew 18 A/)).toBeInTheDocument();
   });
 
+  it('never shows an info-level notice (fw 2.8.0 PLUG_RECOVERED) as an alarm banner', async () => {
+    useSession.mockReturnValue(
+      baseSession({
+        alarms: [
+          {
+            plug_id: 2,
+            event_type: 'PLUG_RECOVERED',
+            severity: 'info',
+            detail: 'Plug reachable again after ~95 s.',
+            received_at: Date.now(),
+          },
+        ],
+      })
+    );
+    await renderMonitor();
+    expect(screen.queryByText(/reachable again/)).not.toBeInTheDocument();
+    expect(document.querySelector('.banner-danger')).toBeNull();
+  });
+
+  it('shows a PLUG_UNREACHABLE warning, and lets a newer PLUG_RECOVERED clear it', async () => {
+    const unreachable = {
+      plug_id: 2,
+      event_type: 'PLUG_UNREACHABLE',
+      severity: 'warning',
+      detail: "Gateway couldn't get a complete reading from the plug 3 times in a row - readings may pause until it answers.",
+      received_at: Date.now() - 5000,
+    };
+    useSession.mockReturnValue(baseSession({ alarms: [unreachable] }));
+    const { unmount } = await renderMonitor();
+    expect(screen.getByText('Plug unreachable')).toBeInTheDocument();
+    unmount();
+
+    // Newest first, as SessionContext keeps them.
+    useSession.mockReturnValue(
+      baseSession({
+        alarms: [
+          {
+            plug_id: 2,
+            event_type: 'PLUG_RECOVERED',
+            severity: 'info',
+            detail: 'Plug reachable again after ~5 s.',
+            received_at: Date.now(),
+          },
+          unreachable,
+        ],
+      })
+    );
+    await renderMonitor();
+    expect(screen.queryByText('Plug unreachable')).not.toBeInTheDocument();
+    expect(document.querySelector('.banner-danger')).toBeNull();
+  });
+
   it('ignores an alarm for a different plug', async () => {
     useSession.mockReturnValue(
       baseSession({
@@ -216,6 +269,37 @@ describe('SessionMonitor — notices', () => {
       baseSession({
         sessionData: { ...baseData, cost_coins: 9, is_stale: false },
         focusedHoldCoins: 10,
+      })
+    );
+    await renderMonitor();
+    expect(screen.getByText(/Low balance/)).toBeInTheDocument();
+  });
+
+  it('does not warn about low balance when the driver’s own kWh limit, not the wallet, will stop the session', async () => {
+    // Hold sized to the limit (10 kWh x 5 = 50) on a well-funded wallet: the
+    // hold running down only means the limit is near.
+    api.get.mockResolvedValue({ base_price_per_kwh: 5, price_now: 5, slots: [] });
+    useWallet.mockReturnValue({ balance: 1000, availableBalance: 950 });
+    useSession.mockReturnValue(
+      baseSession({
+        sessionData: { ...baseData, energy_kwh: 9.5, cost_coins: 47.5, is_stale: false },
+        focusedHoldCoins: 50,
+        focusedLimits: { max_kwh: 10, max_duration_seconds: null },
+      })
+    );
+    await renderMonitor();
+    expect(screen.queryByText(/Low balance/)).not.toBeInTheDocument();
+  });
+
+  it('still warns when the wallet capped the hold below the cost of the kWh limit', async () => {
+    // Limit 10 kWh would cost 50, but the wallet only covered a 20-coin hold.
+    api.get.mockResolvedValue({ base_price_per_kwh: 5, price_now: 5, slots: [] });
+    useWallet.mockReturnValue({ balance: 20, availableBalance: 0 });
+    useSession.mockReturnValue(
+      baseSession({
+        sessionData: { ...baseData, energy_kwh: 3.6, cost_coins: 18, is_stale: false },
+        focusedHoldCoins: 20,
+        focusedLimits: { max_kwh: 10, max_duration_seconds: null },
       })
     );
     await renderMonitor();
@@ -352,5 +436,72 @@ describe('SessionMonitor — limit editor', () => {
 
     expect(screen.getByText(/elapsed time/i)).toBeInTheDocument();
     expect(updateLimits).not.toHaveBeenCalled();
+  });
+});
+
+describe('SessionMonitor: page open while the gateway is at its 10 s idle cadence', () => {
+  it('shows the REST numbers at once with an "Updating" hint before the first frame, not a paused banner', async () => {
+    useSession.mockReturnValue(
+      baseSession({
+        sessionData: { plug_id: 2, plug_name: 'Garage plug', status: 'charging', energy_kwh: 1.2, cost_coins: 7 },
+        lastFrameAt: null,
+        watchSince: Date.now(),
+      })
+    );
+    await renderMonitor();
+    expect(screen.getByText('₹7.00')).toBeInTheDocument();
+    expect(screen.getByText('1.20 kWh')).toBeInTheDocument();
+    expect(screen.getByText('Updating…')).toBeInTheDocument();
+    expect(screen.queryByText(/Live readings paused/)).not.toBeInTheDocument();
+    expect(screen.queryByText('0 W')).not.toBeInTheDocument();
+  });
+
+  it('treats a stale or old first cached frame as updating while the gateway wakes', async () => {
+    useSession.mockReturnValue(
+      baseSession({
+        sessionData: { ...baseData, is_stale: true, age_sec: 40 },
+        watchSince: Date.now() - 2000,
+      })
+    );
+    await renderMonitor();
+    expect(screen.getByText('₹1.25')).toBeInTheDocument();
+    expect(screen.getByText('Updating…')).toBeInTheDocument();
+    expect(screen.queryByText('Reconnecting…')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Live readings paused/)).not.toBeInTheDocument();
+  });
+
+  it('shows "Charging" once a fresh frame arrives', async () => {
+    useSession.mockReturnValue(
+      baseSession({
+        sessionData: { ...baseData, is_stale: false, age_sec: 0.4 },
+        watchSince: Date.now() - 3000,
+        lastFrameAt: Date.now(),
+      })
+    );
+    await renderMonitor();
+    expect(screen.getByText('Charging')).toBeInTheDocument();
+  });
+
+  it('falls back to the paused banner once the wake-up window passes with no frame', async () => {
+    useSession.mockReturnValue(
+      baseSession({ lastFrameAt: null, watchSince: Date.now() - 20000 })
+    );
+    await renderMonitor();
+    expect(screen.getByText('Reconnecting…')).toBeInTheDocument();
+    expect(screen.getByText(/Live readings paused/)).toBeInTheDocument();
+  });
+
+  it('puts the stopped session bill in the toast (a sibling may take focus, with no receipt)', async () => {
+    const okSpy = vi.spyOn(toastBus, 'ok');
+    const stopSession = vi.fn().mockResolvedValue({ coins_spent: 4.5, energy_kwh: 0.9 });
+    useSession.mockReturnValue(baseSession({ stopSession }));
+    await renderMonitor();
+    fireEvent.click(screen.getByRole('button', { name: 'Stop charging' }));
+    const dialog = screen.getByRole('dialog', { name: 'Stop charging?' });
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Stop charging' }));
+    });
+    expect(okSpy).toHaveBeenCalledWith(expect.stringMatching(/Billed 0\.90 kWh, ₹4\.50/));
+    okSpy.mockRestore();
   });
 });

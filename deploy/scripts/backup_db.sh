@@ -2,11 +2,23 @@
 # =============================================================================
 # AmpHive nightly backup — logical DB dump + ops-config tarball -> GCS.
 #
-# Runs on the prod VM `amphive-relay` (installed at ~/amphive-relay/backup_db.sh,
-# shipped with CRLF stripped). Cron: 0 21 * * * (21:00 UTC = 02:30 IST) — see
-# deploy/docs/db_backup_restore.md for setup, restore, and the restore test.
+# Runs on the prod VM `amphive-relay`, installed at ~/amphive-relay/backup_db.sh
+# BY HAND (deploy.ps1 does not ship it; strip CRLF when copying it over).
+# Cron: 0 21 * * * (21:00 UTC = 02:30 IST) in the NORMAL user's crontab; the
+# script calls sudo itself where it needs root. NEVER run it with sudo (see
+# the guard below). Setup, restore, the restore test and the 2026-10-20
+# incident: deploy/docs/db_backup_restore.md.
 # (Pre-2026-08-02 this targeted the deleted amphive-vm-in box; the cron did NOT
 # survive the 2026-07-27 consolidation and was reinstated 2026-08-02.)
+#
+# LIVE COPY DRIFT: the copy on the VM also tars the mail store
+# (/var/mail/vhosts, deploy/docs/mail_server.md gap 6) and /etc/dovecot/users,
+# which this repo copy does not. Merge changes INTO the live copy (or pull it
+# into the repo first); never overwrite it with this file.
+#
+# Exit codes: 0 ok | 1 no DB container / pg_dump failed | 2 upload failed
+# (local copy kept) | 3 refused by the guard below (nothing done) | 4 backup
+# uploaded, but the LAST_SUCCESS marker could not be updated.
 #
 # Design:
 #   - pg_dump -Fc (custom format): compressed, supports selective pg_restore.
@@ -24,13 +36,43 @@
 set -uo pipefail
 
 BASE=/home/Sarthak/amphive-relay
-DEST=gs://amphive-db-backups
+# The original gs://amphive-db-backups went away with the old GCP project in
+# the 2026-09-04 account move; the live script uploads to the -2 bucket.
+DEST=gs://amphive-db-backups-2
 LOCAL="$BASE/backups"
 LOG="$BASE/backup.log"
 TS=$(date -u +%Y%m%d-%H%M%S)
 
-mkdir -p "$LOCAL"
+# Guard (2026-10-20 incident): a manual `sudo ./backup_db.sh` on 2026-09-04
+# left backup.log and backups/ owned by root. Every nightly cron run (as the
+# normal user) then died in under a second, its only output was a cron mail
+# that bounced (no local mailbox), and no backup was taken for 45 days. So:
+# refuse to run as root, and fail LOUDLY when the log/backup paths are not
+# writable, on stderr and in syslog (`journalctl -t amphive-backup`), because
+# backup.log is exactly what may be unwritable.
+guard_fail() {
+    echo "backup_db.sh: ERROR: $1 NO BACKUP TAKEN." >&2
+    logger -t amphive-backup -p user.err "ERROR: $1 NO BACKUP TAKEN." 2>/dev/null || true
+    exit 3
+}
+ME=$(id -un)
+[ "$(id -u)" -ne 0 ] || guard_fail "refusing to run as root - never run this script with sudo (it uses sudo itself where needed, and a root run leaves root-owned files that break the nightly cron)."
+mkdir -p "$LOCAL" 2>/dev/null
+{ [ -d "$LOCAL" ] && [ -w "$LOCAL" ]; } \
+    || guard_fail "cannot write $LOCAL as $ME - owned by root? never run this script with sudo (fix: sudo chown -R $ME: $LOCAL $LOG)."
+( : >> "$LOG" ) 2>/dev/null \
+    || guard_fail "cannot write $LOG as $ME - owned by root? never run this script with sudo (fix: sudo chown $ME: $LOG)."
+
 log() { echo "[$(date -u '+%F %T')] $*" >> "$LOG"; }
+
+# NOT fatal: LAST_SUCCESS is only a freshness marker, and step 5 replaces it
+# by rename, which needs only the directory (checked above). So a marker left
+# root-owned by a sudo run is repaired by the next good run instead of
+# costing a backup.
+if [ -e "$LOCAL/LAST_SUCCESS" ] && [ ! -w "$LOCAL/LAST_SUCCESS" ]; then
+    echo "backup_db.sh: WARN: $LOCAL/LAST_SUCCESS is not writable by $ME (root-owned?); a good run replaces it." >&2
+    log "WARN: LAST_SUCCESS not writable by $ME (root-owned?); a good run replaces it"
+fi
 
 # 1) Logical dump out of the running container.
 #
@@ -90,14 +132,21 @@ ls -1t "$LOCAL"/config-*.tar.gz 2>/dev/null | tail -n +4 | xargs -r rm -f
 
 if [ "$UPLOAD_OK" = 1 ]; then
     log "backup complete"
-# Freshness marker. The cron only writes to backup.log, so a silently
-# failing backup is invisible until the day someone needs a restore. This
-# file's MTIME is the last KNOWN-GOOD upload, so a stale backup is one
-# `ls -l` away instead of a log archaeology exercise:
-#   ls -l ~/amphive-relay/backups/LAST_SUCCESS
-# (Still not alerting - see docs/SECURITY.md. A cron that fails silently is
-# a backup you do not have.)
-date -u +%Y-%m-%dT%H:%M:%SZ > "$LOCAL/LAST_SUCCESS"
+    # 5) Freshness marker. The cron only writes to backup.log, so a silently
+    # failing backup is invisible until the day someone needs a restore. This
+    # file's MTIME is the last KNOWN-GOOD upload, so a stale backup is one
+    # `ls -l` away instead of a log archaeology exercise:
+    #   ls -l ~/amphive-relay/backups/LAST_SUCCESS
+    # (Still not alerting - see docs/SECURITY.md. A cron that fails silently
+    # is a backup you do not have.)
+    # Written to a temp file and RENAMED into place: a plain
+    # `date > LAST_SUCCESS` fails on a root-owned marker, a rename does not.
+    if ! { date -u +%Y-%m-%dT%H:%M:%SZ > "$LOCAL/LAST_SUCCESS.tmp" \
+           && mv -f "$LOCAL/LAST_SUCCESS.tmp" "$LOCAL/LAST_SUCCESS"; }; then
+        log "WARN: backup uploaded, but LAST_SUCCESS could not be updated"
+        echo "backup_db.sh: WARN: backup uploaded, but $LOCAL/LAST_SUCCESS could not be updated." >&2
+        exit 4
+    fi
 else
     log "backup complete WITH UPLOAD ERRORS"
     exit 2

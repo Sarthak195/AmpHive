@@ -51,10 +51,10 @@ AUTO_STOP_ON_LIMITS = os.getenv("AUTO_STOP_ON_LIMITS", "true").lower() in ("1", 
 # has already force-OFF'd the plug locally in firmware — auto-flip it to
 # MAINTENANCE so a new session can't be *started* on it (session-start already
 # 409s any non-AVAILABLE plug) until an operator clears it via
-# POST /api/cpo/plugs/{id}/maintenance. Runs AFTER the safety-cutoff
-# auto-finalize below (same coroutine, sequenced) so it isn't raced/overwritten
-# by finalize_charging_session's own plug.status = AVAILABLE. Env-toggleable;
-# on by default.
+# POST /api/cpo/plugs/{id}/maintenance. Runs BEFORE the safety-cutoff
+# auto-finalize (same coroutine, sequenced); finalize_charging_session keeps a
+# MAINTENANCE status, so watchers never hear a faulted plug is free.
+# Env-toggleable; on by default.
 AUTO_MAINTENANCE_ON_CRITICAL_ALARM = os.getenv("AUTO_MAINTENANCE_ON_CRITICAL_ALARM", "true").lower() in ("1", "true", "yes")
 
 # [Plug power] A plug counts as powered only while its firmware keeps reporting
@@ -64,6 +64,24 @@ AUTO_MAINTENANCE_ON_CRITICAL_ALARM = os.getenv("AUTO_MAINTENANCE_ON_CRITICAL_ALA
 # freshness threshold. Healthy plugs report every ~1-10 s, so ~90 s tolerates a
 # few missed frames without flapping. Env-overridable.
 PLUG_POWER_STALE_SEC = int(os.getenv("PLUG_POWER_STALE_SEC", "90"))
+
+# [Offline debounce] How long a gateway must STAY offline before its offline
+# side effects fire: the driver "Charger connection lost" notice and the
+# plug_connectivity=false push (services/mqtt/status.py). The DB status flip
+# itself stays immediate, so gateway_is_live and every start gate stay
+# truthful. A 45-day log forensic (2026-10-20) found 22 of 33 offline->online
+# pairs reversed within 1 s (ESP32 chip resets + MQTT reconnects), each one
+# ringing a bell. <= 0 restores the old immediate behaviour.
+GATEWAY_OFFLINE_NOTIFY_DELAY_SEC = float(os.getenv("GATEWAY_OFFLINE_NOTIFY_DELAY_SEC", "120"))
+
+# [Orphan bell gating] The reconnect-time orphan-OFF republish
+# (services/mqtt/status.py _republish_off_for_orphaned_plugs) still goes to
+# EVERY plug with no ACTIVE session, but only a plug whose last-known reading
+# (plugs.current_power_w) was at least this many watts rings the CPO
+# "orphan_off" bell. An idle plug's OFF is routine reconnect hygiene, and the
+# firmware's own UNAUTHORIZED_ON alarm still covers a relay found ON with no
+# session.
+ORPHAN_ALERT_MIN_POWER_W = float(os.getenv("ORPHAN_ALERT_MIN_POWER_W", "5.0"))
 
 # [Unmetered consumption] Backend-side continuous cross-check of the P110's
 # own today/month energy counters against what we last saw (see

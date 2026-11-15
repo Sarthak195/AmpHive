@@ -555,6 +555,11 @@ async def update_session_limits(
         "session_id": session.id,
         "max_kwh": session.max_kwh,
         "max_duration_seconds": session.max_duration_seconds,
+        # The possibly resized hold, so the client's low-balance check stays in
+        # step with the new limits without another /api/sessions/active fetch.
+        "hold_coins": (
+            float(session.hold_coins) if session.hold_coins is not None else None
+        ),
     }
 
 

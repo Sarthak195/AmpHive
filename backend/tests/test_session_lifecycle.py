@@ -21,7 +21,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from backend.database.models import SessionStatus
+from backend.database.models import PlugStatus, SessionStatus
 
 
 def _s_one_or_none(value):
@@ -71,6 +71,7 @@ def _plug():
     plug.gateway_id = "gw-1"
     plug.local_ip = "10.0.0.5"
     plug.group_id = None                          # ungrouped: capacity notify no-ops
+    plug.status = PlugStatus.OCCUPIED             # what start set; finalize frees it
     return plug
 
 

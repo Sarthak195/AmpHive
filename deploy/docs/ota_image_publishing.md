@@ -8,7 +8,7 @@ background: [docs/FIRMWARE.md](../../docs/FIRMWARE.md) §6–§8,
 > flow is the admin portal's upload widget (Admin → Firmware Releases →
 > Upload image): it takes the signed `build/amphive-gateway.bin`, validates
 > the ESP image header, reads the version out of the embedded app
-> descriptor, **publishes the image straight to `gs://amphive-fw` (keyless,
+> descriptor, **publishes the image straight to `gs://amphive-fw-2` (keyless,
 > via the VM's own compute service account — no key file, no `gcloud`), and
 > auto-registers the bucket URL.** See docs/FIRMWARE.md §7 and
 > `backend/services/firmware_publish.py`. The manual `gcloud storage cp` flow
@@ -21,25 +21,25 @@ background: [docs/FIRMWARE.md](../../docs/FIRMWARE.md) §6–§8,
 > download (the ESP32 TLS stream breaks mid-way) and the uploaded file was
 > non-persistent (`deploy.ps1` doesn't ship the `firmware_images` volume), so
 > it vanished on redeploy. Every historically-successful OTA fetched from
-> `gs://amphive-fw`, so uploads now go there. That legacy GET endpoint is
+> `gs://amphive-fw-2`, so uploads now go there. That legacy GET endpoint is
 > retained only for back-compat with any release row still pointing at a
 > self-hosted URL.
 >
 > **INFRA PREREQUISITE (apply once, BEFORE deploying the upload feature):** the
 > compute service account needs `roles/storage.objectCreator` on
-> `gs://amphive-fw`. Today it only holds that on `gs://amphive-db-backups`
+> `gs://amphive-fw-2`. Today it only holds that on `gs://amphive-db-backups-2`
 > (used by `backup_db.sh`); the VM's `devstorage.read_write` access scope is
 > already set. Grant it:
 >
 > ```bash
-> gcloud storage buckets add-iam-policy-binding gs://amphive-fw \
->     --member=serviceAccount:930756667383-compute@developer.gserviceaccount.com \
+> gcloud storage buckets add-iam-policy-binding gs://amphive-fw-2 \
+>     --member=serviceAccount:626015685685-compute@developer.gserviceaccount.com \
 >     --role=roles/storage.objectCreator
 > ```
 >
 > Without this the upload endpoint returns **502 "Failed to publish firmware
 > image to the storage bucket"** (the GCS POST 403s). The bucket name is
-> overridable via the `FIRMWARE_GCS_BUCKET` env var (default `amphive-fw`).
+> overridable via the `FIRMWARE_GCS_BUCKET` env var (code default `amphive-fw`; prod sets `amphive-fw-2`).
 
 Since the 2026-07-10 hardening, an OTA image must be:
 
@@ -64,7 +64,7 @@ Since the 2026-07-10 hardening, an OTA image must be:
 
 ## One-time bucket setup (done 2026-07-10)
 
-Commands actually run (project `project-7ee69f02-c0cf-4f51-952`):
+Commands actually run (old project `project-7ee69f02-c0cf-4f51-952`; the bucket is now `gs://amphive-fw-2` in project `project-6e290ffd-5954-4d48-aa9`):
 
 ```bash
 gcloud storage buckets create gs://amphive-fw \
@@ -89,7 +89,7 @@ so a reader gains nothing and a forger is rejected.
 
    ```bash
    gcloud storage cp firmware/build/amphive-gateway.bin \
-       gs://amphive-fw/amphive-gateway-<version>.bin
+       gs://amphive-fw-2/amphive-gateway-<version>.bin
    ```
 
 4. **Register the release** (feat/ota-version-picker, 2026-08-02) so it shows
@@ -98,7 +98,7 @@ so a reader gains nothing and a forger is rejected.
    ```bash
    curl -X POST "http://<backend>/api/admin/firmware-releases" \
        -H "Authorization: Bearer <admin JWT>" -H "Content-Type: application/json" \
-       -d '{"version":"<version>","url":"https://storage.googleapis.com/amphive-fw/amphive-gateway-<version>.bin"}'
+       -d '{"version":"<version>","url":"https://storage.googleapis.com/amphive-fw-2/amphive-gateway-<version>.bin"}'
    ```
 
    This only registers a URL pointer — it does not upload/store a binary
@@ -114,7 +114,7 @@ so a reader gains nothing and a forger is rejected.
    ```bash
    curl -X POST "http://<backend>/api/cpo/gateways/<gateway_id>/ota" \
        -H "Authorization: Bearer <admin JWT>" -H "Content-Type: application/json" \
-       -d '{"firmware_url":"https://storage.googleapis.com/amphive-fw/amphive-gateway-<version>.bin"}'
+       -d '{"firmware_url":"https://storage.googleapis.com/amphive-fw-2/amphive-gateway-<version>.bin"}'
    ```
 
 6. Watch the gateway's status topic / CPO dashboard: it goes offline, reboots,
@@ -178,7 +178,7 @@ see git history / `docs/IMPLEMENTATION_STATUS.md`):
 (downgrade) or `-1.7.0-direct.bin` (liveness regression) still in the bucket** —
 `1.7.1-direct` is the good image.
 
-Published images (`gs://amphive-fw`): `amphive-gateway-1.4.0.bin` (historic),
+Published images (`gs://amphive-fw-2`): `amphive-gateway-1.4.0.bin` (historic),
 `amphive-gateway-1.5.0.bin` (historic), `amphive-gateway-1.6.0-direct.bin`
 (historic), `amphive-gateway-1.7.0-direct.bin` (**pulled — regression**),
 `amphive-gateway-1.7.1-direct.bin` (**current**). See
