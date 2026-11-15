@@ -14,6 +14,16 @@
   display: block;
 }
 
+.cpo-photo-thumb.is-empty {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  font-size: 11px;
+  color: var(--text-2, #667085);
+}
+
 .cpo-photo-actions {
   gap: 6px;
 }

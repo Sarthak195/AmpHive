@@ -182,20 +182,26 @@ export default function PlugReviewsModal({ open, onClose, plug, onSaved }) {
           <div className="plug-reviews-photos">
             {photos.length > 0 && (
               <div className="plug-photo-grid">
-                {photos.map((p) => (
-                  <a
-                    key={p.id}
-                    href={p.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className={`plug-photo${p.status === 'pending' ? ' is-pending' : ''}`}
-                  >
-                    <img src={p.url} alt={plug?.name ?? 'Charger'} loading="lazy" />
-                    {p.status === 'pending' && (
+                {photos.map((p) =>
+                  // A pending photo's bytes are served to moderators only, so
+                  // the uploader sees a placeholder until it is approved.
+                  p.status === 'pending' ? (
+                    <span key={p.id} className="plug-photo is-pending">
+                      <ImagePlus size={20} aria-hidden="true" />
                       <span className="plug-photo-badge">Pending review</span>
-                    )}
-                  </a>
-                ))}
+                    </span>
+                  ) : (
+                    <a
+                      key={p.id}
+                      href={p.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="plug-photo"
+                    >
+                      <img src={p.url} alt={plug?.name ?? 'Charger'} loading="lazy" />
+                    </a>
+                  ),
+                )}
               </div>
             )}
             {user && (

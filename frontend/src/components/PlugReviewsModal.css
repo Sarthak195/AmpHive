@@ -49,8 +49,11 @@
   display: block;
 }
 
-.plug-photo.is-pending img {
-  opacity: 0.6;
+.plug-photo.is-pending {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-2, #667085);
 }
 
 .plug-photo-badge {

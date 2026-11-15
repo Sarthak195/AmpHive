@@ -9,7 +9,11 @@
  * enriches best-effort from GET /api/cpo/plugs (same as CpoPlugReports).
  *
  * Mutation: POST /api/cpo/plug-photos/{id}/approve | /reject (reject also
- * deletes the stored bytes server-side).
+ * deletes the stored bytes server-side, and works on approved photos too).
+ *
+ * Images: p.url is the backend image route, which serves PENDING bytes only to
+ * a moderator, so thumbnails are fetched with the Bearer token (an <img> can't
+ * send it). Rejected photos have no bytes left; they show a placeholder.
  */
 import { useCallback, useEffect, useState } from 'react';
 import { Image as ImageIcon } from 'lucide-react';
@@ -20,6 +24,47 @@ import { apiErrorCopy } from '../../utils/statusCopy';
 import './CpoPlugPhotos.css';
 
 const LIMIT = 200;
+const API_BASE = import.meta.env.VITE_API_URL || '';
+
+function PhotoThumb({ photo }) {
+  const [src, setSrc] = useState(null);
+  const removed = photo.status === 'rejected';
+
+  useEffect(() => {
+    if (removed) return undefined;
+    let objectUrl = null;
+    let cancelled = false;
+    const token = localStorage.getItem('amphive_token');
+    fetch(`${API_BASE}${photo.url}`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    })
+      .then((res) => (res.ok ? res.blob() : null))
+      .then((blob) => {
+        if (!blob || cancelled) return;
+        objectUrl = URL.createObjectURL(blob);
+        setSrc(objectUrl);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [photo.url, removed]);
+
+  if (removed || !src) {
+    return (
+      <span className="cpo-photo-thumb is-empty">
+        <ImageIcon size={16} aria-hidden="true" />
+        {removed ? 'Removed' : null}
+      </span>
+    );
+  }
+  return (
+    <a href={src} target="_blank" rel="noopener noreferrer" className="cpo-photo-thumb">
+      <img src={src} alt={`Charger #${photo.plug_id}`} />
+    </a>
+  );
+}
 
 const STATUS_BADGE = {
   pending: 'badge-warn',
@@ -91,7 +136,7 @@ export default function CpoPlugPhotos() {
     setBusyId(photo.id);
     try {
       await api.post(`/api/cpo/plug-photos/${photo.id}/${action}`);
-      toast.ok(action === 'approve' ? 'Photo approved.' : 'Photo rejected.');
+      toast.ok(action === 'approve' ? 'Photo approved.' : 'Photo rejected and removed.');
       await fetchPhotos();
     } catch (err) {
       toast.error(apiErrorCopy(err));
@@ -104,11 +149,7 @@ export default function CpoPlugPhotos() {
     {
       key: 'url',
       label: 'Photo',
-      render: (p) => (
-        <a href={p.url} target="_blank" rel="noopener noreferrer" className="cpo-photo-thumb">
-          <img src={p.url} alt={`Charger #${p.plug_id}`} loading="lazy" />
-        </a>
-      ),
+      render: (p) => <PhotoThumb photo={p} />,
     },
     {
       key: 'plug_id',
@@ -127,18 +168,20 @@ export default function CpoPlugPhotos() {
       key: 'actions',
       label: 'Actions',
       render: (p) =>
-        p.status !== 'pending' ? (
-          <span aria-hidden="true">—</span>
+        p.status === 'rejected' ? (
+          <span aria-hidden="true">-</span>
         ) : (
           <span className="row cpo-photo-actions">
-            <button
-              type="button"
-              className="btn btn-primary btn-sm"
-              disabled={busyId === p.id}
-              onClick={() => moderate(p, 'approve')}
-            >
-              Approve
-            </button>
+            {p.status === 'pending' && (
+              <button
+                type="button"
+                className="btn btn-primary btn-sm"
+                disabled={busyId === p.id}
+                onClick={() => moderate(p, 'approve')}
+              >
+                Approve
+              </button>
+            )}
             <button
               type="button"
               className="btn btn-quiet btn-sm"
