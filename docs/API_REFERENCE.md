@@ -147,6 +147,7 @@ auto-start.
   - Responses:
     - On success: Emits `subscription_success` event: `{ "session_id": <int> }`
     - On failure: Emits `subscription_error` event: `{ "detail": "<error_message>" }`
+  - Room membership does not survive a reconnect (the new sid joins only `user_{id}`), so a client must re-emit `subscribe_session` on every `connect`, not only the first. The driver SPA does, and also re-reads `/api/sessions/active` on a reconnect and on `queued_charge_*` / `session_stopped` notifications, because pushes sent while the socket was down are not replayed.
 - **Telemetry Stream**:
   - Event: `telemetry` (pushed from server to rooms)
   - Payload: `{ "plug_id": <int>, "power_w": <float>, "current_a": <float>, "voltage_v": <float>, "energy_kwh": <float>, "duration_sec": <int>, "cost_coins": <float>, "status": "charging"|"completed"|"starting", "relay_on": <bool>, "is_stale": <bool>, "age_sec": <float> }` — `relay_on` (the plug's actual relay state), `voltage_v`, `is_stale`, and `age_sec` added 2026-07-10
