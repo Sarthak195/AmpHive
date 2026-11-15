@@ -36,8 +36,8 @@ import { formatINR, coinsToINR, formatKw, formatKwh, formatDuration } from '../u
 // Matches the backend TELEMETRY_STALE_AFTER_SEC default (15 s).
 const STALE_AFTER_MS = 15000;
 
-// Live status pill — Charging / Reconnecting… / Completed.
-const StatusPill = ({ isActive, isStale }) => {
+// Live status pill: Charging / Updating… / Reconnecting… / Completed.
+const StatusPill = ({ isActive, isStale, updating }) => {
   if (!isActive) {
     return (
       <span className="session-status text-3">
@@ -52,6 +52,13 @@ const StatusPill = ({ isActive, isStale }) => {
       </span>
     );
   }
+  if (updating) {
+    return (
+      <span className="session-status text-2">
+        <span className="dot dot-ok" aria-hidden="true" /> Updating…
+      </span>
+    );
+  }
   return (
     <span className="session-status text-2">
       <span className="dot dot-ok dot-live" aria-hidden="true" /> Charging
@@ -62,7 +69,7 @@ const StatusPill = ({ isActive, isStale }) => {
 const SessionMonitor = () => {
   const {
     sessionData, sessionId, isActive, stopSession, updateLimits,
-    lastFrameAt, focusedStartedAt, focusedLimits, focusedHoldCoins, alarms,
+    lastFrameAt, watchSince, focusedStartedAt, focusedLimits, focusedHoldCoins, alarms,
   } = useSession();
   const { coin_inr_rate } = useConfig();
   const { availableBalance } = useWallet();
@@ -115,11 +122,22 @@ const SessionMonitor = () => {
     ? Math.max(0, Math.floor((now - new Date(focusedStartedAt).getTime()) / 1000))
     : (sessionData?.duration_sec || 0);
 
-  // Stale when the server flags it OR no frame has arrived recently.
-  const noFrameFor = lastFrameAt ? now - lastFrameAt : null;
-  const isStale = isActive && (
+  // Stale when the server flags it OR no frame has arrived recently. For the
+  // first STALE_AFTER_MS after (re)subscribing, a missing, stale or old frame
+  // is the gateway still leaving its 10 s idle cadence (the firmware sleeps
+  // out the slow interval before the 1 s one starts), so the numbers already
+  // on screen (REST row or cached frame) stay up with a small "Updating" hint
+  // instead of the "Live readings paused" banner.
+  const sinceWatch = watchSince ? now - watchSince : null;
+  const warmingUp = sinceWatch !== null && sinceWatch < STALE_AFTER_MS;
+  const noFrameFor = lastFrameAt ? now - lastFrameAt : sinceWatch;
+  const isStale = isActive && !warmingUp && (
     sessionData?.is_stale === true ||
     (noFrameFor !== null && noFrameFor > STALE_AFTER_MS)
+  );
+  const noFreshFrame = lastFrameAt == null || (watchSince != null && lastFrameAt < watchSince);
+  const updating = isActive && warmingUp && (
+    noFreshFrame || sessionData?.is_stale === true || Number(sessionData?.age_sec) > 3
   );
 
   // Low balance: the wallet is only debited on stop, so remaining is
@@ -229,9 +247,15 @@ const SessionMonitor = () => {
   const handleStop = async () => {
     setStopping(true);
     try {
-      await stopSession();
+      const bill = await stopSession();
       setConfirmStop(false);
-      toast.ok('Charging stopped.');
+      // With a second session still charging, focus moves to it and no
+      // receipt shows, so the toast carries this session's bill.
+      toast.ok(
+        bill?.coins_spent != null
+          ? `Charging stopped. Billed ${formatKwh(Number(bill.energy_kwh) || 0)}, ${formatINR(coinsToINR(Number(bill.coins_spent), coin_inr_rate))}.`
+          : 'Charging stopped.'
+      );
     } catch (err) {
       setConfirmStop(false);
       toast.error(apiErrorCopy(err));
@@ -243,7 +267,7 @@ const SessionMonitor = () => {
   return (
     <section className="session-monitor card anim-fade" aria-label="Live charging session">
       <div className="session-monitor-top">
-        <StatusPill isActive={isActive} isStale={isStale} />
+        <StatusPill isActive={isActive} isStale={isStale} updating={updating} />
       </div>
 
       {/* Hero: the ring with ₹ + kWh in the center. */}
@@ -267,7 +291,7 @@ const SessionMonitor = () => {
       <dl className="session-meters">
         <div className="session-meter">
           <dt className="text-3 text-xs">Power now</dt>
-          <dd className="num">{formatKw(powerW)}</dd>
+          <dd className="num">{lastFrameAt == null ? '-' : formatKw(powerW)}</dd>
         </div>
         <div className="session-meter">
           <dt className="text-3 text-xs">Elapsed</dt>

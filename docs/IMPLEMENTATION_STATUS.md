@@ -67,6 +67,35 @@ Session page (two driver reports on the live session page):
   first fresh frame can still take up to 10 s; fixing it needs a firmware
   change and an OTA.
 
+Session live updates (driver live session page, keeping up while the app stays
+open; `fix/session-live-updates`, built on `fix/session-page`):
+
+- **Live telemetry died after any socket reconnect.** The new sid is in no
+  rooms and the client only subscribed once. `SessionContext` now re-emits
+  `subscribe_session` on every `connect`, and on a reconnect re-reads
+  `/api/sessions/active` and the wallet.
+- **A backend auto-stop left no bill.** On the `completed` frame (limit,
+  balance or hold exhaustion, the reaper, a reservation clear-out) the page now
+  refocuses a still-charging sibling, or shows the bill from
+  `GET /api/sessions/{id}`, and refreshes the wallet. A driver Stop that leaves
+  a sibling charging puts the bill (kWh and cost) in the toast.
+- **Queued charges were frozen while the app stayed open.** A
+  `queued_charge_*` or `session_stopped` notification re-syncs the active
+  sessions (an auto-started queued charge takes focus when nothing else is
+  live), and the Dashboard "Up next" card is on a 30 s poll and refetches on
+  queue and reservation notifications.
+- **Opening the page while the gateway is at its 10 s idle cadence.** The
+  REST-row or cached-frame numbers show at once; for the first 15 s after a
+  (re)subscribe a missing, stale or old frame shows a small "Updating…" pill
+  instead of the "Live readings paused" banner, which now also appears when no
+  frame at all has arrived 15 s after subscribing. Power shows "-" until the
+  first frame instead of a fabricated 0. Frames are merged over the REST row,
+  so the charger name no longer disappears, and a late frame for another plug
+  is ignored.
+- Remaining: the firmware still sleeps out its current 10 s interval before
+  honouring `SET_INTERVAL 1000`, so live power can lag up to about 10 s after
+  the page opens when the driver was away longer than the 30 s grace.
+
 ---
 
 ## 0a. 2026-10-20 connection noise: debounced offline notices, gated orphan bells, fw 2.8.0 diagnostics
