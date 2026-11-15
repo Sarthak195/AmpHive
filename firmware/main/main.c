@@ -45,6 +45,10 @@ char mqtt_broker_url[128] = "";
 
 bool config_loaded = false;
 static uint32_t telemetry_interval_ms = 10000; // Default 10s (10000ms)
+// Telemetry task handle (fw 2.9.0): SET_INTERVAL notifies it so the poll loop
+// wakes at once instead of finishing its current (up to 10 s) sleep. NULL until
+// app_main creates the task.
+static TaskHandle_t s_telemetry_task = NULL;
 
 // ── Per-plug current-cap watchdog (REC-03) ───────────────────────────────────
 // Each session carries an effective per-plug current cap (amps). When the plug's
@@ -1768,7 +1772,12 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
                 if (cJSON_IsNumber(iv)) interval = (uint32_t)iv->valuedouble;
                 if (interval < 500) interval = 500;
                 if (interval > 60000) interval = 60000;
+                bool changed = (interval != telemetry_interval_ms);
                 telemetry_interval_ms = interval;   // gateway-wide poll cadence
+                // Wake the poll loop now (fw 2.9.0), so a session's 1 s cadence
+                // starts at once. Only on a change: a repeated SET_INTERVAL must
+                // not turn into a poll per command.
+                if (changed && s_telemetry_task) xTaskNotifyGive(s_telemetry_task);
                 ESP_LOGI(TAG, "Telemetry interval updated to %lu ms", interval);
             } else if (action && strcmp(action, "OTA") == 0) {
                 const cJSON *u = cJSON_GetObjectItemCaseSensitive(root, "url");
@@ -2246,7 +2255,13 @@ static void telemetry_task(void *pvParameters) {
             last_session_persist_s = persist_now_s;
         }
 
-        vTaskDelay(pdMS_TO_TICKS(telemetry_interval_ms));
+        /* Sleep one interval, or until SET_INTERVAL notifies us (fw 2.9.0).
+           pdTRUE clears the count, so a burst of commands is one early sweep.
+           An early sweep is safe: the energy integrator uses the measured tick
+           delta and the duration watchdog uses now_seconds(), never the nominal
+           interval. Only the poll-counted debounces (OVERCURRENT_CAP_DEBOUNCE,
+           PLUG_UNREACHABLE_FAILURES) see one extra sample. */
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(telemetry_interval_ms));
     }
 }
 
@@ -2351,7 +2366,7 @@ void app_main(void) {
 
     // 6. Start telemetry and safety watchdog loops
     //    Stack raised to 8 KB: the task now performs real KLAP crypto + HTTP each poll.
-    xTaskCreate(telemetry_task, "telemetry_safety", 8192, NULL, 5, NULL);
+    xTaskCreate(telemetry_task, "telemetry_safety", 8192, NULL, 5, &s_telemetry_task);
 
 #if AMPHIVE_DIRECT_MQTT
     // 7. Direct transport: Wi-Fi is up, so dial the public broker over TLS
