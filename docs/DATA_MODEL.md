@@ -308,7 +308,9 @@ full column list of each:
   (`UPDATE users SET email_verified = true` right after adding the column) so
   the live prod user base is never locked out — only signups made after the
   migration, through the app, start `false`. Closes the account-PRE-hijacking
-  class at its root. Backs `POST /api/auth/register` + `verify-email` +
+  class at its root: while `false` the account's password is provisional
+  (re-registering replaces it, a Google link drops it; residual in
+  SECURITY.md §8.6). Backs `POST /api/auth/register` + `verify-email` +
   `resend-verification`.
 - **`offline_topups`** (`0026_offline_topups.py`) — a CPO's cash top-up of a
   driver's coin wallet, funded from the tenant's own unsettled net earnings

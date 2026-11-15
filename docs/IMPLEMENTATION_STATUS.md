@@ -7,6 +7,27 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 
 ---
 
+## 0 - 2026-11-15 fix batch
+
+- **Login copy (C4, C5):** a wrong password on `/login` now shows the server's
+  "Invalid email or password." instead of "Authentication expired"
+  (`api/client.js` clears the session and redirects only on a 401 to a request
+  that sent a token). A `403 account_disabled` says the account is disabled
+  instead of offering "verify your email" and a resend button.
+- **`GET /api/auth/me` returns `auth_provider` and `created_at` (C6):** the
+  Account page now hides the close-account password prompt for a Google-only
+  account and shows "Member since".
+- **Google sign-in failures land on `/login` (C19):** every callback error
+  (cancelled consent, expired state, disabled account, different Google
+  account, token failures) redirects to `/login?google_error=<code>` instead of
+  a raw JSON page. `Login.jsx` maps known codes to fixed copy; unknown codes
+  get a generic line, so a crafted link cannot put text on the page.
+- **Unverified passwords are provisional (C7):** registering again with an
+  unverified email replaces the password and name and sends a new link
+  (verified emails still get the 400); the first Google link to an unverified
+  account drops its password, while a verified account keeps its password
+  and `auth_provider`. Residual in [SECURITY.md](SECURITY.md) §8.6.
+
 ## 0. Latest — 2026-10-20 connection noise: debounced offline notices, gated orphan bells, fw 2.8.0 diagnostics
 
 A 45-day forensic pass over the prod logs (one user, who is driver, operator
