@@ -689,13 +689,17 @@ def _google_oauth_config():
     return client_id, client_secret, redirect_uri
 
 
-def _google_error_response(status_code: int, detail: str) -> JSONResponse:
-    """Build a callback-error response with the single-use state cookie
-    cleared. Every exit out of google_callback past the state check —
-    success or failure — clears the cookie the same way, so this is the one
-    place that shape is defined instead of repeating .delete_cookie() at each
-    call site."""
-    response = JSONResponse(status_code=status_code, content={"detail": detail})
+def _google_error_response(code: str, detail: str) -> RedirectResponse:
+    """Send the browser back to the SPA's /login with a short error code, and
+    clear the single-use state cookie. The callback is a top-level navigation
+    (Google redirects the browser here), so a JSON body would strand the user
+    on a raw API page. Only the fixed `code` goes in the URL, never `detail`:
+    Login.jsx maps known codes to fixed copy, so a crafted link cannot put
+    arbitrary text on the sign-in page. `detail` is logged for operators."""
+    logger.info("Google sign-in failed", extra={"code": code, "detail": detail})
+    response = RedirectResponse(
+        url=f"{email_service.frontend_origin()}/login?google_error={code}", status_code=302
+    )
     response.delete_cookie(GOOGLE_STATE_COOKIE)
     return response
 
@@ -754,8 +758,9 @@ async def google_callback(request: Request, db: AsyncSession = Depends(get_db)):
     never hits this server's or any proxy's access logs, unlike a query
     string).
 
-    Every branch below returns an explicit Response (JSONResponse for errors,
-    RedirectResponse on success) instead of raising HTTPException, so the
+    Every branch below returns an explicit RedirectResponse (to /login with a
+    google_error code on failure, see _google_error_response, or to the SPA
+    callback page on success) instead of raising HTTPException, so the
     single-use state cookie can be cleared on the SAME response that answers
     the request — raising would hand the exception middleware a fresh
     Response of its own and silently drop that cookie mutation.
@@ -764,7 +769,7 @@ async def google_callback(request: Request, db: AsyncSession = Depends(get_db)):
     if config is None:
         # Not normally reachable (the /login leg already 503s first), but
         # config could in principle change between the two legs.
-        return _google_error_response(503, "Google sign-in is not configured.")
+        return _google_error_response("unavailable", "Google sign-in is not configured.")
     client_id, client_secret, redirect_uri = config
 
     # --- CSRF state check (constant-time; state is a secret nonce) ---------
@@ -772,7 +777,7 @@ async def google_callback(request: Request, db: AsyncSession = Depends(get_db)):
     query_state = request.query_params.get("state")
     if not cookie_state or not query_state or not hmac.compare_digest(cookie_state, query_state):
         return _google_error_response(
-            400, "Invalid or expired sign-in attempt. Please try again."
+            "expired", "Invalid or expired sign-in attempt. Please try again."
         )
 
     code = request.query_params.get("code")
@@ -780,7 +785,7 @@ async def google_callback(request: Request, db: AsyncSession = Depends(get_db)):
         # e.g. the user hit "Cancel" on Google's consent screen
         # (?error=access_denied&state=... with no code).
         return _google_error_response(
-            400, "Google sign-in was cancelled or did not return an authorization code."
+            "cancelled", "Google sign-in was cancelled or did not return an authorization code."
         )
 
     # --- Exchange the code for tokens ---------------------------------------
@@ -805,11 +810,11 @@ async def google_callback(request: Request, db: AsyncSession = Depends(get_db)):
         token_payload = token_response.json()
     except Exception:
         logger.exception("Google token exchange failed")
-        return _google_error_response(400, "Could not complete Google sign-in. Please try again.")
+        return _google_error_response("failed", "Could not complete Google sign-in. Please try again.")
 
     id_tok = token_payload.get("id_token")
     if not id_tok:
-        return _google_error_response(400, "Google did not return an identity token.")
+        return _google_error_response("failed", "Google did not return an identity token.")
 
     # --- Verify the ID token -------------------------------------------------
     # verify_oauth2_token fetches Google's JWKS to check the signature (also
@@ -823,16 +828,16 @@ async def google_callback(request: Request, db: AsyncSession = Depends(get_db)):
         )
     except Exception:
         logger.exception("Google id_token verification failed")
-        return _google_error_response(400, "Could not verify Google identity token.")
+        return _google_error_response("failed", "Could not verify Google identity token.")
 
     if not claims.get("email_verified"):
-        return _google_error_response(400, "Google account email is not verified.")
+        return _google_error_response("email_unverified", "Google account email is not verified.")
     email_claim = claims.get("email")
     if not email_claim:
-        return _google_error_response(400, "Google did not return an email address.")
+        return _google_error_response("failed", "Google did not return an email address.")
     google_sub = claims.get("sub")
     if not google_sub:
-        return _google_error_response(400, "Google did not return an account identifier.")
+        return _google_error_response("failed", "Google did not return an account identifier.")
 
     email = normalize_email(email_claim)
     result = await db.execute(select(User).where(func.lower(User.email) == email))
@@ -865,7 +870,7 @@ async def google_callback(request: Request, db: AsyncSession = Depends(get_db)):
             # (or, vanishingly unlikely, google_sub) — same pattern as
             # /api/auth/register's duplicate-email catch.
             await db.rollback()
-            return _google_error_response(400, "An account with this email already exists.")
+            return _google_error_response("failed", "An account with this email already exists.")
         await db.refresh(user)
         logger.info(
             "New user registered via Google",
@@ -925,7 +930,7 @@ async def google_callback(request: Request, db: AsyncSession = Depends(get_db)):
             # pattern as the branch above.
             await db.rollback()
             return _google_error_response(
-                400, "This Google account is already linked to a different AmpHive account."
+                "google_in_use", "This Google account is already linked to a different AmpHive account."
             )
         await db.refresh(user)
         logger.info(
@@ -937,13 +942,13 @@ async def google_callback(request: Request, db: AsyncSession = Depends(get_db)):
         # This email is already linked to a DIFFERENT Google account than
         # the one that just signed in — never silently switch it.
         return _google_error_response(
-            403, "This email is linked to a different Google account."
+            "different_google", "This email is linked to a different Google account."
         )
 
     # [Admin] Same kill switch as password login — an admin-disabled account
     # must not be able to bypass disablement by signing in with Google.
     if user.is_disabled:
-        return _google_error_response(403, "account_disabled")
+        return _google_error_response("account_disabled", "account_disabled")
 
     token = create_access_token(user.id, user.role.value, user.email, user.token_version)
     logger.info(

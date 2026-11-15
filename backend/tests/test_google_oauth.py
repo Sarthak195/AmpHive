@@ -170,6 +170,16 @@ async def _run_successful_callback(monkeypatch, db, *, sub="google-sub-x", email
     return resp, code, nonce
 
 
+def _login_error(resp):
+    """The callback is a top-level navigation, so every failure redirects to
+    the SPA's /login with a short google_error code (never a JSON body).
+    Returns that code."""
+    assert resp.status_code == 302
+    location = resp.headers["location"]
+    assert "/login?google_error=" in location and "#code=" not in location
+    return location.split("google_error=", 1)[1]
+
+
 # --------------------------------------------------------------------------
 # Unset config: feature hidden everywhere
 # --------------------------------------------------------------------------
@@ -203,7 +213,7 @@ async def test_google_login_503_when_unconfigured(monkeypatch):
 async def test_google_callback_503_when_unconfigured(monkeypatch):
     _clear_google_env(monkeypatch)
     resp = await google_callback(_FakeRequest(), AsyncMock())
-    assert resp.status_code == 503
+    assert _login_error(resp) == "unavailable"
 
 
 # --------------------------------------------------------------------------
@@ -243,7 +253,7 @@ async def test_callback_state_mismatch_rejected(monkeypatch):
 
     resp = await google_callback(req, AsyncMock())
 
-    assert resp.status_code == 400
+    assert _login_error(resp) == "expired"
     assert "set-cookie" in resp.headers  # cookie cleared either way
     assert "google_oauth_state=" in resp.headers["set-cookie"]
 
@@ -255,7 +265,7 @@ async def test_callback_missing_state_cookie_rejected(monkeypatch):
 
     resp = await google_callback(req, AsyncMock())
 
-    assert resp.status_code == 400
+    assert _login_error(resp) == "expired"
 
 
 @pytest.mark.asyncio
@@ -265,7 +275,7 @@ async def test_callback_missing_state_query_rejected(monkeypatch):
 
     resp = await google_callback(req, AsyncMock())
 
-    assert resp.status_code == 400
+    assert _login_error(resp) == "expired"
 
 
 @pytest.mark.asyncio
@@ -277,7 +287,7 @@ async def test_callback_missing_code_rejected(monkeypatch):
 
     resp = await google_callback(req, AsyncMock())
 
-    assert resp.status_code == 400
+    assert _login_error(resp) == "cancelled"
 
 
 # --------------------------------------------------------------------------
@@ -293,7 +303,7 @@ async def test_callback_unverified_email_rejected(monkeypatch):
 
     resp = await google_callback(req, AsyncMock())
 
-    assert resp.status_code == 400
+    assert _login_error(resp) == "email_unverified"
 
 
 @pytest.mark.asyncio
@@ -308,7 +318,7 @@ async def test_callback_token_exchange_failure_maps_to_400_not_500(monkeypatch):
 
     resp = await google_callback(req, AsyncMock())
 
-    assert resp.status_code == 400
+    assert _login_error(resp) == "failed"
 
 
 @pytest.mark.asyncio
@@ -324,7 +334,7 @@ async def test_callback_id_token_verification_failure_maps_to_400_not_500(monkey
 
     resp = await google_callback(req, AsyncMock())
 
-    assert resp.status_code == 400
+    assert _login_error(resp) == "failed"
 
 
 # --------------------------------------------------------------------------
@@ -404,7 +414,7 @@ async def test_callback_new_account_duplicate_race_maps_to_400(monkeypatch):
 
     resp = await google_callback(req, db)
 
-    assert resp.status_code == 400
+    assert _login_error(resp) == "failed"
     db.rollback.assert_awaited_once()
 
 
@@ -558,7 +568,7 @@ async def test_callback_link_race_maps_to_400(monkeypatch):
 
     resp = await google_callback(req, db)
 
-    assert resp.status_code == 400
+    assert _login_error(resp) == "google_in_use"
     db.rollback.assert_awaited_once()
 
 
@@ -595,7 +605,7 @@ async def test_callback_sub_mismatch_rejected_403(monkeypatch):
 
     resp = await google_callback(req, db)
 
-    assert resp.status_code == 403
+    assert _login_error(resp) == "different_google"
     assert existing.google_sub == "original-sub"  # never overwritten
 
 
@@ -616,8 +626,7 @@ async def test_callback_disabled_account_rejected_403(monkeypatch):
 
     resp = await google_callback(req, db)
 
-    assert resp.status_code == 403
-    assert b"account_disabled" in resp.body
+    assert _login_error(resp) == "account_disabled"
 
 
 # --------------------------------------------------------------------------
