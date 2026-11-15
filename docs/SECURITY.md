@@ -587,7 +587,7 @@ BFG + force-push) to purge the dead values entirely.
   dashboard settings (SSL/TLS Full (strict), Always Use HTTPS off, Rocket
   Loader/Email Obfuscation/Bot Fight Mode off, WebSockets on) and the
   reasoning for each are recorded in
-  [DEPLOYMENT.md](DEPLOYMENT.md#cloudflare-front-door-amphiveapp-cpoamphiveapp--added-2026-09-28).
+  [DEPLOYMENT.md](DEPLOYMENT.md#cloudflare-front-door-amphiveapp-cpoamphiveapp-added-2026-09-28).
 - The **VM public IP is ephemeral** and is recorded inconsistently across docs
   (`35.200.131.98`, `34.100.200.152`, and others). The committed
   `amphive_tunnel.conf` endpoint will break whenever the VM IP changes. Prefer a
