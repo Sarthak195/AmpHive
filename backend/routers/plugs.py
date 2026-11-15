@@ -1129,10 +1129,15 @@ async def create_or_update_plug_review(
         raise HTTPException(status_code=404, detail="This charger's gateway no longer exists.")
 
     now = datetime.now(timezone.utc)
+    # Plain values captured BEFORE the commit: a rollback expires every ORM
+    # instance in the session (user and plug included), and reading an expired
+    # attribute under AsyncSession raises MissingGreenlet (500 on every edit).
+    uid, pid = user.id, plug.id
+    author = _author_display(user.full_name, user.email)
     review = PlugReview(
-        plug_id=plug.id,
+        plug_id=pid,
         tenant_id=gateway.tenant_id,
-        driver_user_id=user.id,
+        driver_user_id=uid,
         rating=req.rating,
         body=req.body,
     )
@@ -1145,8 +1150,8 @@ async def create_or_update_plug_review(
         existing = (await db.execute(
             select(PlugReview).where(
                 and_(
-                    PlugReview.driver_user_id == user.id,
-                    PlugReview.plug_id == plug.id,
+                    PlugReview.driver_user_id == uid,
+                    PlugReview.plug_id == pid,
                 )
             )
         )).scalar_one()
@@ -1161,11 +1166,9 @@ async def create_or_update_plug_review(
 
     logger.info(
         "Plug review saved",
-        extra={"plug_id": plug.id, "review_id": review.id, "user_id": user.id},
+        extra={"plug_id": pid, "review_id": review.id, "user_id": uid},
     )
-    return _plug_review_response(
-        review, author_display=_author_display(user.full_name, user.email), is_mine=True
-    )
+    return _plug_review_response(review, author_display=author, is_mine=True)
 
 
 @router.delete("/api/plugs/{plug_id}/reviews/mine", status_code=204)

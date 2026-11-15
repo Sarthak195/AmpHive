@@ -109,6 +109,62 @@ async def test_review_created_for_verified_charger_is_mine():
     assert out.author_display == "Ada"  # never the raw email
 
 
+class _Expiring:
+    """Stands in for an ORM instance: attribute reads raise once `expired` is
+    set, the way an expired instance lazy-loads (MissingGreenlet) under
+    AsyncSession after a rollback."""
+    def __init__(self, **values):
+        self.__dict__["_values"] = values
+        self.__dict__["expired"] = False
+
+    def __getattr__(self, name):
+        if self.__dict__["expired"]:
+            raise RuntimeError(f"expired attribute {name!r} read after rollback")
+        return self.__dict__["_values"][name]
+
+
+@pytest.mark.asyncio
+async def test_review_edit_after_unique_conflict_reads_no_expired_attributes():
+    """C2: the second submit hits UNIQUE(driver_user_id, plug_id) and rolls
+    back; the edit path must not touch the (now expired) user/plug instances."""
+    from sqlalchemy.exc import IntegrityError
+
+    from backend.routers.plugs import create_or_update_plug_review
+    from backend.schemas import PlugReviewCreateRequest
+
+    plug = _Expiring(id=1, group_id=None, gateway_id="gw-1")
+    user = _Expiring(id=7, full_name="Ada Lovelace", email="ada@example.com")
+    gateway = MagicMock(id="gw-1", tenant_id=42)
+    existing = MagicMock(id=9, plug_id=1, rating=2, body="old", created_at=None)
+    db = AsyncMock()
+    db.execute = AsyncMock(side_effect=[
+        MagicMock(scalar_one_or_none=MagicMock(return_value=plug)),
+        MagicMock(scalar_one_or_none=MagicMock(return_value=gateway)),
+        MagicMock(scalar_one=MagicMock(return_value=existing)),
+    ])
+    db.add = MagicMock()
+    db.commit = AsyncMock(side_effect=[IntegrityError("dup", {}, Exception()), None])
+
+    async def _rollback():
+        plug.__dict__["expired"] = True
+        user.__dict__["expired"] = True
+    db.rollback = AsyncMock(side_effect=_rollback)
+    db.refresh = AsyncMock()
+
+    with patch("backend.routers.plugs.ensure_plug_group_access",
+               AsyncMock(return_value=("Grp", False))), \
+         patch("backend.routers.plugs._has_completed_charge",
+               AsyncMock(return_value=True)):
+        out = await create_or_update_plug_review(
+            plug_id=1,
+            req=PlugReviewCreateRequest(rating=5, body="Better now"),
+            user=user, db=db,
+        )
+
+    assert out.id == 9 and out.rating == 5 and out.body == "Better now"
+    assert out.author_display == "Ada" and out.is_mine is True
+
+
 # --- anonymous visibility rule on list ---
 
 @pytest.mark.asyncio
