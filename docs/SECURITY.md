@@ -247,10 +247,12 @@ BFG + force-push) to purge the dead values entirely.
   CURRENT `token_version` (only after `get_current_user` has checked the epoch
   and the disabled flag), and the SPA stores it. Revocation is unchanged:
   logout, password reset, admin role change or disable, and account closure
-  still kill every token, renewed ones included. Trade-off: there is no
-  absolute session cap, so a stolen token can be kept alive by whoever holds
-  it until the epoch is bumped (log out, or reset the password); the token it
-  replaced also stays valid until its own `exp`. The SPA also no longer drops
+  still kill every token, renewed ones included. Renewal is capped: the
+  token carries `auth_time` (the original sign-in) through every renewal and
+  `/me` stops re-minting once that is older than `JWT_MAX_SESSION_DAYS`
+  (default 90), so a stolen token stays usable for at most that long, less if
+  the epoch is bumped first (log out, or reset the password). The token a
+  renewal replaced stays valid until its own `exp`. The SPA also no longer drops
   the token when `/me` fails at boot with a timeout, network error or 5xx;
   only a 401/403 signs out there.
 - [Added 2026-08-04] **Least-privilege DB runtime role (privilege separation).**
@@ -682,7 +684,8 @@ guardrail below was honored — recorded here so the invariants are auditable:
   tokens carry a per-user `token_version` epoch re-checked each request;
   logout revokes server-side, and expiry is env-configurable
   (`JWT_EXPIRY_DAYS`), see §2. Since 2026-11-15 the expiry slides
-  (re-minted on every `GET /api/auth/me`), see §2.
+  (re-minted on every `GET /api/auth/me`, capped at `JWT_MAX_SESSION_DAYS`
+  from the original sign-in), see §2.
 - ~~**No rate limiting** on `/api/auth/login` and `/api/auth/register`~~
   **Resolved 2026-07-11**: both endpoints enforce an in-process
   sliding-window limit per client IP (`backend/services/rate_limit.py`;

@@ -59,6 +59,10 @@ JWT_ALGORITHM = "HS256"
 # token_version epoch — see create_access_token / get_current_user — is the
 # substantive control that makes a long-lived token killable on demand.
 JWT_EXPIRY_DAYS = int(os.getenv("JWT_EXPIRY_DAYS", "7"))
+# Absolute cap on that sliding renewal: /me stops re-minting once the original
+# sign-in (the auth_time claim, carried across renewals) is this old, so a
+# stolen token cannot be kept alive forever.
+JWT_MAX_SESSION_DAYS = int(os.getenv("JWT_MAX_SESSION_DAYS", "90"))
 
 # --- Password Hashing ---
 
@@ -122,7 +126,9 @@ def normalize_email(email: str) -> str:
 
 # --- JWT Token Management ---
 
-def create_access_token(user_id: int, role: str, email: str, token_version: int = 0) -> str:
+def create_access_token(
+    user_id: int, role: str, email: str, token_version: int = 0, auth_time: Optional[int] = None
+) -> str:
     """
     Create a signed JWT access token containing user claims.
 
@@ -134,6 +140,8 @@ def create_access_token(user_id: int, role: str, email: str, token_version: int 
       request is rejected once the stored epoch moves past it)
     - exp: expiration timestamp
     - iat: issued-at timestamp
+    - auth_time: when the user actually signed in (epoch seconds); renewals
+      keep it, which bounds a session at JWT_MAX_SESSION_DAYS
     """
     now = datetime.now(timezone.utc)
     payload = {
@@ -141,10 +149,22 @@ def create_access_token(user_id: int, role: str, email: str, token_version: int 
         "role": role,
         "email": email,
         "tv": token_version,
+        "auth_time": int(now.timestamp()) if auth_time is None else auth_time,
         "iat": now,
         "exp": now + timedelta(days=JWT_EXPIRY_DAYS),
     }
     return jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
+
+
+def renewed_access_token(payload: dict, user: User) -> Optional[str]:
+    """Sliding renewal for GET /api/auth/me: re-mint at the user's CURRENT
+    token_version, keeping the original sign-in time. None once that sign-in
+    is older than JWT_MAX_SESSION_DAYS (tokens minted before auth_time existed
+    fall back to iat), so the client keeps its token until it expires."""
+    auth_time = int(payload.get("auth_time") or payload.get("iat") or 0)
+    if datetime.now(timezone.utc).timestamp() - auth_time > JWT_MAX_SESSION_DAYS * 86400:
+        return None
+    return create_access_token(user.id, user.role.value, user.email, user.token_version, auth_time=auth_time)
 
 
 def decode_access_token(token: str) -> Optional[dict]:

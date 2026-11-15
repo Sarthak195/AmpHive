@@ -135,9 +135,38 @@ async def test_me_returns_renewed_token_at_current_epoch(monkeypatch):
     user.role.value = "driver"
     user.coin_balance = 10.0
 
-    resp = await auth_router.get_me(user=user, db=AsyncMock())
+    signed_in = int(datetime.now(timezone.utc).timestamp()) - 86400
+    sent = create_access_token(9, "driver", user.email, 4, auth_time=signed_in)
+    creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials=sent)
+
+    resp = await auth_router.get_me(user=user, db=AsyncMock(), credentials=creds)
 
     payload = jwt.decode(resp.token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
     assert payload["sub"] == "9" and payload["tv"] == 4 and payload["role"] == "driver"
+    assert payload["auth_time"] == signed_in  # renewal keeps the original sign-in
     expected = datetime.now(timezone.utc) + timedelta(days=JWT_EXPIRY_DAYS)
     assert abs(payload["exp"] - expected.timestamp()) < 60
+
+
+@pytest.mark.asyncio
+async def test_me_stops_renewing_past_max_session_age(monkeypatch):
+    """Past JWT_MAX_SESSION_DAYS since the original sign-in, /me returns no
+    token, so the client keeps its current one until it expires."""
+    from datetime import datetime, timezone
+
+    import backend.routers.auth as auth_router
+    from backend.services.auth import JWT_MAX_SESSION_DAYS
+
+    monkeypatch.setattr(auth_router, "check_and_speed_up_active_session", AsyncMock())
+    monkeypatch.setattr(auth_router, "available_balance", AsyncMock(return_value=0))
+    user = _user(user_id=9, token_version=4)
+    user.full_name = "Driver"
+    user.role.value = "driver"
+    user.coin_balance = 10.0
+    old = int(datetime.now(timezone.utc).timestamp()) - (JWT_MAX_SESSION_DAYS + 1) * 86400
+    sent = create_access_token(9, "driver", user.email, 4, auth_time=old)
+    creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials=sent)
+
+    resp = await auth_router.get_me(user=user, db=AsyncMock(), credentials=creds)
+
+    assert resp.token is None
