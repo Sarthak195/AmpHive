@@ -28,13 +28,15 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Optional, Tuple
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database.models import (
     ChargingSession,
+    DisputeStatus,
     Invoice,
+    SessionDispute,
     SessionStatus,
     Tenant,
     User,
@@ -144,6 +146,21 @@ async def issue_invoice_for_session(db: AsyncSession, session_id: int) -> Invoic
         raise SessionNotInvoiceableError(
             f"Session {session_id} billed nothing (coins_spent={total}); nothing to invoice."
         )
+    # A dispute approved BEFORE the first invoice view found no invoice to
+    # adjust (adjust_invoice_for_session_refund is a no-op then), so net the
+    # approved refunds off here. A fully refunded session gets a 0.00 invoice,
+    # the same shape the adjust path leaves behind.
+    refunded = to_money(
+        (
+            await db.execute(
+                select(func.coalesce(func.sum(SessionDispute.refund_coins), 0)).where(
+                    SessionDispute.session_id == session_id,
+                    SessionDispute.status == DisputeStatus.APPROVED,
+                )
+            )
+        ).scalar_one()
+    )
+    total = to_money(max(total - refunded, ZERO_MONEY))
 
     rate = gst_rate_pct()
     taxable_value, gst_amount = split_gst_inclusive(total, rate)
@@ -281,9 +298,9 @@ async def adjust_invoice_for_session_refund(
     driver-facing debited amount and the wallet ledger's source of truth --
     is a read-only input here and is never itself mutated by this function;
     if an invoice is issued LATER for a session that already had a dispute
-    approved against it, pricing that first issuance off the refund is out
-    of scope here (see this module's docstring: coins_spent is deliberately
-    never rewritten by a refund).
+    approved against it, issue_invoice_for_session nets the approved refunds
+    off at issue time (coins_spent is deliberately never rewritten by a
+    refund).
     """
     invoice = await _get_invoice_by_session(db, session_id)
     if invoice is None:
