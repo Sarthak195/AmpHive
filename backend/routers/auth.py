@@ -16,6 +16,7 @@ import google.oauth2.id_token as google_id_token
 import requests
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.security import HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
@@ -49,9 +50,12 @@ from backend.services.audit import try_record_audit
 from backend.services.auth import (
     _DUMMY_PASSWORD_HASH,
     create_access_token,
+    decode_access_token,
     get_current_user,
     hash_password,
     normalize_email,
+    renewed_access_token,
+    security_scheme,
     verify_password,
 )
 from backend.services.data_export import build_export
@@ -422,6 +426,7 @@ async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
 async def get_me(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    credentials: HTTPAuthorizationCredentials = Depends(security_scheme),
 ):
     """
     Return the current authenticated user's profile.
@@ -440,6 +445,11 @@ async def get_me(
         # figure a NEW session-start would actually be sized against.
         # Additive field: coin_balance is untouched for existing clients.
         available_balance=float(await available_balance(db, user.id)),
+        # Sliding renewal: get_current_user already checked the tv epoch and
+        # the disabled flag, so re-minting at the CURRENT epoch keeps every
+        # revocation path (logout, password reset, admin, closure) intact.
+        # None past JWT_MAX_SESSION_DAYS since the original sign-in.
+        token=renewed_access_token(decode_access_token(credentials.credentials) or {}, user),
     )
 
 

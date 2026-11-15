@@ -78,7 +78,9 @@ export async function apiRequest(endpoint, options = {}) {
       const next = encodeURIComponent(window.location.pathname + window.location.search);
       window.location.href = `/login?next=${next}`;
     }
-    throw new Error('Authentication expired. Please sign in again.');
+    const err = new Error('Authentication expired. Please sign in again.');
+    err.status = 401;
+    throw err;
   }
 
   // Parse response

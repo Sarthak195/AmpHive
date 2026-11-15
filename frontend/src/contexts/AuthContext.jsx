@@ -6,7 +6,9 @@
  *
  * Flow:
  * - On app load: checks localStorage for a saved JWT, calls GET /api/auth/me
- *   to verify it's still valid and load fresh user data.
+ *   to verify it's still valid and load fresh user data. /me also returns a
+ *   renewed JWT, which replaces the stored one (sliding 7-day expiry).
+ *   Only a 401/403 at boot signs out; a timeout or 5xx keeps the session.
  * - Login: POST /api/auth/login → saves JWT + user to localStorage.
  * - Register: POST /api/auth/register → same as login.
  * - Logout: clears localStorage, resets state.
@@ -16,6 +18,18 @@ import { createContext, useState, useEffect, useContext, useCallback } from 'rea
 import api from '../api/client';
 
 const AuthContext = createContext();
+
+// /api/auth/me returns the profile plus a freshly minted JWT (sliding
+// renewal). Persist both, but only while the token we sent is still the
+// stored one, so a /me in flight cannot resurrect a session after logout or
+// overwrite another account's newer login. Returns the user without the token.
+const storeMe = (sentToken, { token, ...userData }) => {
+  if (localStorage.getItem('amphive_token') === sentToken) {
+    if (token) localStorage.setItem('amphive_token', token);
+    localStorage.setItem('amphive_user', JSON.stringify(userData));
+  }
+  return userData;
+};
 
 export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
@@ -32,13 +46,23 @@ export const AuthProvider = ({ children }) => {
 
       try {
         // Verify the token is still valid by calling the /me endpoint
-        const userData = await api.get('/api/auth/me');
+        const userData = storeMe(token, await api.get('/api/auth/me'));
         setUser(userData);
       } catch (err) {
-        // Token is invalid or expired — clear it
         console.warn('Session restore failed:', err.message);
-        localStorage.removeItem('amphive_token');
-        localStorage.removeItem('amphive_user');
+        if (err.status === 401 || err.status === 403) {
+          // Rejected token (expired, revoked) or disabled account: sign out.
+          localStorage.removeItem('amphive_token');
+          localStorage.removeItem('amphive_user');
+        } else {
+          // Timeout, network drop or 5xx says nothing about the token: keep
+          // it and show the cached user; the next real 401 still signs out.
+          try {
+            setUser(JSON.parse(localStorage.getItem('amphive_user')));
+          } catch {
+            // No usable cached user: stay signed out for this load only.
+          }
+        }
       } finally {
         setLoading(false);
       }
@@ -50,9 +74,8 @@ export const AuthProvider = ({ children }) => {
   // Update local user state (e.g. after a wallet top-up changes the balance)
   const refreshUser = useCallback(async () => {
     try {
-      const userData = await api.get('/api/auth/me');
-      setUser(userData);
-      localStorage.setItem('amphive_user', JSON.stringify(userData));
+      const token = localStorage.getItem('amphive_token');
+      setUser(storeMe(token, await api.get('/api/auth/me')));
     } catch (err) {
       console.error('Failed to refresh user:', err.message);
     }
