@@ -6,7 +6,7 @@
  * onConfirm, and the circuit_full → "Ask for capacity" affordance.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 import ChargeSetupModal from './ChargeSetupModal';
@@ -30,7 +30,7 @@ const renderModal = (props = {}) => {
     <ChargeSetupModal
       open
       onClose={onClose}
-      plug={PLUG}
+      plug={props.plug || PLUG}
       mode={props.mode || 'start'}
       onConfirm={onConfirm}
     />
@@ -219,5 +219,59 @@ describe('ChargeSetupModal — failures', () => {
       await screen.findByText(/you'll get a notification when this circuit has room/i)
     ).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Ask for capacity' })).not.toBeInTheDocument();
+  });
+});
+
+describe('ChargeSetupModal: scheduled start', () => {
+  const SCHED_PLUG = { ...PLUG, schedule_available: true, tenant_timezone: 'Asia/Kolkata' };
+
+  it('the "At a time" choice is hidden unless the plug is schedulable', () => {
+    renderModal();
+    expect(screen.queryByRole('button', { name: 'At a time' })).not.toBeInTheDocument();
+    renderModal({ mode: 'queue', plug: SCHED_PLUG });
+    expect(screen.queryByRole('button', { name: 'At a time' })).not.toBeInTheDocument();
+  });
+
+  it('needs a time and a limit; confirms with the tenant-zone instant', async () => {
+    const { onConfirm } = renderModal({ plug: SCHED_PLUG });
+    await userEvent.click(screen.getByRole('button', { name: 'At a time' }));
+
+    // 8h is preselected so the charge stops on its own; confirm waits for a time.
+    expect(screen.getByRole('button', { name: '8h' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByText(/Times are in Asia\/Kolkata/)).toBeInTheDocument();
+    const confirm = screen.getByRole('button', { name: 'Schedule charge' });
+    expect(confirm).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText('Start time'), { target: { value: '22:00' } });
+    expect(screen.getByText(/Starts (today|tomorrow) at/)).toBeInTheDocument();
+    expect(confirm).toBeEnabled();
+
+    // "No limit" with no energy limit blocks a scheduled charge.
+    await userEvent.click(screen.getByRole('button', { name: 'No limit' }));
+    expect(confirm).toBeDisabled();
+    expect(screen.getByText(/needs a time or energy limit/)).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: '8h' }));
+    await userEvent.click(confirm);
+    const [plugId, limits, notBefore] = onConfirm.mock.calls[0];
+    expect(plugId).toBe(7);
+    expect(limits).toEqual({ max_duration_seconds: 28800 });
+    // 22:00 IST is 16:30 UTC.
+    expect(notBefore).toMatch(/T16:30:00\.000Z$/);
+  });
+
+  it('"Now" keeps the two-argument start call', async () => {
+    const { onConfirm } = renderModal({ plug: SCHED_PLUG });
+    await userEvent.click(screen.getByRole('button', { name: 'Start charging' }));
+    expect(onConfirm).toHaveBeenCalledWith(7, null);
+  });
+
+  it('going back to "Now" undoes the 8h preselect', async () => {
+    const { onConfirm } = renderModal({ plug: SCHED_PLUG });
+    await userEvent.click(screen.getByRole('button', { name: 'At a time' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Now' }));
+    expect(screen.getByRole('button', { name: 'No limit' })).toHaveAttribute('aria-pressed', 'true');
+    await userEvent.click(screen.getByRole('button', { name: 'Start charging' }));
+    expect(onConfirm).toHaveBeenCalledWith(7, null);
   });
 });

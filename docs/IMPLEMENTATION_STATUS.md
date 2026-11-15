@@ -11,6 +11,8 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 
 ## 0 - 2026-11-15 fix batch
 
+**Production state:** prod == `origin/main` at `825f27e` (the 2026-11-15 bug-fix release), alembic head `0040_plug_photos`, deployed 2026-11-15.
+
 - Ops housekeeping: `stop_grace_period: 60s` on the postgres `db` service in the relay, prod and dev compose files (the live VM compose needs the same line by hand, see DEPLOYMENT.md).
 - Docs and deploy instructions now name the new GCP project (`project-6e290ffd-5954-4d48-aa9`), compute SA `626015685685-compute@developer.gserviceaccount.com`, IP `8.235.4.66` and the `-2` buckets; dated historical records are unchanged.
 - New known-limit items (U0-U6, F10, firmware SET_INTERVAL wake, boot round trips) added to TODO.md.
@@ -167,6 +169,141 @@ Plug photos and reviews:
   map and deletes the object), and re-rejecting a rejected photo retries a
   failed delete. Approve stays pending-only. Rejected rows show a "Removed"
   placeholder instead of a broken image.
+
+---
+
+## 0b. 2026-11-15 feature batch
+
+Merged on `release/2026-11-15-features` on top of the 2026-11-15 fix release
+(`825f27e`). One subsection per feature branch.
+
+### Cloudflare front door for amphive.app / cpo.amphive.app (LIVE since 2026-09-28, DNS cut over)
+
+Moving `amphive.app` + `cpo.amphive.app` behind Cloudflare's free HTTP proxy
+to cut latency for Indian users (origin is a `us-west1` e2-micro, ~240 ms RTT
+to India). `mqtt.amphive.app` and `mail.amphive.app` stay DNS-only / grey
+cloud: MQTT 8883 and SMTP/IMAP can't traverse the CF HTTP proxy. DNS is
+now served by Cloudflare's nameservers (`harlee`/`ridge.ns.cloudflare.com`,
+cut over from name.com 2026-09-28; the old name.com records were left in
+place, so switching the nameservers back is the rollback).
+
+**Caddy side:** Global `trusted_proxies` now lists
+Cloudflare's published edge ranges + `client_ip_headers CF-Connecting-IP`,
+and every `reverse_proxy` sets `header_up X-Forwarded-For {client_ip}`
+(`deploy/config/Caddyfile.example`, `deploy/relay/deploy-relay.sh` both
+updated; live Caddyfile hand-edited to match, verified with `caddy validate`
++ reload, semantics tested on caddy v2.11.4 in a throwaway container). From a
+Cloudflare peer the upstream XFF collapses to the vouched `CF-Connecting-IP`
+value only (a spoofed XFF is discarded); from an untrusted peer
+`CF-Connecting-IP` is ignored and XFF falls back to the real peer IP.
+`backend/services/rate_limit.py`'s `TRUSTED_PROXY_HOPS=2` is unchanged
+(Caddy still appends one hop, frontend-nginx the other), only its topology
+comments were updated. Cloudflare dashboard: SSL/TLS Full (strict), Always
+Use HTTPS OFF (Caddy already redirects; keeps ACME HTTP-01 on :80 flowing
+through CF untouched), Rocket Loader / Email Obfuscation / Bot Fight Mode
+OFF (conflict with the strict CSP / would JS-challenge API clients),
+WebSockets ON (Socket.io). GCP firewall on 80/443 was **deliberately not**
+locked to Cloudflare's ranges: the origin IP stays directly reachable
+because `mail.amphive.app`'s Let's Encrypt HTTP-01 renewal needs :80 open
+directly, not routed through Cloudflare. See
+[DEPLOYMENT.md](DEPLOYMENT.md#cloudflare-front-door-amphiveapp-cpoamphiveapp-added-2026-09-28)
+and [SECURITY.md](SECURITY.md#6-operational-notes) for the full write-up.
+
+**Verified after cutover (2026-09-28):** `.app` registry delegates to
+Cloudflare; apex + `cpo` resolve to Cloudflare anycast, `mqtt`/`mail` to the
+VM. HTTPS 200 on both hosts via the edge (the Universal SSL edge cert took a
+few minutes to appear after activation; expect a short TLS-handshake-failure
+window on a fresh zone), HSTS/CSP pass through, `/assets/*` `cf-cache-status:
+HIT` after the first fetch, `/api/*` `DYNAMIC` + `no-store`, Socket.io
+handshake offers the websocket upgrade, Google OAuth redirect intact, broker
+TLS on 8883 direct. Client IP: a marked request via Cloudflare and one direct
+to the origin both reached frontend-nginx with `X-Forwarded-For` = the real
+client IP. Measured from an Indian connection (edge colo MRS, Marseille; Indian
+traffic on the free plan is often not served from an Indian colo): median fresh
+connection page TTFB 728 → 582 ms, API 733 → 559 ms, main JS bundle total
+2925 → 954 ms (edge-cached).
+
+### fw 2.9.0-direct, SET_INTERVAL wakes the poll loop (source only)
+
+`firmware/main/main.c`: the telemetry task now sleeps in `ulTaskNotifyTake`
+with the interval as the timeout, and `SET_INTERVAL` notifies it when the value
+changes, so a session's 1 s cadence starts at once instead of after the current
+idle sleep (up to 10 s). Timing audit: the energy integrator uses the measured
+tick delta and the duration watchdog `now_seconds()`, so an early sweep cannot
+miscount energy or time. `PROJECT_VER` is `2.9.0-direct`. The software gateway
+(`agent/amphive_agent/core.py`) gets the same wake, plus a gap clamp that allows
+the interval the cut-short sleep used (`agent/test_poll_wake.py`).
+**Not yet built:** there is no signed 2.9.0 image yet (build with ESP-IDF
+v5.3.3, target esp32, as for 2.8.0). The field gateway stays on 2.8.0-direct. See [FIRMWARE.md](FIRMWARE.md) (§3 and §8).
+
+### Per-device logout (`feat/per-device-logout`)
+
+Log out now signs out only this app in this
+browser. Every sign-in (password login, email verification, Google
+callback) mints a random `sid` claim that `/me` renewals carry unchanged;
+`POST /api/auth/logout` inserts it into the new `revoked_sessions` table
+(migration `0042_revoked_sessions`, after the off-peak
+`0041_queued_not_before`). `get_current_user` (401,
+same detail as a `token_version` mismatch), `get_current_user_optional`
+(anonymous, same as a mismatch there), Socket.io `connect` and the socket
+re-auth all reject a revoked sid with one PK lookup. A token minted before
+this has no sid and its logout falls back to the global bump
+(`scope:"all"`). New `POST /api/auth/logout-everywhere` keeps the global
+`token_version` bump, offered behind a confirm step on the driver Account
+page and on CPO Settings (the only place cpo/admin users can reach it,
+their console being on the other origin). Every existing `token_version`
+bump is unchanged. Rollback runbook step and residuals in
+[SECURITY.md](SECURITY.md) §2. Tests:
+`backend/tests/test_per_device_logout.py` (DB-free plus DB-gated),
+`frontend/src/components/LogoutEverywhere.test.jsx`.
+
+### Backup failure and staleness alerts (`feat/backup-alerts`)
+
+`deploy/scripts/backup_db.sh` mails the operator (`ALERT_TO`, default
+`support@amphive.app`, via the host `sendmail`) when the nightly backup exits
+non-zero, naming the failed step and the log tail. The new
+`deploy/scripts/check_backup_fresh.sh` (cron, 01:00 UTC) mails when the
+last-success marker is older than `MAX_AGE_HOURS` (default 26), which catches a
+backup that never ran. Both run on the VM they watch, so a down VM or a broken
+Postfix sends nothing. Tests: `deploy/scripts/test_backup_alerts.sh`. Install
+steps in [deploy/docs/db_backup_restore.md](../deploy/docs/db_backup_restore.md);
+the live VM script differs and is merged by hand.
+
+### Scheduled (off-peak) start (`feat/offpeak-start`)
+
+The driver plugs in now and picks a start time; the backend energizes the plug
+then. Built on the queued-charge machinery (`QueuedCharge.not_before`, migration
+`0041_queued_not_before`, on top of `0040_plug_photos`). API in
+[API_REFERENCE.md](API_REFERENCE.md#queued-charges-servicessession_reaperpy-queue-a-charge-during-an-outage),
+design record in
+[proposals/queued-charge-offline-plug.md](proposals/queued-charge-offline-plug.md#scheduled-off-peak-start).
+
+- Start modal: "Start: Now | At a time" on a schedulable plug, time entered and
+  shown in the tenant zone; a time or energy limit is required (8h preselected).
+- Sweep: not due -> WAITING; due -> the existing debounce, caps, balance floor and
+  hold; someone else on the socket or a covering booking -> FAILED; flag turned
+  off -> FAILED. Every auto-start (outage rows too) now replays the gateway
+  liveness gate, and STARTED is written in the same commit as the session claim.
+- Start route: 409 `plug_scheduled` for other drivers; the owner's start cancels
+  their own schedule after it succeeds. The reconnect orphan-OFF is never held for
+  a scheduled row.
+- **Deviation from the settled decision "expires_at = not_before + queue TTL":** a
+  scheduled row expires `min(queue_ttl_min, SCHEDULE_START_GRACE_MIN = 30)` after
+  `not_before`, so a dark plug or a late gateway does not start an unattended peak
+  charge hours later. Set `SCHEDULE_START_GRACE_MIN` >= `queue_ttl_min` to revert.
+- Not built: "start at the next cheaper rate" (the setup modal only gets the next
+  price boundary later today, not the tariff's slot list).
+
+Known limits (one-user project, so multi-driver items are documented, not fixed):
+24 h max lookahead; a schedule blocks other drivers' manual starts on that plug
+and other drivers see the plug AVAILABLE until they get the 409; bookings made
+after the schedule are not refused (the schedule FAILs at due time); a Wi-Fi blip
+right before `not_before` re-baselines `powered_since` and delays the start by the
+debounce; a fault (MAINTENANCE) is only reported at due time; the relay is not
+verified OFF while waiting (a Tapo-app press charges unbilled until reconcile, as
+for any idle plug); no zero-draw auto-stop, so a car that never draws runs to its
+limit; outage rows still do not re-check the queued-charging flag at auto-start;
+tenant time depends on the prod image shipping tzdata (unverified).
 
 ---
 
@@ -763,7 +900,7 @@ the `cpo.py` god router + `MQTTManager` god object; a backend deps lockfile.
 | Capability | Status | Notes |
 |------------|:------:|-------|
 | REST API (auth, groups, plugs, sessions, payments, direct, CPO portal) | ✅ | 43 endpoints (2026-07-10: CPO events feed `GET /api/cpo/events` + `POST /api/cpo/events/{id}/ack`, unified `GET /api/wallet/ledger`, public `GET /api/config`, `GET /api/cpo/analytics/sessions.csv` export) — see [API_REFERENCE.md](API_REFERENCE.md) |
-| JWT auth + bcrypt | ✅ | Env-configurable expiry (`JWT_EXPIRY_DAYS`, default 7), **sliding** since 2026-11-15: `GET /api/auth/me` returns a re-minted token the SPA stores, so only a device idle that long signs in again (renewal capped at `JWT_MAX_SESSION_DAYS`, default 90, from the original sign-in); user loaded fresh per request. **Revocable** via the `token_version` epoch (`tv` claim, re-checked per request; `POST /api/auth/logout` bumps it: "log out everywhere"). **Rate-limited** (2026-07-11): login/register enforce a per-IP sliding window (`LOGIN_RATE_LIMIT` 10/60s, `REGISTER_RATE_LIMIT` 10/3600s → 429 + Retry-After; `services/rate_limit.py`), closes SEC §8.6. **Per-account rate limiting** (2026-08-02): a second, account-scoped sliding window layers on top of the per-IP ones above (which can't see one account rotating source IPs), `account_rate_limit_dependency` (keyed by `user.id`) on session start/stop, payment order creation, and CPO offline top-up creation; `login_account_rate_limit_dependency` (keyed by normalized email, no authenticated user yet at `/login`) layered onto the login route, with a 429 message byte-identical to the per-IP one (no account-enumeration oracle). Env-tunable via `*_ACCOUNT_RATE_LIMIT`. **Self-service password reset** (2026-07-20): `POST /api/auth/forgot-password` (enumeration-safe generic 200; single-use token, SHA-256 digest stored in `password_reset_tokens`, migration `0023`; `RESET_TOKEN_TTL_MIN` 30 min) + `POST /api/auth/reset-password` (8-72 rule, bcrypt rehash, `token_version` bump revokes all sessions); both rate-limited (`FORGOT_PASSWORD_RATE_LIMIT` / `RESET_PASSWORD_RATE_LIMIT`); delivery via `services/email.py`, SMTP STARTTLS when `SMTP_*` env is set, else the reset link is logged at WARNING (console fallback). Frontend `/forgot-password` + `/reset-password` pages. **2026-08-11 (PR #118):** the per-account login cap no longer runs as a pre-handler dependency keyed on the submitted email, that let anyone lock a victim out by spamming their address. It now counts **only FAILED attempts inside the handler**: a correct password is verified first, clears the bucket, and is never throttled, while distributed wrong-password brute force stays capped per email (new `record_failure`/`reset` primitives in `services/rate_limit.py`). Also `FORGOT_PASSWORD_EMAIL_RATE_LIMIT` (default 3/3600) keyed on the submitted email and checked *before* the account lookup, so it caps inbox flooding without becoming an enumeration oracle. **2026-08-11 (PR #119): email verification at registration**, `users.email_verified` + `email_verification_tokens` (migration `0037`, mirroring the reset-token machinery). `register()` now creates an UNVERIFIED account and **does NOT auto-login**, returning `{status:"verification_sent"}`; `POST /api/auth/verify-email` consumes the single-use token race-safely (sets verified, bumps `token_version`, issues a JWT so the click logs the user in) and `POST /api/auth/resend-verification` is generic-200 + rate-limited both per-IP and per-email. `login()` 403s an unverified account, checked **after** the password so it never becomes a verified-status oracle. The migration **grandfathers every pre-existing account as verified**, only new signups must verify. |
+| JWT auth + bcrypt | ✅ | Env-configurable expiry (`JWT_EXPIRY_DAYS`, default 7), **sliding** since 2026-11-15: `GET /api/auth/me` returns a re-minted token the SPA stores, so only a device idle that long signs in again (renewal capped at `JWT_MAX_SESSION_DAYS`, default 90, from the original sign-in); user loaded fresh per request. **Revocable** via the `token_version` epoch (`tv` claim, re-checked per request; `POST /api/auth/logout-everywhere` bumps it: "log out everywhere") and, since 2026-11-15, **per device**: every sign-in mints a `sid` claim (kept across renewals) and `POST /api/auth/logout` revokes only that session via `revoked_sessions` (a sid-less legacy token falls back to the global bump); see the 2026-11-15 section above. **Rate-limited** (2026-07-11): login/register enforce a per-IP sliding window (`LOGIN_RATE_LIMIT` 10/60s, `REGISTER_RATE_LIMIT` 10/3600s → 429 + Retry-After; `services/rate_limit.py`), closes SEC §8.6. **Per-account rate limiting** (2026-08-02): a second, account-scoped sliding window layers on top of the per-IP ones above (which can't see one account rotating source IPs), `account_rate_limit_dependency` (keyed by `user.id`) on session start/stop, payment order creation, and CPO offline top-up creation; `login_account_rate_limit_dependency` (keyed by normalized email, no authenticated user yet at `/login`) layered onto the login route, with a 429 message byte-identical to the per-IP one (no account-enumeration oracle). Env-tunable via `*_ACCOUNT_RATE_LIMIT`. **Self-service password reset** (2026-07-20): `POST /api/auth/forgot-password` (enumeration-safe generic 200; single-use token, SHA-256 digest stored in `password_reset_tokens`, migration `0023`; `RESET_TOKEN_TTL_MIN` 30 min) + `POST /api/auth/reset-password` (8-72 rule, bcrypt rehash, `token_version` bump revokes all sessions); both rate-limited (`FORGOT_PASSWORD_RATE_LIMIT` / `RESET_PASSWORD_RATE_LIMIT`); delivery via `services/email.py`, SMTP STARTTLS when `SMTP_*` env is set, else the reset link is logged at WARNING (console fallback). Frontend `/forgot-password` + `/reset-password` pages. **2026-08-11 (PR #118):** the per-account login cap no longer runs as a pre-handler dependency keyed on the submitted email, that let anyone lock a victim out by spamming their address. It now counts **only FAILED attempts inside the handler**: a correct password is verified first, clears the bucket, and is never throttled, while distributed wrong-password brute force stays capped per email (new `record_failure`/`reset` primitives in `services/rate_limit.py`). Also `FORGOT_PASSWORD_EMAIL_RATE_LIMIT` (default 3/3600) keyed on the submitted email and checked *before* the account lookup, so it caps inbox flooding without becoming an enumeration oracle. **2026-08-11 (PR #119): email verification at registration**, `users.email_verified` + `email_verification_tokens` (migration `0037`, mirroring the reset-token machinery). `register()` now creates an UNVERIFIED account and **does NOT auto-login**, returning `{status:"verification_sent"}`; `POST /api/auth/verify-email` consumes the single-use token race-safely (sets verified, bumps `token_version`, issues a JWT so the click logs the user in) and `POST /api/auth/resend-verification` is generic-200 + rate-limited both per-IP and per-email. `login()` 403s an unverified account, checked **after** the password so it never becomes a verified-status oracle. The migration **grandfathers every pre-existing account as verified**, only new signups must verify. |
 | "Sign in with Google" | ✅ | **2026-08-02: merged to main (PR #88). LIVE in prod as of 2026-08-11** (verified: `GOOGLE_*` set, `/api/config` `google_login_enabled=true`, `/login` 302s to Google), the previous "stays hidden until `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` are set" note was stale. **Account pre-hijacking closed 2026-08-11 (PR #118, HIGH):** first-time linking of a Google identity to a pre-existing password account now invalidates the stored password (fresh unusable hash), bumps `token_version` (revoking the attacker's live sessions) and sets `auth_provider='google'`, so an attacker who pre-registered the victim's unverified email is fully evicted the instant the real owner links via Google. The other half (an unverified email holding a usable credential at all) is closed by PR #119's email verification, above. Backend-driven authorization-code flow (no JS SDK): `GET /api/auth/google/login` sets a short-lived CSRF-nonce cookie (`google_oauth_state`, the app's only cookie; auth stays bearer-JWT-only) and 302s to Google; `GET /api/auth/google/callback` validates the state, exchanges the code, verifies the ID token against Google's JWKS (`google-auth`), then finds-or-creates/links the `users` row (`auth_provider`/`google_sub`, migration `0033_google_identity`, partial-unique `google_sub` index) and 302s to `FRONTEND_ORIGIN/auth/google/callback#token=<jwt>` (fragment, never a query string). No separate identities table: a Google-only signup gets an unusable random bcrypt hash, the same trick as `_DUMMY_PASSWORD_HASH`, so `/api/auth/login` refuses it with zero route changes, and the first Google link to an existing password account takes it over: the stored password is replaced with an unusable hash, `token_version` is bumped and `auth_provider` becomes `google`, whether or not the account is verified (the owner can set a password again via forgot-password). `GET /api/config`'s `google_login_enabled` gates the frontend button; unset `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET`/`GOOGLE_OAUTH_REDIRECT_URI` hides the feature everywhere. Tests: `backend/tests/test_google_oauth.py` (mocked token exchange/verification, no network). |
 | Role-based access control | ✅ | Enforced via `services/rbac.py` `require_role(...)` on all `/api/cpo/*` routes (checks the DB role, not just the token) |
 | MQTT command publish (ON/OFF) | ✅ | QoS 1, 3 s wait |
@@ -771,7 +908,7 @@ the `cpo.py` god router + `MQTTManager` god object; a backend deps lockfile.
 | MQTT ingestion crash-isolation | ✅ | **2026-08-11 (PR #117).** A non-*object* JSON payload (`5`, `[]`, `"x"`, `true`, `null`) parses fine, then hits `payload.get(...)` in a topic handler and raises `AttributeError` on the paho network-loop thread; paho 2.1.0 runs with `suppress_exceptions=False`, so that escape killed the loop thread and **froze ALL MQTT ingestion for every tenant**, telemetry, billing accrual, auto-stop, status, alarms/safety-finalize, discovery, until the backend was restarted. Reachable by any single gateway credential publishing one 1-byte frame to its own topic. `services/mqtt/router.py` `_on_message` now rejects non-dict payloads before dispatch **and** wraps the whole decode+route+handler body in a catch-all `except Exception` that logs and drops just that frame, so no current-or-future handler bug can escape into the paho thread (`BaseException` still propagates). The non-JSON logs path and the oversized-frame gate stay outside the dict guard. Tests: `backend/tests/test_mqtt_payload_guard.py`. |
 | MQTT inbound alarm handling + CPO events feed | ✅ | Subscribes `amphive/gateways/+/alarms` (2026-07-10): `_handle_gateway_alarm` maps `{"error"\|"event"}` → severity, persists a `gateway_events` row (tenant resolved from the gateway), and broadcasts a `gateway_alarm` Socket.io event. CPO reads via `GET /api/cpo/events` (filters: `unacknowledged_only`, `severity`) and clears with `POST /api/cpo/events/{id}/ack`. **Verified live in prod 2026-07-10** (synthetic `UNAUTHORIZED_ON` → persisted event id, retrieved + acked via API). **2026-08-02:** `UNMETERED_CONSUMPTION` (offline-consumption detection, above) additionally bell-notifies every CPO of the tenant directly (`notify()`) — the first alarm type to do so, on top of the passive feed every type gets. **2026-10-20:** fw 2.8.0 diagnostics `GATEWAY_BOOT` / `PLUG_UNREACHABLE` / `PLUG_RECOVERED` (§0); the two info ones are stored already acknowledged (`_PRE_ACKED_EVENT_TYPES`), so they never occupy the unacknowledged window the CPO alert strip and Health badge read. |
 | MQTT inbound firmware log-line diagnostics (TD#28) | ✅ | Subscribes `amphive/gateways/+/logs` (QoS 0, plain text — not JSON, matched before the JSON parse in `services/mqtt/router.py`). `services/mqtt/logs.py` `MQTTLogsMixin` parses the ESP-IDF level letter (E/W/I/D/V → error/warning/info, skipping a leading ANSI colour escape) and persists a `gateway_logs` row (tenant resolved from the gateway) — no notify/socket fan-out, a diagnostics feed distinct from the alarm/event feed above. CPO reads via `GET /api/cpo/gateways/{gateway_id}/logs`; admin cross-tenant via `GET /api/admin/gateway-logs`. Pruned after `GATEWAY_LOGS_RETENTION_DAYS` (default 14) by the session reaper's `reap_gateway_logs_once()`. |
-| Orphan-OFF operator alert | ✅ | `mqtt/status.py._republish_off_for_orphaned_plugs` (reconnect-time OFF republish for plugs with no ACTIVE session) now also notifies every CPO of the gateway's tenant — one `orphan_off` bell notification (`services/notifications.py notify()`) per (plug, CPO) pair, only when at least one plug was actually OFF'd. First CPO-targeted `notify()` call site (previously driver-only); delivered via the existing NotificationBell/Socket.io path, no frontend change needed. **2026-10-20:** the bell now also needs the plug to have been last seen drawing power (`plugs.current_power_w >= ORPHAN_ALERT_MIN_POWER_W`, default 5 W) on top of the existing real-OFFLINE→ONLINE-transition gate (a retained `online` replay never bells). An idle plug still gets its OFF, with only an INFO log (§0). |
+| Orphan-OFF operator alert | ✅ | `mqtt/status.py._republish_off_for_orphaned_plugs` (reconnect-time OFF republish for plugs with no ACTIVE session) now also notifies every CPO of the gateway's tenant: one `orphan_off` bell notification (`services/notifications.py notify()`) per (plug, CPO) pair, only when at least one plug was actually OFF'd. First CPO-targeted `notify()` call site (previously driver-only); delivered via the existing NotificationBell/Socket.io path, no frontend change needed. **2026-10-20:** the bell now also needs the plug to have been last seen drawing power (`plugs.current_power_w >= ORPHAN_ALERT_MIN_POWER_W`, default 5 W) on top of the existing real-OFFLINE→ONLINE-transition gate (a retained `online` replay never bells). An idle plug still gets its OFF, with only an INFO log (§0a). |
 | Plug maintenance workflow (fault console) | ✅ | **2026-07-12**: a THERMAL_CUTOFF/OVERCURRENT_CUTOFF alarm now auto-enters the plug into MAINTENANCE (`MQTTManager._auto_enter_maintenance`; excludes `UNAUTHORIZED_ON` and OTA events; env-gate `AUTO_MAINTENANCE_ON_CRITICAL_ALARM`, default on) — session-start already 409s any non-AVAILABLE plug, so this blocks new sessions until an operator clears it. Operators drive enter/clear via `POST /api/cpo/plugs/{id}/maintenance` (`clear` 409s while an ACTIVE session exists); both paths audit (`plug.maintenance_enter`/`plug.maintenance_clear`) and broadcast the status flip like any other plug-status change. |
 | Gateway reachability in the driver plug API | ✅ | `GET /api/plugs/available` and `/api/plugs/{id}` now return `gateway_online` (via `gateway_is_live`: ONLINE + `last_seen_at` within the liveness window), so the driver UI can flag an unreachable charger before a start attempt rather than only via a 409. **Verified in prod** (live gateways → true, never-connected gateway → false). |
 | Live gateway connectivity push (faster-gateway-offline-detection) | ✅ | See [proposals/faster-gateway-offline-detection.md](proposals/faster-gateway-offline-detection.md) — levers 1+3 shipped: `mqtt/status.py` emits `plug_connectivity` on every real online↔offline transition, and `services/session_reaper.py reap_gateway_silence_once()` closes the silence-case gap (TCP-connected but telemetry wedged, no LWT) by reusing `gateway_is_live()` per reaper tick with a bounded in-memory dedup (`_silence_pushed`). Dashboard/CpoGateways/CpoChargers all patch in place on the socket event plus a 30s `usePoll` backstop. Lever 2 (tighter keepalive/liveness-window constants) deliberately held pending field data. **2026-10-20:** the offline direction is debounced. It waits `GATEWAY_OFFLINE_NOTIFY_DELAY_SEC` (default 120 s) and is dropped if the gateway is back by then; the online direction still fires at once (§0). The silence sweep only looks at gateways stored ONLINE, so it does not bypass the debounce. |

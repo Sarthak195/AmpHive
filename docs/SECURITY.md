@@ -242,12 +242,12 @@ BFG + force-push) to purge the dead values entirely.
 - [Added 2026-07-08] **JWT revocation.** Tokens were previously irrevocable
   until their 7-day expiry — a leaked token stayed valid. Every token now
   carries the user's `token_version` epoch (`tv` claim), re-checked per
-  request; `POST /api/auth/logout` bumps the epoch, killing all of that
-  user's tokens server-side ("log out everywhere"). Expiry is now
-  env-configurable (`JWT_EXPIRY_DAYS`, default 7). No blacklist table (the
-  epoch is per-user, not per-token); single-device logout isn't distinguished
-  from all-device. Legacy pre-`tv` tokens are treated as epoch 0 (valid until
-  the first revoke), so the change didn't force-log-out existing sessions.
+  request; `POST /api/auth/logout` bumped the epoch, killing all of that
+  user's tokens server-side ("log out everywhere"; since 2026-11-15 that is
+  `POST /api/auth/logout-everywhere` and plain logout is per-device, see the
+  next bullets). Expiry is now env-configurable (`JWT_EXPIRY_DAYS`, default
+  7). Legacy pre-`tv` tokens are treated as epoch 0 (valid until the first
+  revoke), so the change didn't force-log-out existing sessions.
 - [Added 2026-11-15] **Sliding token renewal.** The fixed 7-day expiry with no
   refresh signed active users out about weekly per device (prod logs showed
   every forced re-login was a 53-byte expired-token 401 on `/me`).
@@ -263,6 +263,52 @@ BFG + force-push) to purge the dead values entirely.
   renewal replaced stays valid until its own `exp`. The SPA also no longer drops
   the token when `/me` fails at boot with a timeout, network error or 5xx;
   only a 401/403 signs out there.
+- [Added 2026-11-15] **Per-device logout (`sid` claim + `revoked_sessions`).**
+  Every sign-in (password login, email verification, Google callback) mints a
+  random 128-bit session id carried as the `sid` claim through every `/me`
+  renewal. `POST /api/auth/logout` now revokes only that sid: it inserts a
+  `revoked_sessions` row (migration `0042_revoked_sessions`) and commits it before a best-effort prune of expired rows, so a
+  cleanup failure can never cost the revocation. All four token-accepting
+  paths reject a revoked sid with one primary-key lookup and no cache:
+  `get_current_user` (401, the same "Session has been revoked" detail and
+  `WWW-Authenticate` header as a `token_version` mismatch),
+  `get_current_user_optional` (degrades to anonymous, exactly like a
+  `token_version` mismatch there, since public endpoints never 401), Socket.io
+  `connect` (refused) and the per-event socket re-auth (force-disconnect). The
+  lookup runs after the `tv` check and only for tokens that carry a sid.
+  Every existing `token_version` bump is unchanged and still kills every sid:
+  `POST /api/auth/logout-everywhere`, password reset, admin role change or
+  disable, account closure, and the first Google link. A row's `expires_at`
+  is `auth_time + JWT_MAX_SESSION_DAYS + JWT_EXPIRY_DAYS` (past it no token of
+  that session can be valid), floored at the presented token's own `exp` and
+  at now + `JWT_EXPIRY_DAYS` so a later cut to either setting cannot prune a
+  row early. The sid is never logged or returned. Residuals and operational
+  limits:
+  - **"This device" means this portal in this browser.** The driver app and
+    the CPO console are separate origins with separate storage, so a user
+    signed in to both holds two sessions, and logging out of one leaves the
+    other signed in (one logout used to kill both). If you think someone
+    else has your session, use **Log out everywhere** (driver Account page;
+    CPO Settings for cpo and admin users) or reset your password. Your own
+    habitual Log out no longer kills a stolen copy of a different session.
+  - **Legacy tokens.** A token minted before this change has no sid; its
+    logout falls back to the global bump (`scope:"all"`), and renewal never
+    upgrades it to a sid (a copy taken before deploy would otherwise outlive
+    a later per-device logout). Such sessions age out at the
+    `JWT_MAX_SESSION_DAYS` cap or the next sign-in.
+  - **Idle sockets.** A revoked sid's already-open socket keeps receiving
+    `user_{id}` pushes until it next interacts (subscribe / unsubscribe) or
+    disconnects, the same residual the `token_version` model has. The tab
+    that logs out closes its own socket.
+  - **Rollback un-revokes per-device logouts.** Pre-feature code ignores the
+    sid claim, so after an image rollback every token whose session was
+    revoked per-device (and that has not hit `exp`) works again and can be
+    renewed. Before starting the old image, run on the owner connection:
+    `UPDATE users SET token_version = token_version + 1 WHERE id IN (SELECT DISTINCT user_id FROM revoked_sessions WHERE expires_at > now());`
+    This turns every live per-device revocation into a global one for the
+    affected users (it also signs them out on their other devices: the price
+    of rolling back). The migration's `downgrade()` runs the same statement
+    before dropping the table. See [DEPLOYMENT.md](DEPLOYMENT.md).
 - [Added 2026-08-04] **Least-privilege DB runtime role (privilege separation).**
   `DATABASE_URL` is the OWNER connection (superuser in prod) and is now used
   ONLY for migrations + one-time role provisioning. When `APP_DB_PASSWORD` is
@@ -506,6 +552,42 @@ BFG + force-push) to purge the dead values entirely.
 
 ## 6. Operational notes
 
+- [Added 2026-09-28, **LIVE**] **Cloudflare
+  front door + client-IP trust model.** `amphive.app` / `cpo.amphive.app`
+  moved behind Cloudflare's free HTTP proxy to cut latency for Indian users
+  (origin is a `us-west1` e2-micro, ~240 ms RTT to India). `mqtt.amphive.app`
+  and `mail.amphive.app` are **deliberately not proxied**, they stay
+  DNS-only / grey-cloud, because MQTT 8883 and SMTP/IMAP cannot traverse
+  Cloudflare's HTTP-only proxy. Cloudflare's nameservers answer for the zone
+  since 2026-09-28 (registrar still name.com). Verified end to end: a request
+  via Cloudflare and one direct to the origin both reached frontend-nginx
+  with `X-Forwarded-For` = the real client IP.
+
+  **Trust model:** Caddy's global `trusted_proxies` now lists Cloudflare's
+  published edge ranges plus `client_ip_headers CF-Connecting-IP`, and every
+  `reverse_proxy` sets `header_up X-Forwarded-For {client_ip}`
+  (`deploy/config/Caddyfile.example`, `deploy/relay/deploy-relay.sh`). From a
+  request that genuinely arrived via Cloudflare, Caddy trusts
+  `CF-Connecting-IP` only because the peer is in those ranges, and writes the
+  upstream XFF as that one vouched address, any XFF the visitor tried to
+  prepend is discarded. **The origin IP is still publicly reachable
+  directly** (the GCP firewall was **not** locked to Cloudflare's ranges on
+  80/443, deliberately: `mail.amphive.app`'s Let's Encrypt HTTP-01
+  certificate issuance needs :80 reachable directly, not routed through
+  Cloudflare, and locking the firewall to CF ranges would break it). A direct
+  hit on the origin is still handled correctly by the trust model: Caddy sees
+  an untrusted peer, ignores any `CF-Connecting-IP` header the caller sends,
+  and falls back to the real TCP peer address for XFF, so a direct caller
+  cannot spoof identity to poison `backend/services/rate_limit.py`'s per-IP
+  buckets either. Either way Caddy still appends exactly one XFF hop and
+  frontend-nginx appends the other, so `TRUSTED_PROXY_HOPS=2` needed **no
+  change**, only its topology comments were updated. Verified with `caddy
+  validate` + reload against the live Caddyfile, and the XFF/CF-Connecting-IP
+  semantics tested on caddy v2.11.4 in a throwaway container. Cloudflare
+  dashboard settings (SSL/TLS Full (strict), Always Use HTTPS off, Rocket
+  Loader/Email Obfuscation/Bot Fight Mode off, WebSockets on) and the
+  reasoning for each are recorded in
+  [DEPLOYMENT.md](DEPLOYMENT.md#cloudflare-front-door-amphiveapp-cpoamphiveapp-added-2026-09-28).
 - The **VM public IP is ephemeral** and is recorded inconsistently across docs
   (`35.200.131.98`, `34.100.200.152`, and others). The committed
   `amphive_tunnel.conf` endpoint will break whenever the VM IP changes. Prefer a
@@ -698,7 +780,8 @@ guardrail below was honored — recorded here so the invariants are auditable:
   logout revokes server-side, and expiry is env-configurable
   (`JWT_EXPIRY_DAYS`), see §2. Since 2026-11-15 the expiry slides
   (re-minted on every `GET /api/auth/me`, capped at `JWT_MAX_SESSION_DAYS`
-  from the original sign-in), see §2.
+  from the original sign-in), and logout is per-device (`sid` claim +
+  `revoked_sessions`) with a separate log out everywhere, see §2.
 - ~~**No rate limiting** on `/api/auth/login` and `/api/auth/register`~~
   **Resolved 2026-07-11**: both endpoints enforce an in-process
   sliding-window limit per client IP (`backend/services/rate_limit.py`;

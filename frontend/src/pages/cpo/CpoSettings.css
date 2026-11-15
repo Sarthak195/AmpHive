@@ -33,3 +33,8 @@
   font-size: var(--text-xs);
   color: var(--warn);
 }
+
+/* The Security card sits after the profile stack (or its skeleton/error). */
+.settings-security {
+  margin-top: var(--sp-4);
+}

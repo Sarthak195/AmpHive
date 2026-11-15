@@ -218,6 +218,14 @@ export const API_ERROR_COPY = {
   plug_powered: 'This charger has power now — start charging directly',
   queue_cap: "You've reached the limit of queued charges",
   insufficient_balance: 'Add charging credit first',
+  // [Scheduled start]
+  plug_scheduled: "Another driver's car is scheduled on this charger",
+  schedule_out_of_range: 'Pick a start time within the next 24 hours',
+  schedule_needs_limit: 'Set a time or energy limit for a scheduled charge',
+  plug_unpowered: 'This charger has no power right now. Queue the charge instead',
+  plug_in_use: 'This charger is in use right now',
+  plug_out_of_service: 'This charger is out of service',
+  plug_reserved: 'Another driver has this charger reserved around that time',
 };
 
 const GENERIC_ERROR = 'Something went wrong. Please try again.';

@@ -11,6 +11,11 @@
   margin-bottom: var(--sp-3);
 }
 
+/* Security card: "Log out everywhere" sits below the password reset. */
+.account-security-everywhere {
+  margin-top: var(--sp-4);
+}
+
 .account-profile-grid {
   display: grid;
   gap: var(--sp-3);

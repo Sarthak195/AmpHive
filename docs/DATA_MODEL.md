@@ -292,6 +292,10 @@ full column list of each:
   request on a plug with no line power but a live gateway (`QueuedCharge`;
   `waiting → started | cancelled | expired | failed`, reaped by
   `services/session_reaper.py`). Backs `/api/sessions/queue*`.
+  `not_before TIMESTAMPTZ NULL` (`0041_queued_not_before.py`,
+  2026-11-15): NULL = outage queue; set = a scheduled start on a
+  powered plug that the sweep never begins before this instant (its
+  `expires_at` is `not_before + min(queue_ttl_min, SCHEDULE_START_GRACE_MIN)`).
 - **`password_reset_tokens`** (`0023_password_reset_tokens.py`) — a
   single-use, SHA-256-digest-only "forgot password" token
   (`PasswordResetToken`). Backs `POST /api/auth/forgot-password` +
@@ -312,6 +316,20 @@ full column list of each:
   (re-registering replaces it, a Google link drops it; residual in
   SECURITY.md §8.6). Backs `POST /api/auth/register` + `verify-email` +
   `resend-verification`.
+- **`revoked_sessions`** (`0042_revoked_sessions.py`, 2026-11-15,
+  after the off-peak `0041_queued_not_before`). Per-device logout's revocation list (`RevokedSession`):
+  `sid` TEXT PRIMARY KEY (the JWT `sid` claim, a random sign-in session id),
+  `user_id` FK `users` ON DELETE CASCADE (indexed,
+  `ix_revoked_sessions_user_id`), `revoked_at` TIMESTAMPTZ default now,
+  `expires_at` TIMESTAMPTZ (indexed, `ix_revoked_sessions_expires_at`) =
+  `auth_time + JWT_MAX_SESSION_DAYS + JWT_EXPIRY_DAYS`, floored at the
+  token's `exp`. Written by `POST /api/auth/logout`; read (one PK lookup) by
+  every token-accepting path; rows past `expires_at` are pruned after each
+  insert. Not exported by `GET /api/auth/me/export` (credential metadata,
+  like the token digests) and not purged at closure (closure's
+  `token_version` bump already kills every sid; rows age out). Its
+  `downgrade()` bumps `token_version` for every user with a live row before
+  the DROP, so a downgrade does not un-revoke anyone (SECURITY.md §2).
 - **`offline_topups`** (`0026_offline_topups.py`) — a CPO's cash top-up of a
   driver's coin wallet, funded from the tenant's own unsettled net earnings
   (`OfflineTopup`; `actor_user_id`/`driver_user_id` nullable + SET NULL, same

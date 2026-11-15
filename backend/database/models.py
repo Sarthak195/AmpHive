@@ -192,9 +192,10 @@ class User(Base):
     # services.money.to_money to avoid float rounding drift. See models money note.
     coin_balance: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal("0.00"), nullable=False)
     # Monotonic token epoch: embedded in every JWT as the `tv` claim and
-    # re-checked on each request. Bumping it (logout, password change, admin
-    # revoke) invalidates all previously issued tokens for this user without a
-    # blacklist table. Added in migration 0003.
+    # re-checked on each request. Bumping it (log out everywhere, password
+    # change, admin revoke, closure) invalidates all previously issued tokens
+    # for this user on every device. Per-device logout instead revokes one
+    # sign-in session id (see RevokedSession). Added in migration 0003.
     token_version: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"), nullable=False)
     # [Admin] Platform-admin kill switch for an account: login refuses a
     # disabled user (403 "account_disabled") and get_current_user rejects
@@ -1706,9 +1707,14 @@ class QueuedCharge(Base):
     max_duration_seconds: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     status: Mapped[QueuedChargeStatus] = mapped_column(SQLEnum(QueuedChargeStatus, name="queued_charge_status", values_callable=lambda x: [e.value for e in x]), default=QueuedChargeStatus.WAITING, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
-    # created_at + queue_ttl; a queued charge that never sees restored power
-    # EXPIRES here rather than lingering (services/session_reaper.py).
+    # created_at + queue_ttl (a scheduled row: not_before + its start grace);
+    # a queued charge that never starts in time EXPIRES here rather than
+    # lingering (services/session_reaper.py).
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # [Scheduled start] NULL = outage queue (start when power returns). Set = a
+    # scheduled start on a powered plug: the sweep never starts it before this
+    # instant (routers/sessions.py queue_charge; migration 0041_queued_not_before).
+    not_before: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     # Linked once the reaper starts the session; SET NULL keeps the queue
     # history row if the session is later deleted.
     started_session_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("charging_sessions.id", ondelete="SET NULL"), nullable=True)
@@ -1792,3 +1798,27 @@ class EmailVerificationToken(Base):
     # NULL = still consumable (if unexpired); set on consumption OR when a
     # newer register/resend request supersedes this token.
     used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class RevokedSession(Base):
+    """[Per-device logout] A sign-in session (the JWT `sid` claim) revoked by
+    POST /api/auth/logout.
+
+    Every token-accepting path (get_current_user, get_current_user_optional,
+    socket.io connect and its re-auth) rejects a token whose sid is listed
+    here, with the same treatment as a token_version mismatch. The lookup is
+    a single primary-key probe and only runs for tokens that carry a sid.
+
+    expires_at = auth_time + JWT_MAX_SESSION_DAYS + JWT_EXPIRY_DAYS (floored
+    at the token's own exp): past it no token of that session can still be
+    valid, so the row is useless and is pruned opportunistically after the
+    next revoke. Log out everywhere does not write here; it bumps
+    users.token_version, which already kills every sid. Alembic revision
+    0042_revoked_sessions.
+    """
+    __tablename__ = "revoked_sessions"
+
+    sid: Mapped[str] = mapped_column(Text, primary_key=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    revoked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)

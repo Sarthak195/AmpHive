@@ -184,11 +184,15 @@ lifetime meter. So the agent, exactly like the ESP:
 - on `OFF` / idle: `kwh: 0`, `status:"available"`, `session_id:""`.
 
 Tests: `agent/test_local_limits.py` (stub device + stub broker, incl. the
-broker-down cutoff) and the `python -m amphive_agent.core` self-checks.
+broker-down cutoff), `agent/test_poll_wake.py` (SET_INTERVAL wake) and the
+`python -m amphive_agent.core` self-checks.
 
 `OTA` is a no-op for the agent (it self-updates via its own package channel);
 reply on `/alarms` with `OTA_REFUSED` or just ignore. `SET_INTERVAL` adjusts the
-poll period (clamped, like the firmware's 500 ms–60 s).
+poll period (clamped, like the firmware's 500 ms to 60 s). Like fw 2.9.0, a
+changed interval wakes the poll loop at once instead of after the current
+sleep, and the meterless integrator's gap clamp allows the interval that sleep
+used, so the first gap after a 10 s to 1 s change is still counted.
 
 ---
 

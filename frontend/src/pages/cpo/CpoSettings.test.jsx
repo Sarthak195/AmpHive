@@ -22,6 +22,11 @@ vi.mock('../../components/CpoLayout', () => ({
   default: ({ children }) => <div data-testid="cpo-layout">{children}</div>,
 }));
 
+const logoutEverywhereSpy = vi.fn();
+vi.mock('../../contexts/AuthContext', () => ({
+  useAuth: () => ({ logoutEverywhere: logoutEverywhereSpy }),
+}));
+
 const toast = { ok: vi.fn(), error: vi.fn(), info: vi.fn(), warn: vi.fn() };
 vi.mock('../../components/ui', async (importOriginal) => {
   const actual = await importOriginal();
@@ -54,6 +59,17 @@ beforeEach(() => vi.clearAllMocks());
 afterEach(() => vi.restoreAllMocks());
 
 describe('CpoSettings', () => {
+  it('offers log out everywhere to cpo and admin users, even if the profile fails', async () => {
+    // CPO Settings is the only place a cpo/admin can reach the global revoke:
+    // the driver Account page lives on the other origin.
+    api.get.mockRejectedValue(Object.assign(new Error('boom'), { status: 500 }));
+    renderPage();
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Log out everywhere' }));
+    expect(screen.getByRole('dialog')).toHaveTextContent(/every device and browser/i);
+    expect(logoutEverywhereSpy).not.toHaveBeenCalled();
+  });
+
   it('loads the profile and renders organization identity read-only', async () => {
     mockApi();
     renderPage();

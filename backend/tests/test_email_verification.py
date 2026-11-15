@@ -216,6 +216,7 @@ async def test_verify_email_consumes_token_marks_verified_and_logs_in():
     assert payload is not None
     assert payload["sub"] == "7"
     assert payload["tv"] == 1  # carries the bumped epoch
+    assert isinstance(payload["sid"], str) and payload["sid"]  # a sign-in: new session id
 
     # Single-use, race-safe: consumption is a conditional UPDATE guarded on
     # used_at IS NULL.

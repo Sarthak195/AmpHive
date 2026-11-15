@@ -18,8 +18,9 @@
  */
 
 import { useCallback, useEffect, useState } from 'react';
-import { Building2, Receipt, Zap } from 'lucide-react';
+import { Building2, Receipt, ShieldCheck, Zap } from 'lucide-react';
 import CpoLayout from '../../components/CpoLayout';
+import LogoutEverywhere from '../../components/LogoutEverywhere';
 import { PageHeader, Skeleton, SkeletonTitle, ErrorState, useToast } from '../../components/ui';
 import api from '../../api/client';
 import { apiErrorCopy } from '../../utils/statusCopy';
@@ -319,6 +320,18 @@ const CpoSettings = () => {
           </section>
         </div>
       )}
+
+      {/* Outside the profile-load branch: signing out every device must not
+          depend on the tenant profile loading. This is the only place a CPO
+          operator or admin can reach it (the driver Account page lives on
+          the other origin). */}
+      <section className="card settings-card settings-security">
+        <h2 className="settings-card-title">
+          <ShieldCheck size={18} aria-hidden="true" />
+          Security
+        </h2>
+        <LogoutEverywhere />
+      </section>
     </CpoLayout>
   );
 };

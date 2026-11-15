@@ -29,7 +29,7 @@ const base64url = (obj) =>
 const makeFakeToken = (payload) => `header.${base64url(payload)}.signature`;
 
 const Probe = () => {
-  const { user, login, logout, loginWithToken, loading } = useAuth();
+  const { user, login, logout, logoutEverywhere, loginWithToken, loading } = useAuth();
   return (
     <div>
       <div data-testid="user">{user ? user.email : 'anonymous'}</div>
@@ -37,6 +37,7 @@ const Probe = () => {
       <button onClick={() => login('driver@amphive.test', 'pw').catch(() => {})}>login</button>
       <button onClick={() => loginWithToken(googleToken).catch(() => {})}>loginWithToken</button>
       <button onClick={logout}>logout</button>
+      <button onClick={() => logoutEverywhere().catch(() => {})}>logoutEverywhere</button>
     </div>
   );
 };
@@ -209,6 +210,47 @@ describe('login / logout', () => {
 
     await waitFor(() => expect(screen.getByTestId('user')).toHaveTextContent('anonymous'));
     expect(localStorage.getItem('amphive_token')).toBeNull();
+  });
+
+  it('logoutEverywhere posts the global revoke then clears state and localStorage', async () => {
+    api.post.mockImplementation((url) =>
+      url === '/api/auth/login'
+        ? Promise.resolve({ token: 'fresh-jwt', user: { email: 'driver@amphive.test', role: 'driver' } })
+        : Promise.resolve({ status: 'logged_out', scope: 'all' })
+    );
+    renderProbe();
+    await screen.findByTestId('user');
+    await userEvent.click(screen.getByText('login'));
+
+    await userEvent.click(screen.getByText('logoutEverywhere'));
+
+    expect(api.post).toHaveBeenCalledWith('/api/auth/logout-everywhere');
+    expect(api.post).not.toHaveBeenCalledWith('/api/auth/logout');
+    await waitFor(() => expect(screen.getByTestId('user')).toHaveTextContent('anonymous'));
+    expect(localStorage.getItem('amphive_token')).toBeNull();
+    expect(localStorage.getItem('amphive_user')).toBeNull();
+  });
+
+  it('logoutEverywhere keeps this session when the server call fails (non-401)', async () => {
+    // A 5xx or network failure means the other devices are still signed in,
+    // so this one must not pretend otherwise. (A 401 is handled by the api
+    // client itself: it clears the dead token and redirects.)
+    const serverError = Object.assign(new Error('Internal Server Error'), { status: 500 });
+    api.post.mockImplementation((url) =>
+      url === '/api/auth/login'
+        ? Promise.resolve({ token: 'fresh-jwt', user: { email: 'driver@amphive.test', role: 'driver' } })
+        : Promise.reject(serverError)
+    );
+    renderProbe();
+    await screen.findByTestId('user');
+    await userEvent.click(screen.getByText('login'));
+    await waitFor(() => expect(screen.getByTestId('user')).not.toHaveTextContent('anonymous'));
+
+    await userEvent.click(screen.getByText('logoutEverywhere'));
+
+    expect(api.post).toHaveBeenCalledWith('/api/auth/logout-everywhere');
+    expect(screen.getByTestId('user')).not.toHaveTextContent('anonymous');
+    expect(localStorage.getItem('amphive_token')).toBe('fresh-jwt');
   });
 });
 

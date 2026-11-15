@@ -11,7 +11,9 @@
  *   Only a 401/403 at boot signs out; a timeout or 5xx keeps the session.
  * - Login: POST /api/auth/login → saves JWT + user to localStorage.
  * - Register: POST /api/auth/register → same as login.
- * - Logout: clears localStorage, resets state.
+ * - Logout: revokes this device's session server-side, clears localStorage,
+ *   resets state. logoutEverywhere signs out every device (Account and CPO
+ *   Settings offer it behind a confirm step).
  */
 
 import { createContext, useState, useEffect, useContext, useCallback } from 'react';
@@ -164,24 +166,41 @@ export const AuthProvider = ({ children }) => {
     });
   }, []);
 
-  const logout = useCallback(async () => {
-    // Revoke the token server-side (bumps token_version → all this user's
-    // tokens die). Best-effort: clear local state regardless of the result,
-    // so the user is always logged out locally even if the request fails.
-    try {
-      await api.post('/api/auth/logout');
-    } catch (err) {
-      console.warn('Logout revoke failed (clearing local session anyway):', err.message);
-    }
+  const clearLocalSession = useCallback(() => {
     setUser(null);
     localStorage.removeItem('amphive_token');
     localStorage.removeItem('amphive_user');
   }, []);
 
+  const logout = useCallback(async () => {
+    // Signs out THIS device: the server revokes this token's sign-in session
+    // (its sid), and the user's other devices stay signed in. Best-effort:
+    // clear local state regardless of the result, so the user is always
+    // logged out locally even if the request fails.
+    try {
+      await api.post('/api/auth/logout');
+    } catch (err) {
+      console.warn('Logout revoke failed (clearing local session anyway):', err.message);
+    }
+    clearLocalSession();
+  }, [clearLocalSession]);
+
+  const logoutEverywhere = useCallback(async () => {
+    // Signs out EVERY device (server bumps token_version). NOT best-effort:
+    // if the request fails the other devices are still signed in, so the
+    // error is rethrown for the caller to show and this session is kept. (A
+    // 401 here means this token was already dead; the api client has then
+    // already cleared it and sent the user to sign in, which is correct.)
+    await api.post('/api/auth/logout-everywhere');
+    clearLocalSession();
+  }, [clearLocalSession]);
+
   // Children always render — consumers branch on `loading` themselves
   // (App holds the route tree behind <BootSplash/> until restore settles).
   return (
-    <AuthContext.Provider value={{ user, login, register, loginWithToken, logout, refreshUser, loading }}>
+    <AuthContext.Provider
+      value={{ user, login, register, loginWithToken, logout, logoutEverywhere, refreshUser, loading }}
+    >
       {children}
     </AuthContext.Provider>
   );

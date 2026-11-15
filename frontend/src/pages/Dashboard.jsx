@@ -60,7 +60,7 @@ import {
 } from '../utils/plugSearch';
 import { apiErrorCopy, plugStateHint, plugStateLabel } from '../utils/statusCopy';
 import { coinsToINR, formatKw, formatKwh } from '../utils/money';
-import { fmtTime, fmtWindow } from '../utils/reservationTime';
+import { fmtTime, fmtTimeInZone, fmtWindow } from '../utils/reservationTime';
 import './Dashboard.css';
 
 // Sentinel for the group filter's "no group assigned" option — distinct from
@@ -330,7 +330,15 @@ const Dashboard = () => {
   };
 
   // ChargeSetupModal's onConfirm — throws so the modal shows the error inline.
-  const handleConfirmSetup = async (plugId, limits) => {
+  const handleConfirmSetup = async (plugId, limits, notBefore) => {
+    if (notBefore) {
+      // [Scheduled start] Same queue endpoint, on a powered plug; stay here.
+      const queued = await api.queueCharge({ plug_id: Number(plugId), ...limits, not_before: notBefore });
+      const tz = queued?.tenant_timezone || setupPlug?.tenant_timezone;
+      toast.ok(`Charge scheduled for ${fmtTimeInZone(queued?.not_before || notBefore, tz)}.`);
+      fetchUpNext();
+      return;
+    }
     if (setupMode === 'queue') {
       const body = { plug_id: Number(plugId) };
       if (limits?.max_kwh) body.max_kwh = limits.max_kwh;
@@ -578,11 +586,17 @@ const Dashboard = () => {
                   ))}
                   {queued.map((q) => (
                     <li key={`q-${q.id}`} className="card card-tight dash-upnext-item">
-                      <Hourglass size={18} aria-hidden="true" className="dash-upnext-icon" />
+                      {q.not_before ? (
+                        <CalendarClock size={18} aria-hidden="true" className="dash-upnext-icon" />
+                      ) : (
+                        <Hourglass size={18} aria-hidden="true" className="dash-upnext-icon" />
+                      )}
                       <div className="dash-upnext-body">
                         <p className="dash-upnext-name">{q.plug_name || `Charger ${q.plug_id}`}</p>
                         <p className="text-3 text-sm">
-                          Waiting for power · {fmtCountdown(q.expires_at, nowMs)}
+                          {q.not_before
+                            ? `Starts at ${fmtTimeInZone(q.not_before, q.tenant_timezone)}`
+                            : `Waiting for power · ${fmtCountdown(q.expires_at, nowMs)}`}
                         </p>
                       </div>
                       <button
@@ -864,7 +878,11 @@ const Dashboard = () => {
         title="Cancel this queued charge?"
         body={
           cancelQueuedTarget
-            ? `Your queued charge on ${cancelQueuedTarget.plug_name || `charger ${cancelQueuedTarget.plug_id}`} won't start when power returns.`
+            ? `Your queued charge on ${cancelQueuedTarget.plug_name || `charger ${cancelQueuedTarget.plug_id}`} won't start ${
+                cancelQueuedTarget.not_before
+                  ? `at ${fmtTimeInZone(cancelQueuedTarget.not_before, cancelQueuedTarget.tenant_timezone)}`
+                  : 'when power returns'
+              }.`
             : ''
         }
         confirmLabel="Cancel queued charge"
