@@ -337,7 +337,9 @@ export default function Account() {
               </div>
             )}
           </div>
-          <LogoutEverywhere />
+          <div className="account-security-everywhere">
+            <LogoutEverywhere />
+          </div>
         </section>
 
         <section className="card">

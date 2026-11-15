@@ -519,6 +519,13 @@ requires_db = pytest.mark.skipif(
     reason="needs TEST_DATABASE_URL pointing at a throwaway Postgres (CI service)",
 )
 
+# Same reset as test_account_closure.py: drop_all leaves enum types behind.
+ENUM_TYPES = [
+    "gateway_status", "plug_status", "session_status", "tx_type", "user_role",
+    "payout_status", "dispute_status", "plug_report_status", "reservation_status",
+    "queued_charge_status",
+]
+
 
 @pytest_asyncio.fixture()
 async def factory():
@@ -532,6 +539,8 @@ async def factory():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
         await conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
+        for enum_name in ENUM_TYPES:
+            await conn.execute(text(f"DROP TYPE IF EXISTS {enum_name} CASCADE"))
         await conn.run_sync(Base.metadata.create_all)
 
     yield async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
