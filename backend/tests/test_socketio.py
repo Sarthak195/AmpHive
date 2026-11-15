@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from backend.database.models import SessionStatus
 from backend.services.socketio_manager import connect, subscribe_session
 
 
@@ -132,6 +133,7 @@ async def test_subscribe_session_success():
         live_user = MagicMock(token_version=0, is_disabled=False)
         mock_session = MagicMock()
         mock_session.plug_id = 9
+        mock_session.status = SessionStatus.ACTIVE
 
         mock_db = AsyncMock()
         mock_db.execute = AsyncMock()
@@ -147,6 +149,47 @@ async def test_subscribe_session_success():
         assert 100 in mock_active_streams
         # Valid, unchanged user → not force-disconnected (regression guard).
         mock_sio.disconnect.assert_not_awaited()
+
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [SessionStatus.COMPLETED, SessionStatus.PAID,
+                                    SessionStatus.CANCELLED])
+async def test_subscribe_finished_session_gets_completed_frame_no_stream(status):
+    """[C15] Subscribing to one's own FINISHED session must not join the room
+    or start a plug-keyed stream (which would show the plug's next driver's
+    live figures). It gets one 'completed' frame built from its own row."""
+    from decimal import Decimal
+    with patch("backend.services.socketio_manager.sio") as mock_sio,          patch("backend.services.socketio_manager.async_session_factory") as mock_db_factory,          patch("backend.services.socketio_manager.stream_telemetry_task") as mock_task,          patch("backend.services.socketio_manager.active_streams", {}) as mock_active_streams:
+
+        mock_sio.get_session = AsyncMock(return_value={"user_id": 42, "tv": 0})
+        mock_sio.emit = AsyncMock()
+        mock_sio.enter_room = AsyncMock()
+        mock_sio.disconnect = AsyncMock()
+
+        live_user = MagicMock(token_version=0, is_disabled=False)
+        finished = MagicMock(plug_id=9, status=status, energy_kwh=1.25,
+                             coins_spent=Decimal("6.25"))
+        mock_db = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.side_effect = [live_user, finished]
+        mock_db.execute = AsyncMock(return_value=mock_result)
+        mock_db_factory.return_value.__aenter__.return_value = mock_db
+
+        await subscribe_session("sid-123", {"session_id": 100})
+
+        mock_sio.enter_room.assert_not_awaited()
+        mock_task.assert_not_called()
+        assert mock_active_streams == {}
+        mock_sio.emit.assert_awaited_once()
+        event, frame = mock_sio.emit.await_args.args
+        assert event == "telemetry"
+        assert mock_sio.emit.await_args.kwargs == {"to": "sid-123"}
+        assert frame["status"] == "completed"
+        assert frame["plug_id"] == 9
+        assert frame["energy_kwh"] == 1.25
+        assert frame["cost_coins"] == 6.25
+        assert frame["power_w"] == 0.0
 
 
 def _configure_reauth_db(mock_db_factory, user):
@@ -221,6 +264,7 @@ async def test_subscribe_session_reauth_allows_unchanged_user():
         live_user = MagicMock(token_version=0, is_disabled=False)
         mock_session = MagicMock()
         mock_session.plug_id = 9
+        mock_session.status = SessionStatus.ACTIVE
         mock_db = AsyncMock()
         mock_db.execute = AsyncMock()
         mock_result = MagicMock()
@@ -252,6 +296,7 @@ async def test_stream_task_emits_telemetry_and_stops_when_room_empties(monkeypat
     fake_lifecycle = types.ModuleType("backend.services.session_lifecycle")
     fake_lifecycle.set_plug_telemetry_interval = AsyncMock()
     monkeypatch.setitem(sys.modules, "backend.services.session_lifecycle", fake_lifecycle)
+    monkeypatch.setattr(sm, "TELEMETRY_SLOWDOWN_GRACE_SEC", 0)
 
     session_id, plug_id = 4242, 7777
     room_name = f"session_{session_id}"
@@ -292,3 +337,32 @@ async def test_stream_task_emits_telemetry_and_stops_when_room_empties(monkeypat
         sm.telemetry_store.end_session(plug_id)
 
     assert session_id not in sm.active_streams
+    # Let the (zero-grace) listener release run before the stub is unpatched.
+    for _ in range(5):
+        await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_reload_within_grace_does_not_slow_the_gateway(monkeypatch):
+    """A page reload drops the old stream before the new one subscribes. The
+    old stream's listener is released only after the grace window, so if the
+    new subscriber is already counted the gateway is never told 10 s; once the
+    last viewer is really gone it is."""
+    from backend.services import socketio_manager as sm
+
+    fake_lifecycle = types.ModuleType("backend.services.session_lifecycle")
+    fake_lifecycle.set_plug_telemetry_interval = AsyncMock()
+    monkeypatch.setitem(sys.modules, "backend.services.session_lifecycle", fake_lifecycle)
+    monkeypatch.setattr(sm, "TELEMETRY_SLOWDOWN_GRACE_SEC", 0)
+    monkeypatch.setattr(sm, "async_session_factory", MagicMock())
+
+    plug_id = 7778
+    sm.telemetry_store.increment_listeners(plug_id)  # old page's stream
+    sm.telemetry_store.increment_listeners(plug_id)  # reloaded page's stream
+
+    await sm.release_listener_later(plug_id)          # old stream released
+    fake_lifecycle.set_plug_telemetry_interval.assert_not_awaited()
+
+    await sm.release_listener_later(plug_id)          # last viewer leaves
+    fake_lifecycle.set_plug_telemetry_interval.assert_awaited_once()
+    assert fake_lifecycle.set_plug_telemetry_interval.await_args.args[1:] == (plug_id, 10000)

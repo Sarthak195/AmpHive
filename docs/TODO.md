@@ -11,6 +11,23 @@ been fixed by the 2026-07-08…11 work — see the shipped sections below).*
 
 ---
 
+## OPEN, 2026-11-15 known limits (fix batch follow-ups)
+
+*Low severity. U0-U6 are from the 2026-11-15 review and were NOT independently verified; F10 is a known false-alarm class.*
+
+- [ ] U0: queued-charge auto-start does not pass the driver's own covering reservation, so it stays BOOKED during the session (`backend/services/session_reaper.py:752`)
+- [ ] U1: CPO dashboard revenue ignores approved refunds and disagrees with the Earnings page (`backend/routers/cpo/_analytics.py:99`)
+- [ ] U2: offline top-up `created_at` is transaction-start time, so one queued behind a payout can precede the new watermark and escape deduction (`backend/routers/cpo/_topups.py:133`)
+- [ ] U3: GST invoice line shows the last-segment rate, so energy x rate does not foot for time-of-day sessions (`backend/services/invoices.py:193`)
+- [ ] U4: tenant-less users (platform admin, tenant-less CPO) match `tenant_id IS NULL` and can see and operate on unclaimed gateways and plugs (`backend/routers/cpo/_gateways.py:60`)
+- [ ] U5: disputes page enriches from only the 200 newest sessions, so older disputes show blank driver, cost and charger (`frontend/src/pages/cpo/CpoDisputes.jsx:101`)
+- [ ] U6: telemetry flush re-buffers the whole batch on a non-connection error, so one bad row blocks history persistence (`backend/services/telemetry_persistence.py:185`)
+- [ ] F10: the unmetered-consumption cross-check can raise false (and large) alarms for the trailing interval of a session (`backend/services/mqtt/telemetry.py:652`)
+- [ ] firmware: wake the telemetry poll loop on SET_INTERVAL (a task notification) so a reopened session gets 1 s data at once; needs an OTA (`firmware/main/main.c:2249`, handler at `firmware/main/main.c:1765`)
+- [ ] boot: about 5 sequential round trips before the first live numbers (`frontend/src/contexts/AuthContext.jsx:35`)
+
+---
+
 ## OPEN — 2026-08-04 reliability & integration backlog
 
 *Surfaced by two prod incidents on 2026-08-04 (activating the DB
@@ -110,12 +127,13 @@ actions, and two deliberate deferrals.*
       root-owned `firmware_images` volume must be chowned first. Needs a
       dedicated infra deploy, not a bundle. (`backend/Dockerfile`,
       `agent/Dockerfile` still have no `USER`.)
-- [ ] **`python-jose` -> PyJWT.** The one remaining dependency advisory is
-      `ecdsa` PYSEC-2026-1325, which has NO upstream fix, arrives transitively
-      via python-jose, and is unreachable here (ES*-only; `JWT_ALGORITHM` pins
-      HS256 on both encode and decode). CI ignores exactly that ID with a
-      written justification. Migrating off python-jose would remove it
-      entirely, but an auth-path swap did not belong in this batch.
+- [x] **`python-jose` -> PyJWT.** Done 2026-11-15: `backend/services/auth.py`
+      and the auth tests now use PyJWT (`import jwt`, HS256, `jwt.PyJWTError`).
+      python-jose PYSEC-2026-4298 (no fixed release) and its `ecdsa` dependency
+      PYSEC-2026-1325 are gone from the lock (`rsa` and `six` went with them), and
+      CI's pip-audit no longer carries any `--ignore-vuln`. Tokens minted by
+      python-jose still decode (`backend/tests/test_jwt_compat.py`), so the
+      deploy does not sign anyone out.
 - [ ] **`users.email` uniqueness is byte-exact, not case-insensitive.**
       `models.py` has a plain `unique=True` while every lookup uses
       `func.lower(User.email)`. Application code has normalised to lowercase

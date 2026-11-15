@@ -87,7 +87,7 @@ theoretical concern on this box — it has already dictated an architecture
 decision elsewhere in the project.
 
 **Inbound port 25 is *not* blocked.** Verified from an off-VM network (the dev
-box): `136.117.94.209:25` accepts connections and returns
+box): `8.235.4.66:25` accepts connections and returns
 `220 mail.amphive.app ESMTP`. GCP's block is egress-only. So the receiving half
 of this server is genuinely internet-facing and genuinely works.
 
@@ -109,7 +109,7 @@ of this server is genuinely internet-facing and genuinely works.
 > **The largest gap is DNS: none of the mail records are published.** Queried
 > against `8.8.8.8` on 2026-08-18:
 >
-> - `amphive.app` **A** → `136.117.94.209` ✅ (the apex exists — it serves the web app)
+> - `amphive.app` **A** → `8.235.4.66` ✅ (the apex exists, it serves the web app)
 > - `mail.amphive.app` **A** → **NXDOMAIN**
 > - `amphive.app` **MX** → **none** (authority section only)
 > - `amphive.app` **TXT** → **none** (no SPF)
@@ -134,11 +134,11 @@ exist.
 accepts mail for the *domain* `amphive.app`. It does **not** connect to the
 domain's A record — that is a common misconception. It queries `MX amphive.app`,
 gets back `10 mail.amphive.app`, then resolves `A mail.amphive.app` →
-`136.117.94.209`. This indirection is the whole reason MX records exist: it lets
+`8.235.4.66`. This indirection is the whole reason MX records exist: it lets
 the web site and the mail server live on different machines. (Here they happen
 to be the same machine, but the protocol does not know or care.)
 
-**2. TCP connect to port 25.** Gmail connects to `136.117.94.209:25`. GCP's
+**2. TCP connect to port 25.** Gmail connects to `8.235.4.66:25`. GCP's
 ingress firewall rule `allow-amphive-mail` permits `tcp:25,tcp:587,tcp:993` from
 `0.0.0.0/0` with no target tags, so this is allowed. Postfix's `master` process
 is listening (`0.0.0.0:25`) and forks an `smtpd` to handle the session.
@@ -601,7 +601,7 @@ exists.
 
 | Type | Name | Value | Job |
 |---|---|---|---|
-| A | `mail.amphive.app` | `136.117.94.209` | resolves the mail host itself |
+| A | `mail.amphive.app` | `8.235.4.66` | resolves the mail host itself |
 | MX | `amphive.app` | `10 mail.amphive.app.` | tells the world where to deliver |
 | TXT | `amphive.app` | `v=spf1 mx ~all` | who may send as this domain |
 | TXT | `mail._domainkey.amphive.app` | `v=DKIM1; h=sha256; k=rsa; p=<public key>` | signature verification key |
@@ -673,7 +673,7 @@ reports until every legitimate source shows as passing and aligned →
 `p=quarantine` → `p=reject`. The `rua=mailto:dmarc@amphive.app` is what makes
 the first step useful, which is why that alias must be deliverable (§3.3).
 
-**Reverse DNS — a gap, and a nuance.** The PTR for `136.117.94.209` is
+**Reverse DNS, a gap, and a nuance.** The PTR for the old box's IP `136.117.94.209` (before the 2026-09 move to `8.235.4.66`; re-check the PTR for the new IP) is
 `209.94.117.136.bc.googleusercontent.com` (verified), the GCP-generic default;
 `publicPtrDomainName` is unset on the instance. Many receivers penalise or
 reject mail from a host whose forward and reverse DNS do not match (FCrDNS).
@@ -820,7 +820,7 @@ openssl s_client -connect mail.amphive.app:587 -starttls smtp -crlf
 openssl s_client -connect mail.amphive.app:993
 ```
 
-(Until DNS exists, substitute `136.117.94.209` for the hostname. The certificate
+(Until DNS exists, substitute `8.235.4.66` for the hostname. The certificate
 will not verify — see §6.)
 
 **Prove you are not an open relay.** This is the test that matters most, and it
@@ -828,7 +828,7 @@ must be run from off the VM, because from loopback `permit_mynetworks` will let
 you relay and you will "prove" the opposite of what you meant:
 
 ```
-telnet 136.117.94.209 25
+telnet 8.235.4.66 25
 EHLO probe.example.com
 MAIL FROM:<test@example.com>
 RCPT TO:<someone@example.net>          <-- a domain we are NOT final destination for
@@ -1159,7 +1159,7 @@ learning build and the gaps are as instructive as the working parts.
    requiring that HELO be sent at all.
 6. ~~**No backups of the mail store.**~~ **CLOSED.** `backup_db.sh` now tars
    `/var/mail/vhosts` alongside the Postgres dump and the ops-config archive,
-   uploads all three to `gs://amphive-db-backups`, and prunes them on the same
+   uploads all three to `gs://amphive-db-backups-2`, and prunes them on the same
    3-generation local retention. Verified with a real run:
    `maildir-20260818-115352.tar.gz` (28K) uploaded successfully.
    `/etc/dovecot/users` — the only copy of the mailbox credentials — rides

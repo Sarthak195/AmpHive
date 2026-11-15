@@ -265,7 +265,7 @@ if [ ! -f "$WORKDIR/Caddyfile" ]; then
   # blanket deny silently breaks the map. If Razorpay Checkout ever needs the
   # W3C Payment Request API, relax payment=() to
   # payment=(self "https://api.razorpay.com") rather than dropping it.
-  csp="default-src 'self'; script-src 'self' https://*.razorpay.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' https: wss:; frame-src https://*.razorpay.com; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+  csp="default-src 'self'; script-src 'self' https://*.razorpay.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self' https: wss:; frame-src https://*.razorpay.com; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
   perms="geolocation=(self), camera=(), microphone=(), usb=(), payment=(), interest-cohort=()"
   {
     echo "# Generated once by deploy-relay.sh from .env — edits here are preserved"

@@ -20,9 +20,9 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import bcrypt
+import jwt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from jose import JWTError, jwt
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -53,10 +53,16 @@ if not JWT_SECRET_KEY or JWT_SECRET_KEY in _KNOWN_INSECURE_SECRETS:
     )
 JWT_ALGORITHM = "HS256"
 # Env-configurable so an environment can shorten token lifetime. Kept at 7d
-# by default (mobile-first UX, no refresh flow); per-user revocation via the
+# by default (mobile-first UX). GET /api/auth/me re-mints the token on every
+# app open (sliding renewal), so only a device idle for this long has to sign
+# in again; per-user revocation via the
 # token_version epoch — see create_access_token / get_current_user — is the
 # substantive control that makes a long-lived token killable on demand.
 JWT_EXPIRY_DAYS = int(os.getenv("JWT_EXPIRY_DAYS", "7"))
+# Absolute cap on that sliding renewal: /me stops re-minting once the original
+# sign-in (the auth_time claim, carried across renewals) is this old, so a
+# stolen token cannot be kept alive forever.
+JWT_MAX_SESSION_DAYS = int(os.getenv("JWT_MAX_SESSION_DAYS", "90"))
 
 # --- Password Hashing ---
 
@@ -120,7 +126,9 @@ def normalize_email(email: str) -> str:
 
 # --- JWT Token Management ---
 
-def create_access_token(user_id: int, role: str, email: str, token_version: int = 0) -> str:
+def create_access_token(
+    user_id: int, role: str, email: str, token_version: int = 0, auth_time: Optional[int] = None
+) -> str:
     """
     Create a signed JWT access token containing user claims.
 
@@ -132,6 +140,8 @@ def create_access_token(user_id: int, role: str, email: str, token_version: int 
       request is rejected once the stored epoch moves past it)
     - exp: expiration timestamp
     - iat: issued-at timestamp
+    - auth_time: when the user actually signed in (epoch seconds); renewals
+      keep it, which bounds a session at JWT_MAX_SESSION_DAYS
     """
     now = datetime.now(timezone.utc)
     payload = {
@@ -139,10 +149,22 @@ def create_access_token(user_id: int, role: str, email: str, token_version: int 
         "role": role,
         "email": email,
         "tv": token_version,
+        "auth_time": int(now.timestamp()) if auth_time is None else auth_time,
         "iat": now,
         "exp": now + timedelta(days=JWT_EXPIRY_DAYS),
     }
     return jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
+
+
+def renewed_access_token(payload: dict, user: User) -> Optional[str]:
+    """Sliding renewal for GET /api/auth/me: re-mint at the user's CURRENT
+    token_version, keeping the original sign-in time. None once that sign-in
+    is older than JWT_MAX_SESSION_DAYS (tokens minted before auth_time existed
+    fall back to iat), so the client keeps its token until it expires."""
+    auth_time = int(payload.get("auth_time") or payload.get("iat") or 0)
+    if datetime.now(timezone.utc).timestamp() - auth_time > JWT_MAX_SESSION_DAYS * 86400:
+        return None
+    return create_access_token(user.id, user.role.value, user.email, user.token_version, auth_time=auth_time)
 
 
 def decode_access_token(token: str) -> Optional[dict]:
@@ -153,7 +175,7 @@ def decode_access_token(token: str) -> Optional[dict]:
     try:
         payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
         return payload
-    except JWTError:
+    except jwt.PyJWTError:
         return None
 
 
@@ -233,5 +255,46 @@ async def get_current_user(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="account_disabled",
         )
+
+    return user
+
+
+# HTTPBearer with auto_error=False: no Authorization header yields None instead
+# of a 401, so an endpoint can stay PUBLIC while still learning the caller's
+# identity when a valid token happens to be present.
+optional_security_scheme = HTTPBearer(auto_error=False)
+
+
+async def get_current_user_optional(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(optional_security_scheme),
+    db: AsyncSession = Depends(get_db),
+) -> Optional[User]:
+    """
+    Best-effort identity for a PUBLIC endpoint. Returns the authenticated User
+    when a valid, non-revoked, non-disabled token is present, else None, it
+    NEVER raises 401/403 for a missing or bad token (a public read must serve
+    anonymous callers). Use it only to enrich a public response (e.g. mark the
+    caller's own review), never to gate access, for that use get_current_user.
+    """
+    if credentials is None:
+        return None
+
+    payload = decode_access_token(credentials.credentials)
+    if payload is None:
+        return None
+
+    user_id = payload.get("sub")
+    if user_id is None:
+        return None
+
+    result = await db.execute(select(User).where(User.id == int(user_id)))
+    user = result.scalar_one_or_none()
+    if user is None:
+        return None
+
+    # Same revocation + disabled checks as get_current_user, but a failure just
+    # degrades to anonymous rather than raising.
+    if payload.get("tv", 0) != user.token_version or user.is_disabled:
+        return None
 
     return user

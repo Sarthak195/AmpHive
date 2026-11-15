@@ -1,7 +1,7 @@
 # =============================================================================
 # Publish the built (signed) gateway firmware image to the public OTA bucket.
 #
-# Uploads firmware/build/amphive-gateway.bin to gs://amphive-fw under a
+# Uploads firmware/build/amphive-gateway.bin to gs://amphive-fw-2 under a
 # versioned name (version read from PROJECT_VER in firmware/CMakeLists.txt),
 # verifies the object is fetchable anonymously over HTTPS, and prints the
 # firmware-release registration call (feat/ota-version-picker, 2026-08-02) so
@@ -15,10 +15,10 @@
 #
 # Usage:
 #   .\deploy\scripts\publish_firmware.ps1
-#   .\deploy\scripts\publish_firmware.ps1 -Bucket amphive-fw -ImagePath firmware\build\amphive-gateway.bin
+#   .\deploy\scripts\publish_firmware.ps1 -Bucket amphive-fw-2 -ImagePath firmware\build\amphive-gateway.bin
 # =============================================================================
 param(
-    [string]$Bucket = "amphive-fw",
+    [string]$Bucket = "amphive-fw-2",
     [string]$ImagePath = "firmware\build\amphive-gateway.bin"
 )
 

@@ -236,11 +236,14 @@ async def cpo_update_plug(
     if req.max_current_a is not None:
         # [Caps] 0 clears the cap back to the default hardware cutoff (NULL).
         plug.max_current_a = req.max_current_a or None
-    if req.queued_charging_enabled is not None:
-        # [Queued charge] Explicit per-plug on/off override of the tenant default.
+    if "queued_charging_enabled" in req.model_fields_set:
+        # [Queued charge] Explicit per-plug on/off override of the tenant
+        # default; an explicit JSON null clears it back to "inherit" (NULL),
+        # while an omitted key leaves it unchanged.
         plug.queued_charging_enabled = req.queued_charging_enabled
-    if req.auto_start_delay_min is not None:
-        # [Queued charge] 0 clears the override back to the tenant default (NULL).
+    if "auto_start_delay_min" in req.model_fields_set:
+        # [Queued charge] null or 0 clears the override back to the tenant
+        # default (NULL); an omitted key leaves it unchanged.
         plug.auto_start_delay_min = req.auto_start_delay_min or None
     if req.rated_power_w is not None:
         # [Discovery] 0 clears the advertised spec back to unset (NULL) —
