@@ -430,51 +430,6 @@ class MQTTTelemetryMixin:
                     )
                     return
 
-                # [H1] Feed the live-stream TelemetryStore now that ownership is
-                # proven. The store's snapshot drives the SSE stream; feeding it
-                # in the handler BEFORE this check (as it used to, synchronously)
-                # let any tenant publish a victim plug_id on its OWN topic and
-                # poison that plug's shared live snapshot for another driver.
-                # Deferred here so it only ever runs for a plug this gateway
-                # actually owns. This coroutine runs ON the event loop (scheduled
-                # via run_coroutine_threadsafe), so update() — which signals the
-                # stream's asyncio.Events — is safe to call directly, without the
-                # call_soon_threadsafe hop the no-DB handler path needs.
-                # current/voltage/status ride on the handler-built `sample`;
-                # cost_coins is auto-calc'd by the store from the session's rate.
-                if self.telemetry_store is not None and sample is not None:
-                    telem_status = (
-                        "charging" if sample.get("status") == "occupied" else "idle"
-                    )
-                    self.telemetry_store.update(
-                        plug_id=plug_id,
-                        power_w=watts,
-                        current_a=sample.get("current_a", 0.0),
-                        energy_kwh=kwh,
-                        status=telem_status,
-                        voltage_v=sample.get("voltage_v", 230.0),
-                        relay_on=relay_on,
-                    )
-
-                # [Plug power] Stamp the per-plug liveness clock. powered_since
-                # re-baselines to now whenever telemetry resumes after a gap
-                # longer than PLUG_POWER_STALE_SEC (a mains/relay power-cycle);
-                # last_telemetry_at is the freshness signal plug_is_powered()
-                # reads. Distinct from the never-written plugs.last_seen_at.
-                # Skipped for offline-resync frames (TD#24): those are buffered
-                # HISTORICAL readings, not proof the plug is live right now — a
-                # backlog of replayed frames must not make a de-powered plug
-                # look freshly powered to plug_is_powered().
-                if not is_offline:
-                    now = datetime.now(timezone.utc)
-                    prev = plug.last_telemetry_at
-                    if prev is None or (now - prev).total_seconds() > PLUG_POWER_STALE_SEC:
-                        plug.powered_since = now
-                    plug.last_telemetry_at = now
-
-                # Update plug's current power reading
-                plug.current_power_w = watts
-
                 # Raw time-series sample — enqueue now that ownership is proven.
                 if self.telemetry_persistence and sample is not None:
                     self.telemetry_persistence.enqueue(sample)
@@ -498,6 +453,31 @@ class MQTTTelemetryMixin:
                     select(ChargingSession).where(where_clause).with_for_update()
                 )
                 active_session = sess_result.scalar_one_or_none()
+
+                # [F17] The plug writes below come AFTER the session row lock
+                # above, never before it: a dirty Plug would autoflush its
+                # UPDATE plugs ahead of the SELECT ... FOR UPDATE, locking plug
+                # then session while finalize_charging_session locks session
+                # then plug (prod deadlocks 2026-10-25 and 2026-10-28).
+                #
+                # [Plug power] Stamp the per-plug liveness clock. powered_since
+                # re-baselines to now whenever telemetry resumes after a gap
+                # longer than PLUG_POWER_STALE_SEC (a mains/relay power-cycle);
+                # last_telemetry_at is the freshness signal plug_is_powered()
+                # reads. Distinct from the never-written plugs.last_seen_at.
+                # Skipped for offline-resync frames (TD#24): those are buffered
+                # HISTORICAL readings, not proof the plug is live right now: a
+                # backlog of replayed frames must not make a de-powered plug
+                # look freshly powered to plug_is_powered().
+                if not is_offline:
+                    now = datetime.now(timezone.utc)
+                    prev = plug.last_telemetry_at
+                    if prev is None or (now - prev).total_seconds() > PLUG_POWER_STALE_SEC:
+                        plug.powered_since = now
+                    plug.last_telemetry_at = now
+
+                # Update plug's current power reading
+                plug.current_power_w = watts
 
                 # [REC-05] An idle frame — no session_id AND relay off (firmware
                 # emits session_id="" + session_kwh=0 when its session_active is
@@ -625,6 +605,38 @@ class MQTTTelemetryMixin:
                             "Republished OFF for relay-on plug with no ACTIVE session",
                             extra={"gateway_id": gateway_id, "plug_id": plug_id},
                         )
+
+                # [H1] Feed the live-stream TelemetryStore now that ownership is
+                # proven. The store's snapshot drives the SSE stream; feeding it
+                # in the handler BEFORE this check (as it used to, synchronously)
+                # let any tenant publish a victim plug_id on its OWN topic and
+                # poison that plug's shared live snapshot for another driver.
+                # Deferred here so it only ever runs for a plug this gateway
+                # actually owns. This coroutine runs ON the event loop (scheduled
+                # via run_coroutine_threadsafe), so update() (which signals the
+                # stream's asyncio.Events) is safe to call directly, without the
+                # call_soon_threadsafe hop the no-DB handler path needs.
+                # current/voltage/status ride on the handler-built `sample`;
+                # cost_coins is auto-calc'd by the store from the session's rate.
+                # [C16] Fed AFTER the session block so it gets the session's
+                # monotonic billed energy (REC-01 offset included), not the raw
+                # wire counter that drops after a gateway reboot; the raw value
+                # is kept only when no session took this frame.
+                if self.telemetry_store is not None and sample is not None:
+                    telem_status = (
+                        "charging" if sample.get("status") == "occupied" else "idle"
+                    )
+                    self.telemetry_store.update(
+                        plug_id=plug_id,
+                        power_w=watts,
+                        current_a=sample.get("current_a", 0.0),
+                        energy_kwh=(
+                            updated_energy_kwh if updated_energy_kwh is not None else kwh
+                        ),
+                        status=telem_status,
+                        voltage_v=sample.get("voltage_v", 230.0),
+                        relay_on=relay_on,
+                    )
 
                 # [Unmetered consumption] Continuous cross-check: the P110's OWN
                 # today/month energy counters (get_energy_usage.today_energy/

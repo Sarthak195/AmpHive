@@ -184,8 +184,15 @@ async def finalize_charging_session(
     if not session or session.status != SessionStatus.ACTIVE:
         return None
 
-    # Load the plug
-    plug_result = await db.execute(select(Plug).where(Plug.id == session.plug_id))
+    # Load the plug, locked (user -> session -> plug, the same session-before-
+    # plug order the telemetry persist path takes) and freshly read, so the
+    # status check in step 5 sees any operator change committed mid-session.
+    plug_result = await db.execute(
+        select(Plug)
+        .where(Plug.id == session.plug_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
     plug = plug_result.scalar_one()
 
     # 1. Send MQTT OFF command (best-effort — the gateway may be gone; its
@@ -312,8 +319,19 @@ async def finalize_charging_session(
     )
     db.add(ledger_entry)
 
-    # 5. Update plug status back to available
-    plug.status = PlugStatus.AVAILABLE
+    # 5. Free the plug, but only the OCCUPIED status this session set at
+    #    start. Every PlugStatus a plug can hold here:
+    #      OCCUPIED    -> AVAILABLE (the normal case)
+    #      AVAILABLE   -> AVAILABLE (an operator already freed it)
+    #      MAINTENANCE -> kept (operator "enter" mid-session, or the
+    #                     auto-maintenance a safety cutoff sets BEFORE this
+    #                     finalize runs, see services/mqtt/alarms.py)
+    #      OFFLINE     -> kept (an operator took it out of service)
+    #    Overwriting those last two used to silently put an out-of-service
+    #    plug back into service and tell its watchers it was free.
+    if plug.status == PlugStatus.OCCUPIED:
+        plug.status = PlugStatus.AVAILABLE
+    plug_freed = plug.status == PlugStatus.AVAILABLE
 
     # [Payout watermark race] Stamp ended_at as late as possible -- right
     # before the commit that makes this session visible to a concurrent
@@ -331,23 +349,29 @@ async def finalize_charging_session(
     session.ended_at = datetime.now(timezone.utc)
     await db.commit()
 
-    # Broadcast so other clients' plug lists flip back to AVAILABLE live.
-    from backend.services.socketio_manager import emit_plug_status
-    await emit_plug_status(plug.id, PlugStatus.AVAILABLE.value)
+    # Broadcast so other clients' plug lists flip back to AVAILABLE live, then
+    # run the watcher fan-out. Only when the plug really is free: a plug kept
+    # in MAINTENANCE or OFFLINE is not "now free".
+    if plug_freed:
+        from backend.services.socketio_manager import emit_plug_status
+        await emit_plug_status(plug.id, PlugStatus.AVAILABLE.value)
 
-    # [Plug watches] "Notify me when free" fan-out — the plug just flipped
-    # back to AVAILABLE (the billing commit above already landed). Excludes
-    # the driver whose session just ended: they get their own receipt
-    # notification below and don't need to hear that their plug freed.
-    # Best-effort by contract — notify_watchers_plug_available never raises
-    # into this billing path (services/plug_watch.py).
-    from backend.services.plug_watch import notify_watchers_plug_available
-    await notify_watchers_plug_available(db, plug, exclude_user_id=session.user_id)
+        # [Plug watches] "Notify me when free" fan-out: the plug just flipped
+        # back to AVAILABLE (the billing commit above already landed). Excludes
+        # the driver whose session just ended: they get their own receipt
+        # notification below and don't need to hear that their plug freed.
+        # Best-effort by contract: notify_watchers_plug_available never raises
+        # into this billing path (services/plug_watch.py).
+        from backend.services.plug_watch import notify_watchers_plug_available
+        await notify_watchers_plug_available(db, plug, exclude_user_id=session.user_id)
 
     # [Caps] This session leaving the circuit may have freed enough current for
-    # a driver waiting on a "Request capacity" — notify any whose plug now fits
-    # (excluding the driver who just finished). Best-effort, never raises into
-    # the billing path (services/capacity.py).
+    # a driver waiting on a "Request capacity": notify any whose plug now fits
+    # (excluding the driver who just finished). Runs whatever this plug's final
+    # status is: circuit load (services/caps.py circuit_load_a) counts ACTIVE
+    # sessions, so a session ending on a MAINTENANCE / OFFLINE plug still frees
+    # current for its siblings. Best-effort, never raises into the billing path
+    # (services/capacity.py).
     from backend.services.capacity import notify_capacity_available
     await notify_capacity_available(db, plug.group_id, exclude_user_id=session.user_id)
 

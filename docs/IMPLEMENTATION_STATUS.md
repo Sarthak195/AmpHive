@@ -96,6 +96,31 @@ open; `fix/session-live-updates`, built on `fix/session-page`):
   honouring `SET_INTERVAL 1000`, so live power can lag up to about 10 s after
   the page opens when the driver was away longer than the 30 s grace.
 
+Device events (plug status, telemetry persist and live stream):
+
+- **Session end keeps an out-of-service plug out of service (C1).**
+  `finalize_charging_session` now locks and re-reads the plug and frees it
+  only from OCCUPIED. AVAILABLE stays AVAILABLE; MAINTENANCE and OFFLINE
+  (an operator change made mid-session, or auto-maintenance) persist. The
+  `plug_status` emit and the "notify me when free" fan-out run only when
+  the final status is AVAILABLE; the capacity fan-out always runs, since
+  the ended session frees circuit current either way. For
+  THERMAL_CUTOFF / OVERCURRENT_CUTOFF, auto-maintenance now runs BEFORE the
+  post-cutoff finalize, so watchers are no longer told a faulted plug is free.
+- **Telemetry persist no longer deadlocks against finalize (F17).**
+  `_persist_telemetry` wrote the plug row before its session
+  `SELECT ... FOR UPDATE`, so autoflush locked plug then session while
+  finalize locks session then plug (prod deadlocks 2026-10-25 and
+  2026-10-28). The plug writes now follow the session lock; no retry loop.
+- **Live kWh and cost follow billed energy (C16).** The TelemetryStore is
+  fed the session's monotonic billed energy (REC-01 reset offset included)
+  instead of the raw wire counter, so a gateway counter regression no
+  longer makes the live display read below the final bill.
+- **Finished sessions are not streamed (C15).** `subscribe_session` on a
+  session that is no longer ACTIVE sends one `completed` frame from the
+  session's own row and joins no room, so it cannot show the plug's next
+  driver's live figures (see [SECURITY.md](SECURITY.md) section 4).
+
 ---
 
 ## 0a. 2026-10-20 connection noise: debounced offline notices, gated orphan bells, fw 2.8.0 diagnostics

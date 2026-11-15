@@ -445,7 +445,12 @@ BFG + force-push) to purge the dead values entirely.
   backend's leftover query-string token fallback — which no client used —
   was **removed 2026-07-09** (`socketio_manager.py:connect`), so a full JWT
   can no longer appear in proxy/access logs via the URL. Session ownership
-  is still verified per subscription.
+  is still verified per subscription, and (since 2026-11-15) so is session
+  state: `subscribe_session` on a session that is no longer ACTIVE gets one
+  `completed` frame built from that session's own row and no stream. The
+  live stream is keyed by plug, so before this a driver who subscribed to
+  their own finished session saw the next driver's live power, energy and
+  cost on that plug.
 
 > RBAC across the `/api/cpo/*` surface is now enforced (`require_role`) — see
 > [§7](#7-recently-fixed).
