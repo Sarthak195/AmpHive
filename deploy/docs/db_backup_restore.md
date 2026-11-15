@@ -157,3 +157,44 @@ sudo docker exec -i amphive-db pg_restore -U postgres -d amphive_restore_test < 
 sudo docker exec amphive-db psql -U postgres -d amphive_restore_test -tAc "SELECT count(*) FROM ledger_transactions"
 sudo docker exec amphive-db dropdb -U postgres amphive_restore_test
 ```
+
+## Backup failure alerts (install on the VM)
+
+Supersedes the "still no alerting" note in "Is the backup actually running?".
+Two mails go to `ALERT_TO` (default `support@amphive.app`, override via env)
+through the host Postfix (`/usr/sbin/sendmail`):
+
+- `backup_db.sh` mails on ANY non-zero exit (EXIT trap), naming the failing
+  step and the last 20 log lines. It does not catch "the cron never ran".
+- `check_backup_fresh.sh` (daily cron) mails if `backups/LAST_SUCCESS` is
+  missing or older than 26 h. This is the net for a dead cron, a down VM or a
+  removed script.
+
+Install (as the normal user, never sudo). The installed `backup_db.sh` also
+backs up the mail store, so diff and merge; do NOT overwrite it:
+
+```sh
+# 1. Copy the repo versions to the VM and strip CRLF.
+scp deploy/scripts/backup_db.sh deploy/scripts/check_backup_fresh.sh amphive-relay:/tmp/
+ssh amphive-relay 'sed -i "s/\r$//" /tmp/backup_db.sh /tmp/check_backup_fresh.sh'
+
+# 2. FIRST diff the live script against the repo copy and merge by hand.
+#    Keep the live mail-store/dovecot tar lines; add the repo's alert block
+#    (ALERT_TO/SENDMAIL/STEP/alert_on_exit + trap, the STEP="..." lines, and
+#    the BASE override). Set STEP before the mail-store step too.
+diff ~/amphive-relay/backup_db.sh /tmp/backup_db.sh
+# After merging: bash -n ~/amphive-relay/backup_db.sh
+
+# 3. Install the freshness check (new file, nothing to merge).
+install -m 755 /tmp/check_backup_fresh.sh ~/amphive-relay/check_backup_fresh.sh
+
+# 4. Cron, normal user (crontab -e). Backup runs 21:00 UTC; check 4 h later.
+#    0 21 * * * ~/amphive-relay/backup_db.sh
+#    0 1  * * * ~/amphive-relay/check_backup_fresh.sh
+```
+
+Verify without waiting for a failure: `ALERT_TO=you@example.com
+MAX_AGE_HOURS=0 ~/amphive-relay/check_backup_fresh.sh` should mail you (exit
+1). Confirm Postfix delivered it: `sudo tail /var/log/mail.log`. The repo test
+`bash deploy/scripts/test_backup_alerts.sh` exercises both scripts locally with
+a stub sendmail (no VM, docker or GCS).

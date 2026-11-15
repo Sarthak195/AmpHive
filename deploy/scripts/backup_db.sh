@@ -35,13 +35,37 @@
 # =============================================================================
 set -uo pipefail
 
-BASE=/home/Sarthak/amphive-relay
+BASE="${BASE:-/home/Sarthak/amphive-relay}"   # env override is for test_backup_alerts.sh
 # The original gs://amphive-db-backups went away with the old GCP project in
 # the 2026-09-04 account move; the live script uploads to the -2 bucket.
 DEST=gs://amphive-db-backups-2
 LOCAL="$BASE/backups"
 LOG="$BASE/backup.log"
 TS=$(date -u +%Y%m%d-%H%M%S)
+
+# Failure alert (2026-11-15): any non-zero exit mails the operator through the
+# host Postfix, naming the step that was running plus the tail of the log, so a
+# broken backup no longer waits for someone to look. SENDMAIL is overridable
+# for tests. A mail failure never changes the exit code. check_backup_fresh.sh
+# (daily cron) is the second net for "the cron itself did not run".
+ALERT_TO="${ALERT_TO:-support@amphive.app}"
+SENDMAIL="${SENDMAIL:-/usr/sbin/sendmail}"
+STEP="startup guard"
+alert_on_exit() {
+    local rc=$?
+    [ "$rc" -eq 0 ] && return 0
+    {
+        echo "To: $ALERT_TO"
+        echo "Subject: [AmpHive] BACKUP FAILED (exit $rc) at step: $STEP"
+        echo
+        echo "backup_db.sh on $(hostname) exited $rc during step: $STEP"
+        echo "Exit codes: 1 no DB container/pg_dump | 2 upload failed | 3 guard | 4 marker not updated"
+        echo
+        echo "Last lines of $LOG:"
+        tail -n 20 "$LOG" 2>/dev/null || echo "(log unreadable)"
+    } | "$SENDMAIL" -t >/dev/null 2>&1 || true
+}
+trap alert_on_exit EXIT
 
 # Guard (2026-10-20 incident): a manual `sudo ./backup_db.sh` on 2026-09-04
 # left backup.log and backups/ owned by root. Every nightly cron run (as the
@@ -75,6 +99,7 @@ if [ -e "$LOCAL/LAST_SUCCESS" ] && [ ! -w "$LOCAL/LAST_SUCCESS" ]; then
 fi
 
 # 1) Logical dump out of the running container.
+STEP="1 find DB container / pg_dump"
 #
 # The container name is RESOLVED, not hardcoded. It used to be a literal
 # `amphive-relay-db-1` — the compose-project-default name, which is what the
@@ -107,6 +132,7 @@ else
 fi
 
 # 2) Ops-config tarball (config/ holds root/1883-owned mosquitto files).
+STEP="2 config tarball"
 if sudo tar -czf "$LOCAL/config-$TS.tar.gz" -C "$BASE" .env Caddyfile docker-compose.relay.yml config 2>>"$LOG"; then
     sudo chown "$(id -u):$(id -g)" "$LOCAL/config-$TS.tar.gz"
     log "config tarball OK"
@@ -115,6 +141,7 @@ else
 fi
 
 # 3) Upload both, organized by year/month.
+STEP="3 upload to $DEST"
 UPLOAD_OK=1
 for f in "$LOCAL/amphive-$TS.dump" "$LOCAL/config-$TS.tar.gz"; do
     [ -f "$f" ] || continue
@@ -132,13 +159,14 @@ ls -1t "$LOCAL"/config-*.tar.gz 2>/dev/null | tail -n +4 | xargs -r rm -f
 
 if [ "$UPLOAD_OK" = 1 ]; then
     log "backup complete"
+    STEP="5 update LAST_SUCCESS marker"
     # 5) Freshness marker. The cron only writes to backup.log, so a silently
     # failing backup is invisible until the day someone needs a restore. This
     # file's MTIME is the last KNOWN-GOOD upload, so a stale backup is one
     # `ls -l` away instead of a log archaeology exercise:
     #   ls -l ~/amphive-relay/backups/LAST_SUCCESS
-    # (Still not alerting - see docs/SECURITY.md. A cron that fails silently
-    # is a backup you do not have.)
+    # (Failures mail ALERT_TO via the EXIT trap above; a cron that never ran
+    # at all is caught by check_backup_fresh.sh.)
     # Written to a temp file and RENAMED into place: a plain
     # `date > LAST_SUCCESS` fails on a root-owned marker, a rename does not.
     if ! { date -u +%Y-%m-%dT%H:%M:%SZ > "$LOCAL/LAST_SUCCESS.tmp" \
