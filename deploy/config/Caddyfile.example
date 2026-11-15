@@ -1,7 +1,7 @@
 # AmpHive TLS reverse proxy (Caddy) — REFERENCE ONLY.
 #
 # You normally never copy this file anywhere. deploy/scripts/deploy.ps1 does
-# NOT generate or touch the Caddyfile — that was true of an earlier two-VM-era
+# NOT generate or touch the Caddyfile, that was true of an earlier two-VM-era
 # architecture, but the 2026-08-02 relay rewrite deliberately dropped it (see
 # docs/DEPLOYMENT.md's "Deploy script" section: the Caddyfile is one of the
 # things deploy.ps1 explicitly does NOT ship). The only generator today is
@@ -9,7 +9,7 @@
 # CADDY_DOMAIN / CADDY_CPO_DOMAIN / ACME_EMAIL in .env on a fresh relay's
 # FIRST deploy only; after that the live Caddyfile is operator-managed by hand
 # on the VM (deploy-relay.sh will not overwrite an existing one). This example
-# mirrors what that generator produces — if you change a header here, change
+# mirrors what that generator produces, if you change a header here, change
 # it in deploy-relay.sh too (and in frontend/nginx.conf, which carries the
 # same set for the non-Caddy paths). The only intentional structural
 # difference is the (amphive_headers) snippet below: it is a readability
@@ -31,17 +31,17 @@
 # Global options. trusted_proxies (M3; updated 2026-09-28 for the Cloudflare
 # front door): amphive.app and cpo.amphive.app now sit behind Cloudflare's
 # free HTTP proxy (mqtt.amphive.app and mail.amphive.app stay DNS-only / grey
-# cloud — MQTT 8883 and SMTP/IMAP can't traverse the CF HTTP proxy), so
+# cloud, MQTT 8883 and SMTP/IMAP can't traverse the CF HTTP proxy), so
 # Caddy's TCP peer is a Cloudflare edge IP, not the visitor, and the private
 # compose-network ranges this block used to list no longer apply. The ranges
 # below are Cloudflare's published edge IPs (refresh occasionally from
-# https://www.cloudflare.com/ips-v4 and /ips-v6 — they change rarely).
+# https://www.cloudflare.com/ips-v4 and /ips-v6, they change rarely).
 # Combined with `client_ip_headers CF-Connecting-IP`, Caddy trusts the
 # CF-Connecting-IP header ONLY when the request arrives from one of these
 # ranges, and writes the upstream X-Forwarded-For as that single vouched
-# client IP — any XFF the visitor tried to spoof is discarded. From an
+# client IP, any XFF the visitor tried to spoof is discarded. From an
 # untrusted peer (e.g. someone hitting the origin IP directly, bypassing
-# Cloudflare — deliberately still possible; the GCP firewall was NOT locked to
+# Cloudflare, deliberately still possible; the GCP firewall was NOT locked to
 # these ranges because mail.amphive.app's Let's Encrypt HTTP-01 renewal needs
 # :80 reachable directly) CF-Connecting-IP is ignored and XFF falls back to
 # the real peer IP, so a direct hit can't spoof identity either. Either way
@@ -96,7 +96,7 @@ amphive.app {
 	# X-Forwarded-For to the single {client_ip} the trusted_proxies block above
 	# resolved (Cloudflare's vouched CF-Connecting-IP when behind Cloudflare,
 	# the real peer otherwise) instead of Caddy's default of appending to
-	# whatever XFF the client sent — so frontend-nginx's own append still lands
+	# whatever XFF the client sent, so frontend-nginx's own append still lands
 	# the backend's TRUSTED_PROXY_HOPS=2 exactly where rate_limit.py expects it.
 	reverse_proxy frontend:80 {
 		header_up X-Forwarded-For {client_ip}

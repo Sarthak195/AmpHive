@@ -120,7 +120,7 @@ class SlidingWindowRateLimiter:
 
 
 # Production request path (since 2026-09-28) is: client → Cloudflare edge →
-# Caddy → frontend-nginx → backend, for amphive.app / cpo.amphive.app — the
+# Caddy → frontend-nginx → backend, for amphive.app / cpo.amphive.app, the
 # only two hostnames Cloudflare proxies. (mqtt.amphive.app and
 # mail.amphive.app are DNS-only / grey-cloud: MQTT 8883 and SMTP/IMAP can't
 # traverse the CF HTTP proxy, and neither goes through this HTTP stack at
@@ -131,11 +131,11 @@ class SlidingWindowRateLimiter:
 # actually came through Cloudflare, Caddy trusts CF-Connecting-IP and writes
 # the upstream X-Forwarded-For as that ONE vouched client IP (discarding
 # anything the visitor tried to prepend); from a direct hit on the origin
-# (bypassing Cloudflare — deliberately still reachable, since
+# (bypassing Cloudflare, deliberately still reachable, since
 # mail.amphive.app's Let's Encrypt HTTP-01 renewal needs :80 open directly)
 # Caddy ignores CF-Connecting-IP and falls back to the real peer IP. Either
 # way, Caddy still APPENDS exactly one X-Forwarded-For entry, same as before
-# Cloudflare, and frontend-nginx appends the other (Caddy) — so the real
+# Cloudflare, and frontend-nginx appends the other (Caddy), so the real
 # client still sits a fixed 2 hops from the RIGHT of the chain.
 _DEFAULT_TRUSTED_PROXY_HOPS = 2
 
@@ -178,7 +178,7 @@ def client_ip(request: Request) -> str:
     trustworthy and we fall back to the real peer address, then to "unknown".
 
     amphive.app / cpo.amphive.app sit behind Cloudflare's proxy as of
-    2026-09-28 (mqtt.amphive.app / mail.amphive.app do not — see
+    2026-09-28 (mqtt.amphive.app / mail.amphive.app do not, see
     ``_DEFAULT_TRUSTED_PROXY_HOPS`` above). That does not change the hop count
     here: Caddy is configured to trust only Cloudflare's edge ranges for the
     ``CF-Connecting-IP`` header and to write X-Forwarded-For as that single

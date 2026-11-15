@@ -277,16 +277,16 @@ if [ ! -f "$WORKDIR/Caddyfile" ]; then
     echo "    servers {"
     echo "        # M3 (updated 2026-09-28 for the Cloudflare front door): amphive.app"
     echo "        # and cpo.amphive.app sit behind Cloudflare's free HTTP proxy now"
-    echo "        # (mqtt.amphive.app and mail.amphive.app stay DNS-only / grey cloud —"
+    echo "        # (mqtt.amphive.app and mail.amphive.app stay DNS-only / grey cloud:"
     echo "        # MQTT 8883 and SMTP/IMAP can't traverse the CF HTTP proxy), so"
     echo "        # Caddy's peer is a Cloudflare edge IP, not the visitor. These are"
     echo "        # Cloudflare's published edge ranges (refresh occasionally from"
-    echo "        # https://www.cloudflare.com/ips-v4 and /ips-v6 — they change rarely)."
+    echo "        # https://www.cloudflare.com/ips-v4 and /ips-v6, they change rarely)."
     echo "        # Combined with client_ip_headers below, Caddy trusts CF-Connecting-IP"
     echo "        # ONLY from these ranges and writes the upstream X-Forwarded-For as"
-    echo "        # that single vouched client IP — a spoofed XFF from the visitor is"
+    echo "        # that single vouched client IP, a spoofed XFF from the visitor is"
     echo "        # discarded. From an untrusted peer (a direct hit on the origin IP,"
-    echo "        # bypassing Cloudflare — deliberately still possible; the firewall"
+    echo "        # bypassing Cloudflare, deliberately still possible; the firewall"
     echo "        # was NOT locked to these ranges because mail.amphive.app's Let's"
     echo "        # Encrypt HTTP-01 renewal needs :80 reachable directly)"
     echo "        # CF-Connecting-IP is ignored and XFF falls back to the real peer IP."
@@ -318,7 +318,7 @@ if [ ! -f "$WORKDIR/Caddyfile" ]; then
       # the trusted_proxies block above resolved (Cloudflare's vouched
       # CF-Connecting-IP when behind Cloudflare, the real peer otherwise)
       # instead of Caddy's default of appending to whatever XFF the client
-      # sent — so frontend-nginx's own append still lands the backend's
+      # sent, so frontend-nginx's own append still lands the backend's
       # TRUSTED_PROXY_HOPS=2 exactly where rate_limit.py expects it.
       echo "    reverse_proxy frontend:80 {"
       echo "        header_up X-Forwarded-For {client_ip}"
