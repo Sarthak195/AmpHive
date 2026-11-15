@@ -400,3 +400,11 @@ CLAUDE.md's non-negotiable to keep `docs/` (not scattered copies) current.
 | DNS | `amphive.app`/`cpo.amphive.app`/`mqtt.amphive.app` → `8.231.81.12` | same names → `136.117.94.209` |
 | MQTT cert | CA + SANs incl. `8.231.81.12` | same CA, SANs now also include `136.117.94.209` |
 | Traffic ceiling | headroom for real growth | **hard 1 GB RAM ceiling — demo/low-traffic/portfolio use only**, not a scale target |
+
+## Addendum 2026-11-15: db `stop_grace_period`
+
+`deploy/relay/docker-compose.relay.yml` now sets `stop_grace_period: 60s` on
+the `db` service so `docker stop` / recreate does not SIGKILL Postgres
+mid-checkpoint. The live compose on the VM is VM-managed (deploy.ps1 does not
+ship it): add the same line to `~/amphive-relay/docker-compose.relay.yml` by hand,
+then `docker compose up -d db`.
