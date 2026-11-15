@@ -35,7 +35,11 @@ from backend.schemas import (
 from backend.services.auth import (
     get_current_user,
 )
-from backend.services.pricing import resolve_price_display, resolve_price_display_batch
+from backend.services.pricing import (
+    resolve_price_display,
+    resolve_price_display_batch,
+    zone_name,
+)
 from backend.services.rate_limit import public_map_rate_limiter, rate_limit_dependency
 from backend.services.session_lifecycle import (
     gateway_is_live,
@@ -263,6 +267,11 @@ async def get_available_plugs(
                     gw_online and not powered
                     and queued_charging_enabled(tenant, plug)
                 ),
+                schedule_available=(
+                    gw_online and powered and plug.status == PlugStatus.AVAILABLE
+                    and queued_charging_enabled(tenant, plug)
+                ),
+                tenant_timezone=zone_name(tenant.timezone),
                 price_per_kwh=float(rate),
                 price_next_per_kwh=float(next_rate) if next_rate is not None else None,
                 price_changes_at=changes_at.isoformat() if changes_at is not None else None,
@@ -444,6 +453,11 @@ async def get_plug(
             gw_online and not powered and tenant is not None
             and queued_charging_enabled(tenant, plug)
         ),
+        schedule_available=(
+            gw_online and powered and plug.status == PlugStatus.AVAILABLE
+            and tenant is not None and queued_charging_enabled(tenant, plug)
+        ),
+        tenant_timezone=zone_name(tenant.timezone) if tenant is not None else None,
         price_per_kwh=float(rate),
         price_next_per_kwh=float(next_rate) if next_rate is not None else None,
         price_changes_at=changes_at.isoformat() if changes_at is not None else None,

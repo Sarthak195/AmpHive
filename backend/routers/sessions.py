@@ -672,7 +672,7 @@ async def get_session_history(
 # reap_queued_starts_once. See docs/proposals/queued-charge-offline-plug.md.)
 # ===========================================================================
 
-def _queued_charge_response(qc) -> dict:
+def _queued_charge_response(qc, tz_name: Optional[str] = None) -> dict:
     """The 201 body for a WAITING queued charge (POST /queue) — the exact shape
     a frontend agent depends on."""
     return {
@@ -683,7 +683,81 @@ def _queued_charge_response(qc) -> dict:
         "expires_at": qc.expires_at.isoformat() if qc.expires_at else None,
         "max_kwh": qc.max_kwh,
         "max_duration_seconds": qc.max_duration_seconds,
+        # [Scheduled start] NULL for an outage queue; the zone to render it in.
+        "not_before": qc.not_before.isoformat() if qc.not_before else None,
+        "tenant_timezone": tz_name,
     }
+
+
+def _conflict(code: str, message: str, status_code: int = 409) -> HTTPException:
+    return HTTPException(status_code=status_code, detail={"code": code, "message": message})
+
+
+async def _check_schedule(db: AsyncSession, req: QueueChargeRequest, user: User, plug: Plug) -> datetime:
+    """[Scheduled start] Admission for POST /queue with not_before, on a plug
+    row the caller holds FOR UPDATE (so two schedules on one socket serialize).
+    Returns not_before as an aware UTC instant, or raises a structured reject."""
+    from backend.database.models import (
+        QueuedCharge,
+        QueuedChargeStatus,
+        Reservation,
+        ReservationStatus,
+    )
+    from backend.services.reservations import RESERVATION_WALKUP_WARN_LOOKAHEAD_MIN
+    from backend.services.session_start import SCHEDULE_MAX_AHEAD_HOURS
+
+    assert req.not_before is not None
+    # The mirror of the outage path's plug_powered: a schedule needs the car
+    # connected to a live, idle socket now.
+    if not plug_is_powered(plug):
+        raise _conflict(
+            "plug_unpowered",
+            "This charger has no power right now. Queue the charge instead and it starts when power returns.",
+        )
+    if plug.status == PlugStatus.OCCUPIED:
+        raise _conflict("plug_in_use", "This plug is currently in use.")
+    if plug.status != PlugStatus.AVAILABLE:
+        raise _conflict("plug_out_of_service", f"This plug is out of service ({plug.status.value}).")
+    # Nobody stands at the plug when it switches on, so an unbounded session on
+    # an absent car would keep the socket live (and the whole wallet held).
+    if req.max_kwh is None and req.max_duration_seconds is None:
+        raise _conflict(
+            "schedule_needs_limit",
+            "Set a time or energy limit for a scheduled charge.",
+            status_code=422,
+        )
+    now = datetime.now(timezone.utc)
+    nb = req.not_before.astimezone(timezone.utc)
+    if not (now < nb <= now + timedelta(hours=SCHEDULE_MAX_AHEAD_HOURS)):
+        raise _conflict(
+            "schedule_out_of_range", "Pick a start time within the next 24 hours.", status_code=400
+        )
+    # Another driver's booking that overlaps [nb, nb + expected run] would
+    # force-stop this session when its window opens (or block it outright).
+    run_min = (req.max_duration_seconds / 60) if req.max_duration_seconds else RESERVATION_WALKUP_WARN_LOOKAHEAD_MIN
+    reserved = (await db.execute(
+        select(Reservation.id).where(and_(
+            Reservation.plug_id == plug.id,
+            Reservation.status == ReservationStatus.BOOKED,
+            Reservation.user_id != user.id,
+            Reservation.start_at < nb + timedelta(minutes=run_min),
+            Reservation.end_at > nb,
+        )).limit(1)
+    )).scalar_one_or_none()
+    if reserved is not None:
+        raise _conflict("plug_reserved", "This charger is reserved by another driver around that time.")
+    # Another driver already holds this socket (scheduled or outage queue).
+    # Race-safe: every scheduled create takes the plug lock first.
+    other = (await db.execute(
+        select(QueuedCharge.id).where(and_(
+            QueuedCharge.plug_id == plug.id,
+            QueuedCharge.status == QueuedChargeStatus.WAITING,
+            QueuedCharge.user_id != user.id,
+        )).limit(1)
+    )).scalar_one_or_none()
+    if other is not None:
+        raise _conflict("plug_scheduled", "Another driver's charge is already queued on this plug.")
+    return nb
 
 
 @router.post("/api/sessions/queue", status_code=201)
@@ -709,9 +783,19 @@ async def queue_charge(
     this (driver, plug) (`already_queued`, also a DB partial-unique backstop).
     """
     from backend.database.models import QueuedCharge, QueuedChargeStatus
-    from backend.services.session_start import queue_ttl, queued_charging_enabled
+    from backend.services import pricing
+    from backend.services.session_start import (
+        queue_ttl,
+        queued_charging_enabled,
+        schedule_ttl,
+    )
 
-    result = await db.execute(select(Plug).where(Plug.id == req.plug_id))
+    # [Scheduled start] A schedule locks the plug row so two drivers can't both
+    # claim one socket (see _check_schedule). The outage path stays lock-free.
+    plug_stmt = select(Plug).where(Plug.id == req.plug_id)
+    if req.not_before is not None:
+        plug_stmt = plug_stmt.with_for_update()
+    result = await db.execute(plug_stmt)
     plug = result.scalar_one_or_none()
     if not plug:
         raise HTTPException(status_code=404, detail=f"Plug {req.plug_id} not found.")
@@ -754,8 +838,12 @@ async def queue_charge(
                 "message": "This charger's gateway is offline — nothing can start it later. Try again once it reconnects.",
             },
         )
+    # [Scheduled start] not_before set = start at that time on a POWERED plug.
+    nb: Optional[datetime] = None
+    if req.not_before is not None:
+        nb = await _check_schedule(db, req, user, plug)
     # The whole point is an UNpowered plug. A powered one should just be started.
-    if plug_is_powered(plug):
+    elif plug_is_powered(plug):
         raise HTTPException(
             status_code=409,
             detail={
@@ -826,6 +914,18 @@ async def queue_charge(
                 "message": "You've already queued a charge on this plug.",
             },
         )
+    # [Scheduled start] Early refusal: another driver's car is scheduled on this
+    # socket, so an outage queue here would energize (and bill) the wrong car
+    # when power returns. The sweep re-checks this under the plug lock.
+    if nb is None and (await db.execute(
+        select(QueuedCharge.id).where(and_(
+            QueuedCharge.plug_id == plug.id,
+            QueuedCharge.status == QueuedChargeStatus.WAITING,
+            QueuedCharge.user_id != user.id,
+            QueuedCharge.not_before.is_not(None),
+        )).limit(1)
+    )).scalar_one_or_none() is not None:
+        raise _conflict("plug_scheduled", "Another driver's charge is scheduled on this plug.")
 
     now = datetime.now(timezone.utc)
     qc = QueuedCharge(
@@ -835,7 +935,11 @@ async def queue_charge(
         max_kwh=req.max_kwh,
         max_duration_seconds=req.max_duration_seconds,
         status=QueuedChargeStatus.WAITING,
-        expires_at=now + timedelta(minutes=queue_ttl(tenant, plug)),
+        not_before=nb,
+        expires_at=(
+            nb + timedelta(minutes=schedule_ttl(tenant, plug)) if nb is not None
+            else now + timedelta(minutes=queue_ttl(tenant, plug))
+        ),
     )
     db.add(qc)
     try:
@@ -862,6 +966,18 @@ async def queue_charge(
 
     # Notify the driver their charge is queued (best-effort — never raises).
     from backend.services.notifications import notify
+    tz_name = pricing.zone_name(tenant.timezone)
+    if nb is not None:
+        hhmm = pricing._to_local(nb, pricing._zone(tenant.timezone)).strftime("%H:%M")
+        await notify(
+            user.id,
+            "queued",
+            "Charge scheduled",
+            f"{plug.name} will start charging at {hhmm} ({tz_name}). Keep your car plugged in.",
+            severity="info",
+            plug_id=plug.id,
+        )
+        return _queued_charge_response(qc, tz_name)
     await notify(
         user.id,
         "queued",
@@ -874,7 +990,7 @@ async def queue_charge(
         plug_id=plug.id,
     )
 
-    return _queued_charge_response(qc)
+    return _queued_charge_response(qc, tz_name)
 
 
 @router.get("/api/sessions/queued")
@@ -886,9 +1002,12 @@ async def get_queued_charges(
     first), with the plug name and the expiry the UI counts down to."""
     from backend.database.models import QueuedCharge, QueuedChargeStatus
 
+    from backend.services.pricing import zone_name
+
     result = await db.execute(
-        select(QueuedCharge, Plug.name)
+        select(QueuedCharge, Plug.name, Tenant.timezone)
         .join(Plug, Plug.id == QueuedCharge.plug_id)
+        .join(Tenant, Tenant.id == QueuedCharge.tenant_id)
         .where(
             and_(
                 QueuedCharge.user_id == user.id,
@@ -907,8 +1026,10 @@ async def get_queued_charges(
             "expires_at": qc.expires_at.isoformat() if qc.expires_at else None,
             "max_kwh": qc.max_kwh,
             "max_duration_seconds": qc.max_duration_seconds,
+            "not_before": qc.not_before.isoformat() if qc.not_before else None,
+            "tenant_timezone": zone_name(tz),
         }
-        for qc, plug_name in result.all()
+        for qc, plug_name, tz in result.all()
     ]
 
 

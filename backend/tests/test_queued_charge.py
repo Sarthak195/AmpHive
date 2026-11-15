@@ -43,6 +43,7 @@ def _tenant(enabled=False, delay=2, ttl=720):
     t.queued_charging_enabled = enabled
     t.auto_start_delay_min = delay
     t.queue_ttl_min = ttl
+    t.timezone = "Asia/Kolkata"
     return t
 
 
@@ -126,8 +127,8 @@ def _db(*results):
     return db
 
 
-def _req(plug_id=1):
-    return QueueChargeRequest(plug_id=plug_id)
+def _req(plug_id=1, **kw):
+    return QueueChargeRequest(plug_id=plug_id, **kw)
 
 
 # --------------------------------------------------------------------------
@@ -227,6 +228,7 @@ async def test_queue_success_creates_waiting_row():
         _one((Decimal("100"), Decimal("0"))),
         _s1(0),                                 # under the cap
         _s1n(None),                             # no existing WAITING row
+        _s1n(None),                             # no other driver's schedule
     )
     with patch("backend.services.notifications.notify", AsyncMock()) as notify:
         resp = await queue_charge(_req(), _user(), db)
@@ -260,7 +262,8 @@ async def test_list_queued_returns_waiting_rows():
     qc.max_kwh = 30.0
     qc.max_duration_seconds = 14400
     rows = MagicMock()
-    rows.all.return_value = [(qc, "Bay 1")]
+    qc.not_before = None
+    rows.all.return_value = [(qc, "Bay 1", "Asia/Kolkata")]
     db = _db(rows)
 
     out = await get_queued_charges(_user(), db)
@@ -343,7 +346,8 @@ def _reservation(user_id):
     return r
 
 
-def _qc(status=QueuedChargeStatus.WAITING, expires_in_min=60, plug_id=1, user_id=5):
+def _qc(status=QueuedChargeStatus.WAITING, expires_in_min=60, plug_id=1, user_id=5,
+        not_before=None):
     qc = MagicMock()
     qc.id = 1
     qc.status = status
@@ -353,6 +357,7 @@ def _qc(status=QueuedChargeStatus.WAITING, expires_in_min=60, plug_id=1, user_id
     qc.max_kwh = 30.0
     qc.max_duration_seconds = 14400
     qc.expires_at = datetime.now(timezone.utc) + timedelta(minutes=expires_in_min)
+    qc.not_before = not_before   # None = outage queue (a MagicMock attr would be truthy)
     return qc
 
 
@@ -682,3 +687,166 @@ async def test_orphan_off_no_orphans_skips_cpo_lookup_and_notify():
     mgr.send_plug_command.assert_not_called()
     notify_mock.assert_not_awaited()
     MQTTManager._instance = None
+
+
+# --------------------------------------------------------------------------
+# [Scheduled start] POST /api/sessions/queue with not_before (powered plug)
+# --------------------------------------------------------------------------
+
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _soon(hours=2):
+    return datetime.now(timezone.utc) + timedelta(hours=hours)
+
+
+def _sched_req(**kw):
+    kw.setdefault("not_before", _soon())
+    kw.setdefault("max_duration_seconds", 3600)
+    return _req(**kw)
+
+
+def _sched_prefix(plug=None, tenant=None):
+    """plug (locked), gateway, tenant: the shared head of the endpoint."""
+    return (
+        _s1n(plug if plug is not None else _plug(powered=True)),
+        _s1(_gateway()),
+        _s1(tenant if tenant is not None else _tenant(enabled=True, ttl=720)),
+    )
+
+
+def test_schedule_request_rejects_naive_not_before():
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError):
+        QueueChargeRequest(plug_id=1, not_before=datetime(2026, 11, 15, 22, 0))
+    ok = QueueChargeRequest(plug_id=1, not_before="2026-11-15T22:00:00+05:30")
+    assert ok.not_before.utcoffset() == timedelta(hours=5, minutes=30)
+
+
+@pytest.mark.asyncio
+async def test_schedule_rejects_unpowered_plug():
+    db = _db(*_sched_prefix(plug=_plug(powered=False)))
+    with pytest.raises(HTTPException) as exc:
+        await queue_charge(_sched_req(), _user(), db)
+    assert exc.value.status_code == 409
+    assert exc.value.detail["code"] == "plug_unpowered"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status,code", [
+    (PlugStatus.OCCUPIED, "plug_in_use"),
+    (PlugStatus.MAINTENANCE, "plug_out_of_service"),
+])
+async def test_schedule_rejects_busy_or_out_of_service_plug(status, code):
+    db = _db(*_sched_prefix(plug=_plug(powered=True, status=status)))
+    with pytest.raises(HTTPException) as exc:
+        await queue_charge(_sched_req(), _user(), db)
+    assert exc.value.detail["code"] == code
+
+
+@pytest.mark.asyncio
+async def test_schedule_requires_a_limit():
+    """Nobody is at the plug when a schedule fires: an unlimited session on an
+    absent car would keep the socket live and the whole wallet held."""
+    db = _db(*_sched_prefix())
+    with pytest.raises(HTTPException) as exc:
+        await queue_charge(_req(not_before=_soon()), _user(), db)
+    assert exc.value.status_code == 422
+    assert exc.value.detail["code"] == "schedule_needs_limit"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("offset", [timedelta(minutes=-1), timedelta(hours=24, minutes=1)])
+async def test_schedule_rejects_out_of_range_time(offset):
+    db = _db(*_sched_prefix())
+    with pytest.raises(HTTPException) as exc:
+        await queue_charge(
+            _sched_req(not_before=datetime.now(timezone.utc) + offset), _user(), db
+        )
+    assert exc.value.status_code == 400
+    assert exc.value.detail["code"] == "schedule_out_of_range"
+
+
+@pytest.mark.asyncio
+async def test_schedule_rejects_other_drivers_overlapping_booking():
+    db = _db(*_sched_prefix(), _s1n(11))         # a BOOKED window overlaps
+    with pytest.raises(HTTPException) as exc:
+        await queue_charge(_sched_req(), _user(), db)
+    assert exc.value.detail["code"] == "plug_reserved"
+
+
+@pytest.mark.asyncio
+async def test_schedule_rejects_when_another_driver_holds_the_socket():
+    db = _db(*_sched_prefix(), _s1n(None), _s1n(12))   # other user's WAITING row
+    with pytest.raises(HTTPException) as exc:
+        await queue_charge(_sched_req(), _user(), db)
+    assert exc.value.detail["code"] == "plug_scheduled"
+
+
+@pytest.mark.asyncio
+async def test_schedule_success_persists_not_before_and_grace_expiry():
+    now = datetime.now(timezone.utc)
+    nb = now.replace(hour=16, minute=30, second=0, microsecond=0)
+    if nb <= now + timedelta(minutes=1):
+        nb += timedelta(days=1)                   # next 16:30Z = 22:00 IST
+    db = _db(
+        *_sched_prefix(),
+        _s1n(None),                               # no overlapping booking
+        _s1n(None),                               # no other driver's row
+        _one((Decimal("100"), Decimal("0"))),     # available balance
+        _s1(0),                                   # under the cap
+        _s1n(None),                               # no own WAITING row
+    )
+    # The venv has no IANA database, so pin the tenant zone to +05:30.
+    with patch("backend.services.pricing._zone", lambda _tz: IST), \
+         patch("backend.services.pricing.zone_name", lambda _tz: "Asia/Kolkata"), \
+         patch("backend.services.notifications.notify", AsyncMock()) as notify:
+        resp = await queue_charge(_sched_req(not_before=nb), _user(), db)
+
+    queued = db.add.call_args.args[0]
+    assert queued.not_before == nb
+    # min(queue_ttl 720, SCHEDULE_START_GRACE_MIN 30): a late start is bounded.
+    assert queued.expires_at == nb + timedelta(minutes=30)
+    assert queued.max_duration_seconds == 3600
+    assert resp["tenant_timezone"] == "Asia/Kolkata"
+    body = notify.await_args.args[3]
+    assert "22:00" in body and "Asia/Kolkata" in body
+
+
+@pytest.mark.asyncio
+async def test_outage_queue_refused_when_another_driver_scheduled_the_socket():
+    db = _db(
+        _s1n(_plug()),
+        _s1(_gateway()),
+        _s1(_tenant(enabled=True)),
+        _one((Decimal("100"), Decimal("0"))),
+        _s1(0),
+        _s1n(None),                               # no own WAITING row
+        _s1n(12),                                 # another driver's schedule
+    )
+    with pytest.raises(HTTPException) as exc:
+        await queue_charge(_req(), _user(), db)
+    assert exc.value.detail["code"] == "plug_scheduled"
+    db.add.assert_not_called()
+
+
+def _has_tz_db():
+    try:
+        from zoneinfo import ZoneInfo
+        ZoneInfo("Europe/London")
+        return True
+    except Exception:
+        return False
+
+
+@pytest.mark.skipif(not _has_tz_db(), reason="no IANA tz database on this host")
+def test_zone_name_resolves_like_billing():
+    from backend.services.pricing import zone_name
+    assert zone_name("Europe/London") == "Europe/London"
+    assert zone_name("Bad/Zone") == "Asia/Kolkata"      # billing's fallback
+
+
+def test_zone_name_last_resort_is_utc():
+    from backend.services.pricing import zone_name
+    with patch("backend.services.pricing._zone", lambda _tz: timezone.utc):
+        assert zone_name("Asia/Kolkata") == "UTC"

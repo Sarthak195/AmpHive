@@ -178,6 +178,18 @@ class QueueChargeRequest(BaseModel):
     plug_id: int
     max_duration_seconds: Optional[int] = Field(default=None, gt=0, le=86400)
     max_kwh: Optional[float] = Field(default=None, gt=0, le=100.0)
+    # [Scheduled start] Set = "start at this instant" on a POWERED plug instead
+    # of the outage queue. Must carry a UTC offset: a naive value would be read
+    # as UTC (the C12 bug class), so the client converts the tenant wall-clock
+    # to an instant and the server never guesses a zone.
+    not_before: Optional[datetime] = None
+
+    @field_validator("not_before")
+    @classmethod
+    def _aware_not_before(cls, v):
+        if v is not None and v.tzinfo is None:
+            raise ValueError("not_before must include a UTC offset")
+        return v
 
 
 class SessionLimitsUpdateRequest(BaseModel):
@@ -254,6 +266,12 @@ class PlugResponse(BaseModel):
     # Home card shows a "Queue charge" CTA instead of the "notify me when free"
     # bell when true. Populated on GET /api/plugs/available and /api/plugs/{id}.
     queue_available: bool = False
+    # [Scheduled start] The driver may schedule a start here now: gateway online
+    # AND plug powered AND AVAILABLE AND queued charging enabled (same flag).
+    schedule_available: bool = False
+    # IANA zone the plug's tariff and schedule times are expressed in
+    # (services/pricing.py zone_name(tenant.timezone)).
+    tenant_timezone: Optional[str] = None
     # The resolved coins-per-kWh rate this plug would bill a session at right
     # now (services/pricing.py resolve_rate_for_plug: plug tariff -> group
     # tariff -> tenant default -> the global COINS_PER_KWH env fallback).

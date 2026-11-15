@@ -87,6 +87,12 @@ def _zone(tz_name) -> "timezone | ZoneInfo":
     return timezone.utc
 
 
+def zone_name(tz_name) -> str:
+    """The IANA name _zone actually resolves to (same fallbacks), for clients
+    that must render tenant wall-clock. 'UTC' on the last-resort path."""
+    return getattr(_zone(tz_name), "key", "UTC")
+
+
 def _to_local(dt: datetime, tz) -> datetime:
     """Project ``dt`` into zone ``tz``. A naive ``dt`` is read as UTC — the
     same convention finalize/gateway_is_live use for legacy tz-less rows."""
