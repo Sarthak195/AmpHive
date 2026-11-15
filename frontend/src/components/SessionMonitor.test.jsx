@@ -9,6 +9,7 @@ import { render, screen, fireEvent, act, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 
 import SessionMonitor from './SessionMonitor';
+import { toastBus } from './ui';
 import { useSession } from '../contexts/SessionContext';
 import { useWallet } from '../contexts/WalletContext';
 import api from '../api/client';
@@ -435,5 +436,72 @@ describe('SessionMonitor — limit editor', () => {
 
     expect(screen.getByText(/elapsed time/i)).toBeInTheDocument();
     expect(updateLimits).not.toHaveBeenCalled();
+  });
+});
+
+describe('SessionMonitor: page open while the gateway is at its 10 s idle cadence', () => {
+  it('shows the REST numbers at once with an "Updating" hint before the first frame, not a paused banner', async () => {
+    useSession.mockReturnValue(
+      baseSession({
+        sessionData: { plug_id: 2, plug_name: 'Garage plug', status: 'charging', energy_kwh: 1.2, cost_coins: 7 },
+        lastFrameAt: null,
+        watchSince: Date.now(),
+      })
+    );
+    await renderMonitor();
+    expect(screen.getByText('₹7.00')).toBeInTheDocument();
+    expect(screen.getByText('1.20 kWh')).toBeInTheDocument();
+    expect(screen.getByText('Updating…')).toBeInTheDocument();
+    expect(screen.queryByText(/Live readings paused/)).not.toBeInTheDocument();
+    expect(screen.queryByText('0 W')).not.toBeInTheDocument();
+  });
+
+  it('treats a stale or old first cached frame as updating while the gateway wakes', async () => {
+    useSession.mockReturnValue(
+      baseSession({
+        sessionData: { ...baseData, is_stale: true, age_sec: 40 },
+        watchSince: Date.now() - 2000,
+      })
+    );
+    await renderMonitor();
+    expect(screen.getByText('₹1.25')).toBeInTheDocument();
+    expect(screen.getByText('Updating…')).toBeInTheDocument();
+    expect(screen.queryByText('Reconnecting…')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Live readings paused/)).not.toBeInTheDocument();
+  });
+
+  it('shows "Charging" once a fresh frame arrives', async () => {
+    useSession.mockReturnValue(
+      baseSession({
+        sessionData: { ...baseData, is_stale: false, age_sec: 0.4 },
+        watchSince: Date.now() - 3000,
+        lastFrameAt: Date.now(),
+      })
+    );
+    await renderMonitor();
+    expect(screen.getByText('Charging')).toBeInTheDocument();
+  });
+
+  it('falls back to the paused banner once the wake-up window passes with no frame', async () => {
+    useSession.mockReturnValue(
+      baseSession({ lastFrameAt: null, watchSince: Date.now() - 20000 })
+    );
+    await renderMonitor();
+    expect(screen.getByText('Reconnecting…')).toBeInTheDocument();
+    expect(screen.getByText(/Live readings paused/)).toBeInTheDocument();
+  });
+
+  it('puts the stopped session bill in the toast (a sibling may take focus, with no receipt)', async () => {
+    const okSpy = vi.spyOn(toastBus, 'ok');
+    const stopSession = vi.fn().mockResolvedValue({ coins_spent: 4.5, energy_kwh: 0.9 });
+    useSession.mockReturnValue(baseSession({ stopSession }));
+    await renderMonitor();
+    fireEvent.click(screen.getByRole('button', { name: 'Stop charging' }));
+    const dialog = screen.getByRole('dialog', { name: 'Stop charging?' });
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Stop charging' }));
+    });
+    expect(okSpy).toHaveBeenCalledWith(expect.stringMatching(/Billed 0\.90 kWh, ₹4\.50/));
+    okSpy.mockRestore();
   });
 });
