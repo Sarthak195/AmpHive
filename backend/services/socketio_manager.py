@@ -7,13 +7,13 @@ import socketio
 from sqlalchemy import and_, select
 
 from backend.database.db import async_session_factory
-from backend.database.models import ChargingSession, User
+from backend.database.models import ChargingSession, SessionStatus, User
 from backend.services.auth import decode_access_token
 from backend.services.rate_limit import (
     client_ip_from_forwarded,
     socketio_connect_rate_limiter,
 )
-from backend.services.telemetry import TelemetryStore
+from backend.services.telemetry import TelemetrySnapshot, TelemetryStore
 
 logger = logging.getLogger("amphive.socketio")
 
@@ -291,6 +291,19 @@ async def subscribe_session(sid, data):
             return
 
         plug_id = charging_session.plug_id
+
+        # [C15] A finished session gets one terminal frame built from its OWN
+        # row and no stream: the store is keyed by plug, so streaming it would
+        # show whoever charges on that plug now (and pin it to the 1 s rate).
+        if charging_session.status != SessionStatus.ACTIVE:
+            done = TelemetrySnapshot(
+                plug_id=plug_id,
+                energy_kwh=charging_session.energy_kwh or 0.0,
+                cost_coins=float(charging_session.coins_spent or 0),
+                status="completed",
+            )
+            await sio.emit("telemetry", done.to_dict(), to=sid)
+            return
 
     # Enter room for this session
     room_name = f"session_{session_id}"
