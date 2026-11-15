@@ -139,6 +139,41 @@ auto-start.
 | GET | `/api/sessions/queued` | JWT | — | The caller's WAITING queued charges, soonest-created first, with `plug_name` → `[{id, plug_id, plug_name, status, created_at, expires_at, max_kwh, max_duration_seconds}]` |
 | DELETE | `/api/sessions/queue/{queued_charge_id}` | JWT | path `queued_charge_id:int` | Cancel a WAITING queued charge (owner only, row-locked + re-checked WAITING so a cancel racing the reaper's auto-start settles once — 409 if the reaper already started/expired it). 404 if missing/foreign. → `{status:"cancelled"}` |
 
+**Scheduled (off-peak) start** (2026-11-15, branch `feat/offpeak-start`, migration
+`0039_queued_not_before`, provisional numbering). The same `POST /api/sessions/queue`
+takes `not_before`: an ISO 8601 instant **with a UTC offset** (a naive value is a
+422), more than now and at most 24 h ahead. It targets a plug that is **powered**,
+on a live gateway, and AVAILABLE; the outage path (no `not_before`) is unchanged.
+The client converts the tenant's wall-clock to an instant; the server never guesses
+a zone.
+
+- Extra rejects (structured `detail.code`): 409 `plug_unpowered` (queue it instead),
+  409 `plug_in_use`, 409 `plug_out_of_service`, 422 `schedule_needs_limit` (a
+  schedule must carry `max_kwh` or `max_duration_seconds`: nobody is at the plug
+  when it switches on), 400 `schedule_out_of_range`, 409 `plug_reserved` (another
+  driver's booking overlaps `[not_before, not_before + max_duration]`, or the walk-up
+  lookahead when only `max_kwh` is set), 409 `plug_scheduled` (another driver
+  already has a WAITING queued charge on this plug). Then the shared
+  `queue_disabled`, `insufficient_balance`, `queue_limit`, `already_queued`. The
+  outage path also refuses `plug_scheduled` when another driver's schedule holds the
+  plug.
+- `expires_at = not_before + min(queue_ttl_min, SCHEDULE_START_GRACE_MIN)` (env,
+  default 30). Set the env at or above `queue_ttl_min` to get `not_before + queue TTL`.
+- Responses of `POST /queue` and `GET /queued` gain `not_before` (null for an
+  outage queue) and `tenant_timezone` (the IANA zone the tariff resolves in,
+  `services/pricing.py zone_name`, the same fallback billing uses).
+- `POST /api/sessions/start` returns 409 `{code: "plug_scheduled"}` when another
+  driver has a WAITING scheduled row on the plug. The owner's own start goes ahead
+  and cancels their schedule once the start succeeded.
+- `PlugResponse` (`GET /api/plugs/available`, `GET /api/plugs/{id}`) gains
+  `schedule_available` (gateway live, plug powered and AVAILABLE, queued charging
+  enabled) and `tenant_timezone`.
+- The sweep starts it at `not_before` when the plug has been powered continuously
+  for `auto_start_delay_min` (the debounce runs from `powered_since`, not from
+  `not_before`), with the usual balance floor, caps and hold sizing. Notifications
+  reuse `queued`, `queued_charge_started` (with the actual time and rate when it
+  started more than 5 min late), `queued_charge_failed` and `queued_charge_expired`.
+
 ### Socket.io Events Reference
 - **Connection**: Pass JWT token via connection auth dict: `{ token: "<JWT_TOKEN>" }` or in connection query string: `?token=<JWT_TOKEN>`.
 - **Subscribe Session**:

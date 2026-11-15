@@ -7,7 +7,45 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 
 ---
 
-## 0. Latest — 2026-10-20 connection noise: debounced offline notices, gated orphan bells, fw 2.8.0 diagnostics
+## 0. Latest: 2026-11-15 scheduled (off-peak) start (branch `feat/offpeak-start`, not merged)
+
+The driver plugs in now and picks a start time; the backend energizes the plug
+then. Built on the queued-charge machinery (`QueuedCharge.not_before`, migration
+`0039_queued_not_before`, PROVISIONAL numbering: PR #127 takes 0039/0040). API in
+[API_REFERENCE.md](API_REFERENCE.md#queued-charges-servicessession_reaperpy-queue-a-charge-during-an-outage),
+design record in
+[proposals/queued-charge-offline-plug.md](proposals/queued-charge-offline-plug.md#scheduled-off-peak-start).
+
+- Start modal: "Start: Now | At a time" on a schedulable plug, time entered and
+  shown in the tenant zone; a time or energy limit is required (8h preselected).
+- Sweep: not due -> WAITING; due -> the existing debounce, caps, balance floor and
+  hold; someone else on the socket or a covering booking -> FAILED; flag turned
+  off -> FAILED. Every auto-start (outage rows too) now replays the gateway
+  liveness gate, and STARTED is written in the same commit as the session claim.
+- Start route: 409 `plug_scheduled` for other drivers; the owner's start cancels
+  their own schedule after it succeeds. The reconnect orphan-OFF is never held for
+  a scheduled row.
+- **Deviation from the settled decision "expires_at = not_before + queue TTL":** a
+  scheduled row expires `min(queue_ttl_min, SCHEDULE_START_GRACE_MIN = 30)` after
+  `not_before`, so a dark plug or a late gateway does not start an unattended peak
+  charge hours later. Set `SCHEDULE_START_GRACE_MIN` >= `queue_ttl_min` to revert.
+- Not built: "start at the next cheaper rate" (the setup modal only gets the next
+  price boundary later today, not the tariff's slot list).
+
+Known limits (one-user project, so multi-driver items are documented, not fixed):
+24 h max lookahead; a schedule blocks other drivers' manual starts on that plug
+and other drivers see the plug AVAILABLE until they get the 409; bookings made
+after the schedule are not refused (the schedule FAILs at due time); a Wi-Fi blip
+right before `not_before` re-baselines `powered_since` and delays the start by the
+debounce; a fault (MAINTENANCE) is only reported at due time; the relay is not
+verified OFF while waiting (a Tapo-app press charges unbilled until reconcile, as
+for any idle plug); no zero-draw auto-stop, so a car that never draws runs to its
+limit; outage rows still do not re-check the queued-charging flag at auto-start;
+tenant time depends on the prod image shipping tzdata (unverified).
+
+---
+
+## 0.00001: 2026-10-20 connection noise: debounced offline notices, gated orphan bells, fw 2.8.0 diagnostics
 
 A 45-day forensic pass over the prod logs (one user, who is driver, operator
 and admin at once) found that most of the bells were noise, and why:

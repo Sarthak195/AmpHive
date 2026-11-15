@@ -400,3 +400,69 @@ Do **not** run the stack/DB locally — exercise via the GCP VM per AGENTS.md /
   `MAX_ACTIVE_SESSIONS_PER_USER`).
 - On caps contention at auto-start: fail-fast + notify (chosen) vs. retry-until-TTL.
 - Whether to surface queued charges to the CPO console (proposed: yes, read-only, later).
+
+---
+
+## Scheduled (off-peak) start
+
+Added 2026-11-15 (branch `feat/offpeak-start`, migration `0039_queued_not_before`,
+provisional numbering). The driver plugs in now and picks a start time; the backend
+energizes the plug at that time. It is a `QueuedCharge` with `not_before` set,
+created through the same `POST /api/sessions/queue`, governed by the same
+`queued_charging_enabled` flag, and started by the same sweep through
+`begin_active_session` (balance floor, caps, hold sized at start, rate resolved at
+the actual start instant).
+
+**Create** (plug row locked, so two schedules on one socket serialize): gateway
+live, plug powered and AVAILABLE, a time or energy limit present (B1 of the
+review: nobody stands at the plug when it switches on, and an unlimited session
+holds the whole wallet), `now < not_before <= now + 24 h`, no other driver's
+booking overlapping the expected run, no other driver's WAITING row on the plug.
+`expires_at = not_before + min(queue_ttl_min, SCHEDULE_START_GRACE_MIN)`.
+
+**Gate order in the sweep:** TTL expiry, then the `not_before` gate (a pure
+attribute check, no user lock), then the existing user lock, cap, plug lock and
+power debounce. The debounce runs from `powered_since`, so a plug that never lost
+power starts at `not_before` (sweep granularity 60 s), and power that returned one
+minute before `not_before` with a two-minute debounce starts one minute after it.
+A telemetry gap over 90 s (a Wi-Fi blip) re-baselines `powered_since` the same way.
+
+**Scheduled rows never wait for the socket:** OCCUPIED by the owner's own session
+means they started now, so the row is CANCELLED; OCCUPIED by anyone else, or a
+covering booking by another driver, FAILs the row with a notification (a later
+start might energize a car that is not the payer's). The flag is re-checked at
+auto-start for scheduled rows. Every auto-start replays the gateway-liveness gate.
+
+**Contention:** another driver's manual start on the plug gets 409
+`plug_scheduled`; the owner's start supersedes their schedule, cancelled only
+after the start succeeded. An outage queue on a plug another driver has scheduled
+is refused at create and, race-free under the plug lock, held WAITING by the sweep.
+
+**Cancel vs start race (review B2):** `begin_active_session` commits on the sweep's
+session, which releases the qc row lock before the ON is published. The sweep now
+sets STARTED before calling it, so that commit writes the claim and STARTED
+together and a cancel in the window gets the existing 409. Failures overwrite it
+with EXPIRED/FAILED as before.
+
+**Orphan-OFF:** the reconnect hold above only considers outage rows
+(`not_before IS NULL`). An OFF to an idle scheduled plug cannot fight the sweep's
+later ON, and a stale plug whose relay restored ON would otherwise charge at peak
+with nothing billing it. The same unbilled-during-debounce hazard still applies to
+the outage-row hold (pre-existing; the "Required change" note above that says the
+OFF is still correct during the debounce is not what the code does).
+
+**Deviation from the settled decision (TTL from `not_before`):** the expiry is
+capped at 30 min after `not_before` by default, because with the 720 min queue TTL
+a gateway that reconnects at 09:30 would start a 22:00 schedule at the peak rate,
+unattended, possibly into a car that is no longer there. `SCHEDULE_START_GRACE_MIN`
+>= `queue_ttl_min` restores "not_before + queue TTL". A start that is still more
+than 5 min late tells the driver the actual time and rate.
+
+**Known limits:** 24 h lookahead; a schedule blocks other drivers' manual starts
+for up to 24 h plus grace with no funds held, and they see the plug AVAILABLE until
+the 409; `POST /api/reservations` does not know about schedules; a fault is only
+reported at due time; the relay is not verified OFF while waiting; no zero-draw
+auto-stop (the mandatory limit bounds it); with two schedules the first start's
+hold can 402 the second (smaller with the mandatory limit); outage rows do not
+re-check the flag at auto-start; "start at the next cheaper rate" is not built
+(the setup modal only receives the next price boundary later today).
