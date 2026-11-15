@@ -1334,8 +1334,8 @@ async def test_persist_telemetry_foreign_plug_does_not_feed_live_store():
 async def test_persist_telemetry_owned_plug_feeds_live_store():
     """[H1] For the gateway's OWN plug the live TelemetryStore IS fed — the
     store feed rides behind the same ownership check as the DB persist, using
-    the current/voltage/status carried on the handler-built `sample`. The raw
-    frame kwh (live display value) is what the store shows."""
+    the current/voltage/status carried on the handler-built `sample`. The store
+    shows the session's billed energy, here equal to the frame kwh (no reset)."""
     MQTTManager._instance = None
     active = MagicMock()
     active.id = 10
@@ -1465,6 +1465,80 @@ async def test_persist_telemetry_counter_reset_banks_offset_and_stays_monotonic(
     assert active.energy_reset_offset_kwh == pytest.approx(4.7)
     assert active.energy_counter_last_raw_kwh == 0.1
     assert active.energy_kwh == 5.0  # offset(4.7) + raw(0.1) = 4.8 < stored 5.0
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_persist_telemetry_live_store_gets_billed_energy_after_counter_reset():
+    """[C16] After a counter regression (raw 1.8 -> 0.0) the live store shows
+    the session's monotonic billed energy (1.8), not the raw 0.0 the wire
+    carried, so the live display and the auto-stop checks agree."""
+    MQTTManager._instance = None
+    active = MagicMock()
+    active.id = 10
+    active.user_id = 1
+    active.energy_kwh = 1.8
+    active.peak_power_w = 0.0
+    active.energy_counter_last_raw_kwh = 1.8
+    active.energy_reset_offset_kwh = 0.0
+    session = _FakeSession([
+        _FakeResult(scalar=_owned_plug()),
+        _FakeResult(scalar=active),
+    ])
+    store = MagicMock()
+    mgr = MQTTManager(db_session_factory=lambda: session, telemetry_store=store)
+    mgr._maybe_auto_stop_on_exhaustion = AsyncMock()
+    mgr._maybe_auto_stop_on_limits = AsyncMock()
+
+    sample = {"plug_id": 5, "current_a": 5.0, "voltage_v": 230.0, "status": "occupied"}
+    with patch("backend.services.pricing.reprice_session_if_due",
+               AsyncMock(return_value=None)):
+        await mgr._persist_telemetry("gw-1", 5, 1100.0, 0.0,
+                                     session_id=10, sample=sample, relay_on=True)
+
+    assert active.energy_kwh == pytest.approx(1.8)
+    assert store.update.call_args.kwargs["energy_kwh"] == pytest.approx(1.8)
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_persist_telemetry_locks_session_before_writing_plug():
+    """[F17] No Plug attribute may be dirty when the ChargingSession
+    SELECT ... FOR UPDATE runs: autoflush would emit UPDATE plugs first and
+    lock plug-then-session, the inverse of finalize's session-then-plug order
+    (the prod deadlocks of 2026-10-25 and 2026-10-28)."""
+    MQTTManager._instance = None
+    plug = _owned_plug()
+    plug.current_power_w = 0.0
+    active = MagicMock()
+    active.id = 10
+    active.user_id = 1
+    active.energy_kwh = 0.4
+    active.peak_power_w = 0.0
+    active.energy_counter_last_raw_kwh = None
+    active.energy_reset_offset_kwh = 0.0
+    seen = {}
+
+    class _OrderSession(_FakeSession):
+        async def execute(self, stmt, *_a, **_k):
+            if "charging_sessions" in str(stmt) and "FOR UPDATE" in str(stmt):
+                seen["power_at_lock"] = plug.current_power_w
+                seen["last_telemetry_at_lock"] = plug.last_telemetry_at
+            return next(self._results)
+
+    session = _OrderSession([_FakeResult(scalar=plug), _FakeResult(scalar=active)])
+    mgr = MQTTManager(db_session_factory=lambda: session)
+    mgr._maybe_auto_stop_on_exhaustion = AsyncMock()
+    mgr._maybe_auto_stop_on_limits = AsyncMock()
+
+    with patch("backend.services.pricing.reprice_session_if_due",
+               AsyncMock(return_value=None)):
+        await mgr._persist_telemetry("gw-1", 5, 1200.0, 0.45,
+                                     session_id=10, sample=None, relay_on=True)
+
+    assert seen == {"power_at_lock": 0.0, "last_telemetry_at_lock": None}
+    assert plug.current_power_w == 1200.0  # still written, just after the lock
+    assert session.committed is True
     MQTTManager._instance = None
 
 
