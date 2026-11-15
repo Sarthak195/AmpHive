@@ -96,7 +96,7 @@ describe('session restore on mount', () => {
   it('clears the stored token when restore fails (expired/invalid JWT)', async () => {
     localStorage.setItem('amphive_token', 'expired-jwt');
     localStorage.setItem('amphive_user', '{"email":"stale"}');
-    api.get.mockRejectedValue(new Error('Authentication expired'));
+    api.get.mockRejectedValue(Object.assign(new Error('Authentication expired'), { status: 401 }));
 
     renderProbe();
 
@@ -104,6 +104,31 @@ describe('session restore on mount', () => {
     await waitFor(() => {
       expect(localStorage.getItem('amphive_token')).toBeNull();
       expect(localStorage.getItem('amphive_user')).toBeNull();
+    });
+  });
+
+  it('keeps the token and the cached user when /me times out at boot', async () => {
+    localStorage.setItem('amphive_token', 'good-jwt');
+    localStorage.setItem('amphive_user', '{"email":"driver@amphive.test"}');
+    api.get.mockRejectedValue(Object.assign(new Error('timed out'), { code: 'timeout' }));
+
+    renderProbe();
+
+    await waitFor(() => expect(screen.getByTestId('loading')).toHaveTextContent('false'));
+    expect(screen.getByTestId('user')).toHaveTextContent('driver@amphive.test');
+    expect(localStorage.getItem('amphive_token')).toBe('good-jwt');
+  });
+
+  it('stores the renewed token from /me and keeps it out of the user object', async () => {
+    localStorage.setItem('amphive_token', 'old-jwt');
+    api.get.mockResolvedValueOnce({ email: 'driver@amphive.test', role: 'driver', token: 'renewed-jwt' });
+
+    renderProbe();
+
+    await waitFor(() => expect(localStorage.getItem('amphive_token')).toBe('renewed-jwt'));
+    expect(JSON.parse(localStorage.getItem('amphive_user'))).toEqual({
+      email: 'driver@amphive.test',
+      role: 'driver',
     });
   });
 });
