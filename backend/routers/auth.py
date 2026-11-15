@@ -94,7 +94,7 @@ router = APIRouter()
 #
 # Until the address is verified the account's password is PROVISIONAL:
 # registering again with the same unverified email replaces it (register), and
-# the first Google sign-in to an unverified account drops it (google_callback).
+# the first Google sign-in that links any password account drops it (google_callback).
 # Residual (docs/SECURITY.md): whoever re-registers LAST and gets the owner to
 # click the newest link still sets the password, until the owner resets it.
 
@@ -918,10 +918,8 @@ async def google_callback(request: Request, db: AsyncSession = Depends(get_db)):
         # Google has cryptographically verified (email_verified, above) that
         # the person signing in owns this email RIGHT NOW.
         #
-        # If the account is still UNVERIFIED, its password is provisional: it
-        # was set by whoever registered the address, who never proved they
-        # own it, while Google just proved the person signing in does. So we
-        # TAKE OVER the credential:
+        # So we TAKE OVER the credential, whatever the account's
+        # email_verified state:
         #
         #   * Invalidate the stored password. users.hashed_password is NOT
         #     NULL, so we can't null it: overwrite it with a fresh random
@@ -929,22 +927,19 @@ async def google_callback(request: Request, db: AsyncSession = Depends(get_db)):
         #     Google-only signups above and services.auth._DUMMY_PASSWORD_HASH).
         #     verify_password can never match it, so /api/auth/login refuses
         #     the old password forever after.
+        #   * Bump token_version to revoke every JWT/session minted before the
+        #     link (get_current_user and the socket layer both gate on tv).
         #   * Flip auth_provider to 'google': Google is now the only working
         #     sign-in method, so the field stays consistent.
-        #   * Mark the email verified.
+        #   * Mark the email verified (a no-op for an already verified account).
         #
-        # That evicts an attacker who pre-registered the owner's (unverified)
-        # email with their OWN password. The owner can still set a password
-        # later via forgot/reset-password (which writes a fresh hash by email
-        # and never checks the old one).
-        #
-        # A VERIFIED account keeps its password (its owner proved the inbox
-        # when they set it) and its auth_provider: linking adds Google as a
-        # second sign-in method (see the google_sub comment in models.py).
-        #
-        # Either way token_version is bumped, revoking every JWT/session
-        # minted before the link (get_current_user and the socket layer both
-        # gate on tv).
+        # That evicts an attacker who pre-registered the owner's email with
+        # their OWN password. It applies to VERIFIED accounts too: a
+        # squatter's password can survive the owner's email verification (see
+        # the residual in docs/SECURITY.md 8.6), so verification alone does not
+        # prove the password's author is the owner. The owner can still set a
+        # password later via forgot/reset-password (which writes a fresh hash
+        # by email and never checks the old one).
         #
         # ORM-level mutations (not a DB-side UPDATE) mirror the google_sub
         # write this branch already did, so the whole link lands in the
@@ -952,13 +947,11 @@ async def google_callback(request: Request, db: AsyncSession = Depends(get_db)):
         # path; even if two concurrent links collapsed the tv bump to +1
         # instead of +2, the pre-existing epoch is still invalidated (the
         # security goal holds).
-        took_over = not user.email_verified
         user.google_sub = google_sub
+        user.hashed_password = hash_password(secrets.token_urlsafe(32))
         user.token_version = user.token_version + 1
-        if took_over:
-            user.hashed_password = hash_password(secrets.token_urlsafe(32))
-            user.auth_provider = "google"
-            user.email_verified = True
+        user.auth_provider = "google"
+        user.email_verified = True
         try:
             await db.commit()
         except IntegrityError:
@@ -972,8 +965,9 @@ async def google_callback(request: Request, db: AsyncSession = Depends(get_db)):
             )
         await db.refresh(user)
         logger.info(
-            "Linked Google identity to existing account (prior sessions revoked)",
-            extra={"user_id": user.id, "email": user.email, "password_dropped": took_over},
+            "Linked Google identity to existing account "
+            "(pre-existing password credential taken over, prior sessions revoked)",
+            extra={"user_id": user.id, "email": user.email},
         )
     elif user.google_sub != google_sub:
         # This email is already linked to a DIFFERENT Google account than

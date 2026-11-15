@@ -106,8 +106,7 @@ def _user(
     email_verified=False,
 ):
     # email_verified defaults False: the link take-over tests below model a
-    # squatter's unverified row (a bare MagicMock attr would be truthy and
-    # land on the verified keep-the-password path instead).
+    # squatter's unverified row (a bare MagicMock attr would be truthy).
     u = MagicMock()
     u.email_verified = email_verified
     u.id = user_id
@@ -428,17 +427,19 @@ async def test_callback_new_account_duplicate_race_maps_to_400(monkeypatch):
 # --------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_callback_link_keeps_a_verified_accounts_password(monkeypatch):
-    """A VERIFIED account's owner proved the inbox when they set the password,
-    so linking Google adds a second sign-in method: the password still works
-    and auth_provider stays 'password' (close-account still asks for it)."""
+async def test_callback_link_evicts_a_verified_accounts_password_too(monkeypatch):
+    """A VERIFIED account is taken over exactly like an unverified one: a
+    squatter's password can survive the owner's email verification, so the
+    first Google link must still drop it, bump the epoch and flip
+    auth_provider to 'google'."""
     _set_google_env(monkeypatch)
     _mock_token_exchange(monkeypatch)
     _mock_verify_claims(monkeypatch, _claims(email="driver@amphive.test", sub="google-sub-2"))
     existing = _user(
         email="driver@amphive.test",
         google_sub=None,
-        hashed_password=hash_password("owners-own-pw"),
+        token_version=0,
+        hashed_password=hash_password("squatter-pw-survived-verification"),
         email_verified=True,
     )
     req = _FakeRequest(cookies={"google_oauth_state": "abc"}, query_params={"state": "abc", "code": "x"})
@@ -447,8 +448,9 @@ async def test_callback_link_keeps_a_verified_accounts_password(monkeypatch):
 
     assert "#code=" in resp.headers["location"]
     assert existing.google_sub == "google-sub-2"
-    assert verify_password("owners-own-pw", existing.hashed_password)
-    assert existing.auth_provider == "password"
+    assert not verify_password("squatter-pw-survived-verification", existing.hashed_password)
+    assert existing.token_version == 1
+    assert existing.auth_provider == "google"
     assert existing.email_verified is True
 
 

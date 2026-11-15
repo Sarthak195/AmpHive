@@ -735,11 +735,11 @@ guardrail below was honored — recorded here so the invariants are auditable:
   password and full name, voids earlier links and sends a new one (under the
   per-email `RESEND_VERIFICATION_EMAIL_RATE_LIMIT` cap, since it mails an
   existing address unauthenticated); a verified email still gets the 400. The
-  first Google sign-in that links an unverified account drops its password
-  (unusable hash, `auth_provider='google'`), because Google proved ownership
-  and the password's author did not. A VERIFIED account keeps its password
-  when Google is linked (Google becomes a second sign-in method). Both link
-  paths still bump `token_version`.
+  first Google sign-in that links an existing password account drops its
+  password (unusable hash, `auth_provider='google'`, `token_version` bumped)
+  whether or not it is verified, because Google proved ownership and the
+  password's author may not be the owner; an unverified account is also
+  marked verified.
   **Residual (accepted):** whoever re-registers LAST and gets the owner to
   click the newest link still sets the password. A squatter who re-registers
   after the owner, then gets the owner to click (the owner's own resend or
@@ -751,9 +751,9 @@ guardrail below was honored — recorded here so the invariants are auditable:
   bucket, a squatter who fills it also makes the owner's own signup and
   resend return 429 until the window passes, while the squatter's password
   and newest link stay live; the cap is kept because dropping it would
-  reopen the mail-bomb path resend-verification closes. Before verification a Google sign-in evicts the squatter;
-  after it, only forgot-password does (a Google link to a verified account
-  keeps the password). Tests: `backend/tests/test_email_verification.py`,
+  reopen the mail-bomb path resend-verification closes. Either forgot-password
+  or the owner's first Google sign-in evicts the squatter, before or after
+  verification. Tests: `backend/tests/test_email_verification.py`,
   `backend/tests/test_google_oauth.py`.
 
 ### 8.7 Claim-code onboarding attack surface (2026-08-02, feat/easy-provisioning) — considered, mitigated
