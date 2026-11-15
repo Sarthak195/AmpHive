@@ -18,6 +18,7 @@ different agent owns test_rate_limiting.py).
 import asyncio
 import inspect
 import os
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -152,6 +153,44 @@ def test_firmware_upload_cap_is_still_a_ceiling(monkeypatch):
 
     assert resp.status_code == 413
     assert "max 100 bytes" in resp.json()["detail"]
+
+
+def _photo_path_app():
+    app = FastAPI()
+    app.middleware("http")(main.max_body_size_middleware)
+
+    @app.post("/api/plugs/{plug_id}/photos")
+    def upload(plug_id: int):
+        return {"ok": True}
+
+    return app
+
+
+def test_plug_photo_upload_gets_its_own_cap(monkeypatch):
+    """C3: a phone photo over the 1 MiB global cap reaches the photo endpoint
+    (which re-checks its own 8 MiB limit) instead of a middleware 413."""
+    monkeypatch.setattr(main, "MAX_REQUEST_BODY_BYTES", 10)
+    monkeypatch.setattr(main, "PLUG_PHOTO_UPLOAD_MAX_BYTES", 100)
+    client = TestClient(_photo_path_app())
+
+    assert client.post("/api/plugs/3/photos", content=b"x" * 50).status_code == 200
+    resp = client.post("/api/plugs/3/photos", content=b"x" * 101)
+    assert resp.status_code == 413
+    assert "max 100 bytes" in resp.json()["detail"]
+
+
+def test_default_photo_cap_matches_the_endpoint():
+    from backend.routers.plugs import _PHOTO_MAX_BYTES
+    assert main.PLUG_PHOTO_UPLOAD_MAX_BYTES == _PHOTO_MAX_BYTES
+
+
+def test_nginx_photo_location_is_nested_in_the_api_block():
+    """A top-level regex location never runs: `location ^~ /api/` stops nginx
+    from evaluating regexes. The carve-out must sit inside that block."""
+    conf = (Path(__file__).resolve().parents[2] / "frontend" / "nginx.conf").read_text(encoding="utf-8")
+    api_block = conf.split("location ^~ /api/ {", 1)[1].split("\n    }", 1)[0]
+    assert "location ~ ^/api/plugs/\d+/photos$" in api_block
+    assert "client_max_body_size 9m;" in api_block
 
 
 def test_other_paths_keep_the_global_cap(monkeypatch):
