@@ -71,6 +71,10 @@ FORCE_STOP_WALKUP_ON_RESERVATION = os.getenv(
 # walk-up route would have blocked.
 MAX_ACTIVE_SESSIONS_PER_USER = int(os.getenv("MAX_ACTIVE_SESSIONS_PER_USER", "2"))
 
+# [Scheduled start] A scheduled auto-start this long past its chosen time tells
+# the driver the actual start time and rate (it may have missed the cheap slot).
+SCHEDULE_LATE_NOTICE = timedelta(minutes=5)
+
 # [Ops] Retention for the forwarded firmware log-line diagnostics feed
 # (GatewayLog, services/mqtt/logs.py) — much shorter than telemetry/event
 # retention since these are high-volume, low-value-per-row lines. Pruned
@@ -550,12 +554,14 @@ class SessionReaperService:
             Tenant,
             User,
         )
+        from backend.services import pricing
         from backend.services.notifications import notify
         from backend.services.reservations import expire_lapsed_reservations
-        from backend.services.session_lifecycle import plug_is_powered
+        from backend.services.session_lifecycle import gateway_is_live, plug_is_powered
         from backend.services.session_start import (
             auto_start_delay,
             begin_active_session,
+            queued_charging_enabled,
         )
 
         now = datetime.now(timezone.utc)
@@ -586,6 +592,12 @@ class SessionReaperService:
                     if qc is None:
                         continue  # cancelled/started by a racer since the scan
 
+                    # [Scheduled start] not_before set = a scheduled row (see
+                    # 1b); None = the outage queue. Read before any commit.
+                    not_before = qc.not_before
+                    if not_before is not None and not_before.tzinfo is None:
+                        not_before = not_before.replace(tzinfo=timezone.utc)
+
                     # 1. TTL expiry — power never returned in time.
                     expires_at = qc.expires_at
                     if expires_at.tzinfo is None:
@@ -595,12 +607,33 @@ class SessionReaperService:
                         plug_id = qc.plug_id
                         user_id = qc.user_id
                         await db.commit()
+                        if not_before is not None:
+                            # Any cause (no power, gateway, cap, booking): the
+                            # start window passed, so say that, not "power".
+                            await notify(
+                                user_id, "queued_charge_expired",
+                                "Scheduled charge expired",
+                                "Your scheduled charge couldn't start in time, so it was cancelled.",
+                                severity="warning", plug_id=plug_id,
+                            )
+                            continue
                         await notify(
                             user_id, "queued_charge_expired",
                             "Queued charge expired",
                             "Power didn't return in time — your queued charge expired.",
                             severity="warning", plug_id=plug_id,
                         )
+                        continue
+
+                    # 1b. [Scheduled start] Not due yet: leave WAITING. A pure
+                    #     attribute check (no user lock), so a schedule hours
+                    #     away costs one row lock per tick. Gating here, ahead
+                    #     of the step 4 debounce, gives "start at not_before if
+                    #     powered continuously for auto_start_delay": the
+                    #     debounce is measured from powered_since, never
+                    #     restarted at not_before.
+                    if not_before is not None and now < not_before:
+                        await db.commit()
                         continue
 
                     # 2. [Cap] Lock the user row BEFORE the plug row — the same
@@ -673,6 +706,20 @@ class SessionReaperService:
                     if (now - powered_since) < delay:
                         await db.commit()  # mid-debounce — leave WAITING
                         continue
+                    if not_before is not None and not queued_charging_enabled(tenant, plug):
+                        # [Scheduled start] The CPO turned queued charging off
+                        # after this was scheduled: never start unattended.
+                        qc.status = QueuedChargeStatus.FAILED
+                        user_id = qc.user_id
+                        plug_name = plug.name
+                        await db.commit()
+                        await notify(
+                            user_id, "queued_charge_failed",
+                            "Scheduled charge couldn't start",
+                            f"Scheduled charging is no longer enabled on {plug_name}.",
+                            severity="warning", plug_id=plug.id,
+                        )
+                        continue
 
                     # 5. Plug must actually be startable. OCCUPIED = someone
                     #    else is on it right now (or a crashed prior auto-start
@@ -680,6 +727,34 @@ class SessionReaperService:
                     #    OFFLINE/MAINTENANCE = the operator took it out of
                     #    service while queued -> fail per the proposal edge case.
                     if plug.status == PlugStatus.OCCUPIED:
+                        if not_before is not None:
+                            # [Scheduled start] Waiting and starting later is
+                            # unsafe: whoever is on the socket afterwards may not
+                            # be the owner's car. The owner's own session means
+                            # they started now (a crash between that start and
+                            # its cancel of this row): supersede it silently.
+                            holder = (await db.execute(
+                                select(ChargingSession.user_id).where(and_(
+                                    ChargingSession.plug_id == plug.id,
+                                    ChargingSession.status == SessionStatus.ACTIVE,
+                                )).limit(1)
+                            )).scalar_one_or_none()
+                            if holder is not None:
+                                qc.status = (
+                                    QueuedChargeStatus.CANCELLED if holder == qc.user_id
+                                    else QueuedChargeStatus.FAILED
+                                )
+                                user_id = qc.user_id
+                                plug_name = plug.name
+                                await db.commit()
+                                if holder != user_id:
+                                    await notify(
+                                        user_id, "queued_charge_failed",
+                                        "Scheduled charge couldn't start",
+                                        f"Someone else is charging on {plug_name}. Your scheduled charge was cancelled.",
+                                        severity="warning", plug_id=plug.id,
+                                    )
+                                continue
                         await db.commit()
                         continue
                     if plug.status != PlugStatus.AVAILABLE:
@@ -721,12 +796,47 @@ class SessionReaperService:
                         .limit(1)
                     )).scalar_one_or_none()
                     if covering is not None and covering.user_id != qc.user_id:
+                        if not_before is not None:
+                            # [Scheduled start] A booking made after the schedule
+                            # (creation refuses an overlap): the window belongs
+                            # to them, and a late start may not be our car.
+                            qc.status = QueuedChargeStatus.FAILED
+                            user_id = qc.user_id
+                            plug_name = plug.name
+                            await db.commit()
+                            await notify(
+                                user_id, "queued_charge_failed",
+                                "Scheduled charge couldn't start",
+                                f"{plug_name} is reserved by another driver. Your scheduled charge was cancelled.",
+                                severity="warning", plug_id=plug.id,
+                            )
+                            continue
                         await db.commit()  # reserved by someone else — leave WAITING
+                        continue
+
+                    # [Scheduled start] An outage row must not start while
+                    # ANOTHER driver's car is scheduled on this socket: the car
+                    # connected is theirs. Under the plug lock, so this is the
+                    # race-free guard (the queue endpoint's check is early UX).
+                    if not_before is None and (await db.execute(
+                        select(QueuedCharge.id).where(and_(
+                            QueuedCharge.plug_id == plug.id,
+                            QueuedCharge.status == QueuedChargeStatus.WAITING,
+                            QueuedCharge.user_id != qc.user_id,
+                            QueuedCharge.not_before.is_not(None),
+                        )).limit(1)
+                    )).scalar_one_or_none() is not None:
+                        await db.commit()
                         continue
 
                     gateway = (await db.execute(
                         select(Gateway).where(Gateway.id == plug.gateway_id)
                     )).scalar_one()
+                    # Replay the walk-up route's liveness gate: a publish only
+                    # proves the broker took the ON, not that a gateway got it.
+                    if not gateway_is_live(gateway, now):
+                        await db.commit()
+                        continue
 
                     # 7. Start via the shared helper (commits the session + plug
                     #    claim itself), passing the user row this transaction
@@ -735,6 +845,13 @@ class SessionReaperService:
                     #    race-safe against a concurrent hold, exactly as the
                     #    walk-up route provides it. Then mark the queue STARTED +
                     #    link it.
+                    # [Scheduled start] Claim STARTED before the helper so its
+                    # own commit persists the claim and the status atomically:
+                    # that commit releases this row lock, and a cancel landing
+                    # between it and a later write would otherwise return
+                    # "cancelled" while the socket goes live. The except below
+                    # overwrites it on failure.
+                    qc.status = QueuedChargeStatus.STARTED
                     try:
                         session = await begin_active_session(
                             db, user, plug, gateway,
@@ -758,7 +875,8 @@ class SessionReaperService:
                             user_id,
                             "queued_charge_expired" if exc.status_code == 402
                             else "queued_charge_failed",
-                            "Queued charge couldn't start",
+                            "Scheduled charge couldn't start" if not_before is not None
+                            else "Queued charge couldn't start",
                             (
                                 f"{plug_name}: your queued charge couldn't start "
                                 "(insufficient balance)."
@@ -769,16 +887,27 @@ class SessionReaperService:
                         )
                         continue
 
-                    qc.status = QueuedChargeStatus.STARTED
                     qc.started_session_id = session.id
                     user_id = qc.user_id
                     plug_name = plug.name
                     await db.commit()
                     started += 1
+                    if not_before is None:
+                        title = "Your queued charge started"
+                        body = f"Power is back on {plug_name}: your queued charge just started."
+                    elif now - not_before > SCHEDULE_LATE_NOTICE:
+                        hhmm = pricing._to_local(now, pricing._zone(tenant.timezone)).strftime("%H:%M")
+                        title = "Your scheduled charge started late"
+                        body = (
+                            f"{plug_name}: your scheduled charge started at {hhmm} "
+                            f"({pricing.zone_name(tenant.timezone)}), at "
+                            f"{session.rate_coins_per_kwh} coins/kWh."
+                        )
+                    else:
+                        title = "Your scheduled charge started"
+                        body = f"Your scheduled charge on {plug_name} started."
                     await notify(
-                        user_id, "queued_charge_started",
-                        "Your queued charge started",
-                        f"Power is back on {plug_name} — your queued charge just started.",
+                        user_id, "queued_charge_started", title, body,
                         severity="info", plug_id=plug.id, session_id=session.id,
                     )
                     logger.info(

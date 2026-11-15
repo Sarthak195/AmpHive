@@ -405,7 +405,7 @@ async def test_sweep_starts_debounced_row():
     gateway = _gateway()
     row_db = _row_db(
         _s1n(qc), _s1n(user), _s1(0), _s1n(plug), _s1(tenant),
-        _upd(), _s1n(None), _s1(gateway),
+        _upd(), _s1n(None), _s1n(None), _s1(gateway),
     )
     svc = SessionReaperService(_factory(_scan_db([1]), row_db), AsyncMock())
 
@@ -433,7 +433,7 @@ async def test_sweep_expires_on_balance_failure():
     tenant = _tenant(delay=2)
     row_db = _row_db(
         _s1n(qc), _s1n(_user()), _s1(0), _s1n(plug), _s1(tenant),
-        _upd(), _s1n(None), _s1(_gateway()),
+        _upd(), _s1n(None), _s1n(None), _s1(_gateway()),
     )
     svc = SessionReaperService(_factory(_scan_db([1]), row_db), AsyncMock())
 
@@ -456,7 +456,7 @@ async def test_sweep_fails_on_caps_failure():
     tenant = _tenant(delay=2)
     row_db = _row_db(
         _s1n(qc), _s1n(_user()), _s1(0), _s1n(plug), _s1(tenant),
-        _upd(), _s1n(None), _s1(_gateway()),
+        _upd(), _s1n(None), _s1n(None), _s1(_gateway()),
     )
     svc = SessionReaperService(_factory(_scan_db([1]), row_db), AsyncMock())
 
@@ -500,7 +500,7 @@ async def test_sweep_defers_when_another_users_reservation_covers_plug():
     session.id = 99
     row_db = _row_db(
         _s1n(qc), _s1n(_user(user_id=5)), _s1(0), _s1n(plug), _s1(tenant),
-        _upd(), _s1n(someone_elses_reservation),
+        _upd(), _s1n(someone_elses_reservation), _s1n(None),
         _s1(gateway),  # only reached if the reservation gate fails to defer
     )
     svc = SessionReaperService(_factory(_scan_db([1]), row_db), AsyncMock())
@@ -546,7 +546,7 @@ async def test_sweep_defers_when_user_at_active_session_cap():
     session.id = 99
     row_db = _row_db(
         _s1n(qc), _s1n(_user(user_id=5)), _s1(2),   # already at the cap
-        _s1n(plug), _s1(tenant), _upd(), _s1n(None), _s1(gateway),
+        _s1n(plug), _s1(tenant), _upd(), _s1n(None), _s1n(None), _s1(gateway),
     )
     svc = SessionReaperService(_factory(_scan_db([1]), row_db), AsyncMock())
 
@@ -850,3 +850,190 @@ def test_zone_name_last_resort_is_utc():
     from backend.services.pricing import zone_name
     with patch("backend.services.pricing._zone", lambda _tz: timezone.utc):
         assert zone_name("Asia/Kolkata") == "UTC"
+
+
+# --------------------------------------------------------------------------
+# [Scheduled start] Sweep: the not_before gate and scheduled-row handling
+# --------------------------------------------------------------------------
+
+def _due_plug(powered_for_min=120, status=PlugStatus.AVAILABLE):
+    plug = _plug(powered=True, status=status)
+    plug.powered_since = datetime.now(timezone.utc) - timedelta(minutes=powered_for_min)
+    return plug
+
+
+def _started_session(rate=Decimal("4.00")):
+    session = MagicMock()
+    session.id = 99
+    session.rate_coins_per_kwh = rate
+    return session
+
+
+async def _sweep(row_db, begin=None):
+    svc = SessionReaperService(_factory(_scan_db([1]), row_db), AsyncMock())
+    begin = begin or AsyncMock(return_value=_started_session())
+    with patch("backend.services.session_start.begin_active_session", begin), \
+         patch("backend.services.notifications.notify", AsyncMock()) as notify:
+        started = await svc.reap_queued_starts_once()
+    return started, begin, notify
+
+
+def _scheduled_start_chain(qc, plug, tenant=None, gateway=None):
+    """qc, user, active count, plug, tenant, reservation expiry, covering
+    booking, gateway. (No outage-row guard: the row is scheduled.)"""
+    return _row_db(
+        _s1n(qc), _s1n(_user()), _s1(0), _s1n(plug),
+        _s1(tenant or _tenant(enabled=True, delay=2)),
+        _upd(), _s1n(None), _s1(gateway or _gateway()),
+    )
+
+
+def _ago(**kw):
+    return datetime.now(timezone.utc) - timedelta(**kw)
+
+
+@pytest.mark.asyncio
+async def test_sweep_leaves_not_yet_due_schedule_without_user_lock():
+    qc = _qc(not_before=_soon(hours=3), expires_in_min=210)
+    row_db = _row_db(_s1n(qc))
+    started, begin, _ = await _sweep(row_db)
+    assert started == 0
+    assert qc.status == QueuedChargeStatus.WAITING
+    assert row_db.execute.await_count == 1        # only the qc row lock
+    begin.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sweep_starts_schedule_at_not_before_when_power_never_dropped():
+    qc = _qc(not_before=_ago(seconds=30))
+    started, begin, notify = await _sweep(_scheduled_start_chain(qc, _due_plug()))
+    assert started == 1
+    assert begin.await_args.kwargs == {"max_kwh": 30.0, "max_duration_seconds": 14400}
+    assert qc.status == QueuedChargeStatus.STARTED
+    assert notify.await_args.args[1] == "queued_charge_started"
+    assert notify.await_args.args[2] == "Your scheduled charge started"
+
+
+@pytest.mark.asyncio
+async def test_sweep_debounce_runs_from_powered_since_not_from_not_before():
+    """Power back 1 min before not_before, 2 min debounce. A Wi-Fi blip that
+    re-baselines powered_since (telemetry gap > 90 s) behaves the same way."""
+    # At not_before: powered only 1 min, so still debouncing.
+    qc = _qc(not_before=_ago(seconds=5))
+    row_db = _row_db(_s1n(qc), _s1n(_user()), _s1(0), _s1n(_due_plug(powered_for_min=1)),
+                     _s1(_tenant(enabled=True, delay=2)))
+    started, begin, _ = await _sweep(row_db)
+    assert started == 0 and qc.status == QueuedChargeStatus.WAITING
+    begin.assert_not_awaited()
+    # At not_before + 1 min: powered 2 min, so it starts with no fresh
+    # debounce counted from not_before.
+    qc = _qc(not_before=_ago(minutes=1))
+    started, _, _ = await _sweep(_scheduled_start_chain(qc, _due_plug(powered_for_min=2)))
+    assert started == 1
+
+
+@pytest.mark.asyncio
+async def test_sweep_expires_schedule_past_its_grace_with_scheduled_copy():
+    qc = _qc(not_before=_ago(minutes=31), expires_in_min=-1)
+    _, _, notify = await _sweep(_row_db(_s1n(qc)))
+    assert qc.status == QueuedChargeStatus.EXPIRED
+    assert notify.await_args.args[1] == "queued_charge_expired"
+    assert "in time" in notify.await_args.args[3]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("holder,status,notified", [
+    (5, QueuedChargeStatus.CANCELLED, False),    # the owner started now
+    (77, QueuedChargeStatus.FAILED, True),       # someone else's car
+])
+async def test_sweep_scheduled_row_on_occupied_plug(holder, status, notified):
+    qc = _qc(not_before=_ago(seconds=30))
+    row_db = _row_db(_s1n(qc), _s1n(_user()), _s1(0),
+                     _s1n(_due_plug(status=PlugStatus.OCCUPIED)),
+                     _s1(_tenant(enabled=True, delay=2)), _s1n(holder))
+    _, begin, notify = await _sweep(row_db)
+    assert qc.status == status
+    assert notify.await_count == (1 if notified else 0)
+    begin.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sweep_fails_schedule_when_another_driver_booked_the_window():
+    qc = _qc(not_before=_ago(seconds=30))
+    row_db = _row_db(_s1n(qc), _s1n(_user()), _s1(0), _s1n(_due_plug()),
+                     _s1(_tenant(enabled=True, delay=2)), _upd(),
+                     _s1n(_reservation(user_id=99)), _s1(_gateway()))
+    _, begin, notify = await _sweep(row_db)
+    assert qc.status == QueuedChargeStatus.FAILED
+    assert notify.await_args.args[1] == "queued_charge_failed"
+    begin.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sweep_fails_schedule_when_cpo_disabled_queued_charging():
+    qc = _qc(not_before=_ago(seconds=30))
+    _, begin, _ = await _sweep(
+        _scheduled_start_chain(qc, _due_plug(), tenant=_tenant(enabled=False, delay=2))
+    )
+    assert qc.status == QueuedChargeStatus.FAILED
+    begin.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sweep_never_starts_on_a_dead_gateway():
+    qc = _qc(not_before=_ago(seconds=30))
+    started, begin, _ = await _sweep(
+        _scheduled_start_chain(qc, _due_plug(), gateway=_gateway(online=False))
+    )
+    assert started == 0 and qc.status == QueuedChargeStatus.WAITING
+    begin.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sweep_outage_row_waits_while_another_driver_is_scheduled():
+    qc = _qc()                                     # outage row (not_before None)
+    row_db = _row_db(_s1n(qc), _s1n(_user()), _s1(0), _s1n(_due_plug()),
+                     _s1(_tenant(delay=2)), _upd(), _s1n(None),
+                     _s1n(12),                     # another driver's schedule
+                     _s1(_gateway()))              # reached only if the guard fails
+    _, begin, _ = await _sweep(row_db)
+    assert qc.status == QueuedChargeStatus.WAITING
+    begin.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sweep_claims_started_before_the_helper_commits():
+    """A cancel can land once the helper's commit releases the qc row lock, so
+    STARTED must already be what that commit writes."""
+    qc = _qc(not_before=_ago(seconds=30))
+    seen = {}
+
+    async def begin(*_a, **_kw):
+        seen["status"] = qc.status
+        return _started_session()
+
+    started, _, _ = await _sweep(_scheduled_start_chain(qc, _due_plug()),
+                                 begin=AsyncMock(side_effect=begin))
+    assert seen["status"] == QueuedChargeStatus.STARTED
+    assert started == 1 and qc.started_session_id == 99
+
+
+@pytest.mark.asyncio
+async def test_sweep_publish_failure_overwrites_the_started_claim():
+    qc = _qc(not_before=_ago(seconds=30))
+    started, _, notify = await _sweep(
+        _scheduled_start_chain(qc, _due_plug()),
+        begin=AsyncMock(side_effect=HTTPException(status_code=500, detail="pub")),
+    )
+    assert started == 0
+    assert qc.status == QueuedChargeStatus.FAILED
+    assert notify.await_args.args[2] == "Scheduled charge couldn't start"
+
+
+@pytest.mark.asyncio
+async def test_sweep_late_scheduled_start_reports_time_and_rate():
+    qc = _qc(not_before=_ago(minutes=20))
+    started, _, notify = await _sweep(_scheduled_start_chain(qc, _due_plug()))
+    assert started == 1
+    assert notify.await_args.args[2] == "Your scheduled charge started late"
+    assert "4.00 coins/kWh" in notify.await_args.args[3]

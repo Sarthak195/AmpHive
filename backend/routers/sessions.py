@@ -1001,7 +1001,6 @@ async def get_queued_charges(
     """[Queued charge] The driver's WAITING queued charges (soonest-created
     first), with the plug name and the expiry the UI counts down to."""
     from backend.database.models import QueuedCharge, QueuedChargeStatus
-
     from backend.services.pricing import zone_name
 
     result = await db.execute(
