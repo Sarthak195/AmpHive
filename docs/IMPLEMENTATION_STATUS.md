@@ -11,6 +11,8 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 
 ## 0 - 2026-11-15 fix batch
 
+**Production state:** prod == `origin/main` at `825f27e` (the 2026-11-15 bug-fix release), alembic head `0040_plug_photos`, deployed 2026-11-15.
+
 - Ops housekeeping: `stop_grace_period: 60s` on the postgres `db` service in the relay, prod and dev compose files (the live VM compose needs the same line by hand, see DEPLOYMENT.md).
 - Docs and deploy instructions now name the new GCP project (`project-6e290ffd-5954-4d48-aa9`), compute SA `626015685685-compute@developer.gserviceaccount.com`, IP `8.235.4.66` and the `-2` buckets; dated historical records are unchanged.
 - New known-limit items (U0-U6, F10, firmware SET_INTERVAL wake, boot round trips) added to TODO.md.
@@ -167,6 +169,52 @@ Plug photos and reviews:
   map and deletes the object), and re-rejecting a rejected photo retries a
   failed delete. Approve stays pending-only. Rejected rows show a "Removed"
   placeholder instead of a broken image.
+
+## 0b. 2026-09-28 Cloudflare front door for amphive.app / cpo.amphive.app (LIVE — DNS cut over)
+
+Moving `amphive.app` + `cpo.amphive.app` behind Cloudflare's free HTTP proxy
+to cut latency for Indian users (origin is a `us-west1` e2-micro, ~240 ms RTT
+to India). `mqtt.amphive.app` and `mail.amphive.app` stay DNS-only / grey
+cloud — MQTT 8883 and SMTP/IMAP can't traverse the CF HTTP proxy. DNS is
+now served by Cloudflare's nameservers (`harlee`/`ridge.ns.cloudflare.com`,
+cut over from name.com 2026-09-28; the old name.com records were left in
+place, so switching the nameservers back is the rollback).
+
+**Caddy side:** Global `trusted_proxies` now lists
+Cloudflare's published edge ranges + `client_ip_headers CF-Connecting-IP`,
+and every `reverse_proxy` sets `header_up X-Forwarded-For {client_ip}`
+(`deploy/config/Caddyfile.example`, `deploy/relay/deploy-relay.sh` both
+updated; live Caddyfile hand-edited to match, verified with `caddy validate`
++ reload, semantics tested on caddy v2.11.4 in a throwaway container). From a
+Cloudflare peer the upstream XFF collapses to the vouched `CF-Connecting-IP`
+value only (a spoofed XFF is discarded); from an untrusted peer
+`CF-Connecting-IP` is ignored and XFF falls back to the real peer IP —
+`backend/services/rate_limit.py`'s `TRUSTED_PROXY_HOPS=2` is unchanged
+(Caddy still appends one hop, frontend-nginx the other), only its topology
+comments were updated. Cloudflare dashboard: SSL/TLS Full (strict), Always
+Use HTTPS OFF (Caddy already redirects; keeps ACME HTTP-01 on :80 flowing
+through CF untouched), Rocket Loader / Email Obfuscation / Bot Fight Mode
+OFF (conflict with the strict CSP / would JS-challenge API clients),
+WebSockets ON (Socket.io). GCP firewall on 80/443 was **deliberately not**
+locked to Cloudflare's ranges — the origin IP stays directly reachable
+because `mail.amphive.app`'s Let's Encrypt HTTP-01 renewal needs :80 open
+directly, not routed through Cloudflare. See
+[DEPLOYMENT.md](DEPLOYMENT.md#cloudflare-front-door-amphiveapp-cpoamphiveapp--added-2026-09-28)
+and [SECURITY.md](SECURITY.md#6-operational-notes) for the full write-up.
+
+**Verified after cutover (2026-09-28):** `.app` registry delegates to
+Cloudflare; apex + `cpo` resolve to Cloudflare anycast, `mqtt`/`mail` to the
+VM. HTTPS 200 on both hosts via the edge (the Universal SSL edge cert took a
+few minutes to appear after activation — expect a short TLS-handshake-failure
+window on a fresh zone), HSTS/CSP pass through, `/assets/*` `cf-cache-status:
+HIT` after the first fetch, `/api/*` `DYNAMIC` + `no-store`, Socket.io
+handshake offers the websocket upgrade, Google OAuth redirect intact, broker
+TLS on 8883 direct. Client IP: a marked request via Cloudflare and one direct
+to the origin both reached frontend-nginx with `X-Forwarded-For` = the real
+client IP. Measured from an Indian connection (edge colo MRS — Marseille; Indian
+traffic on the free plan is often not served from an Indian colo): median fresh
+connection page TTFB 728 → 582 ms, API 733 → 559 ms, main JS bundle total
+2925 → 954 ms (edge-cached).
 
 ---
 
