@@ -7,6 +7,15 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 
 ---
 
+## 0 - 2026-11-15 fix batch
+
+- JWT library swapped from python-jose to PyJWT (`backend/services/auth.py`). Claims, HS256 and the
+  `token_version` check are unchanged; tokens issued before the swap still decode
+  (`backend/tests/test_jwt_compat.py`). Removes python-jose, ecdsa, rsa and six from the lock, and the
+  `--ignore-vuln PYSEC-2026-1325` from the CI pip-audit step.
+
+---
+
 ## 0. Latest — 2026-10-20 connection noise: debounced offline notices, gated orphan bells, fw 2.8.0 diagnostics
 
 A 45-day forensic pass over the prod logs (one user, who is driver, operator

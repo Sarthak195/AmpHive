@@ -157,7 +157,8 @@ firmware-image upload — mirrored by an 8m nginx `location`) + nginx
 >   limit) and published plaintext MQTT on `0.0.0.0` with the template default.
 >   Both loopback-bound. **The live relay stack was already correct** — this was
 >   latent in the disaster-recovery path only.
-> - **Dependencies.** First clean lockfile re-resolve since 2026-07-21: 9
+> - **Dependencies.** (Update 2026-11-15: the python-jose advisories below are
+>   resolved, see the 2026-11-15 note at the end of this section.) First clean lockfile re-resolve since 2026-07-21: 9
 >   advisories in 4 packages -> **1**, and that one (`ecdsa` PYSEC-2026-1325)
 >   has no upstream fix and is unreachable here — it arrives via python-jose and
 >   is ES*-only, while `JWT_ALGORITHM` pins HS256 on both encode and decode.
@@ -192,6 +193,13 @@ firmware-image upload — mirrored by an 8m nginx `location`) + nginx
 > needs a dedicated infra deploy rather than a bundle; and `python-jose` was NOT
 > migrated to PyJWT — it is current at 3.5.0 with no advisory of its own, and an
 > auth-path swap does not belong in a batch this wide.
+>
+> **Update 2026-11-15: python-jose replaced by PyJWT.** python-jose 3.5.0
+> carries PYSEC-2026-4298 with no fixed release and pulled in `ecdsa`
+> (PYSEC-2026-1325). Both are removed (`rsa` and `six` too), and CI's pip-audit
+> runs with no ignores. JWTs stay HS256 with `algorithms=["HS256"]` pinned on
+> decode. Existing tokens keep working: `backend/tests/test_jwt_compat.py`
+> decodes a fixture minted by python-jose.
 
 ---
 
