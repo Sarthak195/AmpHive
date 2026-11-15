@@ -405,8 +405,7 @@ Do **not** run the stack/DB locally — exercise via the GCP VM per AGENTS.md /
 
 ## Scheduled (off-peak) start
 
-Added 2026-11-15 (branch `feat/offpeak-start`, migration `0039_queued_not_before`,
-provisional numbering). The driver plugs in now and picks a start time; the backend
+Added 2026-11-15 (branch `feat/offpeak-start`, migration `0041_queued_not_before`). The driver plugs in now and picks a start time; the backend
 energizes the plug at that time. It is a `QueuedCharge` with `not_before` set,
 created through the same `POST /api/sessions/queue`, governed by the same
 `queued_charging_enabled` flag, and started by the same sweep through

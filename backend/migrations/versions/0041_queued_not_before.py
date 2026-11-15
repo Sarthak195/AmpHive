@@ -6,15 +6,14 @@ rows are a handful and the sweep already scans them all. No GRANT needed (no
 new object class, same reasoning as 0038). IF NOT EXISTS so a
 create_all()-built database migrates cleanly (the 0038 idempotency idiom).
 
-Revision ID: 0039_queued_not_before
-Revises: 0038_account_closure
+Revision ID: 0041_queued_not_before
+Revises: 0040_plug_photos
 Create Date: 2026-11-15
 """
-# PROVISIONAL NUMBERING: PR #127 takes 0039 and 0040; renumber at merge.
 from alembic import op
 
-revision = "0039_queued_not_before"
-down_revision = "0038_account_closure"
+revision = "0041_queued_not_before"
+down_revision = "0040_plug_photos"
 branch_labels = None
 depends_on = None
 

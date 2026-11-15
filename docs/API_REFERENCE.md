@@ -140,7 +140,7 @@ auto-start.
 | DELETE | `/api/sessions/queue/{queued_charge_id}` | JWT | path `queued_charge_id:int` | Cancel a WAITING queued charge (owner only, row-locked + re-checked WAITING so a cancel racing the reaper's auto-start settles once — 409 if the reaper already started/expired it). 404 if missing/foreign. → `{status:"cancelled"}` |
 
 **Scheduled (off-peak) start** (2026-11-15, branch `feat/offpeak-start`, migration
-`0039_queued_not_before`, provisional numbering). The same `POST /api/sessions/queue`
+`0041_queued_not_before`). The same `POST /api/sessions/queue`
 takes `not_before`: an ISO 8601 instant **with a UTC offset** (a naive value is a
 422), more than now and at most 24 h ahead. It targets a plug that is **powered**,
 on a live gateway, and AVAILABLE; the outage path (no `not_before`) is unchanged.

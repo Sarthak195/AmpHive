@@ -1712,7 +1712,7 @@ class QueuedCharge(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     # [Scheduled start] NULL = outage queue (start when power returns). Set = a
     # scheduled start on a powered plug: the sweep never starts it before this
-    # instant (routers/sessions.py queue_charge; migration 0039_queued_not_before).
+    # instant (routers/sessions.py queue_charge; migration 0041_queued_not_before).
     not_before: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     # Linked once the reaper starts the session; SET NULL keeps the queue
     # history row if the session is later deleted.
