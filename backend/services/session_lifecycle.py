@@ -348,8 +348,8 @@ async def finalize_charging_session(
     await db.commit()
 
     # Broadcast so other clients' plug lists flip back to AVAILABLE live, then
-    # run the watcher and capacity fan-out. Only when the plug really is free:
-    # a plug kept in MAINTENANCE or OFFLINE is not "now free".
+    # run the watcher fan-out. Only when the plug really is free: a plug kept
+    # in MAINTENANCE or OFFLINE is not "now free".
     if plug_freed:
         from backend.services.socketio_manager import emit_plug_status
         await emit_plug_status(plug.id, PlugStatus.AVAILABLE.value)
@@ -363,12 +363,15 @@ async def finalize_charging_session(
         from backend.services.plug_watch import notify_watchers_plug_available
         await notify_watchers_plug_available(db, plug, exclude_user_id=session.user_id)
 
-        # [Caps] This session leaving the circuit may have freed enough current for
-        # a driver waiting on a "Request capacity": notify any whose plug now fits
-        # (excluding the driver who just finished). Best-effort, never raises into
-        # the billing path (services/capacity.py).
-        from backend.services.capacity import notify_capacity_available
-        await notify_capacity_available(db, plug.group_id, exclude_user_id=session.user_id)
+    # [Caps] This session leaving the circuit may have freed enough current for
+    # a driver waiting on a "Request capacity": notify any whose plug now fits
+    # (excluding the driver who just finished). Runs whatever this plug's final
+    # status is: circuit load (services/caps.py circuit_load_a) counts ACTIVE
+    # sessions, so a session ending on a MAINTENANCE / OFFLINE plug still frees
+    # current for its siblings. Best-effort, never raises into the billing path
+    # (services/capacity.py).
+    from backend.services.capacity import notify_capacity_available
+    await notify_capacity_available(db, plug.group_id, exclude_user_id=session.user_id)
 
     # 6. End telemetry stream
     state.telemetry_store.end_session(plug.id)

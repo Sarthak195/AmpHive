@@ -13,8 +13,9 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
   `finalize_charging_session` now locks and re-reads the plug and frees it
   only from OCCUPIED. AVAILABLE stays AVAILABLE; MAINTENANCE and OFFLINE
   (an operator change made mid-session, or auto-maintenance) persist. The
-  `plug_status` emit, the "notify me when free" fan-out and the capacity
-  fan-out run only when the final status is AVAILABLE. For
+  `plug_status` emit and the "notify me when free" fan-out run only when
+  the final status is AVAILABLE; the capacity fan-out always runs, since
+  the ended session frees circuit current either way. For
   THERMAL_CUTOFF / OVERCURRENT_CUTOFF, auto-maintenance now runs BEFORE the
   post-cutoff finalize, so watchers are no longer told a faulted plug is free.
 - **Telemetry persist no longer deadlocks against finalize (F17).**

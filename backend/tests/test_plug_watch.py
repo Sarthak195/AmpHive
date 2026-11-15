@@ -515,9 +515,10 @@ async def test_finalize_survives_watch_fanout_db_failure(monkeypatch):
 ])
 async def test_finalize_plug_status_by_prior_status(monkeypatch, before, after, freed):
     """[C1] finalize only frees an OCCUPIED plug; MAINTENANCE / OFFLINE set
-    mid-session persist. The plug_status emit, the watcher fan-out and the
-    capacity fan-out run only when the final status is AVAILABLE, while the
-    billing receipt and the telemetry teardown always happen."""
+    mid-session persist. The plug_status emit and the watcher fan-out run
+    only when the final status is AVAILABLE, while the billing receipt, the
+    telemetry teardown and the capacity fan-out always happen (the session
+    left the circuit even when its plug stays out of service)."""
     session, plug = _finalize_fixtures()
     plug.status = before
     db = _db(
@@ -535,7 +536,7 @@ async def test_finalize_plug_status_by_prior_status(monkeypatch, before, after, 
     assert plug.status == after
     assert emit_mock.await_count == (1 if freed else 0)
     assert watchers_mock.await_count == (1 if freed else 0)
-    assert capacity_mock.await_count == (1 if freed else 0)
+    assert capacity_mock.await_count == 1
 
 
 @pytest.mark.asyncio
