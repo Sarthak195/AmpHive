@@ -31,8 +31,11 @@ Two driver reports on the live session page, fixed in one branch:
   now stay quiet when reaching `max_kwh` at the current rate fits inside the
   hold (the Limit banner already shows that progress), and warn as before when
   the wallet capped the hold or there is no kWh limit. `PATCH /limits` returns
-  the resized `hold_coins` so the client compares against the new hold. Hold
-  sizing, auto-stop and billing are unchanged.
+  the resized `hold_coins` so the client compares against the new hold. A
+  limit-bound hold runs out on the same frame the kWh limit is reached, so that
+  stop is now labelled `auto-stopped: energy limit reached` ("your limit was
+  reached") instead of "balance used up". Hold sizing, auto-stop thresholds and
+  billing are unchanged.
 - **Still open:** the firmware poll loop's `vTaskDelay` is not woken by
   `SET_INTERVAL`, so after a real idle period (no viewer for over 30 s) the
   first fresh frame can still take up to 10 s; fixing it needs a firmware

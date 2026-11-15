@@ -13,8 +13,8 @@ import api from '../api/client';
 vi.mock('../api/client', () => ({
   default: { get: vi.fn(), post: vi.fn(), put: vi.fn(), patch: vi.fn(), delete: vi.fn() },
 }));
-// The user object must be render-stable: SessionProvider keys effects on
-// [user], so a fresh object each call would loop the socket effect forever.
+// The user object is kept render-stable (SessionProvider keys its effects on
+// the user id, so this is belt and braces).
 // mockRefreshUser is likewise a single shared spy (not re-created per render)
 // so tests can assert on its call count.
 const { MOCK_USER, mockRefreshUser } = vi.hoisted(() => ({

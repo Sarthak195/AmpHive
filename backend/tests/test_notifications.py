@@ -225,6 +225,30 @@ async def test_low_balance_silent_when_own_kwh_limit_stops_first():
 
 
 @pytest.mark.asyncio
+async def test_limit_bound_hold_running_out_is_labelled_as_the_limit():
+    """At max_kwh a limit-bound hold is used up on the same frame; the stop
+    must say "limit reached", not "balance used up"."""
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def _db():
+        yield MagicMock()
+
+    MQTTManager._instance = None
+    mgr = MQTTManager(db_session_factory=_db)
+
+    finalize_mock = AsyncMock(return_value=None)
+    with patch("backend.services.session_lifecycle.finalize_charging_session", finalize_mock):
+        await mgr._maybe_auto_stop_on_exhaustion(
+            session_id=8, user_id=3, energy_kwh=2.0, rate_coins_per_kwh=Decimal("5"),
+            hold_coins=Decimal("10"), max_kwh=2.0,
+        )
+
+    assert finalize_mock.await_args.kwargs["reason"] == "auto-stopped: energy limit reached"
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
 async def test_low_balance_warns_when_wallet_capped_the_hold_below_the_limit():
     """The limit (5 kWh x 5 = 25) costs more than the 10-coin hold the wallet
     could cover, so the wallet is what will stop the session: warn."""

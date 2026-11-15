@@ -834,23 +834,22 @@ class MQTTTelemetryMixin:
                     if user is None:
                         return
                     threshold = user.coin_balance
+            # Is the driver's own kWh limit (not the wallet) what stops this
+            # session? With a kWh limit the hold is sized to that limit's cost
+            # whenever the wallet can afford it (services/session_start.py), so
+            # a hold running down then just means the limit is near. True when
+            # reaching max_kwh at the current rate fits inside the hold.
+            limit_bound = (
+                hold_coins is not None
+                and max_kwh is not None
+                and session_cost(segments, max_kwh) <= threshold
+            )
             if accrued_cost < threshold:
-                # Still covered — maybe warn (once per session) as the cost
+                # Still covered: maybe warn (once per session) as the cost
                 # approaches the threshold, so the driver sees the auto-stop
-                # coming even with the app closed.
-                #
-                # Only when the WALLET is what will stop it: with a kWh limit
-                # the hold is sized to that limit's cost whenever the wallet
-                # can afford it (services/session_start.py), so a hold running
-                # down then just means the driver's own limit is near. If
-                # reaching max_kwh at the current rate fits inside the hold,
-                # the limit stops the session first: stay quiet (and do not
-                # mark it warned, so a later limit raise can still warn).
-                limit_bound = (
-                    hold_coins is not None
-                    and max_kwh is not None
-                    and session_cost(segments, max_kwh) <= threshold
-                )
+                # coming even with the app closed. Only when the wallet is what
+                # will stop it; a limit-bound session stays quiet and is not
+                # marked warned, so a later limit raise can still warn.
                 if (
                     LOW_BALANCE_WARN_FRACTION > 0
                     and not limit_bound
@@ -879,10 +878,15 @@ class MQTTTelemetryMixin:
             # (own txn; row-locks + re-checks ACTIVE so a concurrent user stop
             # or the reaper settles this exactly once).
             from backend.services.session_lifecycle import finalize_charging_session
-            reason = (
-                "auto-stopped: session hold exhausted" if hold_coins is not None
-                else "auto-stopped: wallet balance exhausted"
-            )
+            # A limit-bound hold runs out on the same frame the kWh limit is
+            # reached (this check runs before _maybe_auto_stop_on_limits), so
+            # label it as the limit, not as the balance being used up.
+            if limit_bound:
+                reason = "auto-stopped: energy limit reached"
+            elif hold_coins is not None:
+                reason = "auto-stopped: session hold exhausted"
+            else:
+                reason = "auto-stopped: wallet balance exhausted"
             async with self.db_session_factory() as db:
                 outcome = await finalize_charging_session(
                     db, session_id, reason=reason

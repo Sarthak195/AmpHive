@@ -88,9 +88,10 @@ export const SessionProvider = ({ children }) => {
       return;
     }
 
-    const token = localStorage.getItem('amphive_token');
+    // Read the token on every (re)connect: the socket now outlives a
+    // same-user re-login, which can store a new token.
     const newSocket = io(API_BASE, {
-      auth: { token },
+      auth: (cb) => cb({ token: localStorage.getItem('amphive_token') }),
       transports: ['websocket', 'polling'],
     });
 
