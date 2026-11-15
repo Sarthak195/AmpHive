@@ -44,8 +44,8 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
   browser. Every sign-in (password login, email verification, Google
   callback) mints a random `sid` claim that `/me` renewals carry unchanged;
   `POST /api/auth/logout` inserts it into the new `revoked_sessions` table
-  (migration `0041_revoked_sessions`, **provisional numbering**: it becomes
-  `0042` after the off-peak `0041` at integration). `get_current_user` (401,
+  (migration `0042_revoked_sessions`, after the off-peak
+  `0041_queued_not_before`). `get_current_user` (401,
   same detail as a `token_version` mismatch), `get_current_user_optional`
   (anonymous, same as a mismatch there), Socket.io `connect` and the socket
   re-auth all reject a revoked sid with one PK lookup. A token minted before

@@ -97,7 +97,7 @@ config/passwd/ACL under `config/` — those are operator-managed on the VM
 accounts: `add_gateway_user.ps1`). To add/rotate `.env` keys, append on the VM
 and `docker compose up -d backend`.
 
-**Rolling back across `0041_revoked_sessions` (per-device logout,
+**Rolling back across `0042_revoked_sessions` (per-device logout,
 2026-11-15).** An image rollback keeps the table but pre-feature code ignores
 it, which silently un-revokes every per-device logout whose token has not
 expired. Before starting the old image, run once on the owner connection:

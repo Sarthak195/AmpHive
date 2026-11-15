@@ -457,22 +457,22 @@ async def test_socket_reauth_without_auth_sid_issues_no_lookup():
 # ===========================================================================
 
 _MIGRATION = (
-    Path(__file__).resolve().parents[1] / "migrations" / "versions" / "0041_revoked_sessions.py"
+    Path(__file__).resolve().parents[1] / "migrations" / "versions" / "0042_revoked_sessions.py"
 )
 
 
 def _load_migration():
-    spec = importlib.util.spec_from_file_location("mig_0041_revoked_sessions", _MIGRATION)
+    spec = importlib.util.spec_from_file_location("mig_0042_revoked_sessions", _MIGRATION)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
 
-def test_migration_chains_onto_0040_and_is_marked_provisional():
+def test_migration_chains_onto_0041_queued_not_before():
     mig = _load_migration()
-    assert mig.revision == "0041_revoked_sessions"
-    assert mig.down_revision == "0040_plug_photos"
-    assert "\n# PROVISIONAL NUMBERING" in _MIGRATION.read_text(encoding="utf-8")
+    assert mig.revision == "0042_revoked_sessions"
+    assert mig.down_revision == "0041_queued_not_before"
+    assert "PROVISIONAL NUMBERING" not in _MIGRATION.read_text(encoding="utf-8")
 
 
 def test_migration_matches_the_model():

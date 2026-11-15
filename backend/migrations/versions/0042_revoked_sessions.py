@@ -22,19 +22,14 @@ downgrade never silently un-revokes a logged-out device. The same statement
 is the rollback runbook step for an image rollback that keeps the table
 (docs/SECURITY.md, docs/DEPLOYMENT.md).
 
-Revision ID: 0041_revoked_sessions
-Revises: 0040_plug_photos
+Revision ID: 0042_revoked_sessions
+Revises: 0041_queued_not_before
 Create Date: 2026-11-15
 """
-# PROVISIONAL NUMBERING: chained onto 0040_plug_photos, the head on main when
-# this was written. The off-peak feature also claims 0041; at integration this
-# file becomes 0042_revoked_sessions with down_revision repointed to the
-# off-peak 0041 (same parallel-migration convention as
-# 0028_payout_settlement_marking). test_migration_heads.py enforces one head.
 from alembic import op
 
-revision = "0041_revoked_sessions"
-down_revision = "0040_plug_photos"
+revision = "0042_revoked_sessions"
+down_revision = "0041_queued_not_before"
 branch_labels = None
 depends_on = None
 

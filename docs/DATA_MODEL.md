@@ -316,9 +316,8 @@ full column list of each:
   (re-registering replaces it, a Google link drops it; residual in
   SECURITY.md §8.6). Backs `POST /api/auth/register` + `verify-email` +
   `resend-verification`.
-- **`revoked_sessions`** (`0041_revoked_sessions.py`, 2026-11-15,
-  **provisional numbering**: renumbered `0042` after the off-peak `0041` at
-  integration). Per-device logout's revocation list (`RevokedSession`):
+- **`revoked_sessions`** (`0042_revoked_sessions.py`, 2026-11-15,
+  after the off-peak `0041_queued_not_before`). Per-device logout's revocation list (`RevokedSession`):
   `sid` TEXT PRIMARY KEY (the JWT `sid` claim, a random sign-in session id),
   `user_id` FK `users` ON DELETE CASCADE (indexed,
   `ix_revoked_sessions_user_id`), `revoked_at` TIMESTAMPTZ default now,

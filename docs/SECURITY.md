@@ -267,8 +267,7 @@ BFG + force-push) to purge the dead values entirely.
   Every sign-in (password login, email verification, Google callback) mints a
   random 128-bit session id carried as the `sid` claim through every `/me`
   renewal. `POST /api/auth/logout` now revokes only that sid: it inserts a
-  `revoked_sessions` row (migration `0041_revoked_sessions`, provisional
-  number) and commits it before a best-effort prune of expired rows, so a
+  `revoked_sessions` row (migration `0042_revoked_sessions`) and commits it before a best-effort prune of expired rows, so a
   cleanup failure can never cost the revocation. All four token-accepting
   paths reject a revoked sid with one primary-key lookup and no cache:
   `get_current_user` (401, the same "Session has been revoked" detail and

@@ -1814,7 +1814,7 @@ class RevokedSession(Base):
     valid, so the row is useless and is pruned opportunistically after the
     next revoke. Log out everywhere does not write here; it bumps
     users.token_version, which already kills every sid. Alembic revision
-    0041_revoked_sessions (provisional numbering).
+    0042_revoked_sessions.
     """
     __tablename__ = "revoked_sessions"
 
