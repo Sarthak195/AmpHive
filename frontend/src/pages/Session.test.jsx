@@ -62,6 +62,15 @@ describe('Session page — no active charge', () => {
   });
 });
 
+describe('Session page — restoring', () => {
+  it('shows a loading placeholder, not "No active charge", while the restore is in flight', () => {
+    useSession.mockReturnValue({ ...base, restoring: true });
+    renderPage();
+    expect(screen.getByRole('status', { name: /Loading your charging session/ })).toBeInTheDocument();
+    expect(screen.queryByText('No active charge')).not.toBeInTheDocument();
+  });
+});
+
 describe('Session page — live monitor', () => {
   it('renders the monitor (and no seg pills) for a single active session', () => {
     useSession.mockReturnValue({
