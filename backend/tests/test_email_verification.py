@@ -37,7 +37,7 @@ from backend.schemas import (
     VerifyEmailRequest,
 )
 from backend.services import email as email_service
-from backend.services.auth import decode_access_token
+from backend.services.auth import decode_access_token, hash_password, verify_password
 from backend.services.rate_limit import SlidingWindowRateLimiter
 
 
@@ -147,7 +147,7 @@ async def test_register_creates_unverified_no_token_and_issues_verification(monk
 async def test_register_duplicate_email_still_400_before_any_token(monkeypatch):
     send_spy = AsyncMock()
     monkeypatch.setattr(email_service, "send_email_verification", send_spy)
-    db = _db([_scalar(_user())])  # duplicate found on the lookup
+    db = _db([_scalar(_user(email_verified=True))])  # VERIFIED duplicate found
 
     with pytest.raises(HTTPException) as exc:
         await register(
@@ -158,6 +158,41 @@ async def test_register_duplicate_email_still_400_before_any_token(monkeypatch):
     assert "already exists" in exc.value.detail
     db.add.assert_not_called()
     send_spy.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_register_again_on_unverified_email_replaces_provisional_password(monkeypatch):
+    """An unverified account's password is provisional: registering again
+    replaces the password and name, voids older links and sends a new one, so
+    a squatter who pre-registered the owner's email loses their password."""
+    sent = {}
+
+    async def fake_send(to_addr, verify_link):
+        sent.update(to=to_addr, link=verify_link)
+
+    monkeypatch.setattr(email_service, "send_email_verification", fake_send)
+    squatter = _user(email="owner@example.com", email_verified=False)
+    squatter.hashed_password = hash_password("squatter-pw")
+    void_update = MagicMock()
+    # execute #1: duplicate-check lookup (the unverified row); #2: void old links.
+    db = _db([_scalar(squatter), void_update])
+
+    res = await register(
+        RegisterRequest(email="owner@example.com", password="owners-pw-1", full_name="Real Owner"),
+        db,
+    )
+    await asyncio.sleep(0)
+
+    assert res.status == "verification_sent"
+    assert verify_password("owners-pw-1", squatter.hashed_password)
+    assert not verify_password("squatter-pw", squatter.hashed_password)
+    assert squatter.full_name == "Real Owner"
+    assert squatter.email_verified is False  # still needs the link
+    assert db.execute.await_count == 2  # lookup + void outstanding links
+    db.commit.assert_awaited_once()
+    token_row = db.add.call_args_list[0].args[0]  # the new link, not a new user
+    assert token_row.user_id == squatter.id
+    assert sent["to"] == "owner@example.com"
 
 
 # --------------------------------------------------------------------------

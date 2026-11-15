@@ -91,6 +91,12 @@ router = APIRouter()
 # /api/auth/login 403s until the address is verified. Mirrors the
 # password-reset token machinery exactly (SHA-256-digest-only, single-use,
 # TTL-boxed, at most one live link per account).
+#
+# Until the address is verified the account's password is PROVISIONAL:
+# registering again with the same unverified email replaces it (register), and
+# the first Google sign-in to an unverified account drops it (google_callback).
+# Residual (docs/SECURITY.md): whoever re-registers LAST and gets the owner to
+# click the newest link still sets the password, until the owner resets it.
 
 # How long an emailed verification link stays valid. Longer than the reset TTL
 # (24 h default) on purpose — a new user may not click immediately.
@@ -162,6 +168,11 @@ async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
 
     Rate-limited per client IP (REGISTER_RATE_LIMIT) against bulk account
     creation / email enumeration.
+
+    An email that belongs to a VERIFIED account still gets the 400. One that
+    belongs to an UNVERIFIED account is re-registered: its provisional
+    password and name are replaced and a new link is sent (older links are
+    voided), under the per-email resend cap.
     """
     # Canonicalize (trim + lowercase) so `Driver@x.com` and `driver@x.com`
     # are the same account — both for the duplicate check below and for what
@@ -172,8 +183,34 @@ async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
     # unique index is the real guard — a concurrent duplicate slips past this
     # SELECT and must be caught at commit).
     result = await db.execute(select(User).where(func.lower(User.email) == email))
-    if result.scalar_one_or_none():
+    existing = result.scalar_one_or_none()
+    if existing is not None and existing.email_verified:
         raise HTTPException(status_code=400, detail="An account with this email already exists.")
+    if existing is not None:
+        # An UNVERIFIED account's password is provisional: nobody has proven
+        # they own the address yet. Registering again replaces the password
+        # and name and sends a fresh link (voiding older ones), so a squatter
+        # who pre-registered the owner's email loses their password the moment
+        # the owner signs up. Capped like resend-verification, since this also
+        # mails an existing address without authentication.
+        retry_after = resend_verification_email_rate_limiter.check(f"resend_verify:{email}")
+        if retry_after is not None:
+            seconds = int(retry_after) + 1
+            raise HTTPException(
+                status_code=429,
+                detail=f"Too many verification requests for this email. Try again in {seconds} s.",
+                headers={"Retry-After": str(seconds)},
+            )
+        existing.hashed_password = hash_password(req.password)
+        existing.full_name = req.full_name
+        # The single commit inside _issue_email_verification carries the new
+        # password together with the voided links.
+        await _issue_email_verification(db, existing)
+        logger.info(
+            "Unverified account re-registered (password replaced, new verification email sent)",
+            extra={"user_id": existing.id, "email": existing.email},
+        )
+        return RegisterResponse(status="verification_sent", email=existing.email)
 
     # Create the user with hashed password — UNVERIFIED (login is gated on it).
     user = User(
@@ -879,48 +916,49 @@ async def google_callback(request: Request, db: AsyncSession = Depends(get_db)):
     elif user.google_sub is None:
         # First-time Google link to a PRE-EXISTING local/password account.
         # Google has cryptographically verified (email_verified, above) that
-        # the person signing in owns this email RIGHT NOW, so we securely TAKE
-        # OVER the credential instead of merely bolting Google on beside the
-        # existing password:
+        # the person signing in owns this email RIGHT NOW.
+        #
+        # If the account is still UNVERIFIED, its password is provisional: it
+        # was set by whoever registered the address, who never proved they
+        # own it, while Google just proved the person signing in does. So we
+        # TAKE OVER the credential:
         #
         #   * Invalidate the stored password. users.hashed_password is NOT
-        #     NULL, so we can't null it — overwrite it with a fresh random
+        #     NULL, so we can't null it: overwrite it with a fresh random
         #     unusable hash (valid shape, unmatchable; the same trick used for
         #     Google-only signups above and services.auth._DUMMY_PASSWORD_HASH).
         #     verify_password can never match it, so /api/auth/login refuses
         #     the old password forever after.
-        #   * Bump token_version to revoke every JWT/session minted before the
-        #     link (get_current_user and the socket layer both gate on tv).
-        #   * Flip auth_provider to 'google' — Google is now the only working
+        #   * Flip auth_provider to 'google': Google is now the only working
         #     sign-in method, so the field stays consistent.
+        #   * Mark the email verified.
         #
-        # Together these defeat the account-PRE-hijacking class: an attacker
-        # who pre-registered the victim's (unverified) email with their OWN
-        # password is fully evicted the instant the real owner links via
-        # Google — the attacker's password stops working AND their live
-        # sessions die. The owner can still set a password later via the normal
-        # forgot/reset-password flow (which writes a fresh hash by email and
-        # never checks the old one).
+        # That evicts an attacker who pre-registered the owner's (unverified)
+        # email with their OWN password. The owner can still set a password
+        # later via forgot/reset-password (which writes a fresh hash by email
+        # and never checks the old one).
         #
-        # NOTE: the COMPLETE fix for this class is email-ownership verification
-        # AT REGISTRATION (so an unverified email can't hold a usable
-        # credential in the first place). That is out of scope here and tracked
-        # separately — this take-over closes the federated-merge half only.
+        # A VERIFIED account keeps its password (its owner proved the inbox
+        # when they set it) and its auth_provider: linking adds Google as a
+        # second sign-in method (see the google_sub comment in models.py).
+        #
+        # Either way token_version is bumped, revoking every JWT/session
+        # minted before the link (get_current_user and the socket layer both
+        # gate on tv).
         #
         # ORM-level mutations (not a DB-side UPDATE) mirror the google_sub
-        # write this branch already did, so the whole take-over lands in the
+        # write this branch already did, so the whole link lands in the
         # single commit below. First-time linking is not a high-concurrency
         # path; even if two concurrent links collapsed the tv bump to +1
         # instead of +2, the pre-existing epoch is still invalidated (the
         # security goal holds).
+        took_over = not user.email_verified
         user.google_sub = google_sub
-        user.hashed_password = hash_password(secrets.token_urlsafe(32))
         user.token_version = user.token_version + 1
-        user.auth_provider = "google"
-        # Google-verified owner is now the account holder — mark the email
-        # verified (an attacker's pre-registered unverified account is taken
-        # over AND becomes verified in the same step).
-        user.email_verified = True
+        if took_over:
+            user.hashed_password = hash_password(secrets.token_urlsafe(32))
+            user.auth_provider = "google"
+            user.email_verified = True
         try:
             await db.commit()
         except IntegrityError:
@@ -934,9 +972,8 @@ async def google_callback(request: Request, db: AsyncSession = Depends(get_db)):
             )
         await db.refresh(user)
         logger.info(
-            "Linked Google identity to existing account "
-            "(pre-existing password credential taken over, prior sessions revoked)",
-            extra={"user_id": user.id, "email": user.email},
+            "Linked Google identity to existing account (prior sessions revoked)",
+            extra={"user_id": user.id, "email": user.email, "password_dropped": took_over},
         )
     elif user.google_sub != google_sub:
         # This email is already linked to a DIFFERENT Google account than

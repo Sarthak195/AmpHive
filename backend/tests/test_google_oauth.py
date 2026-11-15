@@ -103,8 +103,13 @@ def _user(
     google_sub=None,
     is_disabled=False,
     hashed_password=None,
+    email_verified=False,
 ):
+    # email_verified defaults False: the link take-over tests below model a
+    # squatter's unverified row (a bare MagicMock attr would be truthy and
+    # land on the verified keep-the-password path instead).
     u = MagicMock()
+    u.email_verified = email_verified
     u.id = user_id
     u.email = email
     u.full_name = "Test Driver"
@@ -423,9 +428,34 @@ async def test_callback_new_account_duplicate_race_maps_to_400(monkeypatch):
 # --------------------------------------------------------------------------
 
 @pytest.mark.asyncio
+async def test_callback_link_keeps_a_verified_accounts_password(monkeypatch):
+    """A VERIFIED account's owner proved the inbox when they set the password,
+    so linking Google adds a second sign-in method: the password still works
+    and auth_provider stays 'password' (close-account still asks for it)."""
+    _set_google_env(monkeypatch)
+    _mock_token_exchange(monkeypatch)
+    _mock_verify_claims(monkeypatch, _claims(email="driver@amphive.test", sub="google-sub-2"))
+    existing = _user(
+        email="driver@amphive.test",
+        google_sub=None,
+        hashed_password=hash_password("owners-own-pw"),
+        email_verified=True,
+    )
+    req = _FakeRequest(cookies={"google_oauth_state": "abc"}, query_params={"state": "abc", "code": "x"})
+
+    resp = await google_callback(req, _db_returning(existing))
+
+    assert "#code=" in resp.headers["location"]
+    assert existing.google_sub == "google-sub-2"
+    assert verify_password("owners-own-pw", existing.hashed_password)
+    assert existing.auth_provider == "password"
+    assert existing.email_verified is True
+
+
+@pytest.mark.asyncio
 async def test_callback_links_google_to_existing_password_account(monkeypatch):
     """SECURE take-over (was: account-pre-hijacking). Linking Google to a
-    pre-existing password account must EVICT the old credential, not sit
+    pre-existing UNVERIFIED password account must EVICT the old credential, not sit
     beside it: the stored password is replaced with an unusable hash, the
     token epoch is bumped (kills prior sessions), and auth_provider flips to
     'google'. This is what stops an attacker who pre-registered the victim's
