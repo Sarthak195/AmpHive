@@ -189,7 +189,7 @@ def test_nginx_photo_location_is_nested_in_the_api_block():
     from evaluating regexes. The carve-out must sit inside that block."""
     conf = (Path(__file__).resolve().parents[2] / "frontend" / "nginx.conf").read_text(encoding="utf-8")
     api_block = conf.split("location ^~ /api/ {", 1)[1].split("\n    }", 1)[0]
-    assert "location ~ ^/api/plugs/\d+/photos$" in api_block
+    assert r"location ~ ^/api/plugs/\d+/photos$" in api_block
     assert "client_max_body_size 9m;" in api_block
 
 
