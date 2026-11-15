@@ -428,7 +428,7 @@ def _finalize_fixtures():
     return session, plug
 
 
-async def _run_finalize(db, monkeypatch, watchers_mock=None):
+async def _run_finalize(db, monkeypatch, watchers_mock=None, emit_mock=None):
     """watchers_mock=None leaves the REAL fan-out service in place."""
     from contextlib import ExitStack
 
@@ -451,7 +451,8 @@ async def _run_finalize(db, monkeypatch, watchers_mock=None):
 
     with ExitStack() as stack:
         stack.enter_context(
-            patch("backend.services.socketio_manager.emit_plug_status", AsyncMock())
+            patch("backend.services.socketio_manager.emit_plug_status",
+                  emit_mock or AsyncMock())
         )
         stack.enter_context(
             patch("backend.services.notifications.notify", AsyncMock())
@@ -503,6 +504,39 @@ async def test_finalize_survives_watch_fanout_db_failure(monkeypatch):
     assert receipt["status"] == "completed"
     assert receipt["coins_spent"] == 5.0
     db.rollback.assert_awaited_once()  # the service restored the shared session
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("before, after, freed", [
+    (PlugStatus.OCCUPIED, PlugStatus.AVAILABLE, True),       # the normal case
+    (PlugStatus.AVAILABLE, PlugStatus.AVAILABLE, True),      # operator freed it mid-session
+    (PlugStatus.MAINTENANCE, PlugStatus.MAINTENANCE, False), # operator / auto-maintenance
+    (PlugStatus.OFFLINE, PlugStatus.OFFLINE, False),         # operator took it out of service
+])
+async def test_finalize_plug_status_by_prior_status(monkeypatch, before, after, freed):
+    """[C1] finalize only frees an OCCUPIED plug; MAINTENANCE / OFFLINE set
+    mid-session persist. The plug_status emit and the watcher fan-out run
+    only when the final status is AVAILABLE, while the billing receipt, the
+    telemetry teardown and the capacity fan-out always happen (the session
+    left the circuit even when its plug stays out of service)."""
+    session, plug = _finalize_fixtures()
+    plug.status = before
+    db = _db(
+        _scalar_one_or_none(_user(3)),
+        _scalar_one_or_none(session),
+        _scalar_one(plug),
+    )
+    watchers_mock = AsyncMock(return_value=0)
+    emit_mock = AsyncMock()
+    capacity_mock = AsyncMock(return_value=0)
+    with patch("backend.services.capacity.notify_capacity_available", capacity_mock):
+        receipt = await _run_finalize(db, monkeypatch, watchers_mock, emit_mock)
+
+    assert receipt is not None and receipt["status"] == "completed"
+    assert plug.status == after
+    assert emit_mock.await_count == (1 if freed else 0)
+    assert watchers_mock.await_count == (1 if freed else 0)
+    assert capacity_mock.await_count == 1
 
 
 @pytest.mark.asyncio
@@ -592,6 +626,10 @@ async def test_available_plugs_carry_watching_via_one_extra_query():
     db = _db(rows_result, watched_result, favorited_result, expire_result, reservations_result)
 
     with patch("backend.routers.plugs.gateway_is_live", return_value=True), \
+         patch("backend.routers.plugs.resolve_review_aggregates_batch",
+               AsyncMock(return_value={})), \
+         patch("backend.routers.plugs.resolve_photo_thumbnails_batch",
+               AsyncMock(return_value={})), \
          patch("backend.routers.plugs.resolve_price_display_batch",
                AsyncMock(return_value={1: (Decimal("5.00"), None, None),
                                        2: (Decimal("5.00"), None, None)})):
@@ -626,7 +664,11 @@ async def test_get_plug_reports_watching_true():
     )
 
     with patch("backend.routers.plugs.resolve_price_display",
-               AsyncMock(return_value=(Decimal("5.00"), None, None))):
+               AsyncMock(return_value=(Decimal("5.00"), None, None))), \
+         patch("backend.routers.plugs.resolve_review_aggregates_batch",
+               AsyncMock(return_value={})), \
+         patch("backend.routers.plugs.resolve_photo_thumbnails_batch",
+               AsyncMock(return_value={})):
         res = await get_plug(7, user, db)
 
     assert res.watching is True

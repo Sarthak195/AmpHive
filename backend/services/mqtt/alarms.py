@@ -381,34 +381,34 @@ class MQTTAlarmMixin:
         if event_type == "UNMETERED_CONSUMPTION" and plug_id is not None:
             await self._notify_cpos_unmetered_consumption(tenant_id, gateway_id, plug_id, detail)
 
-        # A finalize-worthy alarm means the firmware already forced the relay OFF
-        # and cleared its local session — finalize the backend session to match
-        # (bills the recorded energy, frees the plug, notifies the driver).
-        # Previously the session sat ACTIVE until the reaper noticed, and the
-        # driver never learned why charging stopped. This includes OVERCURRENT_CAP
-        # (a soft cap trip): the firmware stopped charging, so the backend must
-        # finalize too — otherwise the plug is orphaned OCCUPIED until the reaper.
-        if plug_id is not None and event_type in self._FINALIZE_ALARM_REASONS:
-            await self._finalize_session_after_cutoff(plug_id, event_type)
-
         # Fault console (additive): hardware safety cutoffs ALSO auto-enter the
         # plug into MAINTENANCE so a NEW session can't start until an operator
         # clears it (session-start already 409s any non-AVAILABLE plug).
-        # Deliberately sequenced AFTER the finalize call above, in this same
-        # coroutine — not an independently scheduled task — so the MAINTENANCE
-        # flip can't be raced/overwritten by finalize_charging_session's own
-        # `plug.status = AVAILABLE`. Runs even when no session was found above
-        # (a cutoff with no active session still needs the plug taken out of
-        # service). Env-gated via AUTO_MAINTENANCE_ON_CRITICAL_ALARM.
-        # OVERCURRENT_CAP is deliberately EXCLUDED (not in the maintenance set):
-        # it's a policy limit on a HEALTHY plug, so the plug stays AVAILABLE after
-        # finalize rather than forcing an operator to clear maintenance each trip.
+        # Sequenced BEFORE the finalize below, in this same coroutine: finalize
+        # keeps a MAINTENANCE status (it only frees an OCCUPIED plug), so the
+        # plug never passes through a committed AVAILABLE window and its
+        # "notify me when free" watchers are not told a faulted plug is free.
+        # Runs even when no session is found (a cutoff with no active session
+        # still needs the plug taken out of service). Env-gated via
+        # AUTO_MAINTENANCE_ON_CRITICAL_ALARM. OVERCURRENT_CAP is deliberately
+        # EXCLUDED (not in the maintenance set): it's a policy limit on a
+        # HEALTHY plug, so the plug goes back to AVAILABLE after finalize rather
+        # than forcing an operator to clear maintenance each trip.
         if (
             AUTO_MAINTENANCE_ON_CRITICAL_ALARM
             and plug_id is not None
             and event_type in self._MAINTENANCE_ALARM_REASONS
         ):
             await self._auto_enter_maintenance(plug_id, event_type)
+
+        # A finalize-worthy alarm means the firmware already forced the relay OFF
+        # and cleared its local session, so finalize the backend session to match
+        # (bills the recorded energy, frees the plug unless it is in MAINTENANCE,
+        # notifies the driver). This includes OVERCURRENT_CAP (a soft cap trip):
+        # the firmware stopped charging, so the backend must finalize too,
+        # otherwise the plug is orphaned OCCUPIED until the reaper.
+        if plug_id is not None and event_type in self._FINALIZE_ALARM_REASONS:
+            await self._finalize_session_after_cutoff(plug_id, event_type)
 
     # Alarms after which the firmware has already stopped charging locally, so the
     # backend must finalize the session to match. The value is the finalize reason,
@@ -461,8 +461,8 @@ class MQTTAlarmMixin:
     async def _auto_enter_maintenance(self, plug_id: int, event_type: str):
         """
         Force a plug into MAINTENANCE after a hardware safety cutoff (called
-        from _persist_gateway_event, right after _finalize_session_after_cutoff
-        — see the ordering note there). The firmware has already force-OFF'd
+        from _persist_gateway_event, right BEFORE _finalize_session_after_cutoff;
+        see the ordering note there). The firmware has already force-OFF'd
         the relay locally — this only stops a *new* session from being started
         on the plug (session-start 409s any non-AVAILABLE plug) until an
         operator clears it via POST /api/cpo/plugs/{id}/maintenance. No-op if

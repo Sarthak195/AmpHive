@@ -117,3 +117,6 @@ skills-lock.json
 # checkout. See tools/flasher/README.md.
 tools/flasher/firmware-images/*.bin
 tools/flasher/*.spec.bak
+
+# graphify knowledge graph (regenerate with: graphify update .)
+graphify-out/

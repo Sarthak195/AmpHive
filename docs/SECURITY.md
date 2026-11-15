@@ -157,7 +157,8 @@ firmware-image upload — mirrored by an 8m nginx `location`) + nginx
 >   limit) and published plaintext MQTT on `0.0.0.0` with the template default.
 >   Both loopback-bound. **The live relay stack was already correct** — this was
 >   latent in the disaster-recovery path only.
-> - **Dependencies.** First clean lockfile re-resolve since 2026-07-21: 9
+> - **Dependencies.** (Update 2026-11-15: the python-jose advisories below are
+>   resolved, see the 2026-11-15 note at the end of this section.) First clean lockfile re-resolve since 2026-07-21: 9
 >   advisories in 4 packages -> **1**, and that one (`ecdsa` PYSEC-2026-1325)
 >   has no upstream fix and is unreachable here — it arrives via python-jose and
 >   is ES*-only, while `JWT_ALGORITHM` pins HS256 on both encode and decode.
@@ -192,6 +193,13 @@ firmware-image upload — mirrored by an 8m nginx `location`) + nginx
 > needs a dedicated infra deploy rather than a bundle; and `python-jose` was NOT
 > migrated to PyJWT — it is current at 3.5.0 with no advisory of its own, and an
 > auth-path swap does not belong in a batch this wide.
+>
+> **Update 2026-11-15: python-jose replaced by PyJWT.** python-jose 3.5.0
+> carries PYSEC-2026-4298 with no fixed release and pulled in `ecdsa`
+> (PYSEC-2026-1325). Both are removed (`rsa` and `six` too), and CI's pip-audit
+> runs with no ignores. JWTs stay HS256 with `algorithms=["HS256"]` pinned on
+> decode. Existing tokens keep working: `backend/tests/test_jwt_compat.py`
+> decodes a fixture minted by python-jose.
 
 ---
 
@@ -240,6 +248,21 @@ BFG + force-push) to purge the dead values entirely.
   epoch is per-user, not per-token); single-device logout isn't distinguished
   from all-device. Legacy pre-`tv` tokens are treated as epoch 0 (valid until
   the first revoke), so the change didn't force-log-out existing sessions.
+- [Added 2026-11-15] **Sliding token renewal.** The fixed 7-day expiry with no
+  refresh signed active users out about weekly per device (prod logs showed
+  every forced re-login was a 53-byte expired-token 401 on `/me`).
+  `GET /api/auth/me` now also returns a freshly minted token at the user's
+  CURRENT `token_version` (only after `get_current_user` has checked the epoch
+  and the disabled flag), and the SPA stores it. Revocation is unchanged:
+  logout, password reset, admin role change or disable, and account closure
+  still kill every token, renewed ones included. Renewal is capped: the
+  token carries `auth_time` (the original sign-in) through every renewal and
+  `/me` stops re-minting once that is older than `JWT_MAX_SESSION_DAYS`
+  (default 90), so a stolen token stays usable for at most that long, less if
+  the epoch is bumped first (log out, or reset the password). The token a
+  renewal replaced stays valid until its own `exp`. The SPA also no longer drops
+  the token when `/me` fails at boot with a timeout, network error or 5xx;
+  only a 401/403 signs out there.
 - [Added 2026-08-04] **Least-privilege DB runtime role (privilege separation).**
   `DATABASE_URL` is the OWNER connection (superuser in prod) and is now used
   ONLY for migrations + one-time role provisioning. When `APP_DB_PASSWORD` is
@@ -350,7 +373,7 @@ BFG + force-push) to purge the dead values entirely.
     transport + signing.** Both halves of the earlier TODO are implemented
     (fw ≥ 1.4.0):
     * **HTTPS-only images**: hosted on the public-read GCS bucket
-      `gs://amphive-fw` (`https://storage.googleapis.com/amphive-fw/...`,
+      `gs://amphive-fw-2` (`https://storage.googleapis.com/amphive-fw-2/...`,
       public-CA cert the firmware's Mozilla bundle validates; public-read
       user-approved 2026-07-10 — images hold no secrets and are signed).
       Plain `http://` is refused by the firmware
@@ -422,7 +445,12 @@ BFG + force-push) to purge the dead values entirely.
   backend's leftover query-string token fallback — which no client used —
   was **removed 2026-07-09** (`socketio_manager.py:connect`), so a full JWT
   can no longer appear in proxy/access logs via the URL. Session ownership
-  is still verified per subscription.
+  is still verified per subscription, and (since 2026-11-15) so is session
+  state: `subscribe_session` on a session that is no longer ACTIVE gets one
+  `completed` frame built from that session's own row and no stream. The
+  live stream is keyed by plug, so before this a driver who subscribed to
+  their own finished session saw the next driver's live power, energy and
+  cost on that plug.
 
 > RBAC across the `/api/cpo/*` surface is now enforced (`require_role`) — see
 > [§7](#7-recently-fixed).
@@ -668,7 +696,9 @@ guardrail below was honored — recorded here so the invariants are auditable:
 - ~~**JWT: 7-day expiry, no revocation/blacklist**~~ **Resolved 2026-07-08**:
   tokens carry a per-user `token_version` epoch re-checked each request;
   logout revokes server-side, and expiry is env-configurable
-  (`JWT_EXPIRY_DAYS`) — see §2.
+  (`JWT_EXPIRY_DAYS`), see §2. Since 2026-11-15 the expiry slides
+  (re-minted on every `GET /api/auth/me`, capped at `JWT_MAX_SESSION_DAYS`
+  from the original sign-in), see §2.
 - ~~**No rate limiting** on `/api/auth/login` and `/api/auth/register`~~
   **Resolved 2026-07-11**: both endpoints enforce an in-process
   sliding-window limit per client IP (`backend/services/rate_limit.py`;
@@ -708,6 +738,36 @@ guardrail below was honored — recorded here so the invariants are auditable:
   `RegisterRequest` uses `EmailStr` and an 8-72 char password rule (72 =
   bcrypt truncation boundary). Login is intentionally unvalidated so accounts
   created before the rule can still sign in (`backend/schemas.py`; TD#30).
+- ~~**A squatter's password survives the owner's email verification**~~
+  **Resolved 2026-11-15** (account pre-hijacking, password half). Someone
+  could register `victim@x` with their own password; the owner, refused with
+  "already exists", requested a resend and clicked it, and `verify-email`
+  flipped the account verified with the squatter's password still set. Rule
+  now: an UNVERIFIED account's password is **provisional**.
+  `POST /api/auth/register` on an existing unverified email replaces the
+  password and full name, voids earlier links and sends a new one (under the
+  per-email `RESEND_VERIFICATION_EMAIL_RATE_LIMIT` cap, since it mails an
+  existing address unauthenticated); a verified email still gets the 400. The
+  first Google sign-in that links an existing password account drops its
+  password (unusable hash, `auth_provider='google'`, `token_version` bumped)
+  whether or not it is verified, because Google proved ownership and the
+  password's author may not be the owner; an unverified account is also
+  marked verified.
+  **Residual (accepted):** whoever re-registers LAST and gets the owner to
+  click the newest link still sets the password. A squatter who re-registers
+  after the owner, then gets the owner to click (the owner's own resend or
+  the squatter's mail both send the newest link), ends up with a verified
+  account whose password the squatter knows, until the owner resets it via
+  forgot-password. Repeated re-registration can also keep voiding the
+  owner's pending link (bounded by the per-IP register limit and the
+  per-email cap). Because re-registration shares the per-email resend
+  bucket, a squatter who fills it also makes the owner's own signup and
+  resend return 429 until the window passes, while the squatter's password
+  and newest link stay live; the cap is kept because dropping it would
+  reopen the mail-bomb path resend-verification closes. Either forgot-password
+  or the owner's first Google sign-in evicts the squatter, before or after
+  verification. Tests: `backend/tests/test_email_verification.py`,
+  `backend/tests/test_google_oauth.py`.
 
 ### 8.7 Claim-code onboarding attack surface (2026-08-02, feat/easy-provisioning) — considered, mitigated
 

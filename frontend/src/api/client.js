@@ -9,9 +9,10 @@
  * - API base URL comes from VITE_API_URL env var or defaults to
  *   the current origin (for same-domain Docker deployments).
  * - JWT token is stored in localStorage under 'amphive_token'.
- * - On 401 response, the token is cleared and user is redirected
- *   to the login page to re-authenticate — with the current location
- *   preserved as ?next= so Login can send them back.
+ * - On a 401 response, the token is cleared and the user is redirected to
+ *   the login page (current location preserved as ?next= so Login can send
+ *   them back). A 401 from /api/auth/login itself (a wrong password) is
+ *   thrown with the server's detail like any other error.
  * - Every request carries a 20s AbortController timeout so a dead backend
  *   surfaces as a friendly error (err.code === 'timeout') instead of an
  *   indefinite spinner.
@@ -68,8 +69,10 @@ export async function apiRequest(endpoint, options = {}) {
     clearTimeout(timeoutId);
   }
 
-  // Handle 401 Unauthorized — token expired or invalid
-  if (response.status === 401) {
+  // A 401 means the session expired, was revoked or is missing: clear it and
+  // send the user to sign in. A 401 from the login call itself is a wrong
+  // password, so it falls through and the server's detail is shown.
+  if (response.status === 401 && endpoint !== '/api/auth/login') {
     localStorage.removeItem('amphive_token');
     localStorage.removeItem('amphive_user');
     // Redirect to login page if not already there, preserving the current
@@ -78,7 +81,9 @@ export async function apiRequest(endpoint, options = {}) {
       const next = encodeURIComponent(window.location.pathname + window.location.search);
       window.location.href = `/login?next=${next}`;
     }
-    throw new Error('Authentication expired. Please sign in again.');
+    const err = new Error('Authentication expired. Please sign in again.');
+    err.status = 401;
+    throw err;
   }
 
   // Parse response

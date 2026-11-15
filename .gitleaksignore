@@ -1,0 +1,4 @@
+# Test fixture in commit 0287fe5 (PR #136), a harmless HS256 test secret.
+# The line now carries an inline gitleaks:allow; this entry covers the
+# historical commit, which gitleaks still scans in the PR range.
+0287fe5954d08d211a476ad13147b109c4e06668:backend/tests/test_jwt_compat.py:generic-api-key:11

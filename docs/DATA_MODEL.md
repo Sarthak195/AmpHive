@@ -308,7 +308,9 @@ full column list of each:
   (`UPDATE users SET email_verified = true` right after adding the column) so
   the live prod user base is never locked out — only signups made after the
   migration, through the app, start `false`. Closes the account-PRE-hijacking
-  class at its root. Backs `POST /api/auth/register` + `verify-email` +
+  class at its root: while `false` the account's password is provisional
+  (re-registering replaces it, a Google link drops it; residual in
+  SECURITY.md §8.6). Backs `POST /api/auth/register` + `verify-email` +
   `resend-verification`.
 - **`offline_topups`** (`0026_offline_topups.py`) — a CPO's cash top-up of a
   driver's coin wallet, funded from the tenant's own unsettled net earnings
@@ -320,7 +322,7 @@ full column list of each:
 - **`firmware_releases`** (`0036_firmware_releases.py`, feat/ota-version-
   picker) — an admin-registered firmware release catalog (`FirmwareRelease`:
   `version` UNIQUE, `url` the already-published `https://` image location —
-  `gs://amphive-fw` or the backend's own image host, see
+  `gs://amphive-fw-2` or the backend's own image host, see
   [FIRMWARE.md](FIRMWARE.md) §7 — `notes`,
   `is_active` soft-deactivate flag). Not tenant-scoped: one firmware fleet.
   Replaces hand-pasting a firmware URL with a version dropdown on the CPO
@@ -333,7 +335,7 @@ full column list of each:
   only URLs, never binary blobs — since feat/admin-dashboard (2026-08-04)
   `POST /api/admin/firmware-releases/upload` accepts the `.bin` itself and
   auto-registers a row; since 2026-08-11 (PR #115) that upload **publishes
-  the bytes to `gs://amphive-fw`** and registers the bucket URL (the
+  the bytes to `gs://amphive-fw-2`** and registers the bucket URL (the
   2026-08-04 backend-volume host `GET /api/firmware/images/{filename}` is
   kept only as legacy back-compat for URLs registered before the switch).
   Re-uploading/re-registering a **deactivated** version overwrites

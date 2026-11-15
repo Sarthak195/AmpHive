@@ -30,6 +30,21 @@ import { apiErrorCopy } from '../utils/statusCopy';
 import { isSafeInternalPath } from '../utils/safePath';
 import { isCpoHost } from '../utils/appHost';
 
+// Fixed copy for the backend's sign-in error codes: the password 403
+// 'account_disabled' detail, and the ?google_error= code the Google callback
+// redirects back with. Only known codes get specific text, so a crafted link
+// cannot put arbitrary words on this page.
+const SIGN_IN_ERROR_COPY = {
+  account_disabled: 'This account has been disabled. Contact support if you think this is a mistake.',
+  cancelled: 'Google sign-in was cancelled.',
+  expired: 'That Google sign-in attempt expired. Please try again.',
+  email_unverified: 'Your Google account email is not verified with Google.',
+  different_google: 'This email is linked to a different Google account.',
+  google_in_use: 'This Google account is already linked to a different AmpHive account.',
+  unavailable: "Google sign-in isn't available right now.",
+};
+const GOOGLE_FAILED = 'Google sign-in did not complete. Please try again.';
+
 const Login = () => {
   const { login } = useAuth();
   const navigate = useNavigate();
@@ -46,7 +61,10 @@ const Login = () => {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
-  const [error, setError] = useState('');
+  const [error, setError] = useState(() => {
+    const code = new URLSearchParams(location.search).get('google_error');
+    return code ? SIGN_IN_ERROR_COPY[code] || GOOGLE_FAILED : '';
+  });
   const [busy, setBusy] = useState(false);
   // A 403 means the account exists but its email is unverified — a distinct
   // state from the 401 "wrong credentials" error, with a resend affordance.
@@ -68,7 +86,9 @@ const Login = () => {
       const target = (next && isSafeInternalPath(next) ? next : null) || fromTarget || '/';
       navigate(target, { replace: true });
     } catch (err) {
-      if (err?.status === 403) {
+      if (err?.status === 403 && err.message === 'account_disabled') {
+        setError(SIGN_IN_ERROR_COPY.account_disabled);
+      } else if (err?.status === 403) {
         // Unverified email — show the verify/resend state, not a red error.
         setUnverified(true);
       } else {
