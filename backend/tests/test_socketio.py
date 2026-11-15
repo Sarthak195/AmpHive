@@ -252,6 +252,7 @@ async def test_stream_task_emits_telemetry_and_stops_when_room_empties(monkeypat
     fake_lifecycle = types.ModuleType("backend.services.session_lifecycle")
     fake_lifecycle.set_plug_telemetry_interval = AsyncMock()
     monkeypatch.setitem(sys.modules, "backend.services.session_lifecycle", fake_lifecycle)
+    monkeypatch.setattr(sm, "TELEMETRY_SLOWDOWN_GRACE_SEC", 0)
 
     session_id, plug_id = 4242, 7777
     room_name = f"session_{session_id}"
@@ -292,3 +293,32 @@ async def test_stream_task_emits_telemetry_and_stops_when_room_empties(monkeypat
         sm.telemetry_store.end_session(plug_id)
 
     assert session_id not in sm.active_streams
+    # Let the (zero-grace) listener release run before the stub is unpatched.
+    for _ in range(5):
+        await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_reload_within_grace_does_not_slow_the_gateway(monkeypatch):
+    """A page reload drops the old stream before the new one subscribes. The
+    old stream's listener is released only after the grace window, so if the
+    new subscriber is already counted the gateway is never told 10 s; once the
+    last viewer is really gone it is."""
+    from backend.services import socketio_manager as sm
+
+    fake_lifecycle = types.ModuleType("backend.services.session_lifecycle")
+    fake_lifecycle.set_plug_telemetry_interval = AsyncMock()
+    monkeypatch.setitem(sys.modules, "backend.services.session_lifecycle", fake_lifecycle)
+    monkeypatch.setattr(sm, "TELEMETRY_SLOWDOWN_GRACE_SEC", 0)
+    monkeypatch.setattr(sm, "async_session_factory", MagicMock())
+
+    plug_id = 7778
+    sm.telemetry_store.increment_listeners(plug_id)  # old page's stream
+    sm.telemetry_store.increment_listeners(plug_id)  # reloaded page's stream
+
+    await sm.release_listener_later(plug_id)          # old stream released
+    fake_lifecycle.set_plug_telemetry_interval.assert_not_awaited()
+
+    await sm.release_listener_later(plug_id)          # last viewer leaves
+    fake_lifecycle.set_plug_telemetry_interval.assert_awaited_once()
+    assert fake_lifecycle.set_plug_telemetry_interval.await_args.args[1:] == (plug_id, 10000)

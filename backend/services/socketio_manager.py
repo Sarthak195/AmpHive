@@ -59,6 +59,29 @@ sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins=cors_allowed_
 # Active background telemetry tasks by session_id
 active_streams: Dict[int, asyncio.Task] = {}
 
+# How long a plug stays at the fast (1 s) cadence after its last live viewer
+# leaves. A page reload drops the old socket before the new one subscribes;
+# slowing the gateway to 10 s in that gap made a reloaded session look frozen
+# for ~10 s, because the firmware sleeps out the whole slow interval before it
+# honours the next SET_INTERVAL. Within the grace window the new subscriber's
+# listener keeps the count above zero, so no slowdown is ever sent.
+TELEMETRY_SLOWDOWN_GRACE_SEC = float(os.getenv("TELEMETRY_SLOWDOWN_GRACE_SEC", "30"))
+# Strong refs so pending release tasks are not garbage-collected mid-sleep.
+_release_tasks: set = set()
+
+
+async def release_listener_later(plug_id: int) -> None:
+    """Drop one live-view listener for `plug_id` after the grace window, and
+    slow the gateway to 10 s only if nobody else is watching by then."""
+    from backend.services.session_lifecycle import set_plug_telemetry_interval
+    try:
+        await asyncio.sleep(TELEMETRY_SLOWDOWN_GRACE_SEC)
+        if telemetry_store.decrement_listeners(plug_id) == 0:
+            async with async_session_factory() as db:
+                await set_plug_telemetry_interval(db, plug_id, 10000)
+    except Exception:
+        logger.exception("Telemetry slowdown failed", extra={"plug_id": plug_id})
+
 telemetry_store = TelemetryStore()
 
 
@@ -367,11 +390,11 @@ async def stream_telemetry_task(session_id: int, plug_id: int):
     except Exception as e:
         logger.error(f"Error in stream_telemetry_task for session {session_id}: {e}", exc_info=True)
     finally:
-        if listeners_incremented:
-            async with async_session_factory() as db:
-                listeners = telemetry_store.decrement_listeners(plug_id)
-                if listeners == 0:
-                    await set_plug_telemetry_interval(db, plug_id, 10000)
-
+        # Free the slot first so a re-subscribe starts a fresh stream task.
         active_streams.pop(session_id, None)
+        if listeners_incremented:
+            release = asyncio.create_task(release_listener_later(plug_id))
+            _release_tasks.add(release)
+            release.add_done_callback(_release_tasks.discard)
+
         logger.info(f"Telemetry stream task for session {session_id} ended.")
