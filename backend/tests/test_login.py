@@ -154,6 +154,8 @@ async def test_login_success_returns_valid_token():
     assert payload["sub"] == str(user.id)
     assert payload["role"] == "driver"
     assert payload["tv"] == 2
+    # A sign-in mints a fresh per-device session id (per-device logout).
+    assert isinstance(payload["sid"], str) and len(payload["sid"]) >= 22
 
 
 # -------------------------------------------- email-verification login gate ---

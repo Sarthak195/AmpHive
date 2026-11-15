@@ -3,9 +3,11 @@ Tests for JWT token revocation via the users.token_version epoch.
 
 Every token carries the user's token_version at issue time (`tv` claim);
 get_current_user rejects a request whose `tv` no longer matches the stored
-epoch, and POST /api/auth/logout bumps the epoch ("log out everywhere").
-Legacy tokens minted before the claim existed (no `tv`) are treated as
-epoch 0 for backward compatibility.
+epoch, and POST /api/auth/logout-everywhere bumps the epoch ("log out
+everywhere"). POST /api/auth/logout bumps it too, but only for a legacy
+token without a `sid` claim (per-device logout is in
+test_per_device_logout.py). Legacy tokens minted before the tv claim existed
+(no `tv`) are treated as epoch 0 for backward compatibility.
 """
 from unittest.mock import AsyncMock, MagicMock
 
@@ -101,8 +103,9 @@ async def test_legacy_token_rejected_after_first_revoke():
 
 @pytest.mark.asyncio
 async def test_logout_bumps_token_version():
-    """The bump must be a DB-side atomic UPDATE (token_version + 1), not
-    Python arithmetic on the auth-loaded instance — a stale identity-mapped
+    """A sid-less (pre-per-device) token's logout falls back to the global
+    bump. The bump must be a DB-side atomic UPDATE (token_version + 1), not
+    Python arithmetic on the auth-loaded instance: a stale identity-mapped
     epoch would collapse concurrent bumps (lost update)."""
     user = _user(token_version=4)
     result = MagicMock()
@@ -110,9 +113,9 @@ async def test_logout_bumps_token_version():
     db = AsyncMock()
     db.execute = AsyncMock(return_value=result)
 
-    res = await logout(user, db)
+    res = await logout(user, db, _creds(create_access_token(1, "driver", "d@x.test", 4)))
 
-    assert res == {"status": "logged_out"}
+    assert res == {"status": "logged_out", "scope": "all"}
     stmt = str(db.execute.await_args.args[0])
     assert stmt.startswith("UPDATE users")
     assert "token_version + " in stmt

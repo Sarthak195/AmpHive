@@ -220,7 +220,7 @@ async def connect(sid, environ, auth=None):
         # The token's sign-in session id rides along under `auth_sid` (only
         # when the token has one) so the same re-validation also catches a
         # per-device logout.
-        socket_session: Dict[str, Any] = {"user_id": user_id, "tv": payload.get("tv", 0)}
+        socket_session = {"user_id": user_id, "tv": payload.get("tv", 0)}
         if auth_sid is not None:
             socket_session["auth_sid"] = auth_sid
         await sio.save_session(sid, socket_session)

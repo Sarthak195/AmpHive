@@ -579,8 +579,12 @@ async def test_callback_link_google_sign_in_still_yields_a_working_token(monkeyp
     payload = decode_access_token(token)
     assert payload["sub"] == str(existing.id)
     assert payload["tv"] == existing.token_version == 1
+    # The callback is a sign-in, so it mints a per-device session id that the
+    # exchange hands over unchanged.
+    assert isinstance(payload["sid"], str) and payload["sid"]
 
-    # The freshly-minted Google token is accepted by get_current_user.
+    # The freshly-minted Google token is accepted by get_current_user (its
+    # sid lookup resolves to a MagicMock on this AsyncMock db: not revoked).
     creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
     assert await get_current_user(creds, _db_returning(existing)) is existing
 

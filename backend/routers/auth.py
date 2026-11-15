@@ -56,7 +56,9 @@ from backend.services.auth import (
     new_session_id,
     normalize_email,
     renewed_access_token,
+    revoke_session,
     security_scheme,
+    token_sid,
     verify_password,
 )
 from backend.services.data_export import build_export
@@ -497,33 +499,81 @@ async def get_me(
     )
 
 
-@router.post("/api/auth/logout")
-async def logout(
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    """
-    Revoke every outstanding token for this user by bumping token_version
-    (server-side "log out everywhere"). The current token — and any issued on
-    other devices — is rejected on its next request. The bump happens DB-side:
-    incrementing `user.token_version` in Python would reuse the auth-loaded
-    identity-mapped instance, whose stale epoch can collapse concurrent bumps
-    (same lost-update class as the wallet — see services/wallet.py).
-    """
+async def _bump_token_version(db: AsyncSession, user_id: int) -> int:
+    """Revoke every outstanding token for this user on every device by
+    bumping token_version. The bump happens DB-side: incrementing
+    `user.token_version` in Python would reuse the auth-loaded identity-mapped
+    instance, whose stale epoch can collapse concurrent bumps (same
+    lost-update class as the wallet, see services/wallet.py). Caller commits."""
     result = await db.execute(
         update(User)
-        .where(User.id == user.id)
+        .where(User.id == user_id)
         .values(token_version=User.token_version + 1)
         .returning(User.token_version)
         .execution_options(synchronize_session=False)
     )
-    new_epoch = result.scalar_one()
+    return result.scalar_one()
+
+
+@router.post("/api/auth/logout")
+async def logout(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    credentials: HTTPAuthorizationCredentials = Depends(security_scheme),
+):
+    """
+    Sign out THIS device: revoke the caller's sign-in session (the token's
+    `sid` claim) in revoked_sessions. Every token of that session, including
+    any /me renewal of it, is rejected on its next request; the user's other
+    devices stay signed in.
+
+    A token minted before per-device sessions existed carries no sid, so
+    there is nothing narrower to revoke: it falls back to the old global
+    token_version bump (`scope: "all"`). Log out everywhere on purpose is
+    POST /api/auth/logout-everywhere.
+    """
+    # Copy before any commit: a commit or rollback expires ORM instances, and
+    # a lazy reload of `user` after it would fail in async.
+    user_id, email = user.id, user.email
+    payload = decode_access_token(credentials.credentials) or {}
+    if token_sid(payload) is None:
+        new_epoch = await _bump_token_version(db, user_id)
+        await db.commit()
+        logger.info(
+            "User logged out (legacy token without sid: all tokens revoked)",
+            extra={"user_id": user_id, "email": email, "token_version": new_epoch},
+        )
+        return {"status": "logged_out", "scope": "all"}
+
+    # Commits the revocation itself (then a best-effort prune of expired
+    # rows). The sid is never logged.
+    await revoke_session(db, user_id, payload)
+    logger.info(
+        "User logged out (this device's session revoked)",
+        extra={"user_id": user_id, "email": email},
+    )
+    return {"status": "logged_out", "scope": "device"}
+
+
+@router.post("/api/auth/logout-everywhere")
+async def logout_everywhere(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Revoke every outstanding token for this user on every device (server-side
+    "log out everywhere"): the token_version bump, exactly what
+    POST /api/auth/logout did before per-device sessions. No revoked_sessions
+    row is needed, because the bump already kills every sid.
+    """
+    user_id, email = user.id, user.email
+    new_epoch = await _bump_token_version(db, user_id)
     await db.commit()
     logger.info(
-        "User logged out (tokens revoked)",
-        extra={"user_id": user.id, "email": user.email, "token_version": new_epoch},
+        "User logged out everywhere (tokens revoked)",
+        extra={"user_id": user_id, "email": email, "token_version": new_epoch},
     )
-    return {"status": "logged_out"}
+    return {"status": "logged_out", "scope": "all"}
 
 
 # ===========================================================================
