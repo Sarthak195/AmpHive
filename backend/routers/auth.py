@@ -53,6 +53,7 @@ from backend.services.auth import (
     decode_access_token,
     get_current_user,
     hash_password,
+    new_session_id,
     normalize_email,
     renewed_access_token,
     security_scheme,
@@ -303,7 +304,9 @@ async def verify_email(req: VerifyEmailRequest, db: AsyncSession = Depends(get_d
     # the new epoch — the click logs them in.
     result = await db.execute(select(User).where(User.id == evt.user_id))
     user = result.scalar_one()
-    token = create_access_token(user.id, user.role.value, user.email, user.token_version)
+    token = create_access_token(
+        user.id, user.role.value, user.email, user.token_version, sid=new_session_id()
+    )
     logger.info(
         "Email verified (user logged in)",
         extra={"user_id": user.id, "email": user.email},
@@ -444,7 +447,9 @@ async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
             detail="Please verify your email address. Check your inbox for the verification link.",
         )
 
-    token = create_access_token(user.id, user.role.value, user.email, user.token_version)
+    token = create_access_token(
+        user.id, user.role.value, user.email, user.token_version, sid=new_session_id()
+    )
     logger.info(
         "User logged in",
         extra={"user_id": user.id, "email": user.email},
@@ -983,7 +988,9 @@ async def google_callback(request: Request, db: AsyncSession = Depends(get_db)):
     if user.is_disabled:
         return _google_error_response("account_disabled", "account_disabled")
 
-    token = create_access_token(user.id, user.role.value, user.email, user.token_version)
+    token = create_access_token(
+        user.id, user.role.value, user.email, user.token_version, sid=new_session_id()
+    )
     logger.info(
         "User logged in via Google",
         extra={"user_id": user.id, "email": user.email},

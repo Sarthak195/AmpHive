@@ -126,8 +126,33 @@ def normalize_email(email: str) -> str:
 
 # --- JWT Token Management ---
 
+# Random per-sign-in session id (the `sid` claim): 16 bytes of entropy, which
+# token_urlsafe renders as 22 url-safe characters.
+SESSION_ID_BYTES = 16
+
+
+def new_session_id() -> str:
+    """A fresh, unguessable sign-in session id for the `sid` claim. Minted
+    once per sign-in (login, email verification, Google callback) and carried
+    unchanged across /me renewals, so revoking it ends that one device's
+    session without touching the user's other devices."""
+    return secrets.token_urlsafe(SESSION_ID_BYTES)
+
+
+def token_sid(payload: dict) -> Optional[str]:
+    """The token's `sid` claim, or None when it is absent or malformed (a
+    token minted before per-device sessions existed carries none)."""
+    sid = payload.get("sid")
+    return sid if isinstance(sid, str) and sid else None
+
+
 def create_access_token(
-    user_id: int, role: str, email: str, token_version: int = 0, auth_time: Optional[int] = None
+    user_id: int,
+    role: str,
+    email: str,
+    token_version: int = 0,
+    auth_time: Optional[int] = None,
+    sid: Optional[str] = None,
 ) -> str:
     """
     Create a signed JWT access token containing user claims.
@@ -142,6 +167,11 @@ def create_access_token(
     - iat: issued-at timestamp
     - auth_time: when the user actually signed in (epoch seconds); renewals
       keep it, which bounds a session at JWT_MAX_SESSION_DAYS
+    - sid: the sign-in session id (only when `sid` is passed). Sign-in paths
+      pass new_session_id(); renewals pass the old token's sid through. None
+      omits the claim, so a token minted before per-device sessions stays
+      sid-less across renewals. POST /api/auth/logout revokes it
+      (revoked_sessions).
     """
     now = datetime.now(timezone.utc)
     payload = {
@@ -153,6 +183,8 @@ def create_access_token(
         "iat": now,
         "exp": now + timedelta(days=JWT_EXPIRY_DAYS),
     }
+    if sid is not None:
+        payload["sid"] = sid
     return jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
 
 
@@ -160,11 +192,22 @@ def renewed_access_token(payload: dict, user: User) -> Optional[str]:
     """Sliding renewal for GET /api/auth/me: re-mint at the user's CURRENT
     token_version, keeping the original sign-in time. None once that sign-in
     is older than JWT_MAX_SESSION_DAYS (tokens minted before auth_time existed
-    fall back to iat), so the client keeps its token until it expires."""
+    fall back to iat), so the client keeps its token until it expires.
+
+    The sign-in session id (`sid`) is carried through unchanged and never
+    minted here: a sid-less token stays sid-less, so a copy of it taken before
+    per-device sessions existed cannot outlive a later per-device logout."""
     auth_time = int(payload.get("auth_time") or payload.get("iat") or 0)
     if datetime.now(timezone.utc).timestamp() - auth_time > JWT_MAX_SESSION_DAYS * 86400:
         return None
-    return create_access_token(user.id, user.role.value, user.email, user.token_version, auth_time=auth_time)
+    return create_access_token(
+        user.id,
+        user.role.value,
+        user.email,
+        user.token_version,
+        auth_time=auth_time,
+        sid=token_sid(payload),
+    )
 
 
 def decode_access_token(token: str) -> Optional[dict]:
