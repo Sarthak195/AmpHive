@@ -7,6 +7,30 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 
 ---
 
+## 0 - 2026-11-15 fix batch
+
+- **Invoices after a refund (C11)** - `issue_invoice_for_session` now nets the
+  session's APPROVED dispute refunds off the invoice at first issue. Before, a
+  dispute approved before the driver first opened the invoice left nothing for
+  `adjust_invoice_for_session_refund` to adjust, so the invoice reported (and
+  the CPO GST list/CSV overstated) the full pre-refund total. A fully refunded
+  session now issues a 0.00 invoice, the same shape the adjust path produces.
+- **CPO dashboard "today" is tenant-local (C12)** - `GET /api/cpo/analytics/overview`
+  "today" and the daily revenue/energy series (`/analytics/revenue`,
+  `/analytics/energy`) now use the tenant's `timezone` (same resolver as pricing,
+  default `Asia/Kolkata`) instead of the UTC day, which rolled over at 05:30 IST.
+- **Plug edit can reset to inherit (C13)** - `PUT /api/cpo/plugs/{id}` treats an
+  explicit JSON `null` for `queued_charging_enabled` / `auto_start_delay_min` as
+  "clear the override back to the tenant default"; an omitted key still leaves it
+  unchanged (`0` still clears the delay).
+- **Reservations Day view stays fresh (C14)** - the Day timeline refetches on
+  every switch to it, so a cancel made in the List view is no longer drawn
+  stale. Known limit: the Day fetch is still the newest 200 reservations, so a
+  tenant with more than 200 in total sees empty oldest days (one reservation in
+  prod today; add from/to params to `GET /api/cpo/reservations` if that changes).
+
+---
+
 ## 0. Latest — 2026-10-20 connection noise: debounced offline notices, gated orphan bells, fw 2.8.0 diagnostics
 
 A 45-day forensic pass over the prod logs (one user, who is driver, operator

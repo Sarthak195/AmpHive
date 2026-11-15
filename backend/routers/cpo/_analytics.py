@@ -9,7 +9,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
-from sqlalchemy import Date, and_, cast, func, select
+from sqlalchemy import Date, and_, bindparam, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database.db import get_db
@@ -20,14 +20,42 @@ from backend.database.models import (
     Plug,
     SessionStatus,
     TelemetryReading,
+    Tenant,
     User,
 )
 from backend.services.csv_safe import sanitize_csv_cell
+from backend.services.pricing import _zone
 from backend.services.rbac import require_role
 
 from ._common import clamp_days
 
 router = APIRouter()
+
+
+async def _tenant_zone(db: AsyncSession, tenant_id):
+    """The tenant's tzinfo, resolved exactly as services/pricing does (falls
+    back to the pricing default zone, then UTC). Dashboard "today" and the
+    daily series are tenant-local days, not UTC days."""
+    tz_name = (
+        await db.execute(select(Tenant.timezone).where(Tenant.id == tenant_id))
+    ).scalar_one_or_none()
+    return _zone(tz_name)
+
+
+def _local_midnight_utc(tz, now: datetime) -> datetime:
+    """Start of `now`'s calendar day in `tz`, as an aware UTC datetime."""
+    return now.astimezone(tz).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    ).astimezone(timezone.utc)
+
+
+def _local_day(tz):
+    """SQL expression: the tenant-local calendar date of started_at. The zone
+    name is rendered inline (literal_execute) so the SELECT and GROUP BY
+    copies are textually identical; with a plain bind param Postgres sees
+    $1 vs $2 and rejects the query as not grouped."""
+    zone = bindparam("tz", getattr(tz, "key", "UTC"), literal_execute=True)
+    return cast(func.timezone(zone, ChargingSession.started_at), Date)
 
 
 # --- CPO Analytics ---
@@ -76,7 +104,8 @@ async def cpo_analytics_overview(
     gateways_total = gw_total_result.scalar() or 0
 
     # Today's stats (energy and revenue from completed sessions started today)
-    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    tz = await _tenant_zone(db, tenant_id)
+    today_start = _local_midnight_utc(tz, datetime.now(timezone.utc))
     today_stats_result = await db.execute(
         select(
             func.coalesce(func.sum(ChargingSession.energy_kwh), 0),
@@ -304,10 +333,12 @@ async def cpo_analytics_revenue(
     """
     cutoff = datetime.now(timezone.utc) - timedelta(days=clamp_days(days))
 
+    day = _local_day(await _tenant_zone(db, user.tenant_id))
+
     # Query: group completed sessions by date, sum revenue
     result = await db.execute(
         select(
-            cast(ChargingSession.started_at, Date).label("date"),
+            day.label("date"),
             func.coalesce(func.sum(ChargingSession.coins_spent), 0).label("revenue"),
             func.count(ChargingSession.id).label("count"),
         )
@@ -316,8 +347,8 @@ async def cpo_analytics_revenue(
             ChargingSession.started_at >= cutoff,
             ChargingSession.status.in_([SessionStatus.COMPLETED, SessionStatus.PAID]),
         ))
-        .group_by(cast(ChargingSession.started_at, Date))
-        .order_by(cast(ChargingSession.started_at, Date))
+        .group_by(day)
+        .order_by(day)
     )
 
     rows = result.all()
@@ -345,9 +376,11 @@ async def cpo_analytics_energy(
     """
     cutoff = datetime.now(timezone.utc) - timedelta(days=clamp_days(days))
 
+    day = _local_day(await _tenant_zone(db, user.tenant_id))
+
     result = await db.execute(
         select(
-            cast(ChargingSession.started_at, Date).label("date"),
+            day.label("date"),
             func.coalesce(func.sum(ChargingSession.energy_kwh), 0).label("energy"),
             func.count(ChargingSession.id).label("count"),
         )
@@ -356,8 +389,8 @@ async def cpo_analytics_energy(
             ChargingSession.started_at >= cutoff,
             ChargingSession.status.in_([SessionStatus.COMPLETED, SessionStatus.PAID]),
         ))
-        .group_by(cast(ChargingSession.started_at, Date))
-        .order_by(cast(ChargingSession.started_at, Date))
+        .group_by(day)
+        .order_by(day)
     )
 
     rows = result.all()
