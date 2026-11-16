@@ -228,14 +228,17 @@ Ctrl-C stops all plugs cleanly.
    steps in `docs/FIRMWARE.md §7`) — only needed for the port-addressing
    mode; skip if using secondary IPs. Set the gateway's captive-portal Tapo
    email/password to match `--email`/`--password` above.
-3. **Register the gateway and 3 plugs** via the CPO API (same pattern
+3. **Register the gateway and 3 plugs** via the API (same pattern
    `tools/fake_plug.py` uses for its own registration, just pointed at real
    IPs/ports instead):
    ```bash
    # gateway (gateway_id must match the real device's derived id, shown on
-   # the unit / in the captive portal serial log)
-   curl -X POST $API_BASE/api/cpo/gateways -H "Authorization: Bearer $TOKEN" \
-        -d '{"gateway_id":"<gw-mac>","name":"P110 sim bench"}'
+   # the unit / in the captive portal serial log). Manual registration is
+   # admin-only, so an admin mints it and the CPO claims the printed code.
+   curl -X POST $API_BASE/api/admin/gateways/inventory \
+        -H "Authorization: Bearer $ADMIN_TOKEN" -d '{"gateway_id":"<gw-mac>"}'
+   curl -X POST $API_BASE/api/cpo/gateways/claim -H "Authorization: Bearer $TOKEN" \
+        -d '{"claim_code":"<code>","name":"P110 sim bench"}'
 
    # one plug per emulator instance — local_ip is "host:port" (port mode) or
    # a bare secondary IP (IP mode)
