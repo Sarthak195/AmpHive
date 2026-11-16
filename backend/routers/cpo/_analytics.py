@@ -23,11 +23,11 @@ from backend.database.models import (
     Tenant,
     User,
 )
+from backend.services import payouts as payout_service
 from backend.services.csv_safe import sanitize_csv_cell
 from backend.services.pricing import _zone
-from backend.services.rbac import require_role
 
-from ._common import clamp_days
+from ._common import _require_tenant_id, clamp_days, require_cpo_tenant
 
 router = APIRouter()
 
@@ -62,7 +62,7 @@ def _local_day(tz):
 
 @router.get("/api/cpo/analytics/overview")
 async def cpo_analytics_overview(
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -71,7 +71,7 @@ async def cpo_analytics_overview(
     - Today's energy consumption and revenue
     - All-time totals
     """
-    tenant_id = user.tenant_id
+    tenant_id = _require_tenant_id(user)  # int for mypy; require_cpo_tenant already refused None
 
     # Total plugs count
     plug_count_result = await db.execute(
@@ -109,7 +109,6 @@ async def cpo_analytics_overview(
     today_stats_result = await db.execute(
         select(
             func.coalesce(func.sum(ChargingSession.energy_kwh), 0),
-            func.coalesce(func.sum(ChargingSession.coins_spent), 0),
             func.count(ChargingSession.id),
         )
         .where(and_(
@@ -120,14 +119,19 @@ async def cpo_analytics_overview(
     )
     today_row = today_stats_result.first()
     today_energy = float(today_row[0]) if today_row else 0.0
-    today_revenue = float(today_row[1]) if today_row else 0.0
-    today_sessions = int(today_row[2]) if today_row else 0
+    today_sessions = int(today_row[1]) if today_row else 0
+    # Revenue uses the Earnings page's definition (coins_spent net of approved
+    # dispute refunds) so the dashboard and /api/cpo/earnings always agree.
+    today_revenue = float(
+        await payout_service.sum_completed_session_coins(
+            db, tenant_id, window_start=today_start
+        )
+    )
 
     # All-time stats
     alltime_result = await db.execute(
         select(
             func.coalesce(func.sum(ChargingSession.energy_kwh), 0),
-            func.coalesce(func.sum(ChargingSession.coins_spent), 0),
             func.count(ChargingSession.id),
         )
         .where(and_(
@@ -137,8 +141,10 @@ async def cpo_analytics_overview(
     )
     alltime_row = alltime_result.first()
     alltime_energy = float(alltime_row[0]) if alltime_row else 0.0
-    alltime_revenue = float(alltime_row[1]) if alltime_row else 0.0
-    alltime_sessions = int(alltime_row[2]) if alltime_row else 0
+    alltime_sessions = int(alltime_row[1]) if alltime_row else 0
+    alltime_revenue = float(
+        await payout_service.sum_completed_session_coins(db, tenant_id)
+    )
 
     return {
         "plugs": {"total": total_plugs},
@@ -159,7 +165,7 @@ async def cpo_analytics_overview(
 
 @router.get("/api/cpo/analytics/sessions")
 async def cpo_analytics_sessions(
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
     plug_id: Optional[int] = None,
     status_filter: Optional[str] = None,
@@ -255,7 +261,7 @@ async def cpo_analytics_sessions(
 
 @router.get("/api/cpo/analytics/sessions.csv")
 async def cpo_export_sessions_csv(
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
     plug_id: Optional[int] = None,
     status_filter: Optional[str] = None,
@@ -322,7 +328,7 @@ async def cpo_export_sessions_csv(
 
 @router.get("/api/cpo/analytics/revenue")
 async def cpo_analytics_revenue(
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
     days: int = 30,
 ):
@@ -365,7 +371,7 @@ async def cpo_analytics_revenue(
 
 @router.get("/api/cpo/analytics/energy")
 async def cpo_analytics_energy(
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
     days: int = 30,
 ):
@@ -407,7 +413,7 @@ async def cpo_analytics_energy(
 
 @router.get("/api/cpo/analytics/telemetry")
 async def cpo_analytics_telemetry(
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
     plug_id: Optional[int] = None,
     days: int = 1,

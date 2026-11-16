@@ -72,7 +72,7 @@ const SessionMonitor = () => {
     lastFrameAt, watchSince, focusedStartedAt, focusedLimits, focusedHoldCoins, alarms,
   } = useSession();
   const { coin_inr_rate } = useConfig();
-  const { availableBalance } = useWallet();
+  const { availableBalance, balanceFresh } = useWallet();
   const toast = useToast();
 
   // 1 Hz clock so the elapsed timer and staleness check tick smoothly between
@@ -332,7 +332,9 @@ const SessionMonitor = () => {
               <p>
                 <strong>Low balance</strong> — about{' '}
                 <span className="num">{formatINR(coinsToINR(Math.max(0, remainingCoins), coin_inr_rate))}</span>
-                {kwhLeft != null && <> (≈ {formatKwh(kwhLeft)})</>} left before charging
+                {kwhLeft != null && <> (≈ {formatKwh(kwhLeft)})</>}
+                {!hasHold && balanceFresh === false && <span className="stale-tag">(last saved balance)</span>}
+                {' '}left before charging
                 stops automatically. <Link to="/credit?next=/session">Add credit</Link> —
                 charging continues while you add credit.
               </p>

@@ -26,7 +26,9 @@ const navLinkClass = ({ isActive }) => `appbar-link${isActive ? ' active' : ''}`
 
 const AppBar = () => {
   const { user, logout } = useAuth();
-  const { balance } = useWallet();
+  const { balance, balanceFresh } = useWallet();
+  // Instant open: the balance is the cached user's until /me answers.
+  const balanceStale = balanceFresh === false;
   const location = useLocation();
   const navigate = useNavigate();
   const [menuOpen, setMenuOpen] = useState(false);
@@ -98,7 +100,11 @@ const AppBar = () => {
 
         <div className="appbar-side">
           {user && !cpoHost && (
-            <Link to="/credit" className="wallet-pill" aria-label="Charging credit balance">
+            <Link
+              to="/credit"
+              className={`wallet-pill${balanceStale ? ' is-stale' : ''}`}
+              aria-label={balanceStale ? 'Charging credit balance (last saved)' : 'Charging credit balance'}
+            >
               <WalletIcon size={15} aria-hidden="true" />
               <Money coins={balance} />
             </Link>

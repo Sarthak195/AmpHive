@@ -24,9 +24,8 @@ from backend.database.models import PlugPhoto, PlugPhotoStatus, User
 from backend.routers.plugs import photo_image_path
 from backend.schemas import PlugPhotoResponse
 from backend.services.photo_publish import PhotoPublishError, delete_object
-from backend.services.rbac import require_role
 
-from ._common import logger
+from ._common import logger, require_cpo_tenant
 
 router = APIRouter()
 
@@ -43,7 +42,7 @@ def _photo_response(photo: PlugPhoto) -> PlugPhotoResponse:
 
 @router.get("/api/cpo/plug-photos", response_model=List[PlugPhotoResponse])
 async def cpo_list_plug_photos(
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
     status_filter: Optional[str] = "pending",
     limit: int = 100,
@@ -95,7 +94,7 @@ async def _load_photo(db, photo_id: int, tenant_id: Optional[int], allowed) -> P
 @router.post("/api/cpo/plug-photos/{photo_id}/approve", response_model=PlugPhotoResponse)
 async def cpo_approve_plug_photo(
     photo_id: int,
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
 ):
     """Approve a pending photo: it becomes publicly visible on the map/panel.
@@ -113,7 +112,7 @@ async def cpo_approve_plug_photo(
 @router.post("/api/cpo/plug-photos/{photo_id}/reject", response_model=PlugPhotoResponse)
 async def cpo_reject_plug_photo(
     photo_id: int,
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
 ):
     """Reject a photo: mark it REJECTED and delete the stored bytes from the

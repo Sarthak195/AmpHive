@@ -1,6 +1,6 @@
 /**
  * CpoDisputes tests (redesign v3, D7): the Open-by-default status tabs,
- * best-effort session enrichment (driver email + session cost, degrading to
+ * session enrichment from the list response (driver email + session cost, degrading to
  * raw ids when the lookup misses), the resolve ConfirmDialog — approve with
  * a refund input defaulting to and capped at the session's cost, reject
  * requiring a note — the read-only "View session" detail modal, and the
@@ -36,6 +36,7 @@ const OPEN_DISPUTE = {
   reason: 'Charger stopped early', status: 'open',
   resolution_note: null, refund_coins: null,
   created_at: '2026-07-10T10:00:00Z', resolved_at: null, resolved_by_user_id: null,
+  user_email: 'driver@amphive.test', session_cost_coins: 40, plug_name: 'Garage plug',
 };
 
 const APPROVED_DISPUTE = {
@@ -43,18 +44,6 @@ const APPROVED_DISPUTE = {
   reason: 'Double charged', status: 'approved',
   resolution_note: 'Verified overbill', refund_coins: 12,
   created_at: '2026-07-09T08:30:00Z', resolved_at: '2026-07-09T09:00:00Z', resolved_by_user_id: 5,
-};
-
-const SESSIONS_ENRICHMENT = {
-  total: 1,
-  items: [
-    {
-      id: 101, plug_id: 5, plug_name: 'Garage plug', user_id: 42,
-      user_email: 'driver@amphive.test', started_at: '2026-07-10T09:00:00Z',
-      ended_at: '2026-07-10T09:30:00Z', duration_minutes: 30,
-      energy_kwh: 5, coins_spent: 40, status: 'completed',
-    },
-  ],
 };
 
 const SESSION_DETAIL = {
@@ -65,10 +54,9 @@ const SESSION_DETAIL = {
   max_kwh: null, max_duration_seconds: null, reason: null,
 };
 
-const mockApi = ({ disputes = [OPEN_DISPUTE], enrichment = SESSIONS_ENRICHMENT, sessionDetail = SESSION_DETAIL } = {}) => {
+const mockApi = ({ disputes = [OPEN_DISPUTE], sessionDetail = SESSION_DETAIL } = {}) => {
   api.get.mockImplementation((url) => {
     if (url.startsWith('/api/cpo/disputes')) return Promise.resolve(disputes);
-    if (url.startsWith('/api/cpo/analytics/sessions')) return Promise.resolve(enrichment);
     if (url === '/api/sessions/101') return Promise.resolve(sessionDetail);
     return Promise.reject(new Error(`unhandled url ${url}`));
   });
@@ -98,8 +86,14 @@ describe('CpoDisputes', () => {
     expect(screen.getByText(/Garage plug/)).toBeInTheDocument();
   });
 
-  it('falls back to a raw driver id and "—" cost when enrichment has no match', async () => {
-    mockApi({ enrichment: { total: 0, items: [] } });
+  it('does not look up sessions separately: old disputes get their fields from the list response', async () => {
+    renderPage();
+    await screen.findByText('driver@amphive.test');
+    expect(api.get).not.toHaveBeenCalledWith(expect.stringContaining('/api/cpo/analytics/sessions'));
+  });
+
+  it('falls back to a raw driver id and "—" cost when the dispute carries no enrichment', async () => {
+    mockApi({ disputes: [{ ...OPEN_DISPUTE, user_email: null, session_cost_coins: null, plug_name: null }] });
     renderPage();
 
     await screen.findByText('Charger stopped early');

@@ -25,6 +25,9 @@
  * takes a wall-clock time in the TENANT's zone, requires a time or energy
  * limit (nobody is at the plug when it switches on; 8h is preselected), and
  * calls `onConfirm(plugId, limits, notBeforeIso)`. "Now" keeps the two-arg call.
+ *
+ * `priceStale` marks the price as last saved (the plug row came from the
+ * instant-open snapshot and the live list has not answered yet).
  */
 
 import { useEffect, useState } from 'react';
@@ -78,9 +81,9 @@ const COPY = {
   },
 };
 
-export default function ChargeSetupModal({ open, onClose, plug, mode = 'start', onConfirm }) {
+export default function ChargeSetupModal({ open, onClose, plug, mode = 'start', onConfirm, priceStale = false }) {
   const { coins_per_kwh, coin_inr_rate } = useConfig();
-  const { availableBalance } = useWallet();
+  const { availableBalance, balanceFresh } = useWallet();
 
   const [timePreset, setTimePreset] = useState('none');
   const [customTime, setCustomTime] = useState('');
@@ -222,7 +225,8 @@ export default function ChargeSetupModal({ open, onClose, plug, mode = 'start', 
           <p className="charge-setup-plug">{plug.name || `Charger ${plug.id}`}</p>
           <p className="text-3 text-sm num">
             <Money coins={rate} rate={coin_inr_rate} />
-            /kWh · your balance covers ≈ {covers.toFixed(1)} kWh
+            /kWh{priceStale && <span className="stale-tag">(last saved price)</span>} · your balance covers ≈ {covers.toFixed(1)} kWh
+            {balanceFresh === false && <span className="stale-tag">(last saved balance)</span>}
           </p>
         </div>
 

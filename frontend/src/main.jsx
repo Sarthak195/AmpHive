@@ -26,6 +26,7 @@ import { ConfigProvider } from './contexts/ConfigContext';
 import { AuthProvider } from './contexts/AuthContext';
 import { WalletProvider } from './contexts/WalletContext';
 import { SessionProvider } from './contexts/SessionContext';
+import { setupServiceWorker } from './utils/swControl';
 
 const root = ReactDOM.createRoot(document.getElementById('root'));
 root.render(
@@ -45,3 +46,6 @@ root.render(
     </ErrorBoundary>
   </React.StrictMode>
 );
+
+// App-shell service worker for the instant open (driver host, prod only).
+setupServiceWorker();

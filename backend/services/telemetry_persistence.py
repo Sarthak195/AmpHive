@@ -32,6 +32,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Callable, Optional
 
 from sqlalchemy import delete, insert, select
+from sqlalchemy.exc import DataError, DBAPIError, IntegrityError, StatementError
 
 logger = logging.getLogger("amphive.telemetry_persistence")
 
@@ -45,6 +46,30 @@ RETENTION_DAYS = int(os.getenv("TELEMETRY_RETENTION_DAYS", "0"))
 PRUNE_EVERY_N_FLUSHES = int(os.getenv("TELEMETRY_PRUNE_EVERY_N_FLUSHES", "360"))
 
 
+def _is_data_error(exc: BaseException) -> bool:
+    """True for a bad-row error (constraint/data/bind failure) that retrying the
+    same row can never fix, as opposed to a transient connection/DB-down error."""
+    if isinstance(exc, (IntegrityError, DataError)):
+        return True
+    # Under asyncpg, SQLAlchemy maps most Postgres class-22 data errors (e.g.
+    # string truncation, numeric out of range) to a generic DBAPIError, so
+    # classify by SQLSTATE: 22 = data exception, 23 = integrity violation.
+    orig = getattr(exc, "orig", None)
+    code = getattr(orig, "sqlstate", None) or getattr(orig, "pgcode", None)
+    if isinstance(code, str) and code[:2] in ("22", "23"):
+        return True
+    # asyncpg's client-side "invalid input for query argument" DataError has no
+    # SQLSTATE and is mapped to InterfaceError; a closed connection is also an
+    # InterfaceError (transient), so match the original class by name.
+    cause = getattr(orig, "__cause__", None)
+    if cause is not None and any(c.__name__ == "DataError" for c in type(cause).__mro__):
+        return True
+    # Bind-processing failures (e.g. a wrongly-typed value) are StatementErrors
+    # that are not DBAPIErrors; DBAPIErrors outside the classes above (operational,
+    # interface, ...) stay transient.
+    return isinstance(exc, StatementError) and not isinstance(exc, DBAPIError)
+
+
 class TelemetryPersistenceService:
     """Buffers raw telemetry samples and batch-flushes them to the database."""
 
@@ -56,6 +81,7 @@ class TelemetryPersistenceService:
         self._stop = asyncio.Event()
         self._dropped = 0
         self._flush_count = 0
+        self._bad_rows_dropped = 0
 
     # ------------------------------------------------------------------
     # Producer side — called from the paho MQTT thread. Cheap, non-blocking.
@@ -169,15 +195,44 @@ class TelemetryPersistenceService:
                     })
 
                 if rows:
-                    await session.execute(insert(TelemetryReading), rows)
-                    await session.commit()
+                    try:
+                        await session.execute(insert(TelemetryReading), rows)
+                        await session.commit()
+                    except Exception as e:
+                        if not _is_data_error(e):
+                            raise
+                        # A bad row must not block history forever: retry the
+                        # batch row by row (each in a savepoint), drop the bad.
+                        await session.rollback()
+                        await self._insert_isolating(session, insert(TelemetryReading), rows, e)
+                        await session.commit()
             logger.debug(f"Flushed {len(batch)} telemetry readings")
         except Exception as e:
             # Transient failure (DB down, etc.): re-buffer at the front and retry
-            # next cycle. Still bounded by the deque maxlen.
+            # next cycle. Still bounded by the deque maxlen. Data errors on the
+            # insert are isolated per row above and never reach here.
             logger.error(f"Telemetry flush failed ({len(batch)} rows): {e}")
             for r in reversed(batch):
                 self._buffer.appendleft(r)
+
+    async def _insert_isolating(self, session, stmt, rows: list, batch_error) -> None:
+        """Insert rows one at a time, each in a savepoint; drop and count the rows
+        that fail with a data error. Any other error propagates (batch re-buffered)."""
+        dropped = 0
+        for row in rows:
+            try:
+                async with session.begin_nested():
+                    await session.execute(stmt, [row])
+            except Exception as e:
+                if not _is_data_error(e):
+                    raise
+                dropped += 1
+        self._bad_rows_dropped += dropped
+        logger.error(
+            f"Telemetry batch insert hit a data error ({batch_error}); "
+            f"dropped {dropped} bad row(s), persisted {len(rows) - dropped}. "
+            f"total_bad_dropped={self._bad_rows_dropped}"
+        )
 
     async def _prune_old(self) -> None:
         from backend.database.models import Plug, TelemetryReading

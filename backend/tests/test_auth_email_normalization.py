@@ -1,14 +1,14 @@
 """
 Email case-insensitivity across register/login/forgot-password.
 
-SECURITY audit MEDIUM finding: users.email's unique index is byte-exact, so
-without normalization `Driver@x.com` and `driver@x.com` are different
-accounts — a user who types a different case than they registered with
-can't log in or recover their password, and a duplicate account can be
-created accidentally. Fix is code-level canonicalization (trim + lowercase,
-see services/auth.normalize_email) applied before every lookup/insert; no
-migration (a case-insensitive unique index would need one — see the PR/
-review notes for that residual risk).
+SECURITY audit MEDIUM finding: without normalization `Driver@x.com` and
+`driver@x.com` are different accounts, so a user who types a different case
+than they registered with can't log in or recover their password, and a
+duplicate account can be created accidentally. Fix is code-level
+canonicalization (trim + lowercase, see services/auth.normalize_email) applied
+before every lookup/insert, backstopped by the case-insensitive unique index
+on lower(email) (migration 0043; DB-gated test in
+test_users_email_ci_unique.py).
 
 Login's own case-insensitivity coverage lives in test_login.py alongside its
 other login-specific tests; this file covers normalize_email itself plus

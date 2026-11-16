@@ -11,7 +11,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.database.db import get_db
 from backend.database.models import AuditLog, Gateway, GatewayEvent, GatewayLog, User
 from backend.schemas import GatewayEventResponse, GatewayLogResponse
-from backend.services.rbac import require_role
+
+from ._common import require_cpo_tenant
 
 router = APIRouter()
 
@@ -20,7 +21,7 @@ router = APIRouter()
 
 @router.get("/api/cpo/events")
 async def cpo_list_events(
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
     limit: int = 50,
     offset: int = 0,
@@ -80,7 +81,7 @@ async def cpo_list_events(
 @router.post("/api/cpo/events/{event_id}/ack")
 async def cpo_acknowledge_event(
     event_id: int,
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
 ):
     """Acknowledge (clear from the active feed) a single event. Tenant-scoped."""
@@ -101,7 +102,7 @@ async def cpo_acknowledge_event(
 @router.get("/api/cpo/gateways/{gateway_id}/logs")
 async def cpo_gateway_logs(
     gateway_id: str,
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
     limit: int = 50,
     offset: int = 0,
@@ -159,7 +160,7 @@ async def cpo_gateway_logs(
 
 @router.get("/api/cpo/audit")
 async def cpo_list_audit_log(
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
     limit: int = 50,
     offset: int = 0,

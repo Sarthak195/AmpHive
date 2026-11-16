@@ -38,7 +38,9 @@ so the wallet debits and the live cost tick up predictably. At the default
 10 kW that's ~0.167 kWh/min (~0.83 coins/min at the default COINS_PER_KWH=5).
 
 Registration (creating the gateway + plug rows) goes through the public CPO
-API, not the DB, so this never touches the database directly.
+API, not the DB, so this never touches the database directly. A gateway id the
+CPO's tenant does not already own must first be minted as inventory by an
+admin and claimed by the CPO (manual gateway registration is admin-only).
 
 Modes
 -----
@@ -210,18 +212,32 @@ def _cpo_login(api_base: str, email: str, password: str) -> str:
 def register(api_base: str, token: str, gateway_id: str, vpn_ip: str,
              plug_name: str, local_ip: str, group_id: Optional[int]) -> int:
     """Idempotently ensure the fake gateway + plug exist. Returns the plug id."""
-    # 1. Gateway — tolerate "already exists" so re-runs are safe.
-    status, body = _api_request(
-        "POST", f"{api_base}/api/cpo/gateways", token,
-        {"gateway_id": gateway_id, "name": f"Fake Plug Gateway ({gateway_id})",
-         "vpn_ip": vpn_ip},
-    )
-    if status == 200:
-        log.info("Registered gateway %s", gateway_id)
-    elif status == 400 and "already exists" in str(body):
-        log.info("Gateway %s already exists — reusing it", gateway_id)
+    # 1. Gateway: reuse it if this tenant already owns it, so re-runs are safe
+    #    with a CPO token. Manual POST /api/cpo/gateways is admin-only
+    #    (gateway-ID squatting fix), so a NEW gateway id needs the admin
+    #    inventory mint plus a CPO claim first.
+    status, gateways = _api_request("GET", f"{api_base}/api/cpo/gateways", token)
+    if status == 200 and isinstance(gateways, list) and any(
+        g.get("id") == gateway_id for g in gateways
+    ):
+        log.info("Gateway %s already registered to this tenant, reusing it", gateway_id)
     else:
-        raise SystemExit(f"Gateway registration failed ({status}): {body}")
+        status, body = _api_request(
+            "POST", f"{api_base}/api/cpo/gateways", token,
+            {"gateway_id": gateway_id, "name": f"Fake Plug Gateway ({gateway_id})",
+             "vpn_ip": vpn_ip},
+        )
+        if status == 200:
+            log.info("Registered gateway %s", gateway_id)
+        elif status == 403:
+            raise SystemExit(
+                f"Gateway {gateway_id} is not on this tenant and manual registration "
+                "is admin-only. Mint it as inventory (admin console, Gateways, or "
+                "POST /api/admin/gateways/inventory), then claim the printed code "
+                "as this CPO (CPO portal, Gateways, Add gateway) and re-run."
+            )
+        else:
+            raise SystemExit(f"Gateway registration failed ({status}): {body}")
 
     # 2. Plug — reuse an existing fake plug on this gateway (matched by name) so
     #    re-runs don't pile up duplicate rows.

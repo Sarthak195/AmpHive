@@ -119,11 +119,10 @@ def normalize_email(email: str) -> str:
     and lowercase. Applied at register/login/forgot-password so `Driver@x.com`
     and `driver@x.com` resolve to the same account.
 
-    Note: `users.email`'s unique index is still byte-exact (no migration
-    here) — this is a code-level guarantee. It stops *new* case-variant
-    duplicates from being created and lets a user who types a different case
-    than they registered with still log in / recover; it does not merge or
-    dedupe any case-variant accounts that may already exist in the DB.
+    Note: `users.email` also has a case-insensitive unique index on
+    lower(email) (migration 0043), so a case-variant duplicate that slips past
+    this normalization (a race, a hand-made row) is rejected by the database
+    rather than making login raise MultipleResultsFound.
     """
     return email.strip().lower()
 

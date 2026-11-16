@@ -502,6 +502,14 @@ tr.row-link { cursor: pointer; }
 .banner-danger { background: var(--danger-soft); border-color: transparent; color: var(--danger); }
 .banner-ok { background: var(--ok-soft); border-color: transparent; color: var(--ok); }
 
+/* Instant open: figures rendered from saved data until a refresh succeeds
+   (utils/snapshot.js). Dimmed, and always paired with text or an aria label. */
+.is-stale .num,
+.num.is-stale,
+.wallet-pill.is-stale { opacity: .55; }
+.stale-tag { margin-left: var(--sp-1); color: var(--ink-3); font-size: var(--text-xs); }
+.stale-note { align-items: center; justify-content: space-between; }
+
 /* ==== modal =============================================================== */
 .overlay {
   position: fixed;

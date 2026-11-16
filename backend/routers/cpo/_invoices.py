@@ -17,17 +17,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.database.db import get_db
 from backend.database.models import Invoice, User
 from backend.services.csv_safe import sanitize_csv_cell
-from backend.services.invoices import invoice_to_dict
-from backend.services.rbac import require_role
+from backend.services.invoices import effective_rate, invoice_to_dict
 
-from ._common import _require_tenant_id, clamp_days
+from ._common import _require_tenant_id, clamp_days, require_cpo_tenant
 
 router = APIRouter()
 
 
 @router.get("/api/cpo/invoices")
 async def cpo_list_invoices(
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
     limit: int = 50,
     offset: int = 0,
@@ -61,7 +60,7 @@ async def cpo_list_invoices(
 
 @router.get("/api/cpo/invoices.csv")
 async def cpo_export_invoices_csv(
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
     days: Optional[int] = None,
 ):
@@ -89,7 +88,7 @@ async def cpo_export_invoices_csv(
         "invoice_number", "issued_at", "session_id", "driver_user_id",
         "energy_kwh", "rate_coins_per_kwh", "amount_coins",
         "taxable_value_inr", "gst_rate_pct", "gst_amount_inr", "total_inr",
-        "seller_legal_name", "seller_gstin",
+        "seller_legal_name", "seller_gstin", "effective_rate_coins_per_kwh",
     ])
     for inv in result.scalars().all():
         writer.writerow([
@@ -106,6 +105,7 @@ async def cpo_export_invoices_csv(
             round(float(inv.total_inr), 2),
             sanitize_csv_cell(inv.seller_legal_name or ""),
             sanitize_csv_cell(inv.seller_gstin or ""),
+            float(effective_rate(inv)),
         ])
 
     filename = f"amphive-invoices-{datetime.now(timezone.utc).strftime('%Y%m%d')}.csv"

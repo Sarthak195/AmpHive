@@ -19,6 +19,12 @@
  * 5. Desktop rail — charging credit (₹-first) + "Add credit", and month stats
  *    from GET /api/me/stats (the stats block hides if that endpoint errors).
  *
+ * Instant open: plugs, up next and stats start from the last saved snapshot
+ * (utils/snapshot.js), as does SessionContext's session list. Until each
+ * one's refresh succeeds the page is dimmed (.is-stale) with a status note
+ * ("Showing your last saved data from HH:MM"), the banner shows the saved
+ * cost without a live dot, and "Open session" waits for the real list.
+ *
  * Live updates: socket plug_status / plug_connectivity patches cards in
  * place; a 30s usePoll refetch is the catch-all backstop. Queued charging is
  * feature-flagged server-side — the queue affordance renders only when a
@@ -61,6 +67,7 @@ import {
 import { apiErrorCopy, plugStateHint, plugStateLabel } from '../utils/statusCopy';
 import { coinsToINR, formatKw, formatKwh } from '../utils/money';
 import { fmtTime, fmtTimeInZone, fmtWindow } from '../utils/reservationTime';
+import { fmtSavedAt, readSnapshot, writeSnapshot } from '../utils/snapshot';
 import './Dashboard.css';
 
 // Sentinel for the group filter's "no group assigned" option — distinct from
@@ -84,37 +91,58 @@ const fmtCountdown = (iso, nowMs) => {
 };
 
 const Dashboard = () => {
-  const { user } = useAuth();
-  const { activeSessions, sessionData, sessionId, switchSession, startSession, socket } =
-    useSession();
+  const { user, refreshUser, userError } = useAuth();
+  const {
+    activeSessions, sessionData, sessionId, switchSession, startSession, socket,
+    sessionsStale, sessionsSavedAt, sessionsError, retrySessions,
+  } = useSession();
   const { coin_inr_rate } = useConfig();
-  const { balance } = useWallet();
+  const { balance, balanceFresh } = useWallet();
+  const balanceStale = balanceFresh === false;
+  const uid = user?.id;
+
+  /* ---- instant open: last saved data ------------------------------------ */
+  const [saved] = useState(() => {
+    const plugsSnap = readSnapshot('plugs', uid);
+    const upSnap = readSnapshot('upnext', uid);
+    const statsSnap = readSnapshot('stats', uid);
+    return {
+      plugs: Array.isArray(plugsSnap?.data) ? plugsSnap : null,
+      upnext: upSnap?.data && typeof upSnap.data === 'object' ? upSnap : null,
+      stats: statsSnap?.data?.month ? statsSnap : null,
+    };
+  });
   const toast = useToast();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
 
   /* ---- plugs ------------------------------------------------------------ */
-  const [plugs, setPlugs] = useState(null); // null = not loaded yet
+  const [plugs, setPlugs] = useState(saved.plugs?.data ?? null); // null = not loaded yet
   const [plugsError, setPlugsError] = useState(null);
+  const [plugsStale, setPlugsStale] = useState(saved.plugs != null);
 
   const fetchPlugs = useCallback(async () => {
     try {
       const data = await api.get('/api/plugs/available');
-      setPlugs(Array.isArray(data) ? data : []);
+      const list = Array.isArray(data) ? data : [];
+      setPlugs(list);
+      writeSnapshot('plugs', uid, list);
+      setPlugsStale(false);
       setPlugsError(null);
     } catch (err) {
       // Keep already-loaded cards on a background refresh failure; only the
       // initial load (or a Retry) surfaces the ErrorState.
       setPlugsError(err);
     }
-  }, []);
+  }, [uid]);
 
   usePoll(fetchPlugs, 30_000);
 
   /* ---- up next: reservations + queued charges --------------------------- */
-  const [reservations, setReservations] = useState([]);
-  const [queued, setQueued] = useState([]);
+  const [reservations, setReservations] = useState(saved.upnext?.data.reservations ?? []);
+  const [queued, setQueued] = useState(saved.upnext?.data.queued ?? []);
   const [upNextError, setUpNextError] = useState(null);
+  const [upNextStale, setUpNextStale] = useState(saved.upnext != null);
   const [nowMs, setNowMs] = useState(() => Date.now());
 
   const fetchUpNext = useCallback(async () => {
@@ -123,13 +151,19 @@ const Dashboard = () => {
         api.get('/api/reservations/my'),
         api.listQueuedCharges(),
       ]);
-      setReservations(Array.isArray(res?.upcoming) ? res.upcoming : []);
-      setQueued(Array.isArray(q) ? q : []);
+      const next = {
+        reservations: Array.isArray(res?.upcoming) ? res.upcoming : [],
+        queued: Array.isArray(q) ? q : [],
+      };
+      setReservations(next.reservations);
+      setQueued(next.queued);
+      writeSnapshot('upnext', uid, next);
+      setUpNextStale(false);
       setUpNextError(null);
     } catch (err) {
       setUpNextError(err);
     }
-  }, []);
+  }, [uid]);
 
   // Polled like the plugs: a queued charge can auto-start, expire or fail
   // server-side at any time, and a push missed while the socket was down is
@@ -146,19 +180,45 @@ const Dashboard = () => {
   /* ---- month stats (rail) ------------------------------------------------ */
   // GET /api/me/stats may not exist yet (backend builds in parallel) — the
   // stats block simply hides on any error.
-  const [stats, setStats] = useState(null);
+  const [stats, setStats] = useState(saved.stats?.data ?? null);
+  const [statsStale, setStatsStale] = useState(saved.stats != null);
+  const [statsError, setStatsError] = useState(false);
+  const fetchStats = useCallback(async () => {
+    try {
+      const data = await api.get('/api/me/stats');
+      setStats(data?.month ? data : null);
+      if (data?.month) writeSnapshot('stats', uid, data);
+      setStatsStale(false);
+      setStatsError(false);
+    } catch {
+      setStatsError(true);
+    }
+  }, [uid]);
   useEffect(() => {
-    let cancelled = false;
-    api
-      .get('/api/me/stats')
-      .then((data) => {
-        if (!cancelled && data?.month) setStats(data);
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    fetchStats();
+  }, [fetchStats]);
+
+  /* ---- stale marking ------------------------------------------------------ */
+  // Only data actually rendered from a snapshot counts; a flag clears on a
+  // successful refresh only, never on failure.
+  const staleTimes = [
+    plugsStale && saved.plugs?.savedAt,
+    upNextStale && saved.upnext?.savedAt,
+    statsStale && saved.stats?.savedAt,
+    sessionsStale && sessionsSavedAt,
+  ].filter(Boolean);
+  const pageStale = staleTimes.length > 0;
+  const staleFailed = Boolean(
+    (plugsStale && plugsError) || (upNextStale && upNextError) || (statsStale && statsError)
+    || (sessionsStale && sessionsError) || (balanceStale && userError)
+  );
+  const retryStale = () => {
+    if (plugsStale) fetchPlugs();
+    if (upNextStale) fetchUpNext();
+    if (statsStale) fetchStats();
+    if (sessionsStale) retrySessions?.();
+    if (balanceStale) refreshUser?.();
+  };
 
   /* ---- live socket updates ---------------------------------------------- */
   useEffect(() => {
@@ -319,6 +379,13 @@ const Dashboard = () => {
   const [setupMode, setSetupMode] = useState('start');
   const [reservePlug, setReservePlug] = useState(null);
   const [reportPlug, setReportPlug] = useState(null);
+
+  // The modal shows the plug's price, so give it the live row once the
+  // refresh lands, and mark it while it is still the saved snapshot row (a
+  // charge-now lookup row is fetched live and is never marked).
+  const setupFromSaved = Boolean(plugsStale && setupPlug && plugs?.includes(setupPlug));
+  const setupPlugLive =
+    (!plugsStale && setupPlug && plugs?.find((p) => p.id === setupPlug.id)) || setupPlug;
 
   const openCharge = (plug) => {
     setSetupMode('start');
@@ -486,23 +553,43 @@ const Dashboard = () => {
   const firstName = user?.full_name?.split(' ')[0];
 
   return (
-    <main className="page dash">
+    <main className={`page dash${pageStale ? ' is-stale' : ''}`}>
       <PageHeader
         title={firstName ? `Welcome back, ${firstName}` : 'Welcome back'}
         sub="Charge, reserve, or check on your chargers."
       />
 
+      {pageStale && (
+        <div className="banner banner-info stale-note" role="status">
+          <span>
+            Showing your last saved data from {fmtSavedAt(Math.min(...staleTimes))}.{' '}
+            {staleFailed ? "Couldn't refresh." : 'Updating...'}
+          </span>
+          {staleFailed && (
+            <button type="button" className="btn btn-quiet btn-sm" onClick={retryStale}>
+              Retry
+            </button>
+          )}
+        </div>
+      )}
+
       <div className="dash-layout">
         <div className="dash-main">
           {/* 1 — active session banners */}
           {activeSessions.map((s) => {
-            const live = s.session_id === sessionId ? sessionData : null;
+            const live = !sessionsStale && s.session_id === sessionId ? sessionData : null;
             return (
               <section key={s.session_id} className="card dash-banner" aria-label="Active charging session">
                 <div className="dash-banner-info">
-                  <StatusDot tone="ok" live />
+                  <StatusDot tone="ok" live={!sessionsStale} />
                   <div>
                     <p className="dash-banner-title">Charging at {s.plug_name || `charger ${s.plug_id}`}</p>
+                    {sessionsStale && s.cost_coins != null && (
+                      <p className="text-2 text-sm">
+                        <Money coins={s.cost_coins} rate={coin_inr_rate} />
+                        <span className="stale-tag">(last saved)</span>
+                      </p>
+                    )}
                     {live && (
                       <p className="text-2 text-sm num">
                         <Money coins={live.cost_coins} rate={coin_inr_rate} /> ·{' '}
@@ -519,16 +606,28 @@ const Dashboard = () => {
                     )}
                   </div>
                 </div>
-                <button
-                  type="button"
-                  className="btn btn-primary btn-sm"
-                  onClick={() => {
-                    switchSession(s);
-                    navigate('/session');
-                  }}
-                >
-                  Open session
-                </button>
+                {sessionsStale ? (
+                  // The saved row may have ended: wait for the real list.
+                  <button
+                    type="button"
+                    className="btn btn-primary btn-sm"
+                    disabled={!sessionsError}
+                    onClick={() => retrySessions?.()}
+                  >
+                    {sessionsError ? 'Retry' : 'Checking...'}
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    className="btn btn-primary btn-sm"
+                    onClick={() => {
+                      switchSession(s);
+                      navigate('/session');
+                    }}
+                  >
+                    Open session
+                  </button>
+                )}
               </section>
             );
           })}
@@ -800,8 +899,9 @@ const Dashboard = () => {
         <aside className="dash-rail" aria-label="Charging credit and monthly stats">
           <section className="card dash-wallet">
             <p className="dash-wallet-label text-3 text-sm">Charging credit</p>
-            <p className="dash-wallet-amount num">
+            <p className={`dash-wallet-amount num${balanceStale ? ' is-stale' : ''}`}>
               <Money coins={balance} rate={coin_inr_rate} />
+              {balanceStale && <span className="stale-tag">(last saved)</span>}
             </p>
             <Link to="/credit" className="btn btn-primary btn-full">
               Add credit
@@ -832,7 +932,8 @@ const Dashboard = () => {
       <ChargeSetupModal
         open={Boolean(setupPlug)}
         onClose={() => setSetupPlug(null)}
-        plug={setupPlug}
+        plug={setupPlugLive}
+        priceStale={setupFromSaved}
         mode={setupMode}
         onConfirm={handleConfirmSetup}
       />

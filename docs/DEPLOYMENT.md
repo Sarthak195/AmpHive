@@ -120,6 +120,104 @@ nameservers (`harlee`/`ridge.ns.cloudflare.com`) answer for the zone (see
 below), the records are unchanged; the domain is still registered at
 name.com, whose old DNS records were left in place as the rollback.
 
+### Non-root containers (infra deploy runbook, written 2026-11-16, NOT yet deployed)
+
+`backend/Dockerfile` now runs as the fixed uid/gid **10001** (`app`) and
+`agent/Dockerfile` as 10001 (`amphive`); in the compose files the `backend`
+service gets `cap_drop: [ALL]` + `security_opt: [no-new-privileges:true]`
+(relay, `tls`, `prod`). This closes audit item P1 (security-audit-2026-08-04).
+The 2026-08-04 attempt was reverted because `deploy.ps1` ships only source (it
+cannot apply the compose half) and the live `firmware_images` volume is
+root-owned. Both are handled below. **Not changed on purpose:** the frontend
+(nginx master starts as root to bind and drop to `nginx`; its caps cannot be
+validated without running it), `db`, `mqtt` and `caddy` (their stock images
+manage their own users and capabilities).
+
+What the app writes to disk: nothing outside `/app/data`. OTA uploads
+(`POST /api/admin/firmware-releases/upload`) publish to the GCS bucket over the
+VM's metadata-server identity and never touch the volume; the volume is only
+read by the legacy `GET /api/firmware/images/{filename}` for old release rows.
+Existing files are mode 644 in a 755 directory, so they stay readable as uid
+10001 even before the chown below. The chown is still done so the directory
+is writable by the app (the image creates `/app/data/firmware-images` owned by
+10001, but an EXISTING named volume keeps its old root ownership: Docker only
+copies image ownership into a brand-new empty volume).
+
+**This is a full image rebuild, not a thin layer.** The Dockerfile itself
+changed, so use the normal on-box build (`deploy/scripts/deploy.ps1`): the pip
+layer is above the changed instructions and stays cached, only the last few
+layers rebuild. Do NOT use the local-build "thin layer over the old image"
+shortcut: it overlays source on the previous image and never re-runs the
+Dockerfile, so the `USER` would not be applied. The frontend image is unchanged
+(its build is a cache hit). Order does not matter between the image and the
+compose half: the image alone is non-root and safe with the old compose; the
+compose half only adds `cap_drop` / `no-new-privileges`.
+
+Run from the dev box (`gcloud compute ssh amphive-relay --zone us-west1-a`
+for the VM steps; confirm the gcloud default project first, see the
+`deploy.ps1` preflight). Pick a quiet time: the backend restarts once (a few
+seconds of 502s, the gateways reconnect on their own).
+
+1. **Backup.** On the VM run `~/amphive-relay/backup_db.sh` as the normal user
+   (never with sudo) and confirm it exits 0 and the object is in the backup
+   bucket; also take a disk snapshot
+   (`gcloud compute disks snapshot amphive-relay --zone us-west1-a --snapshot-names pre-nonroot-$(date +%Y%m%d)`).
+   Copy the live compose file: `cp docker-compose.relay.yml docker-compose.relay.yml.pre-nonroot`.
+2. **Rollback tags** (so the old image survives the rebuild overwriting
+   `:latest`): `sudo docker tag amphive_backend:latest amphive_backend:pre-nonroot`
+   and the same for `amphive_frontend`.
+3. **Chown the firmware volume.** Find the name with
+   `sudo docker volume ls | grep firmware` (compose-default:
+   `amphive-relay_firmware_images`), then
+   `sudo docker run --rm -v amphive-relay_firmware_images:/d alpine chown -R 10001:10001 /d`.
+   Safe to do before the new image is live (the old root-run backend ignores
+   ownership).
+4. **Ship and build the image.** From the dev box on a clean, committed HEAD
+   that contains this change: `pwsh deploy/scripts/deploy.ps1` (pwsh 7).
+   It builds both images on-box, runs `compose up -d` and verifies health and
+   the alembic head. The backend now starts as uid 10001.
+5. **Apply the compose half by hand** (deploy.ps1 does not ship the compose
+   file). In `~/amphive-relay/docker-compose.relay.yml` add to the `backend`
+   service (same text as `deploy/relay/docker-compose.relay.yml`):
+   ```yaml
+       cap_drop:
+         - ALL
+       security_opt:
+         - no-new-privileges:true
+   ```
+   then `sudo docker compose -f docker-compose.relay.yml up -d backend` (only
+   the backend is recreated).
+6. **Verify.**
+   - `sudo docker exec <backend> id` prints `uid=10001(app) gid=10001(app)`
+     (take the real container name from `docker ps`).
+   - `sudo docker inspect -f '{{.HostConfig.CapDrop}} {{.HostConfig.SecurityOpt}}' <backend>`
+     prints `[ALL] [no-new-privileges:true]`.
+   - Volume is writable by the app:
+     `sudo docker exec <backend> sh -c 'touch /app/data/firmware-images/.w && rm /app/data/firmware-images/.w && echo writable'`.
+   - Legacy reads still work: `sudo docker exec <backend> ls -ln /app/data/firmware-images`
+     lists the files owned by 10001, and (if any release row still points at a
+     self-hosted URL) `curl -sI https://amphive.app/api/firmware/images/<file>` is 200.
+   - Upload/OTA path: on the next real firmware release, upload the `.bin`
+     through the admin console and confirm the release registers with the
+     `storage.googleapis.com/amphive-fw/...` URL (this exercises the GCS
+     publish from the non-root container) and the CPO OTA picker lists it.
+   - `curl -s http://localhost:8000/api/health`, public
+     `https://amphive.app/api/health` 200, backend restart count 0,
+     `docker logs <backend> --since 5m` has no `PermissionError`, and a gateway
+     shows online with fresh telemetry (the MQTT path works under `cap_drop`).
+7. **Rollback** (any failed check): `sudo docker tag amphive_backend:pre-nonroot amphive_backend:latest`,
+   restore the compose copy
+   (`cp docker-compose.relay.yml.pre-nonroot docker-compose.relay.yml`), then
+   `sudo docker compose -f docker-compose.relay.yml up -d backend`. The chown is
+   harmless to leave in place. No migration is involved, so no database
+   rollback is needed.
+
+The fake plug (`deploy/docker/docker-compose.fakeplug.yml`) reuses the backend
+image, so it also runs as 10001 once restarted: its bind-mounted
+`fake_plug.py` must be world-readable (mode 644). The agent image (not run on
+the VM) needs an existing `/state` volume chowned once:
+`docker run --rm -v <vol>:/state alpine chown -R 10001:10001 /state`.
+
 ### Cloudflare front door (`amphive.app`, `cpo.amphive.app`) (added 2026-09-28)
 
 `amphive.app` and `cpo.amphive.app` sit behind Cloudflare's free HTTP proxy
@@ -178,6 +276,71 @@ nameservers cut over to Cloudflare the same day; end-to-end verification
 recorded in [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md). On a fresh
 zone the Universal SSL edge certificate lags activation by a few minutes:
 HTTPS handshakes fail (TLS alert 40) until it lands.
+
+### Service worker and instant open (added 2026-11-16)
+
+On the driver host (`amphive.app`, HTTPS, production build only) every visitor
+gets the service worker `frontend/public/sw.js`, registered by
+`frontend/src/utils/swControl.js` with `updateViaCache: 'none'`. It keeps the
+app shell (`index.html`) and the hashed `/assets/*` in Cache Storage, so a
+repeat open paints at once; the app then shows the user's last saved
+dashboard and session data from localStorage (`src/utils/snapshot.js`),
+dimmed and labelled "last saved" until each refresh succeeds. The CPO host
+never registers it, and a worker that finds itself on a `cpo.` host has no
+fetch handler. `/api/`, `/socket.io/`, `/auth/*`, `/reset-password`,
+`/verify-email`, `/login`, `/signup`, `/cpo`, `/admin`, legal pages, unknown
+paths and root files are never answered from the cache.
+
+**Update flow after a deploy.** No `sw.js` change is needed for an app
+deploy. Each open serves the cached shell and revalidates it in the
+background: the worker fetches the new `index.html` and its entry assets, and
+swaps the shell only once all of them are cached. A phone therefore normally
+runs the previous bundle for one open; this is not a guarantee (the browser
+can stop the worker before the swap finishes), so it is bounded instead by
+the 7-day rule (a shell older than 7 days is fetched network-first, with a
+3 s timeout, before falling back to the cache) and by the CACHE bump below. If the
+old bundle asks for a lazy chunk the deploy removed, the page drops the
+cached shell and reloads once onto the current app. Old assets are pruned one
+swap later, not in the same open. Rule this implies: **API changes must stay
+backward compatible for one release** (already true for open tabs).
+`frontend/nginx.conf` is unchanged by this feature, so a dist-only thin layer
+still deploys it.
+
+**Operator switches** (each one is a frontend redeploy; `sw.test.js` fails if
+the duplicated constants disagree):
+
+| Switch | Edit | Effect on everyone | Effect on push users |
+|---|---|---|---|
+| Force everyone onto the new shell (a breaking API change) | Bump `CACHE` in `sw.js` and `SHELL_CACHE_NAME` in `swControl.js` together (`amphive-shell-v2`) | Old shell cache dropped on the worker update; open pages reload once onto the new app | None |
+| Level 1, soft off | `SHELL_CACHE = false` in `sw.js` | Caches dropped, no fetch handler, worker stays registered; app opens as it did before this feature | None, push keeps working |
+| Level 2, kill | `KILL = true` in `sw.js` **and** `SW_KILL = true` in `swControl.js` | Caches dropped, no fetch handler, open pages reload once (sessionStorage-guarded, no loop), pages stop registering and unregister the worker wherever it carries no push subscription | They keep a registered, cache-less, fetch-less worker (the same as the push-only worker before this feature), so notifications still arrive. A hard unregister for push users is not provided. |
+
+Both levels work even if the shell logic is broken: the browser's worker
+update check fetches `/sw.js` outside the fetch handler, and
+`updateViaCache: 'none'` keeps it off the HTTP cache. Kill-switch reach is
+"next visit", not instant. To revert, flip the flags back and redeploy.
+
+**Post-deploy check.** `curl -sI https://amphive.app/sw.js`: expect
+`cf-cache-status` other than a stale `HIT` and an `ETag` that matches the
+origin. Cloudflare's Browser Cache TTL rewrites the browser-facing
+`Cache-Control` to `max-age=14400` (measured 2026-11-16), so do not expect
+`no-cache` in that header; the worker update check ignores it anyway because
+of `updateViaCache: 'none'` (set "Respect Existing Headers" in Cloudflare if
+you want the header to read correctly). `index.html` must stay
+`cf-cache-status: DYNAMIC`: never add a Cloudflare "Cache Everything" rule.
+
+**Known limits.**
+- iOS Safari wipes script-written storage (Cache Storage, localStorage)
+  after 7 days without use, and keeps service workers alive only briefly;
+  the page posts a `revalidate` message after load so the swap does not rely
+  only on the navigation event. A wiped phone just opens the slow way once.
+- Personal snapshots are uid-tagged, schema-versioned, expire after 7 days
+  and are cleared on logout, logout everywhere and any 401 (a per-device
+  logout from another device reaches this one as a 401). Cache Storage holds
+  only public shell and asset bytes.
+- Logout does not unsubscribe Web Push (pre-existing), so on a shared phone
+  the previous user's push notifications keep arriving until they turn push
+  off in Account or the subscription expires.
 
 ### Memory and disk on the 1 GB VM (measured 2026-11-16)
 

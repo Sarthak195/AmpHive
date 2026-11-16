@@ -516,6 +516,33 @@ async def test_sweep_defers_when_another_users_reservation_covers_plug():
 
 
 @pytest.mark.asyncio
+async def test_sweep_passes_own_covering_reservation_to_start_helper():
+    """[U0] The queue owner's OWN covering reservation must be handed to
+    begin_active_session (as the manual start route does) so it flips to
+    FULFILLED with the session linked; otherwise it stays BOOKED during the
+    session and lazily expires as a no-show."""
+    qc = _qc(user_id=5)
+    plug = _plug(powered=True)
+    plug.powered_since = datetime.now(timezone.utc) - timedelta(minutes=10)
+    own_reservation = _reservation(user_id=5)
+    session = MagicMock()
+    session.id = 99
+    row_db = _row_db(
+        _s1n(qc), _s1n(_user(user_id=5)), _s1(0), _s1n(plug), _s1(_tenant(delay=2)),
+        _upd(), _s1n(own_reservation), _s1n(None), _s1(_gateway()),
+    )
+    svc = SessionReaperService(_factory(_scan_db([1]), row_db), AsyncMock())
+
+    with patch("backend.services.session_start.begin_active_session",
+               AsyncMock(return_value=session)) as begin, \
+         patch("backend.services.notifications.notify", AsyncMock()):
+        started = await svc.reap_queued_starts_once()
+
+    assert started == 1
+    assert begin.await_args.kwargs.get("covering_reservation") is own_reservation
+
+
+@pytest.mark.asyncio
 async def test_sweep_defers_when_user_at_active_session_cap():
     """[Cap gate] A user already running MAX_ACTIVE_SESSIONS_PER_USER (2)
     ACTIVE sessions must not be auto-started past the cap the walk-up start
@@ -938,7 +965,9 @@ async def test_sweep_starts_schedule_at_not_before_when_power_never_dropped():
     qc = _qc(not_before=_ago(seconds=30))
     started, begin, notify = await _sweep(_scheduled_start_chain(qc, _due_plug()))
     assert started == 1
-    assert begin.await_args.kwargs == {"max_kwh": 30.0, "max_duration_seconds": 14400}
+    assert begin.await_args.kwargs == {
+        "max_kwh": 30.0, "max_duration_seconds": 14400, "covering_reservation": None,
+    }
     assert qc.status == QueuedChargeStatus.STARTED
     assert notify.await_args.args[1] == "queued_charge_started"
     assert notify.await_args.args[2] == "Your scheduled charge started"

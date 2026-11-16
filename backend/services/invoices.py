@@ -319,6 +319,27 @@ async def adjust_invoice_for_session_refund(
     return invoice
 
 
+_RATE_QUANT = Decimal("0.000001")
+
+
+def effective_rate(invoice: Invoice) -> Decimal:
+    """The per-kWh rate that makes the printed line foot: total / energy.
+
+    `invoice.rate_coins_per_kwh` is only the session's LAST rate segment (a
+    time-of-day tariff changes it mid-session), so energy x that rate does
+    not equal the billed total for a session that crossed a rate change. The
+    total already blends every segment, so total / energy is the one rate
+    that reproduces it. Energy is taken at its printed 3 dp, and the rate is
+    kept to 6 dp so energy x rate rounds back to the total at 2 dp for any
+    plausible session size. Zero energy has nothing to divide: show the
+    snapshot rate.
+    """
+    energy = Decimal(str(round(invoice.energy_kwh, 3)))
+    if energy <= 0:
+        return to_money(invoice.rate_coins_per_kwh)
+    return (to_money(invoice.total_inr) / energy).quantize(_RATE_QUANT)
+
+
 def invoice_to_dict(invoice: Invoice) -> dict:
     """JSON-serializable shape for GET /api/sessions/{id}/invoice and
     GET /api/cpo/invoices."""
@@ -336,7 +357,10 @@ def invoice_to_dict(invoice: Invoice) -> dict:
         "line_item": {
             "description": f"EV charging session #{invoice.session_id}",
             "energy_kwh": round(invoice.energy_kwh, 3),
+            # Last rate segment only (see effective_rate); kept for
+            # compatibility. Use effective_rate_coins_per_kwh to foot the line.
             "rate_coins_per_kwh": float(invoice.rate_coins_per_kwh),
+            "effective_rate_coins_per_kwh": float(effective_rate(invoice)),
         },
         "amount_coins": float(invoice.amount_coins),
         "taxable_value_inr": float(invoice.taxable_value_inr),
@@ -408,7 +432,7 @@ async def render_invoice_html(db: AsyncSession, invoice: Invoice) -> str:
       <tr>
         <th>Description</th>
         <th>Energy (kWh)</th>
-        <th>Rate (coins/kWh)</th>
+        <th>Effective rate (coins/kWh)</th>
         <th>Taxable Value (Rs.)</th>
         <th>GST ({invoice.gst_rate_pct:.2f}%) (Rs.)</th>
         <th>Total (Rs.)</th>
@@ -418,7 +442,7 @@ async def render_invoice_html(db: AsyncSession, invoice: Invoice) -> str:
       <tr>
         <td>EV charging session #{invoice.session_id}</td>
         <td>{invoice.energy_kwh:.3f}</td>
-        <td>{invoice.rate_coins_per_kwh:.2f}</td>
+        <td>{effective_rate(invoice):.6f}</td>
         <td>{invoice.taxable_value_inr:.2f}</td>
         <td>{invoice.gst_amount_inr:.2f}</td>
         <td>{invoice.total_inr:.2f}</td>
@@ -431,7 +455,9 @@ async def render_invoice_html(db: AsyncSession, invoice: Invoice) -> str:
     <tr class="grand"><td class="label">Total:</td><td>Rs. {invoice.total_inr:.2f}</td></tr>
   </table>
   <div class="footer">
-    1 coin = Rs. 1. Amounts above are GST-inclusive of the total already
+    1 coin = Rs. 1. The effective rate is the total divided by the energy
+    delivered, so it covers every rate that applied during the session
+    (time-of-day pricing can change the rate part-way through). Amounts above are GST-inclusive of the total already
     collected from the driver's wallet at session end -- issuing this
     invoice does not charge anything further. This invoice reflects a
     single intra-state GST rate; CGST/SGST vs. IGST is not itemized

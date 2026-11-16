@@ -17,6 +17,7 @@ from backend.database.models import (
     ChargingSession,
     DisputeStatus,
     LedgerTransaction,
+    Plug,
     SessionDispute,
     Tenant,
     TransactionType,
@@ -25,17 +26,16 @@ from backend.database.models import (
 from backend.schemas import CpoDisputeResolveRequest, DisputeResponse
 from backend.services.invoices import adjust_invoice_for_session_refund
 from backend.services.money import ZERO_MONEY, to_money
-from backend.services.rbac import require_role
 from backend.services.wallet import credit_wallet
 
-from ._common import _dispute_response, logger
+from ._common import _dispute_response, logger, require_cpo_tenant
 
 router = APIRouter()
 
 
 @router.get("/api/cpo/disputes", response_model=List[DisputeResponse])
 async def cpo_list_disputes(
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
     status_filter: Optional[str] = None,
     limit: int = 100,
@@ -43,8 +43,10 @@ async def cpo_list_disputes(
     """
     Disputes filed against sessions on the CPO's own plugs. `tenant_id` is
     denormalized onto SessionDispute at creation time (from the session's
-    plug -> gateway -> tenant chain), so this is a single indexed equality
-    filter, no join — same convention as GatewayEvent/TelemetryReading.
+    plug -> gateway -> tenant chain), so the tenant scope is a single indexed
+    equality filter on the dispute itself. Driver email, session cost and plug
+    name are outer-joined in (`user_email`, `session_cost_coins`, `plug_name`)
+    so the page never needs a separate, size-capped session lookup.
     Newest first; optional `status_filter` (open/approved/rejected).
     """
     limit = max(1, min(limit, 500))
@@ -59,20 +61,29 @@ async def cpo_list_disputes(
             )
 
     result = await db.execute(
-        select(SessionDispute)
+        select(SessionDispute, User.email, ChargingSession.coins_spent, Plug.name)
+        .outerjoin(User, User.id == SessionDispute.driver_user_id)
+        .outerjoin(ChargingSession, ChargingSession.id == SessionDispute.session_id)
+        .outerjoin(Plug, Plug.id == ChargingSession.plug_id)
         .where(and_(*conditions))
         .order_by(SessionDispute.created_at.desc(), SessionDispute.id.desc())
         .limit(limit)
     )
-    disputes = list(result.scalars().all())
-    return [_dispute_response(d) for d in disputes]
+    out = []
+    for d, email, cost, plug_name in result.all():
+        resp = _dispute_response(d)
+        resp.user_email = email
+        resp.session_cost_coins = float(cost) if cost is not None else None
+        resp.plug_name = plug_name
+        out.append(resp)
+    return out
 
 
 @router.post("/api/cpo/disputes/{dispute_id}/resolve", response_model=DisputeResponse)
 async def cpo_resolve_dispute(
     dispute_id: int,
     req: CpoDisputeResolveRequest,
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
 ):
     """

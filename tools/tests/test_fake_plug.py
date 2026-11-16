@@ -566,3 +566,30 @@ def test_self_test_cli_runs_without_network(monkeypatch, capsys):
     assert '"relay": true' in out
     assert "SET_LIMITS" in out
     assert "config    <-" in out
+
+
+def test_register_reuses_owned_gateway_and_explains_mint_claim_on_403(monkeypatch):
+    """Manual gateway registration is admin-only: an already-owned gateway is
+    reused without POSTing it, and a 403 on a new id exits with the
+    mint-then-claim instruction instead of a bare failure."""
+    calls = []
+
+    def owned(method, url, token=None, body=None):
+        calls.append((method, url))
+        if url.endswith("/api/cpo/gateways"):
+            return 200, [{"id": "gw-1"}]
+        if url.endswith("/api/cpo/plugs") and method == "GET":
+            return 200, [{"id": 5, "gateway_id": "gw-1", "name": "Fake"}]
+        raise AssertionError(f"unexpected {method} {url}")
+
+    monkeypatch.setattr(fake_plug, "_api_request", owned)
+    assert fake_plug.register("http://api", "t", "gw-1", "", "Fake", "10.0.0.2", None) == 5
+    assert ("POST", "http://api/api/cpo/gateways") not in calls
+
+    def refused(method, url, token=None, body=None):
+        return (200, []) if method == "GET" else (403, {"detail": "Insufficient permissions"})
+
+    monkeypatch.setattr(fake_plug, "_api_request", refused)
+    with pytest.raises(SystemExit) as exc:
+        fake_plug.register("http://api", "t", "gw-new", "", "Fake", "10.0.0.2", None)
+    assert "claim" in str(exc.value)

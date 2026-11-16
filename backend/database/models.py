@@ -30,6 +30,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    func,
     text,
 )
 from sqlalchemy import Enum as SQLEnum
@@ -245,6 +246,15 @@ class User(Base):
     transactions: Mapped[List["LedgerTransaction"]] = relationship("LedgerTransaction", back_populates="user", cascade="all, delete-orphan")
     # [P2] Groups the user has joined (via access codes)
     group_memberships: Mapped[List["GroupMembership"]] = relationship("GroupMembership", back_populates="user", cascade="all, delete-orphan")
+
+
+# Every lookup is func.lower(User.email) == normalize_email(...), so a
+# case-variant duplicate (which the byte-exact unique on `email` allows) would
+# make login raise MultipleResultsFound. This expression unique index closes
+# that at the DB. Alembic revision 0043_email_ci_unique. Declared after the
+# class so it can reference the mapped column (an expression index cannot be
+# written in __table_args__ without a Column object).
+Index("uq_users_email_lower", func.lower(User.email), unique=True)
 
 
 class Gateway(Base):

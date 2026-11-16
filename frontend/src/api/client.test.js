@@ -191,11 +191,14 @@ describe('apiRequest: 401 handling', () => {
     window.history.pushState({}, '', '/login'); // stay put: no navigation in jsdom
     localStorage.setItem('amphive_token', 'stale');
     localStorage.setItem('amphive_user', '{}');
+    localStorage.setItem('amphive_snap:plugs', '{}');
     fetch.mockResolvedValue(jsonResponse({ detail: 'Session has been revoked.' }, { ok: false, status: 401 }));
 
     await expect(apiRequest('/api/auth/me')).rejects.toMatchObject({ status: 401 });
     expect(localStorage.getItem('amphive_token')).toBeNull();
     expect(localStorage.getItem('amphive_user')).toBeNull();
+    // Saved data snapshots go with the session (utils/snapshot.js).
+    expect(localStorage.getItem('amphive_snap:plugs')).toBeNull();
     window.history.pushState({}, '', '/');
   });
 });

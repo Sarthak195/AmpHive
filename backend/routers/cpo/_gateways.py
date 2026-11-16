@@ -32,7 +32,13 @@ from backend.services.rbac import require_role
 from backend.services.session_lifecycle import gateway_is_live
 from backend.services.versioning import version_sort_key
 
-from ._common import DEFAULT_LIST_LIMIT, _require_tenant_id, clamp_list_window, logger
+from ._common import (
+    DEFAULT_LIST_LIMIT,
+    _require_tenant_id,
+    clamp_list_window,
+    logger,
+    require_cpo_tenant,
+)
 
 router = APIRouter()
 
@@ -56,7 +62,7 @@ def _normalize_claim_code(raw: str) -> str:
 
 @router.get("/api/cpo/gateways")
 async def cpo_list_gateways(
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
     limit: int = DEFAULT_LIST_LIMIT,
     offset: int = 0,
@@ -102,13 +108,19 @@ async def cpo_list_gateways(
 @router.post("/api/cpo/gateways")
 async def cpo_create_gateway(
     req: CpoGatewayCreateRequest,
-    user: User = Depends(require_role("cpo", "admin")),
+    # Admin-only since 2026-11-16 (gateway-ID squatting): a gateway_id is the
+    # device MAC, which is not a secret, so letting any CPO register any
+    # not-yet-registered id let them squat a unit before its real owner.
+    # CPOs onboard through POST /api/cpo/gateways/claim (admin-minted claim
+    # code) instead. The role gate runs before the duplicate lookup, so a
+    # CPO also no longer learns whether a given MAC is already registered.
+    user: User = Depends(require_role("admin")),
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Register a new ESP32 gateway under the CPO's tenant.
-    This is the authenticated version of the legacy /api/gateways/register
-    endpoint — CPOs should use this instead.
+    Manually register an ESP32 gateway under the caller's tenant (platform
+    admin only; lab/legacy units). The normal onboarding path is admin mint
+    (POST /api/admin/gateways/inventory) followed by a CPO claim.
     """
     # A platform admin has no tenant of its own — refuse rather than create a
     # phantom tenant-less gateway (2026-08-18 audit).
@@ -160,7 +172,7 @@ async def cpo_create_gateway(
 )
 async def cpo_claim_gateway(
     req: CpoGatewayClaimRequest,
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -261,7 +273,7 @@ async def cpo_list_firmware_releases(
 async def cpo_gateway_ota(
     gateway_id: str,
     req: CpoGatewayOtaRequest,
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
 ):
     """

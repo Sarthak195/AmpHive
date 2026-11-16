@@ -507,12 +507,12 @@ async def test_export_invoices_csv():
         "invoice_number,issued_at,session_id,driver_user_id,"
         "energy_kwh,rate_coins_per_kwh,amount_coins,"
         "taxable_value_inr,gst_rate_pct,gst_amount_inr,total_inr,"
-        "seller_legal_name,seller_gstin"
+        "seller_legal_name,seller_gstin,effective_rate_coins_per_kwh"
     )
     assert lines[1] == (
         "ACME-2026-27-00001,2026-07-20T13:00:00+00:00,42,7,"
         "1.5,8.0,12.0,10.17,18.0,1.83,12.0,"
-        "Acme Charging Pvt Ltd,"
+        "Acme Charging Pvt Ltd,,8.0"
     )
 
 

@@ -5,6 +5,15 @@
 
 import { Component } from 'react';
 import { TriangleAlert } from 'lucide-react';
+import { clearSnapshots } from '../utils/snapshot';
+import { dropShell } from '../utils/swControl';
+
+// A saved snapshot or cached shell that crashes would crash again on every
+// open, so Reload drops both before reloading.
+const resetAndReload = () => {
+  clearSnapshots();
+  dropShell().finally(() => window.location.reload());
+};
 
 class ErrorBoundary extends Component {
   constructor(props) {
@@ -32,7 +41,7 @@ class ErrorBoundary extends Component {
             <button
               type="button"
               className="btn btn-primary"
-              onClick={() => window.location.reload()}
+              onClick={resetAndReload}
             >
               Reload
             </button>

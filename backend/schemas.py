@@ -512,9 +512,9 @@ class CpoGatewayCreateRequest(BaseModel):
     so the operator just copies it here. ``vpn_ip`` is legacy/overlay-only
     (direct-MQTT devices don't use it); optional and defaults to empty.
 
-    This is the "manual registration" path — still supported for lab/legacy
-    use, but the preflashed-unit flow (POST /api/cpo/gateways/claim below)
-    is now the primary way a CPO adds a gateway.
+    This is the "manual registration" path, admin-only since 2026-11-16
+    (gateway-ID squatting); a CPO adds a gateway through the claim-code flow
+    (POST /api/cpo/gateways/claim below).
     """
     # Bounds mirror gateways.id String(50) / .name String(100) /
     # .vpn_ip String(45).
@@ -767,6 +767,12 @@ class DisputeResponse(BaseModel):
     created_at: Optional[str] = None
     resolved_at: Optional[str] = None
     resolved_by_user_id: Optional[int] = None
+    # Display context, filled only by GET /api/cpo/disputes (one join, so it
+    # covers every dispute regardless of how old the session is). None on the
+    # driver-filing and resolve responses.
+    user_email: Optional[str] = None
+    session_cost_coins: Optional[float] = None
+    plug_name: Optional[str] = None
 
 
 # --- Plug Problem Reports ("report a problem with this charger") ---

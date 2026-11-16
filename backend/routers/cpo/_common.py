@@ -8,12 +8,13 @@ doesn't need to import from a sibling.
 """
 import logging
 
-from fastapi import HTTPException
+from fastapi import Depends, HTTPException
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database.models import Payout, PlugReport, SessionDispute, Tariff, TariffSlot, User
 from backend.schemas import DisputeResponse, PlugReportResponse
+from backend.services.rbac import require_role
 
 logger = logging.getLogger("amphive.api")
 
@@ -60,6 +61,17 @@ def _require_tenant_id(user: User) -> int:
             detail="You are not associated with a tenant.",
         )
     return user.tenant_id
+
+
+async def require_cpo_tenant(user: User = Depends(require_role("cpo", "admin"))) -> User:
+    """Role gate for every tenant-scoped /api/cpo route (U4). The routes filter
+    with `X.tenant_id == user.tenant_id`, which SQLAlchemy compiles to
+    `X.tenant_id IS NULL` when the caller has no tenant, so a bare admin or a
+    CPO not yet attached to a tenant would match unclaimed inventory gateways,
+    their plugs and platform-level audit rows. Refuse such a caller before any
+    query runs; platform admins manage unclaimed inventory via /api/admin/*."""
+    _require_tenant_id(user)
+    return user
 
 
 async def _load_tenant_tariff(db: AsyncSession, tariff_id: int, tenant_id: int) -> Tariff:

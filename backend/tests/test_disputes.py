@@ -733,6 +733,25 @@ async def test_cpo_list_disputes_is_tenant_scoped(factory):
 
 
 @pytest.mark.asyncio
+async def test_cpo_list_disputes_includes_driver_cost_and_plug(factory):
+    """The list joins driver email, session cost and plug name server-side, so
+    the page needs no size-capped session lookup (older disputes were blank)."""
+    from backend.routers.cpo import cpo_list_disputes
+
+    world = await _seed_world(factory, coins_spent="12.50")
+    await _seed_open_dispute(factory, world)
+    cpo = _user_obj(world["cpo_id"], "cpo@amphive.test", tenant_id=world["tenant_id"])
+
+    async with factory() as db:
+        rows = await cpo_list_disputes(cpo, db)
+
+    assert len(rows) == 1
+    assert rows[0].user_email.startswith("driver-")
+    assert rows[0].session_cost_coins == 12.5
+    assert rows[0].plug_name == "Test Plug"
+
+
+@pytest.mark.asyncio
 async def test_cpo_list_disputes_filters_by_status(factory):
     from backend.routers.cpo import cpo_list_disputes, cpo_resolve_dispute
     from backend.schemas import CpoDisputeResolveRequest

@@ -79,13 +79,23 @@ the `~/.ssh/google_compute_engine` key that a first `gcloud compute ssh`
 creates). You need the `gateway_id` (the MAC shown on the setup page or the
 device sticker).
 
-**A. Create the gateway record** (CPO dashboard, or the API):
+**A. Create the gateway record** (an admin mints it, the CPO claims it). A
+CPO can no longer register a gateway_id by hand: `POST /api/cpo/gateways` is
+admin-only since 2026-11-16 (a MAC is not a secret, so any CPO could squat a
+unit; see `docs/SECURITY.md` section 8.8).
 
 ```bash
-# gateway_id == the MAC shown in the setup portal; vpn_ip is legacy/optional.
-curl -X POST https://<backend>/api/cpo/gateways \
+# 1. Admin: mint the unit as unclaimed inventory (admin console > Gateways
+#    does the same). gateway_id == the MAC shown in the setup portal.
+curl -X POST https://<backend>/api/admin/gateways/inventory \
+  -H "Authorization: Bearer <admin-token>" -H "Content-Type: application/json" \
+  -d '{"gateway_id":"1cc3abb4fb54"}'
+# -> {"status":"minted","gateway_id":"1cc3abb4fb54","claim_code":"..."}
+
+# 2. CPO: claim it with that code (CPO portal > Gateways > Add gateway).
+curl -X POST https://<backend>/api/cpo/gateways/claim \
   -H "Authorization: Bearer <cpo-token>" -H "Content-Type: application/json" \
-  -d '{"gateway_id":"1cc3abb4fb54","name":"Client Site A - Bay 1"}'
+  -d '{"claim_code":"<code>","name":"Client Site A - Bay 1"}'
 ```
 
 **B. Mint the per-gateway broker credential** (it goes into the device's MQTT
