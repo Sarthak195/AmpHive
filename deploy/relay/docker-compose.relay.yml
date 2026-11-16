@@ -41,7 +41,9 @@
 # image-pinned (amphive_backend:latest / amphive_frontend:latest, no build:
 # keys), and mounts the broker files from config/ (docs/DEPLOYMENT.md §1).
 # deploy.ps1 never ships this file, so a change made here (e.g. the logging
-# block below) has to be applied to the live copy by hand.
+# block below) has to be applied to the live copy by hand. The same goes for
+# the backend's cap_drop/no-new-privileges (docs/DEPLOYMENT.md, "Non-root
+# containers").
 # =============================================================================
 
 # Log rotation for EVERY service (2026-10-20; previously only mqtt and
@@ -138,6 +140,13 @@ services:
       dockerfile: Dockerfile
     container_name: amphive-backend
     restart: unless-stopped
+    # Hardening (non-root image, uid 10001; see docs/DEPLOYMENT.md "Non-root
+    # containers"). The app needs no Linux capability: it binds 8000 (>1024)
+    # and only talks outbound. no-new-privileges blocks setuid escalation.
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     mem_limit: 300m
     # Every backend setting (DATABASE_URL, MQTT_*, JWT_SECRET_KEY, RAZORPAY_*,
     # coin/GST/reservation config, VAPID, SMTP, ...) comes straight from .env —

@@ -83,6 +83,13 @@ services:
       dockerfile: Dockerfile
     container_name: amphive-backend
     restart: always
+    # Hardening (non-root image, uid 10001; see docs/DEPLOYMENT.md "Non-root
+    # containers"). The app needs no Linux capability: it binds 8000 (>1024)
+    # and only talks outbound. no-new-privileges blocks setuid escalation.
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     ports:
       # Loopback-bound (matches deploy/relay/docker-compose.relay.yml). The
       # SPA reaches the API through the frontend nginx proxy, so nothing
