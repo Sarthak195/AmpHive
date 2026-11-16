@@ -754,6 +754,18 @@ async def test_topup_queued_behind_a_payout_is_still_deducted_by_the_next_payout
     # in force when it committed...
     assert datetime.fromisoformat(res.created_at) >= datetime.fromisoformat(payout1["period_end"])
 
+    # Settle payout 1 (PAID, not cancelled: cancelling would drop the
+    # watermark back and reopen the first session), else payout 2 is a 409.
+    # The actor reuses the seeded CPO's real users row so the audit FK holds.
+    from backend.database.models import UserRole
+    from backend.routers.cpo import cpo_mark_payout_paid
+
+    admin = SimpleNamespace(
+        id=world["cpo_id"], tenant_id=None, role=UserRole.ADMIN, email="admin@amphive.test",
+    )
+    async with factory() as db:
+        await cpo_mark_payout_paid(payout_id=payout1["id"], user=admin, db=db)
+
     # ...so the next payout deducts it exactly once: 90 net - 40 cash = 50.
     async with factory() as db:
         payout2 = await cpo_request_payout(user=cpo, db=db)
