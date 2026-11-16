@@ -317,6 +317,37 @@ class MQTTTelemetryMixin:
         self._unmetered_alert_cooldown[plug_id] = now
         return True
 
+    async def _session_tail_kwh(self, session, plug_id: int, since: Optional[datetime]) -> float:
+        """[F10] Upper bound (kWh) on the energy a session on this plug
+        delivered after its last telemetry frame, for the most recent session
+        that ended after `since` (the plug's previous live frame, i.e. when the
+        unmetered baseline was last advanced). Finalize bills only what the
+        frames reported, and the relay stays on until its OFF lands, so that
+        tail shows up in the plug-side counters on the first uncovered frame.
+
+        Bounded by the session's own end (ended_at), never by "now": energy
+        after the session ended is genuinely unmetered and must still alarm.
+        Returns 0.0 (excuse nothing) when there is no such session or it lacks
+        the timestamps/peak power to bound it. Plain SELECT, no row lock."""
+        if since is None:
+            return 0.0
+        from sqlalchemy import select
+
+        from backend.database.models import ChargingSession
+        from backend.services.mqtt_manager import UNMETERED_SESSION_TAIL_SLACK_SEC
+
+        result = await session.execute(
+            select(ChargingSession)
+            .where(ChargingSession.plug_id == plug_id, ChargingSession.ended_at > since)
+            .order_by(ChargingSession.ended_at.desc())
+            .limit(1)
+        )
+        ended = result.scalar_one_or_none()
+        if ended is None or ended.last_telemetry_at is None or not ended.peak_power_w:
+            return 0.0
+        gap = max(0.0, (ended.ended_at - ended.last_telemetry_at).total_seconds())
+        return ended.peak_power_w * (gap + UNMETERED_SESSION_TAIL_SLACK_SEC) / 3_600_000.0
+
     async def _persist_gateway_seen(self, gateway_id: str):
         """Mark a gateway ONLINE + freshly seen because telemetry arrived from
         it (also heals a gateway stuck OFFLINE after a missed retained status)."""
@@ -429,6 +460,11 @@ class MQTTTelemetryMixin:
                         },
                     )
                     return
+
+                # [F10] When the plug was last seen live, before this frame
+                # restamps it below: the unmetered cross-check uses it to find
+                # a session that ended after the baseline was taken.
+                prev_frame_at = plug.last_telemetry_at
 
                 # Raw time-series sample — enqueue now that ownership is proven.
                 if self.telemetry_persistence and sample is not None:
@@ -699,6 +735,18 @@ class MQTTTelemetryMixin:
                             candidate = delta_today
                         # both reset -> candidate stays None (full reset, nothing to report)
 
+                        # [F10] Take off the tail of a session that ended
+                        # after the baseline was taken (energy delivered
+                        # inside that session, after its last frame). Only
+                        # looked up once the delta would alarm, and before the
+                        # cooldown check so an excused frame never burns it.
+                        if (
+                            candidate is not None
+                            and candidate >= UNMETERED_CONSUMPTION_THRESHOLD_KWH
+                        ):
+                            candidate -= await self._session_tail_kwh(
+                                session, plug_id, prev_frame_at
+                            )
                         if (
                             candidate is not None
                             and candidate >= UNMETERED_CONSUMPTION_THRESHOLD_KWH

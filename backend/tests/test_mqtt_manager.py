@@ -2736,6 +2736,150 @@ async def test_persist_telemetry_unmetered_consumption_cooldown_suppresses_repea
     MQTTManager._instance = None
 
 
+# [F10] Trailing interval of a just-ended session. The plug baseline was last
+# advanced by the session's final frame, but the relay kept delivering (billed
+# session energy is frozen at that frame) until finalize's OFF landed. The
+# first uncovered frame used to report that tail as "unmetered".
+
+
+def _ended_session(gap_sec, peak_w, ended_ago_sec=2.0):
+    now = datetime.now(timezone.utc)
+    ended = MagicMock()
+    ended.ended_at = now - timedelta(seconds=ended_ago_sec)
+    ended.last_telemetry_at = ended.ended_at - timedelta(seconds=gap_sec)
+    ended.peak_power_w = peak_w
+    return ended
+
+
+def _plug_after_session(prev_today, prev_month, ended):
+    plug = _plug_with_baseline(prev_today, prev_month)
+    # The plug's last live frame was the session's last frame.
+    plug.last_telemetry_at = ended.last_telemetry_at
+    return plug
+
+
+@pytest.mark.asyncio
+async def test_persist_telemetry_unmetered_session_tail_not_flagged():
+    """10 s cadence at 3.5 kW: the stop lands ~10 s after the last session
+    frame, so the plug's counters show ~12 Wh more than the baseline the
+    session left behind. That energy was delivered INSIDE the session, so the
+    first idle frame after the stop must not alarm (and must not burn the
+    per-plug alert cooldown either)."""
+    MQTTManager._instance = None
+    ended = _ended_session(gap_sec=10.0, peak_w=3500.0)
+    plug = _plug_after_session(1.0, 10.0, ended)
+    session = _FakeSession([
+        _FakeResult(scalar=plug),    # plug lookup
+        _FakeResult(scalar=None),    # no ACTIVE session any more
+        _FakeResult(scalar=ended),   # the session that ended after the baseline
+    ])
+    mgr = MQTTManager(db_session_factory=lambda: session)
+    mgr._persist_gateway_event = AsyncMock()
+
+    await mgr._persist_telemetry(
+        "gw-1", 5, 0.0, 0.0, session_id=None, sample=None, relay_on=False,
+        today_kwh=1.012, month_kwh=10.012,
+    )
+
+    assert session.committed is True
+    mgr._persist_gateway_event.assert_not_awaited()
+    assert 5 not in mgr._unmetered_alert_cooldown
+    assert plug.last_today_energy_kwh == 1.012   # baseline still advances
+    assert plug.last_month_energy_kwh == 10.012
+
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_persist_telemetry_unmetered_reaped_session_tail_not_flagged():
+    """The large shape: the gateway dropped off mid-session, the reaper
+    finalized after its 300 s stale window, and the gateway's first frame back
+    still names the (now COMPLETED) session with the relay on. The ~0.29 kWh
+    the plug delivered between the last frame and the reaper's finalize was
+    delivered inside the session's lifetime, not outside any session."""
+    MQTTManager._instance = None
+    ended = _ended_session(gap_sec=300.0, peak_w=3500.0, ended_ago_sec=1.0)
+    plug = _plug_after_session(1.0, 10.0, ended)
+    session = _FakeSession([
+        _FakeResult(scalar=plug),    # plug lookup
+        _FakeResult(scalar=None),    # id-scoped lookup: session 10 is COMPLETED
+        _FakeResult(scalar=None),    # REC-02 plug-scoped re-check: nothing ACTIVE
+        _FakeResult(scalar=ended),   # the session that ended after the baseline
+    ])
+    mgr = MQTTManager(db_session_factory=lambda: session)
+    mgr._persist_gateway_event = AsyncMock()
+    mgr.send_plug_command = MagicMock(return_value=True)
+
+    await mgr._persist_telemetry(
+        "gw-1", 5, 3500.0, 0.6, session_id=10, sample=None, relay_on=True,
+        today_kwh=1.292, month_kwh=10.292,
+    )
+
+    assert session.committed is True
+    mgr.send_plug_command.assert_called_once()   # REC-02 still forces OFF
+    mgr._persist_gateway_event.assert_not_awaited()
+
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_persist_telemetry_unmetered_beyond_session_tail_still_flagged():
+    """Genuine consumption right after a session ended (relay switched back
+    on by hand, or a lost OFF on a gateway that stayed offline) is far more
+    than the just-ended session could have delivered in its tail, so it still
+    alarms, with the tail allowance taken off the estimate."""
+    MQTTManager._instance = None
+    ended = _ended_session(gap_sec=10.0, peak_w=3500.0)
+    plug = _plug_after_session(1.0, 10.0, ended)
+    session = _FakeSession([
+        _FakeResult(scalar=plug),
+        _FakeResult(scalar=None),
+        _FakeResult(scalar=ended),
+    ])
+    mgr = MQTTManager(db_session_factory=lambda: session)
+    mgr._persist_gateway_event = AsyncMock()
+
+    await mgr._persist_telemetry(
+        "gw-1", 5, 0.0, 0.0, session_id=None, sample=None, relay_on=False,
+        today_kwh=1.5, month_kwh=10.5,
+    )
+
+    mgr._persist_gateway_event.assert_awaited_once()
+    args = mgr._persist_gateway_event.await_args.args
+    assert args[2] == "UNMETERED_CONSUMPTION"
+    # 0.5 kWh minus the 3.5 kW x (10 s gap + 15 s slack) tail allowance.
+    assert "0.476" in args[4]
+
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_persist_telemetry_unmetered_no_recent_session_still_flagged():
+    """The plug has been seen live since its last session ended (no session
+    ended after the baseline), so nothing is excused: a jump still alarms in
+    full."""
+    MQTTManager._instance = None
+    plug = _plug_with_baseline(1.0, 10.0)
+    plug.last_telemetry_at = datetime.now(timezone.utc) - timedelta(seconds=10)
+    session = _FakeSession([
+        _FakeResult(scalar=plug),
+        _FakeResult(scalar=None),
+        _FakeResult(scalar=None),    # no session ended after the baseline
+    ])
+    mgr = MQTTManager(db_session_factory=lambda: session)
+    mgr._persist_gateway_event = AsyncMock()
+
+    await mgr._persist_telemetry(
+        "gw-1", 5, 0.0, 0.0, session_id=None, sample=None, relay_on=False,
+        today_kwh=1.05, month_kwh=10.05,
+    )
+
+    mgr._persist_gateway_event.assert_awaited_once()
+    assert "0.050" in mgr._persist_gateway_event.await_args.args[4]
+
+    MQTTManager._instance = None
+
+
 # ---------------------------------------------------------------------------
 # [Unmetered consumption] Firmware's own one-shot offline report + the CPO
 # bell-notify fan-out (services/mqtt/alarms.py) — the other half of the
