@@ -965,7 +965,9 @@ async def test_sweep_starts_schedule_at_not_before_when_power_never_dropped():
     qc = _qc(not_before=_ago(seconds=30))
     started, begin, notify = await _sweep(_scheduled_start_chain(qc, _due_plug()))
     assert started == 1
-    assert begin.await_args.kwargs == {"max_kwh": 30.0, "max_duration_seconds": 14400}
+    assert begin.await_args.kwargs == {
+        "max_kwh": 30.0, "max_duration_seconds": 14400, "covering_reservation": None,
+    }
     assert qc.status == QueuedChargeStatus.STARTED
     assert notify.await_args.args[1] == "queued_charge_started"
     assert notify.await_args.args[2] == "Your scheduled charge started"
