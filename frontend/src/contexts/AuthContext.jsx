@@ -218,7 +218,8 @@ export const AuthProvider = ({ children }) => {
   }, [clearLocalSession]);
 
   // Children always render — consumers branch on `loading` themselves
-  // (App holds the route tree behind <BootSplash/> until restore settles).
+  // (App shows <BootSplash/> while `loading`, which ends at once when a cached
+  // user exists and after /me otherwise).
   return (
     <AuthContext.Provider
       value={{ user, login, register, loginWithToken, logout, logoutEverywhere, refreshUser, loading }}
