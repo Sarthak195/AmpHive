@@ -81,6 +81,9 @@ firmware-image upload — mirrored by an 8m nginx `location`) + nginx
 >   not yet manually updated, the *deployed* backstop is the 16 KB app-layer
 >   guard alone (push the conf + recreate the `mqtt` container to activate the
 >   broker cap; tracked in docs/TODO.md "2026-08-04" backlog).
+>   **Update 2026-11-16:** the live VM broker has run with `message_size_limit
+>   8192` since 2026-08-11 (container started 2026-10-20 with it, checked
+>   2026-11-16), so the 8 KB broker cap is now real on prod.
 > - **Web-Push SSRF (LOW).** Subscription `endpoint` URLs are validated
 >   (`is_safe_push_endpoint`) at both the subscribe API (422) and the send path
 >   (skip+log) — `https` public FQDN only, IP-literal/loopback/link-local/private/
@@ -193,6 +196,13 @@ firmware-image upload — mirrored by an 8m nginx `location`) + nginx
 > needs a dedicated infra deploy rather than a bundle; and `python-jose` was NOT
 > migrated to PyJWT — it is current at 3.5.0 with no advisory of its own, and an
 > auth-path swap does not belong in a batch this wide.
+>
+> **Update 2026-11-16: non-root containers built, not yet deployed.** The
+> backend and agent images now run as uid/gid 10001 and the backend service has
+> `cap_drop: ALL` plus `no-new-privileges` (relay, tls and prod compose files).
+> Until the infra deploy in docs/DEPLOYMENT.md "Non-root containers" is done on
+> the VM, prod containers still run as root. Frontend, db, mqtt and caddy are
+> unchanged by design.
 >
 > **Update 2026-11-15: python-jose replaced by PyJWT.** python-jose 3.5.0
 > carries PYSEC-2026-4298 with no fixed release and pulled in `ecdsa`
@@ -914,6 +924,26 @@ Tests: `backend/tests/test_gateway_create.py` (cpo refused and admin allowed
 by the route's real role dependency, claim route still open to cpo/admin),
 `tools/tests/test_fake_plug.py` (simulator reuses an owned gateway, explains
 mint plus claim on 403), `frontend/src/pages/cpo/CpoGateways.test.jsx`.
+
+### 8.9 2026-11-16 batch: tenant-less scope, email case, offline cache (merged, not deployed)
+
+- **Tenant-less callers (U4).** Tenant-scoped `/api/cpo/*` routes filtered with
+  `tenant_id == user.tenant_id`, which compiles to `IS NULL` for a caller with
+  no tenant and matched unclaimed inventory gateways, their plugs and
+  platform audit rows. They now share `routers/cpo/_common.require_cpo_tenant`,
+  which returns 400 "You are not associated with a tenant." before any query.
+  Open without a tenant: setup, profile, firmware-releases, payout mark_paid
+  and cancel. Test: `backend/tests/test_cpo_tenant_scope.py` (structural check
+  that every route is guarded or allow-listed, plus a no-query assertion).
+- **Email uniqueness.** Migration `0043_email_ci_unique` adds a unique index on
+  `lower(email)`, so a case-variant duplicate can no longer exist and login's
+  `lower(email)` lookup cannot hit `MultipleResultsFound`.
+- **Offline cache (instant open).** Cache Storage holds only the public shell
+  (`index.html`) and hashed `/assets`; API traffic is never cached by the
+  service worker. Personal data snapshots live in localStorage, are tagged with
+  the user id and a schema version, expire after 7 days, and are cleared on
+  logout, logout everywhere and any 401. A snapshot is rendered dimmed and
+  labelled "last saved" until fresh data replaces it.
 
 ---
 
