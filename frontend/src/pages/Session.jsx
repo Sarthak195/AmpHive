@@ -18,13 +18,16 @@ import SessionMonitor from '../components/SessionMonitor';
 import SessionReceipt from '../components/SessionReceipt';
 import { useSession } from '../contexts/SessionContext';
 import { useConfig } from '../contexts/ConfigContext';
-import { PageHeader, EmptyState, Skeleton } from '../components/ui';
+import { PageHeader, EmptyState, Money, Skeleton } from '../components/ui';
+import { fmtTime } from '../utils/reservationTime';
 import { formatINR, coinsToINR } from '../utils/money';
 import './Session.css';
 
 const Session = () => {
-  const { isActive, sessionData, activeSessions, sessionId, switchSession, receipt, restoring } =
-    useSession();
+  const {
+    isActive, sessionData, activeSessions, sessionId, switchSession, receipt, restoring,
+    sessionsStale, sessionsSavedAt, sessionsError, retrySessions,
+  } = useSession();
   const { coin_inr_rate } = useConfig();
 
   // Last-known live cost per session — telemetry only streams for the focused
@@ -88,6 +91,36 @@ const Session = () => {
           )}
           <SessionMonitor />
         </>
+      ) : sessionsStale && activeSessions.length > 0 ? (
+        // Instant open (a push tap lands here): the last saved sessions,
+        // read-only and marked, until the restore answers. They stay (still
+        // marked) if it fails, rather than claiming "No active charge".
+        <div className="stack is-stale">
+          <div className="banner banner-info stale-note" role="status">
+            <span>
+              {sessionsSavedAt
+                ? `Showing your last saved session from ${fmtTime(sessionsSavedAt)}. `
+                : 'Showing your last saved session. '}
+              {sessionsError ? "Couldn't refresh." : 'Updating...'}
+            </span>
+            {sessionsError && (
+              <button type="button" className="btn btn-quiet btn-sm" onClick={() => retrySessions?.()}>
+                Retry
+              </button>
+            )}
+          </div>
+          {activeSessions.map((s) => (
+            <section key={s.session_id} className="card" aria-label="Last saved charging session">
+              <p>Charging at {s.plug_name || `charger ${s.plug_id}`}</p>
+              {s.cost_coins != null && (
+                <p className="text-2 text-sm">
+                  <Money coins={s.cost_coins} rate={coin_inr_rate} />
+                  <span className="stale-tag">(last saved)</span>
+                </p>
+              )}
+            </section>
+          ))}
+        </div>
       ) : restoring ? (
         // Still asking the backend whether a session is running: a loading
         // placeholder, not a "No active charge" flash for a live session.

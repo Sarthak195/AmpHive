@@ -43,7 +43,9 @@ const validateAmount = (value) => {
 };
 
 export default function Wallet() {
-  const { user, refreshUser } = useAuth();
+  const { user, refreshUser, userFresh } = useAuth();
+  // Instant open: the cached user's balance until /me answers.
+  const balanceStale = userFresh === false;
   const { coin_inr_rate: rate = 1 } = useConfig();
   const toast = useToast();
   const [searchParams] = useSearchParams();
@@ -208,13 +210,14 @@ export default function Wallet() {
       <PageHeader title="Charging credit" sub="Add credit and see where it went." />
 
       <div className="stack">
-        <section className="card wallet-balance-card">
+        <section className={`card wallet-balance-card${balanceStale ? ' is-stale' : ''}`}>
           <p className="wallet-balance-label">
             <WalletIcon size={16} aria-hidden="true" />
             Balance
           </p>
           <p className="wallet-balance-figure">
             <Money coins={coinBalance} rate={rate} />
+            {balanceStale && <span className="stale-tag">(last saved)</span>}
           </p>
           {heldCoins > 0 && (
             <p className="text-2 text-sm">

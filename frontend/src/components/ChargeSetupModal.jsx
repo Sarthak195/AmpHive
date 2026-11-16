@@ -80,7 +80,7 @@ const COPY = {
 
 export default function ChargeSetupModal({ open, onClose, plug, mode = 'start', onConfirm }) {
   const { coins_per_kwh, coin_inr_rate } = useConfig();
-  const { availableBalance } = useWallet();
+  const { availableBalance, balanceFresh } = useWallet();
 
   const [timePreset, setTimePreset] = useState('none');
   const [customTime, setCustomTime] = useState('');
@@ -223,6 +223,7 @@ export default function ChargeSetupModal({ open, onClose, plug, mode = 'start', 
           <p className="text-3 text-sm num">
             <Money coins={rate} rate={coin_inr_rate} />
             /kWh · your balance covers ≈ {covers.toFixed(1)} kWh
+            {balanceFresh === false && <span className="stale-tag">(last saved balance)</span>}
           </p>
         </div>
 
