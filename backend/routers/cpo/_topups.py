@@ -16,6 +16,7 @@ Modeled on the dispute-approve precedent (_disputes.py cpo_resolve_dispute):
 row-lock, credit_wallet(), a driver-side LedgerTransaction, a try_record_audit
 row, and a best-effort driver notification.
 """
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -130,12 +131,24 @@ async def cpo_create_topup(
             detail=f"No driver account found for '{req.driver_email}'.",
         )
 
+    # Invariant: a top-up's created_at is taken while holding the tenant row
+    # lock, from the same app clock cpo_request_payout uses for period_end.
+    # Every payout that committed before us got its period_end before we got
+    # the lock, and every later payout reads its `now` after we commit, so
+    # this top-up falls in exactly one payout's [watermark, now) window and is
+    # deducted exactly once. Do NOT fall back to the column's
+    # CURRENT_TIMESTAMP default: that is the transaction START time, which can
+    # predate a payout that committed while we waited for the lock, putting
+    # the top-up behind the new watermark where no payout ever deducts it.
+    # Floored at the under-lock watermark so a wall clock that steps back
+    # still cannot stamp the row behind it.
     topup = OfflineTopup(
         tenant_id=tenant_id,
         actor_user_id=user.id,
         driver_user_id=driver.id,
         amount_coins=amount,
         note=req.note,
+        created_at=max(datetime.now(timezone.utc), summary["watermark"]),
     )
     db.add(topup)
 
