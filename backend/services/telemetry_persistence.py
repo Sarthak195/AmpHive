@@ -180,13 +180,23 @@ class TelemetryPersistenceService:
                 self._buffer.appendleft(r)
 
     async def _prune_old(self) -> None:
-        from backend.database.models import TelemetryReading
+        from backend.database.models import Plug, TelemetryReading
 
         cutoff = datetime.now(timezone.utc) - timedelta(days=RETENTION_DAYS)
         try:
             async with self.db_session_factory() as session:
+                # recorded_at alone has no index, so filtering on it only made
+                # this hourly DELETE a full scan of the whole table (288 MB in
+                # prod, 2026-11-16), which pushed the app out of the e2-micro's
+                # memory every hour. Adding plug_id lets Postgres range-scan
+                # idx_telemetry_plug_recorded instead. plug_id is NOT NULL with
+                # an ON DELETE CASCADE FK to plugs, so every row is still covered.
+                plug_ids = (await session.execute(select(Plug.id))).scalars().all()
                 result = await session.execute(
-                    delete(TelemetryReading).where(TelemetryReading.recorded_at < cutoff)
+                    delete(TelemetryReading).where(
+                        TelemetryReading.plug_id.in_(plug_ids),
+                        TelemetryReading.recorded_at < cutoff,
+                    )
                 )
                 await session.commit()
                 logger.info(

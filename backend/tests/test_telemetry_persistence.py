@@ -79,6 +79,46 @@ def test_buffer_is_bounded_and_counts_drops(monkeypatch):
     assert svc._buffer[-1]["plug_id"] == total - 1
 
 
+@pytest.mark.asyncio
+async def test_prune_filters_on_plug_id_so_the_index_is_usable(monkeypatch):
+    """The hourly prune must filter on plug_id as well as recorded_at:
+    recorded_at alone has no index, which made it a full-table scan."""
+    from sqlalchemy.dialects import postgresql
+
+    monkeypatch.setattr(tp, "RETENTION_DAYS", 90)
+    executed = []
+
+    class _Result:
+        rowcount = 0
+
+        def scalars(self):
+            return self
+
+        def all(self):
+            return [1, 2]
+
+    class _Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def execute(self, stmt):
+            executed.append(stmt)
+            return _Result()
+
+        async def commit(self):
+            pass
+
+    await tp.TelemetryPersistenceService(db_session_factory=_Session)._prune_old()
+
+    sql = str(executed[-1].compile(dialect=postgresql.dialect()))
+    assert sql.startswith("DELETE FROM telemetry_readings")
+    assert "telemetry_readings.plug_id IN" in sql
+    assert "telemetry_readings.recorded_at <" in sql
+
+
 @pytest.mark.skip(reason="Needs a live Postgres (date_trunc + enum types); wire up in CI.")
 async def test_flush_enriches_and_inserts():
     """
