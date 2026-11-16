@@ -331,8 +331,9 @@ const UnsplitRoutes = () => (
 function App() {
   const { loading } = useAuth();
 
-  // Hold the whole tree behind the splash until the session restore
-  // settles — guards no longer flash anonymous redirects on reload.
+  // Hold the whole tree behind the splash until the session restore can
+  // render a user (the cached one at once, or /me's) so guards do not flash
+  // anonymous redirects on reload.
   if (loading) return <BootSplash />;
 
   return (

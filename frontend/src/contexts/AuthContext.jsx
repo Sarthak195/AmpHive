@@ -6,7 +6,8 @@
  *
  * Flow:
  * - On app load: checks localStorage for a saved JWT, calls GET /api/auth/me
- *   to verify it's still valid and load fresh user data. /me also returns a
+ *   to verify it's still valid and load fresh user data (a cached user lets
+ *   the app render first and /me revalidates in the background). /me also returns a
  *   renewed JWT, which replaces the stored one (sliding 7-day expiry).
  *   Only a 401/403 at boot signs out; a timeout or 5xx keeps the session.
  * - Login: POST /api/auth/login → saves JWT + user to localStorage.
@@ -37,7 +38,11 @@ export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
 
-  // On mount, check if a valid JWT token exists and restore the session
+  // On mount, restore the session. With a token AND a cached user object the
+  // app renders at once from the cache (the route chunk and its data calls
+  // start downloading in parallel with /me instead of after it) and /me
+  // revalidates in the background. With a token but no usable cached user,
+  // loading stays true until /me settles.
   useEffect(() => {
     const restoreSession = async () => {
       const token = localStorage.getItem('amphive_token');
@@ -47,24 +52,41 @@ export const AuthProvider = ({ children }) => {
       }
 
       try {
+        const cached = JSON.parse(localStorage.getItem('amphive_user'));
+        if (cached && typeof cached === 'object' && !Array.isArray(cached)) {
+          setUser(cached);
+          setLoading(false);
+        }
+      } catch {
+        // Unreadable cache: wait for /me below.
+      }
+
+      try {
         // Verify the token is still valid by calling the /me endpoint
-        const userData = storeMe(token, await api.get('/api/auth/me'));
-        setUser(userData);
+        const me = await api.get('/api/auth/me');
+        const userData = storeMe(token, me);
+        // Apply only if the user did not log out or switch accounts while /me
+        // was in flight: the stored token must still be the one sent or the
+        // renewed one storeMe just wrote.
+        const current = localStorage.getItem('amphive_token');
+        if (current === token || (me.token && current === me.token)) {
+          setUser(userData);
+        }
       } catch (err) {
         console.warn('Session restore failed:', err.message);
         if (err.status === 401 || err.status === 403) {
           // Rejected token (expired, revoked) or disabled account: sign out.
-          localStorage.removeItem('amphive_token');
-          localStorage.removeItem('amphive_user');
-        } else {
-          // Timeout, network drop or 5xx says nothing about the token: keep
-          // it and show the cached user; the next real 401 still signs out.
-          try {
-            setUser(JSON.parse(localStorage.getItem('amphive_user')));
-          } catch {
-            // No usable cached user: stay signed out for this load only.
+          // The api client already clears storage on a 401, so a null stored
+          // token also counts as ours; a different token is a newer login.
+          const current = localStorage.getItem('amphive_token');
+          if (current === token || current === null) {
+            localStorage.removeItem('amphive_token');
+            localStorage.removeItem('amphive_user');
+            setUser(null);
           }
         }
+        // Timeout, network drop or 5xx says nothing about the token: keep it
+        // and the cached user; the next real 401 still signs out.
       } finally {
         setLoading(false);
       }
@@ -196,7 +218,8 @@ export const AuthProvider = ({ children }) => {
   }, [clearLocalSession]);
 
   // Children always render — consumers branch on `loading` themselves
-  // (App holds the route tree behind <BootSplash/> until restore settles).
+  // (App shows <BootSplash/> while `loading`, which ends at once when a cached
+  // user exists and after /me otherwise).
   return (
     <AuthContext.Provider
       value={{ user, login, register, loginWithToken, logout, logoutEverywhere, refreshUser, loading }}
