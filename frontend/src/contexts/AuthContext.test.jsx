@@ -445,3 +445,64 @@ describe('loginWithToken (Google sign-in redirect)', () => {
     await waitFor(() => expect(localStorage.getItem('amphive_token')).toBe(googleToken));
   });
 });
+
+describe('instant open: snapshots and freshness', () => {
+  const snapKeys = () => Object.keys(localStorage).filter((k) => k.startsWith('amphive_snap:'));
+  const seed = () => {
+    localStorage.setItem('amphive_token', 'good-jwt');
+    localStorage.setItem('amphive_user', '{"id":7,"email":"driver@amphive.test"}');
+    localStorage.setItem('amphive_snap:plugs', '{}');
+    localStorage.setItem('amphive_snap:sessions', '{}');
+  };
+  const FreshProbe = () => {
+    const { userFresh, logout } = useAuth();
+    return (
+      <div>
+        <div data-testid="fresh">{String(userFresh)}</div>
+        <button onClick={logout}>logout</button>
+      </div>
+    );
+  };
+  const renderFresh = () =>
+    render(
+      <AuthProvider>
+        <FreshProbe />
+      </AuthProvider>
+    );
+
+  it('logout removes every amphive_snap: key', async () => {
+    seed();
+    api.get.mockResolvedValue({ id: 7, email: 'driver@amphive.test' });
+    api.post.mockResolvedValue({ status: 'logged_out' });
+    renderFresh();
+    await userEvent.click(screen.getByText('logout'));
+    await waitFor(() => expect(snapKeys()).toEqual([]));
+  });
+
+  it('a 401 at boot removes every amphive_snap: key', async () => {
+    seed();
+    api.get.mockRejectedValue(Object.assign(new Error('expired'), { status: 401 }));
+    renderFresh();
+    await waitFor(() => expect(snapKeys()).toEqual([]));
+    expect(localStorage.getItem('amphive_token')).toBeNull();
+  });
+
+  it('userFresh is false on the cached user and turns true only when /me succeeds', async () => {
+    seed();
+    let resolveMe;
+    api.get.mockReturnValue(new Promise((r) => { resolveMe = r; }));
+    renderFresh();
+    expect(screen.getByTestId('fresh')).toHaveTextContent('false');
+    resolveMe({ id: 7, email: 'driver@amphive.test' });
+    await waitFor(() => expect(screen.getByTestId('fresh')).toHaveTextContent('true'));
+  });
+
+  it('userFresh stays false when /me fails with a timeout', async () => {
+    seed();
+    api.get.mockRejectedValue(Object.assign(new Error('timed out'), { code: 'timeout' }));
+    renderFresh();
+    await waitFor(() => expect(api.get).toHaveBeenCalled());
+    await new Promise((r) => setTimeout(r, 0));
+    expect(screen.getByTestId('fresh')).toHaveTextContent('false');
+  });
+});

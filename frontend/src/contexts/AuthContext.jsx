@@ -19,6 +19,7 @@
 
 import { createContext, useState, useEffect, useContext, useCallback } from 'react';
 import api from '../api/client';
+import { cachedUserId, clearStoredSession } from '../utils/snapshot';
 
 const AuthContext = createContext();
 
@@ -37,6 +38,12 @@ const storeMe = (sentToken, { token, ...userData }) => {
 export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
+  // False while the user (and so the coin balance) is the cached copy, true
+  // once /me has answered in this page load. Money shown while false must be
+  // marked as not live. userError: the last /me attempt failed (not a 401),
+  // so the UI can offer a retry instead of "Updating..." forever.
+  const [userFresh, setUserFresh] = useState(false);
+  const [userError, setUserError] = useState(false);
 
   // On mount, restore the session. With a token AND a cached user object the
   // app renders at once from the cache (the route chunk and its data calls
@@ -71,6 +78,8 @@ export const AuthProvider = ({ children }) => {
         const current = localStorage.getItem('amphive_token');
         if (current === token || (me.token && current === me.token)) {
           setUser(userData);
+          setUserFresh(true);
+          setUserError(false);
         }
       } catch (err) {
         console.warn('Session restore failed:', err.message);
@@ -80,10 +89,11 @@ export const AuthProvider = ({ children }) => {
           // token also counts as ours; a different token is a newer login.
           const current = localStorage.getItem('amphive_token');
           if (current === token || current === null) {
-            localStorage.removeItem('amphive_token');
-            localStorage.removeItem('amphive_user');
+            clearStoredSession();
             setUser(null);
           }
+        } else {
+          setUserError(true);
         }
         // Timeout, network drop or 5xx says nothing about the token: keep it
         // and the cached user; the next real 401 still signs out.
@@ -100,13 +110,18 @@ export const AuthProvider = ({ children }) => {
     try {
       const token = localStorage.getItem('amphive_token');
       setUser(storeMe(token, await api.get('/api/auth/me')));
+      setUserFresh(true);
+      setUserError(false);
     } catch (err) {
       console.error('Failed to refresh user:', err.message);
+      setUserError(true);
     }
   }, []);
 
   const login = useCallback(async (email, password) => {
     const data = await api.post('/api/auth/login', { email, password });
+    // A different account on this device: drop the previous one's snapshots.
+    if (String(cachedUserId()) !== String(data.user?.id)) clearStoredSession();
     // Save JWT token and user data to localStorage
     localStorage.setItem('amphive_token', data.token);
     localStorage.setItem('amphive_user', JSON.stringify(data.user));
@@ -114,6 +129,8 @@ export const AuthProvider = ({ children }) => {
     // AuthResponse's user shape lacks fields like available_balance,
     // created_at, is_disabled that the rest of the app expects.
     setUser(data.user);
+    // The login response itself is live server data.
+    setUserFresh(true);
     await refreshUser();
     return data;
   }, [refreshUser]);
@@ -164,6 +181,7 @@ export const AuthProvider = ({ children }) => {
       }
     }
 
+    if (incoming && String(cachedUserId()) !== String(Number(incoming.sub))) clearStoredSession();
     localStorage.setItem('amphive_token', token);
     if (incoming) {
       const optimisticUser = { id: Number(incoming.sub), email: incoming.email, role: incoming.role };
@@ -190,8 +208,8 @@ export const AuthProvider = ({ children }) => {
 
   const clearLocalSession = useCallback(() => {
     setUser(null);
-    localStorage.removeItem('amphive_token');
-    localStorage.removeItem('amphive_user');
+    setUserFresh(false);
+    clearStoredSession();
   }, []);
 
   const logout = useCallback(async () => {
@@ -222,7 +240,10 @@ export const AuthProvider = ({ children }) => {
   // user exists and after /me otherwise).
   return (
     <AuthContext.Provider
-      value={{ user, login, register, loginWithToken, logout, logoutEverywhere, refreshUser, loading }}
+      value={{
+        user, login, register, loginWithToken, logout, logoutEverywhere, refreshUser, loading,
+        userFresh, userError,
+      }}
     >
       {children}
     </AuthContext.Provider>

@@ -18,6 +18,8 @@
  *   indefinite spinner.
  */
 
+import { clearStoredSession } from '../utils/snapshot';
+
 const REQUEST_TIMEOUT_MS = 20_000;
 
 // In development: Vite provides import.meta.env.VITE_API_URL
@@ -73,8 +75,8 @@ export async function apiRequest(endpoint, options = {}) {
   // send the user to sign in. A 401 from the login call itself is a wrong
   // password, so it falls through and the server's detail is shown.
   if (response.status === 401 && endpoint !== '/api/auth/login') {
-    localStorage.removeItem('amphive_token');
-    localStorage.removeItem('amphive_user');
+    // Token, cached user and every saved data snapshot (utils/snapshot.js).
+    clearStoredSession();
     // Redirect to login page if not already there, preserving the current
     // location so Login can return the user after re-authenticating.
     if (window.location.pathname !== '/login') {

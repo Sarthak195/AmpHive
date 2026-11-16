@@ -9,7 +9,7 @@
  * stats that hide when /api/me/stats errors.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor, within, fireEvent } from '@testing-library/react';
+import { act, render, screen, waitFor, within, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 
@@ -39,10 +39,11 @@ vi.mock('../contexts/WalletContext', () => ({ useWallet: () => ({ balance: 500 }
 // The two modals have their own test files — stub them so these tests assert
 // only that Dashboard opens them with the right plug + mode.
 vi.mock('../components/ChargeSetupModal', () => ({
-  default: ({ open, mode, plug, onConfirm }) =>
+  default: ({ open, mode, plug, onConfirm, priceStale }) =>
     open ? (
       <div data-testid="setup-modal">
         {`${mode}:${plug.id}`}
+        <span data-testid="setup-price">{`${plug.price_per_kwh}${priceStale ? ' (last saved price)' : ''}`}</span>
         {/* [Scheduled start] stand-in for picking "At a time" + confirming */}
         <button
           type="button"
@@ -414,5 +415,86 @@ describe('Dashboard: up next stays current (C10)', () => {
     handlers.notification({ type: 'queued_charge_started', plug_id: 4 });
 
     await waitFor(() => expect(screen.queryByText(/Waiting for power/)).not.toBeInTheDocument());
+  });
+});
+
+describe('Dashboard: instant open from saved data', () => {
+  const ME = { ...DRIVER, id: 7 };
+  const save = (key, data) =>
+    localStorage.setItem(`amphive_snap:${key}`, JSON.stringify({ v: 1, uid: 7, savedAt: Date.now() - 60_000, data }));
+
+  beforeEach(() => {
+    localStorage.clear();
+    localStorage.setItem('amphive_token', 't');
+    localStorage.setItem('amphive_user', JSON.stringify(ME));
+    useAuth.mockReturnValue({ user: ME });
+    save('plugs', [{ ...PLUGS[0], name: 'Saved Lobby Plug' }]);
+  });
+
+  it('renders the saved chargers before the fetch resolves, marked, and clears on success', async () => {
+    let resolvePlugs;
+    setRoute('/api/plugs/available', () => new Promise((r) => { resolvePlugs = r; }));
+    renderDash();
+    expect(screen.getByText('Saved Lobby Plug')).toBeInTheDocument();
+    expect(screen.getByText(/Showing your last saved data from/)).toHaveTextContent('Updating...');
+    expect(screen.getByRole('main')).toHaveClass('is-stale');
+
+    await act(async () => resolvePlugs(PLUGS));
+    expect(await screen.findByText('Lobby Plug')).toBeInTheDocument();
+    expect(screen.queryByText(/Showing your last saved data/)).not.toBeInTheDocument();
+    expect(screen.getByRole('main')).not.toHaveClass('is-stale');
+    expect(JSON.parse(localStorage.getItem('amphive_snap:plugs')).data).toHaveLength(PLUGS.length);
+  });
+
+  it('the charge setup opened from a saved card marks the price, then shows the live one', async () => {
+    let resolvePlugs;
+    setRoute('/api/plugs/available', () => new Promise((r) => { resolvePlugs = r; }));
+    save('plugs', [{ ...PLUGS[0], name: 'Saved Lobby Plug', price_per_kwh: 20 }]);
+    renderDash();
+    expect(screen.getByText('Saved Lobby Plug')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Charge' }));
+    expect(screen.getByTestId('setup-price')).toHaveTextContent('20 (last saved price)');
+
+    await act(async () => resolvePlugs(PLUGS));
+    expect(screen.getByTestId('setup-price')).toHaveTextContent(/^8$/);
+  });
+
+  it('keeps the saved chargers marked when the refresh fails, with a working Retry', async () => {
+    setRoute('/api/plugs/available', () => Promise.reject(new Error('offline')));
+    renderDash();
+    expect(await screen.findByText(/Couldn't refresh/)).toBeInTheDocument();
+    expect(screen.getByText('Saved Lobby Plug')).toBeInTheDocument();
+    expect(screen.getByRole('main')).toHaveClass('is-stale');
+
+    setRoute('/api/plugs/available', () => Promise.resolve(PLUGS));
+    await userEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(await screen.findByText('Lobby Plug')).toBeInTheDocument();
+    expect(screen.queryByText(/Showing your last saved data/)).not.toBeInTheDocument();
+  });
+
+  it('shows no note when nothing was saved, and ignores another user\'s data', async () => {
+    localStorage.setItem('amphive_snap:plugs', JSON.stringify({ v: 1, uid: 99, savedAt: Date.now(), data: [] }));
+    renderDash();
+    expect(screen.queryByText(/Showing your last saved data/)).not.toBeInTheDocument();
+    expect(await screen.findByText('Lobby Plug')).toBeInTheDocument();
+  });
+
+  it('a saved running session shows its saved cost and waits before Open session', async () => {
+    useSession.mockReturnValue({
+      activeSessions: [{ session_id: 5, plug_id: 1, plug_name: 'Lobby Plug', cost_coins: 42 }],
+      sessionData: null,
+      sessionId: null,
+      switchSession: vi.fn(),
+      startSession: vi.fn(),
+      socket: null,
+      sessionsStale: true,
+      sessionsSavedAt: Date.now() - 60_000,
+      sessionsError: false,
+      retrySessions: vi.fn(),
+    });
+    renderDash();
+    const banner = screen.getByRole('region', { name: 'Active charging session' });
+    expect(within(banner).getByText('(last saved)')).toBeInTheDocument();
+    expect(within(banner).getByRole('button', { name: 'Checking...' })).toBeDisabled();
   });
 });

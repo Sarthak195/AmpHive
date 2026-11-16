@@ -70,7 +70,8 @@ const EXPORT_FILENAME = 'amphive-data-export.json';
 const CLOSE_CONFIRM_PHRASE = 'DELETE MY ACCOUNT';
 
 export default function Account() {
-  const { user, logout } = useAuth();
+  const { user, logout, userFresh } = useAuth();
+  const balanceStale = userFresh === false;
   const { coin_inr_rate: rate } = useConfig();
   const toast = useToast();
 
@@ -142,7 +143,9 @@ export default function Account() {
         setPushState(permission === 'denied' ? 'denied' : 'off');
         return;
       }
-      const reg = await navigator.serviceWorker.register('/sw.js');
+      // Same registration main.jsx makes (utils/swControl.js); updateViaCache
+      // 'none' keeps the browser's update check off the HTTP cache.
+      const reg = await navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' });
       const sub = await reg.pushManager.subscribe({
         userVisibleOnly: true,
         applicationServerKey: urlBase64ToUint8Array(vapidKey),
@@ -443,7 +446,8 @@ export default function Account() {
               {hasCredit ? (
                 <>
                   Your remaining charging credit of{' '}
-                  <Money coins={coinBalance} rate={rate} /> is forfeited.
+                  <Money coins={coinBalance} rate={rate} />
+                  {balanceStale && <span className="stale-tag">(last saved)</span>} is forfeited.
                 </>
               ) : (
                 'Any remaining charging credit is forfeited.'
@@ -521,7 +525,8 @@ export default function Account() {
                   Your remaining charging credit of{' '}
                   <strong>
                     <Money coins={coinBalance} rate={rate} />
-                  </strong>{' '}
+                  </strong>
+                  {balanceStale && <span className="stale-tag">(last saved)</span>}{' '}
                   is forfeited. Charging credit is prepaid balance for charging
                   only — it can&apos;t be paid out as cash or moved to another
                   account, so spend it before you close.

@@ -15,7 +15,10 @@ import { useAuth } from './AuthContext';
 const WalletContext = createContext();
 
 export const WalletProvider = ({ children }) => {
-  const { user, refreshUser } = useAuth();
+  const { user, refreshUser, userFresh } = useAuth();
+  // False while the balance is the cached user's (instant open), until /me
+  // answers: callers mark the figure as not live.
+  const balanceFresh = userFresh;
 
   // Balance comes from the user object (updated from backend)
   const balance = user?.coin_balance ?? 0;
@@ -33,7 +36,7 @@ export const WalletProvider = ({ children }) => {
   }, [refreshUser]);
 
   return (
-    <WalletContext.Provider value={{ balance, availableBalance, refreshBalance }}>
+    <WalletContext.Provider value={{ balance, availableBalance, refreshBalance, balanceFresh }}>
       {children}
     </WalletContext.Provider>
   );

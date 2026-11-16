@@ -277,6 +277,71 @@ recorded in [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md). On a fresh
 zone the Universal SSL edge certificate lags activation by a few minutes:
 HTTPS handshakes fail (TLS alert 40) until it lands.
 
+### Service worker and instant open (added 2026-11-16)
+
+On the driver host (`amphive.app`, HTTPS, production build only) every visitor
+gets the service worker `frontend/public/sw.js`, registered by
+`frontend/src/utils/swControl.js` with `updateViaCache: 'none'`. It keeps the
+app shell (`index.html`) and the hashed `/assets/*` in Cache Storage, so a
+repeat open paints at once; the app then shows the user's last saved
+dashboard and session data from localStorage (`src/utils/snapshot.js`),
+dimmed and labelled "last saved" until each refresh succeeds. The CPO host
+never registers it, and a worker that finds itself on a `cpo.` host has no
+fetch handler. `/api/`, `/socket.io/`, `/auth/*`, `/reset-password`,
+`/verify-email`, `/login`, `/signup`, `/cpo`, `/admin`, legal pages, unknown
+paths and root files are never answered from the cache.
+
+**Update flow after a deploy.** No `sw.js` change is needed for an app
+deploy. Each open serves the cached shell and revalidates it in the
+background: the worker fetches the new `index.html` and its entry assets, and
+swaps the shell only once all of them are cached. A phone therefore normally
+runs the previous bundle for one open; this is not a guarantee (the browser
+can stop the worker before the swap finishes), so it is bounded instead by
+the 7-day rule (a shell older than 7 days is fetched network-first, with a
+3 s timeout, before falling back to the cache) and by the CACHE bump below. If the
+old bundle asks for a lazy chunk the deploy removed, the page drops the
+cached shell and reloads once onto the current app. Old assets are pruned one
+swap later, not in the same open. Rule this implies: **API changes must stay
+backward compatible for one release** (already true for open tabs).
+`frontend/nginx.conf` is unchanged by this feature, so a dist-only thin layer
+still deploys it.
+
+**Operator switches** (each one is a frontend redeploy; `sw.test.js` fails if
+the duplicated constants disagree):
+
+| Switch | Edit | Effect on everyone | Effect on push users |
+|---|---|---|---|
+| Force everyone onto the new shell (a breaking API change) | Bump `CACHE` in `sw.js` and `SHELL_CACHE_NAME` in `swControl.js` together (`amphive-shell-v2`) | Old shell cache dropped on the worker update; open pages reload once onto the new app | None |
+| Level 1, soft off | `SHELL_CACHE = false` in `sw.js` | Caches dropped, no fetch handler, worker stays registered; app opens as it did before this feature | None, push keeps working |
+| Level 2, kill | `KILL = true` in `sw.js` **and** `SW_KILL = true` in `swControl.js` | Caches dropped, no fetch handler, open pages reload once (sessionStorage-guarded, no loop), pages stop registering and unregister the worker wherever it carries no push subscription | They keep a registered, cache-less, fetch-less worker (the same as the push-only worker before this feature), so notifications still arrive. A hard unregister for push users is not provided. |
+
+Both levels work even if the shell logic is broken: the browser's worker
+update check fetches `/sw.js` outside the fetch handler, and
+`updateViaCache: 'none'` keeps it off the HTTP cache. Kill-switch reach is
+"next visit", not instant. To revert, flip the flags back and redeploy.
+
+**Post-deploy check.** `curl -sI https://amphive.app/sw.js`: expect
+`cf-cache-status` other than a stale `HIT` and an `ETag` that matches the
+origin. Cloudflare's Browser Cache TTL rewrites the browser-facing
+`Cache-Control` to `max-age=14400` (measured 2026-11-16), so do not expect
+`no-cache` in that header; the worker update check ignores it anyway because
+of `updateViaCache: 'none'` (set "Respect Existing Headers" in Cloudflare if
+you want the header to read correctly). `index.html` must stay
+`cf-cache-status: DYNAMIC`: never add a Cloudflare "Cache Everything" rule.
+
+**Known limits.**
+- iOS Safari wipes script-written storage (Cache Storage, localStorage)
+  after 7 days without use, and keeps service workers alive only briefly;
+  the page posts a `revalidate` message after load so the swap does not rely
+  only on the navigation event. A wiped phone just opens the slow way once.
+- Personal snapshots are uid-tagged, schema-versioned, expire after 7 days
+  and are cleared on logout, logout everywhere and any 401 (a per-device
+  logout from another device reaches this one as a 401). Cache Storage holds
+  only public shell and asset bytes.
+- Logout does not unsubscribe Web Push (pre-existing), so on a shared phone
+  the previous user's push notifications keep arriving until they turn push
+  off in Account or the subscription expires.
+
 ### Memory and disk on the 1 GB VM (measured 2026-11-16)
 
 Warm, the API answers in 25 to 200 ms on the VM. The likely cause of the slow

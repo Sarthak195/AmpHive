@@ -148,3 +148,31 @@ describe('Session page — after a stop', () => {
     expect(screen.queryByTestId('receipt')).not.toBeInTheDocument();
   });
 });
+
+describe('Session page: saved sessions on an instant open', () => {
+  const saved = {
+    ...base,
+    activeSessions: [{ session_id: 5, plug_id: 1, plug_name: 'Lobby Plug', cost_coins: 42 }],
+    sessionsStale: true,
+    sessionsSavedAt: Date.now() - 60_000,
+    retrySessions: vi.fn(),
+  };
+
+  it('shows the saved session read-only and marked while the restore runs', () => {
+    useSession.mockReturnValue({ ...saved, restoring: true, sessionsError: false });
+    renderPage();
+    expect(screen.getByText('Charging at Lobby Plug')).toBeInTheDocument();
+    expect(screen.getByText('(last saved)')).toBeInTheDocument();
+    expect(screen.getByText(/Showing your last saved session from/)).toHaveTextContent('Updating...');
+    expect(screen.queryByTestId('monitor')).not.toBeInTheDocument();
+  });
+
+  it('keeps it (with Retry) instead of "No active charge" when the restore failed', async () => {
+    useSession.mockReturnValue({ ...saved, restoring: false, sessionsError: true });
+    renderPage();
+    expect(screen.queryByText('No active charge')).not.toBeInTheDocument();
+    expect(screen.getByText("Couldn't refresh.", { exact: false })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(saved.retrySessions).toHaveBeenCalled();
+  });
+});
