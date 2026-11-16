@@ -132,7 +132,14 @@ async def test_manual_register_allows_admin():
 async def test_claim_route_still_open_to_cpo_and_admin():
     """The claim-code path is the CPO onboarding route and must stay open to
     both roles (drivers still refused)."""
-    checker = _user_dependency("/api/cpo/gateways/claim")
+    # The claim route's `user` is require_cpo_tenant (U4), which wraps the
+    # role checker; drive the role checker it depends on.
+    from fastapi.dependencies.utils import get_dependant
+
+    guard = _user_dependency("/api/cpo/gateways/claim")
+    checker = next(
+        d.call for d in get_dependant(path="/x", call=guard).dependencies if d.name == "user"
+    )
     cpo = _role_user(UserRole.CPO)
     admin = _role_user(UserRole.ADMIN)
     assert await checker(user=cpo) is cpo

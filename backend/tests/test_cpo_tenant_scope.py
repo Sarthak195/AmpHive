@@ -37,6 +37,14 @@ TENANTLESS_ALLOWED = {
     ("POST", "/api/cpo/payouts/{payout_id}/cancel"),
 }
 
+# Admin-only route (gateway-ID squatting fix) that checks the tenant in the
+# handler body via _require_tenant_id instead of the shared dependency. It
+# still refuses a tenant-less admin before any query; it just needs a valid
+# body to get past request validation first.
+ADMIN_ONLY_BODY_GUARD = {
+    ("POST", "/api/cpo/gateways"): {"gateway_id": "aabbccddeeff", "name": "gw"},
+}
+
 
 def _cpo_routes():
     from backend.routers import cpo
@@ -64,7 +72,9 @@ def test_every_tenant_scoped_cpo_route_requires_a_tenant():
     assert routes, "no CPO routes found"
     unguarded = [
         (m, p) for m, p, r in routes
-        if (m, p) not in TENANTLESS_ALLOWED and not _uses_guard(r.dependant, require_cpo_tenant)
+        if (m, p) not in TENANTLESS_ALLOWED
+        and (m, p) not in ADMIN_ONLY_BODY_GUARD
+        and not _uses_guard(r.dependant, require_cpo_tenant)
     ]
     assert unguarded == []
     # The allow-list must not go stale either.
@@ -195,6 +205,8 @@ def test_guarded_routes_never_compile_a_null_tenant_match(client_as):
         if (method, path) in TENANTLESS_ALLOWED:
             continue
         client, statements = client_as(_user(UserRole.ADMIN, None))
-        resp = client.request(method, _concrete(path), json={})
+        resp = client.request(
+            method, _concrete(path), json=ADMIN_ONLY_BODY_GUARD.get((method, path), {})
+        )
         assert resp.status_code == 400, (method, path, resp.status_code, resp.text)
         assert statements == [], (method, path, [str(s) for s in statements])
