@@ -119,6 +119,80 @@ async def test_prune_filters_on_plug_id_so_the_index_is_usable(monkeypatch):
     assert "telemetry_readings.recorded_at <" in sql
 
 
+class _FlushSession:
+    """Fake AsyncSession: 2 selects (tenant, active session), then inserts. An
+    insert containing a row with bad=True raises IntegrityError (atomically)."""
+
+    def __init__(self, store, error):
+        self.store, self.error, self.pending, self.selects = store, error, [], 0
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def execute(self, stmt, params=None):
+        if params is None:
+            self.selects += 1
+
+            class _R:
+                def all(_self, n=self.selects):
+                    return [(1, 10)] if n == 1 else []
+
+            return _R()
+        if self.error is not None:
+            raise self.error
+        if any(r.get("bad") for r in params):
+            from sqlalchemy.exc import IntegrityError
+
+            raise IntegrityError("INSERT", {}, Exception("check constraint"))
+        self.pending.extend(params)
+
+    def begin_nested(self):
+        return self
+
+    async def commit(self):
+        self.store.extend(self.pending)
+        self.pending = []
+
+    async def rollback(self):
+        self.pending = []
+
+
+def _flush_svc(store, error=None):
+    svc = tp.TelemetryPersistenceService(db_session_factory=lambda: _FlushSession(store, error))
+    for i, bad in enumerate([False, True, False]):
+        svc.enqueue({"plug_id": 1, "power_w": float(i), "bad": bad})
+    return svc
+
+
+@pytest.mark.asyncio
+async def test_flush_isolates_bad_row_and_persists_good_rows():
+    """U6: one bad row must not block the rest of the batch forever."""
+    store = []
+    svc = _flush_svc(store)
+    await svc._flush_once()
+
+    assert [r["power_w"] for r in store] == [0.0, 2.0]
+    assert svc._bad_rows_dropped == 1
+    assert len(svc._buffer) == 0  # nothing re-buffered, no infinite retry
+
+
+@pytest.mark.asyncio
+async def test_flush_rebuffers_batch_on_transient_error():
+    """A connection/DB-down error still re-buffers the whole batch, in order."""
+    from sqlalchemy.exc import OperationalError
+
+    store = []
+    svc = _flush_svc(store, error=OperationalError("INSERT", {}, Exception("conn lost")))
+    await svc._flush_once()
+
+    assert store == []
+    assert [r["power_w"] for r in svc._buffer] == [0.0, 1.0, 2.0]
+    assert svc._bad_rows_dropped == 0
+
+
 @pytest.mark.skip(reason="Needs a live Postgres (date_trunc + enum types); wire up in CI.")
 async def test_flush_enriches_and_inserts():
     """
