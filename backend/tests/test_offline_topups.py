@@ -688,3 +688,74 @@ async def test_concurrent_topup_and_payout_never_both_draw_the_full_pool(factory
         assert outcomes["payout"][1]["net_coins"] == pytest.approx(90.00)
         assert await _fresh_balance(factory, world["driver_id"]) == Decimal("0.00")
         assert await _offline_topup_count(factory, world["tenant_id"]) == 0
+
+
+async def _add_unsettled_session(factory, tenant_id: int, gross_coins: str) -> None:
+    """One more COMPLETED, still-unsettled session for an already-seeded
+    tenant (reuses that tenant's existing plug and driver)."""
+    from sqlalchemy import select
+
+    from backend.database.models import ChargingSession, SessionStatus
+
+    now = datetime.now(timezone.utc)
+    async with factory() as db:
+        first = (
+            await db.execute(
+                select(ChargingSession).where(ChargingSession.tenant_id == tenant_id).limit(1)
+            )
+        ).scalar_one()
+        db.add(ChargingSession(
+            tenant_id=tenant_id, user_id=first.user_id, plug_id=first.plug_id,
+            status=SessionStatus.COMPLETED, coins_spent=Decimal(gross_coins),
+            started_at=now - timedelta(minutes=30), ended_at=now - timedelta(minutes=1),
+        ))
+        await db.commit()
+
+
+@requires_db
+@pytest.mark.asyncio
+async def test_topup_queued_behind_a_payout_is_still_deducted_by_the_next_payout(factory):
+    """U2: a top-up whose transaction STARTED before a payout committed, but
+    which only got the tenant lock after it, must still land inside the next
+    payout's [watermark, now) top-up window. With created_at left to the
+    column's CURRENT_TIMESTAMP default (Postgres transaction-start time) it
+    was stamped before payout 1's period_end, fell behind the new watermark,
+    and was never deducted from any payout (the CPO drew those earnings twice:
+    once as cash, once as a bank payout)."""
+    from sqlalchemy import text
+
+    from backend.routers.cpo import cpo_create_topup, cpo_request_payout
+    from backend.schemas import CpoTopupCreateRequest
+
+    world = await _seed_tenant_with_earnings(factory, gross_coins="100.00")
+    cpo = _cpo_user(world["tenant_id"], world["cpo_id"], world["cpo_email"])
+
+    async with factory() as topup_db:
+        # The top-up request's transaction is already open (in production the
+        # auth dependency's user lookup on this same session opens it) before
+        # it reaches the tenant lock...
+        await topup_db.execute(text("SELECT 1"))
+
+        # ...while a payout takes the lock first, claims the 100-coin session
+        # and commits, advancing the watermark to its period_end.
+        async with factory() as db:
+            payout1 = await cpo_request_payout(user=cpo, db=db)
+        assert payout1["net_coins"] == pytest.approx(90.00)
+
+        # New earnings arrive after payout 1; the queued top-up now gets the
+        # lock and draws 40 of them.
+        await _add_unsettled_session(factory, world["tenant_id"], "100.00")
+        res = await cpo_create_topup(
+            CpoTopupCreateRequest(driver_email=world["driver_email"], amount_coins=40.00),
+            cpo, topup_db,
+        )
+
+    # Invariant: every committed top-up is stamped at or after the watermark
+    # in force when it committed...
+    assert datetime.fromisoformat(res.created_at) >= datetime.fromisoformat(payout1["period_end"])
+
+    # ...so the next payout deducts it exactly once: 90 net - 40 cash = 50.
+    async with factory() as db:
+        payout2 = await cpo_request_payout(user=cpo, db=db)
+    assert payout2["gross_coins"] == pytest.approx(100.00)
+    assert payout2["net_coins"] == pytest.approx(50.00)
