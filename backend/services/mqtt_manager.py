@@ -107,6 +107,14 @@ UNMETERED_CONSUMPTION_RESET_EPS_KWH = float(os.getenv("UNMETERED_CONSUMPTION_RES
 # different plug is unaffected (the cooldown is per-plug).
 UNMETERED_ALERT_COOLDOWN_SEC = float(os.getenv("UNMETERED_ALERT_COOLDOWN_SEC", "300"))
 
+# [F10] The plug-side counters keep climbing between a session's last
+# telemetry frame and the moment finalize's OFF actually opens the relay (plus
+# the P110's own counter lag and Wh rounding). That tail was delivered INSIDE
+# the session, so the first uncovered frame excuses up to the session's
+# peak_power_w x (ended_at - its last frame + this slack) instead of reporting
+# it as unmetered. See _session_tail_kwh in services/mqtt/telemetry.py.
+UNMETERED_SESSION_TAIL_SLACK_SEC = float(os.getenv("UNMETERED_SESSION_TAIL_SLACK_SEC", "15"))
+
 # [Opt-in charging limits] Charging limits (max_duration_seconds / max_kwh)
 # are opt-in: a session with no explicit limit charges until the driver (or a
 # real safety net) stops it — never a hidden default duration/energy. But the
