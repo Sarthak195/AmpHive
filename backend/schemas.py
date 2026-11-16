@@ -767,6 +767,12 @@ class DisputeResponse(BaseModel):
     created_at: Optional[str] = None
     resolved_at: Optional[str] = None
     resolved_by_user_id: Optional[int] = None
+    # Display context, filled only by GET /api/cpo/disputes (one join, so it
+    # covers every dispute regardless of how old the session is). None on the
+    # driver-filing and resolve responses.
+    user_email: Optional[str] = None
+    session_cost_coins: Optional[float] = None
+    plug_name: Optional[str] = None
 
 
 # --- Plug Problem Reports ("report a problem with this charger") ---
