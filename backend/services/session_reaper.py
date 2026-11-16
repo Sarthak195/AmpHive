@@ -510,7 +510,7 @@ class SessionReaperService:
             start_at <= now < end_at) is replayed: a window held by a DIFFERENT
             user leaves the row WAITING rather than stealing their bookable
             slot. The queued charge's OWN user holding the window is not a
-            conflict — the start proceeds and that reservation is handed to
+            conflict: the start proceeds and that reservation is handed to
             begin_active_session, which marks it FULFILLED.
           - [Hold sizing] The user row locked for the cap check above is the
             SAME row passed into begin_active_session, so its
