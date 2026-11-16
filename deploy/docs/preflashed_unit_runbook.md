@@ -18,8 +18,9 @@ See also: [docs/FIRMWARE.md §2](../../docs/FIRMWARE.md#2-captive-portal--implem
 
 ## Why claim codes (design summary)
 
-Today, adding a gateway means an operator hand-registers a DB row
-(`POST /api/cpo/gateways`) and provisions per-gateway MQTT broker credentials
+Before this flow, adding a gateway meant an operator hand-registered a DB row
+(`POST /api/cpo/gateways`, admin-only since 2026-11-16 to stop gateway-ID
+squatting, so claim codes are now the only CPO path) and provisioned per-gateway MQTT broker credentials
 (`add_gateway_user.ps1`) for **every unit, per customer**. That doesn't scale
 to a retail/self-serve product. The claim-code flow splits the work:
 

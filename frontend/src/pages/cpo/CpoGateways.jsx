@@ -7,10 +7,11 @@
  *
  * Adding a gateway: the primary "Add gateway" flow is now the claim-code
  * form (POST /api/cpo/gateways/claim) — a preflashed unit ships with a short
- * code on its label, no operator hand-registration needed. The old manual
- * gateway-ID/name form (POST /api/cpo/gateways) still exists for lab/legacy
- * units that were never minted as claim-code inventory, tucked behind a
- * "Register a gateway manually" link inside the claim modal.
+ * code on its label, no operator hand-registration needed. It is the only
+ * add path here: the old manual gateway-ID/name form was removed 2026-11-16
+ * because POST /api/cpo/gateways is now admin-only (a MAC is not a secret,
+ * so any CPO could squat a unit). A unit without a code is minted as
+ * inventory by a platform admin (AdminGateways) and then claimed here.
  *
  * Update firmware: replaces hand-pasting a firmware URL with a dropdown of
  * registered releases (GET /api/cpo/firmware-releases), newest first,
@@ -22,8 +23,8 @@
  * CpoLayout/TenantContext already own the org name and nav badges — this
  * page fetches only its own gateway list.
  *
- * Data: GET /api/cpo/gateways, POST /api/cpo/gateways/claim (primary add),
- * POST /api/cpo/gateways (manual add), GET /api/cpo/firmware-releases
+ * Data: GET /api/cpo/gateways, POST /api/cpo/gateways/claim (add),
+ * GET /api/cpo/firmware-releases
  * (version picker), POST /api/cpo/gateways/{id}/ota.
  */
 
@@ -112,45 +113,6 @@ export default function CpoGateways() {
       setClaimError(apiErrorCopy(err));
     } finally {
       setClaimBusy(false);
-    }
-  };
-
-  // ---- Add gateway: manual registration (secondary, lab/legacy units) --
-  const [manualOpen, setManualOpen] = useState(false);
-  const [manualGatewayId, setManualGatewayId] = useState('');
-  const [manualName, setManualName] = useState('');
-  const [manualBusy, setManualBusy] = useState(false);
-  const [manualError, setManualError] = useState('');
-
-  const openManual = () => {
-    setManualGatewayId('');
-    setManualName('');
-    setManualError('');
-    setClaimOpen(false);
-    setManualOpen(true);
-  };
-
-  const closeManual = () => {
-    if (manualBusy) return;
-    setManualOpen(false);
-  };
-
-  const submitManual = async (e) => {
-    e.preventDefault();
-    setManualBusy(true);
-    setManualError('');
-    try {
-      await api.post('/api/cpo/gateways', {
-        gateway_id: manualGatewayId.trim(),
-        name: manualName.trim(),
-      });
-      setManualOpen(false);
-      toast.ok('Gateway registered.');
-      fetchGateways();
-    } catch (err) {
-      setManualError(apiErrorCopy(err));
-    } finally {
-      setManualBusy(false);
     }
   };
 
@@ -350,55 +312,9 @@ export default function CpoGateways() {
               {claimBusy ? 'Adding…' : 'Add gateway'}
             </button>
           </div>
-          <button type="button" className="btn btn-ghost btn-sm btn-full" onClick={openManual}>
-            Register a gateway manually instead
-          </button>
-        </form>
-      </Modal>
-
-      {/* Add gateway: manual registration (secondary, lab/legacy units) */}
-      <Modal open={manualOpen} onClose={closeManual} title="Register a gateway manually">
-        <form className="stack" onSubmit={submitManual}>
           <p className="text-2 text-sm">
-            Flash the gateway firmware, then copy the device ID it shows in its own
-            setup portal — that&apos;s the gateway ID below. Give it a name your team
-            will recognize (its parking spot or building).
+            No claim code? Ask the AmpHive team to add the unit for you.
           </p>
-          <div className="field">
-            <label className="field-label" htmlFor="gw-manual-id">
-              Gateway ID (device MAC)
-            </label>
-            <input
-              id="gw-manual-id"
-              className="input"
-              value={manualGatewayId}
-              onChange={(e) => setManualGatewayId(e.target.value)}
-              placeholder="a1b2c3d4e5f6"
-              required
-            />
-          </div>
-          <div className="field">
-            <label className="field-label" htmlFor="gw-manual-name">
-              Name
-            </label>
-            <input
-              id="gw-manual-name"
-              className="input"
-              value={manualName}
-              onChange={(e) => setManualName(e.target.value)}
-              placeholder="Basement gateway"
-              required
-            />
-          </div>
-          {manualError && <p className="field-error">{manualError}</p>}
-          <div className="modal-actions">
-            <button type="button" className="btn btn-quiet" onClick={closeManual} disabled={manualBusy}>
-              Cancel
-            </button>
-            <button type="submit" className="btn btn-primary" disabled={manualBusy}>
-              {manualBusy ? 'Registering…' : 'Add gateway'}
-            </button>
-          </div>
         </form>
       </Modal>
 

@@ -888,6 +888,33 @@ Tests: `backend/tests/test_gateway_claim.py` (mint/claim/double-claim/
 foreign-tenant/bad-code, mocked-DB + DB-gated), `backend/tests/test_rate_limiting.py`
 (wiring).
 
+### 8.8 Gateway-ID squatting on the manual path (2026-11-16) - **RESOLVED (admin-only)**
+
+`POST /api/cpo/gateways` used to let any cpo account register any
+not-yet-registered `gateway_id` under its own tenant. A `gateway_id` is the
+device MAC, which is printed on the unit, shown in its setup portal and
+broadcast on the air, so it is not a secret: a CPO could register a unit
+before its real buyer and own its plugs in the backend. (It never got broker
+access: the MQTT account is still created per unit by `add_gateway_user.ps1`.)
+A side oracle came with it: the "already exists" 400 told any CPO whether a
+given MAC was registered.
+
+Fix: the route is now `require_role("admin")`, so a cpo gets 403 from the
+role gate before the duplicate lookup runs (closing the oracle too). CPOs
+onboard only through the claim-code path (§8.7), whose code is minted by an
+admin with the unit and is not derivable from the MAC. In practice platform
+admins have no tenant (the route still calls `_require_tenant_id`, which
+400s for them), so the operator's onboarding path for any unit is the admin
+inventory mint (`POST /api/admin/gateways/inventory`, admin console
+Gateways page) followed by a claim. The CPO portal's "Register a gateway
+manually" form is removed. Existing gateway rows, broker credentials and
+the claim flow are unchanged.
+
+Tests: `backend/tests/test_gateway_create.py` (cpo refused and admin allowed
+by the route's real role dependency, claim route still open to cpo/admin),
+`tools/tests/test_fake_plug.py` (simulator reuses an owned gateway, explains
+mint plus claim on 403), `frontend/src/pages/cpo/CpoGateways.test.jsx`.
+
 ---
 
 ## Quick remediation checklist

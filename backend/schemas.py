@@ -512,9 +512,9 @@ class CpoGatewayCreateRequest(BaseModel):
     so the operator just copies it here. ``vpn_ip`` is legacy/overlay-only
     (direct-MQTT devices don't use it); optional and defaults to empty.
 
-    This is the "manual registration" path — still supported for lab/legacy
-    use, but the preflashed-unit flow (POST /api/cpo/gateways/claim below)
-    is now the primary way a CPO adds a gateway.
+    This is the "manual registration" path, admin-only since 2026-11-16
+    (gateway-ID squatting); a CPO adds a gateway through the claim-code flow
+    (POST /api/cpo/gateways/claim below).
     """
     # Bounds mirror gateways.id String(50) / .name String(100) /
     # .vpn_ip String(45).

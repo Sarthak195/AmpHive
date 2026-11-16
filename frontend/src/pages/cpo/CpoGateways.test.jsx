@@ -168,41 +168,18 @@ describe('CpoGateways', () => {
     expect(await screen.findByText('Claim code not found or already used.')).toBeInTheDocument();
   });
 
-  it('falls back to manual registration from the claim modal', async () => {
-    api.post.mockResolvedValue({ status: 'registered' });
+  it('offers no manual gateway-ID registration (admin-only API since 2026-11-16)', async () => {
     const user = userEvent.setup();
     renderPage();
     await screen.findByText('Basement gateway');
 
     await user.click(screen.getByRole('button', { name: 'Add gateway' }));
-    await user.click(screen.getByRole('button', { name: 'Register a gateway manually instead' }));
+    const modal = screen.getByLabelText('Claim code').closest('.modal');
 
-    const modal = (await screen.findByText('Flash the gateway firmware,', { exact: false })).closest('.modal');
-    await user.type(within(modal).getByLabelText('Gateway ID (device MAC)'), 'ff00ff00ff00');
-    await user.type(within(modal).getByLabelText('Name'), 'New gateway');
-    await user.click(within(modal).getByRole('button', { name: 'Add gateway' }));
-
-    expect(api.post).toHaveBeenCalledWith('/api/cpo/gateways', {
-      gateway_id: 'ff00ff00ff00',
-      name: 'New gateway',
-    });
-    expect(toast.ok).toHaveBeenCalled();
-  });
-
-  it('surfaces a manual registration failure inline in its own modal', async () => {
-    api.post.mockRejectedValue(new Error("Gateway 'x' already exists."));
-    const user = userEvent.setup();
-    renderPage();
-    await screen.findByText('Basement gateway');
-
-    await user.click(screen.getByRole('button', { name: 'Add gateway' }));
-    await user.click(screen.getByRole('button', { name: 'Register a gateway manually instead' }));
-    const modal = (await screen.findByText('Flash the gateway firmware,', { exact: false })).closest('.modal');
-    await user.type(within(modal).getByLabelText('Gateway ID (device MAC)'), 'dupe');
-    await user.type(within(modal).getByLabelText('Name'), 'Dupe');
-    await user.click(within(modal).getByRole('button', { name: 'Add gateway' }));
-
-    expect(await screen.findByText("Gateway 'x' already exists.")).toBeInTheDocument();
+    expect(within(modal).queryByRole('button', { name: /manually/i })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Gateway ID (device MAC)')).not.toBeInTheDocument();
+    expect(within(modal).getByText(/No claim code\?/)).toBeInTheDocument();
+    expect(api.post).not.toHaveBeenCalledWith('/api/cpo/gateways', expect.anything());
   });
 
   // --- OTA: version picker ---------------------------------------------------
