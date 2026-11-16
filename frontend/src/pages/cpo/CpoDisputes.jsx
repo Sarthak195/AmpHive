@@ -5,13 +5,11 @@
  * A dispute resolves exactly once — the backend 409s if it's already closed.
  *
  * Data: GET /api/cpo/disputes[?status_filter=open|approved|rejected] (bare
- * list, newest first). Session cost + driver email aren't on that shape, so
- * this page enriches rows best-effort from GET
- * /api/cpo/analytics/sessions?days=3650&limit=200 (same tenant-scoped
- * endpoint CpoSessions uses) — a failed or partial enrichment never blocks
- * the table, it just leaves those cells as "—". The resolve dialog re-fetches
- * the authoritative session cost fresh via GET /api/sessions/{id} when it
- * opens, and "View session" reuses that same endpoint for a read-only detail
+ * list, newest first). Each row already carries `user_email`,
+ * `session_cost_coins` and `plug_name` (joined server-side, so old disputes
+ * are covered too); a missing value just shows as "—" or a raw id. The
+ * resolve dialog re-fetches the authoritative session cost fresh via
+ * GET /api/sessions/{id} when it opens, and "View session" reuses that same endpoint for a read-only detail
  * modal (CpoSessions' pattern).
  *
  * Mutation: POST /api/cpo/disputes/{id}/resolve { action, refund_coins?, note? }.
@@ -28,11 +26,6 @@ import { disputeStatusLabel, sessionStatusLabel, apiErrorCopy } from '../../util
 import './CpoDisputes.css';
 
 const LIMIT = 200;
-// "Full history" for the best-effort session enrichment lookup below — disputes
-// are filed against already-finished sessions, which can predate any fixed
-// recent window, so this intentionally reaches back further than the
-// Sessions page's own day-range filters.
-const ENRICHMENT_DAYS = 3650;
 
 const STATUS_BADGE = {
   open: 'badge-warn',
@@ -91,28 +84,6 @@ export default function CpoDisputes() {
   useEffect(() => {
     fetchDisputes();
   }, [fetchDisputes]);
-
-  // ---- Best-effort session enrichment (cost + driver email + plug) --------
-  const [sessionMap, setSessionMap] = useState({});
-
-  useEffect(() => {
-    let cancelled = false;
-    api
-      .get(`/api/cpo/analytics/sessions?days=${ENRICHMENT_DAYS}&limit=200`)
-      .then((res) => {
-        if (cancelled) return;
-        const items = Array.isArray(res) ? res : res?.items || res?.sessions || [];
-        setSessionMap(Object.fromEntries(items.map((s) => [s.id, s])));
-      })
-      .catch(() => {
-        // Best-effort only — the table falls back to raw ids.
-      });
-    return () => {
-      cancelled = true;
-    };
-    // Fetched once — this enrichment map covers sessions regardless of which
-    // dispute status tab is active.
-  }, []);
 
   // ---- Session detail modal (read-only, "View session") -------------------
   const [detail, setDetail] = useState(null);
@@ -223,10 +194,9 @@ export default function CpoDisputes() {
       key: 'session_id',
       label: 'Session',
       render: (d) => {
-        const s = sessionMap[d.session_id];
         return (
           <button type="button" className="btn btn-quiet btn-sm" onClick={() => openDetail(d)}>
-            #{d.session_id}{s?.plug_name ? ` · ${s.plug_name}` : ''}
+            #{d.session_id}{d.plug_name ? ` · ${d.plug_name}` : ''}
           </button>
         );
       },
@@ -234,7 +204,7 @@ export default function CpoDisputes() {
     {
       key: 'driver',
       label: 'Driver',
-      render: (d) => sessionMap[d.session_id]?.user_email || `Driver #${d.driver_user_id}`,
+      render: (d) => d.user_email || `Driver #${d.driver_user_id}`,
     },
     { key: 'reason', label: 'Reason' },
     {
@@ -242,7 +212,7 @@ export default function CpoDisputes() {
       label: 'Session cost',
       num: true,
       render: (d) =>
-        sessionMap[d.session_id] ? <Money coins={sessionMap[d.session_id].coins_spent} rate={rate} /> : '—',
+        d.session_cost_coins != null ? <Money coins={d.session_cost_coins} rate={rate} /> : '—',
     },
     {
       key: 'status',
