@@ -2854,6 +2854,40 @@ async def test_persist_telemetry_unmetered_beyond_session_tail_still_flagged():
 
 
 @pytest.mark.asyncio
+async def test_persist_telemetry_unmetered_outage_gap_still_flagged():
+    """Backend outage mid-session: the firmware kept the relay on for ~4 h
+    (~15 kWh at 3.5 kW), and the reaper finalized the session on restart
+    before the gateway reconnected. The tail allowance is capped at the
+    reaper's stale window plus one sweep, so the outage-sized energy still
+    alarms instead of being excused as 3.5 kW x 4 h of tail."""
+    MQTTManager._instance = None
+    ended = _ended_session(gap_sec=4 * 3600.0, peak_w=3500.0, ended_ago_sec=1.0)
+    plug = _plug_after_session(1.0, 10.0, ended)
+    session = _FakeSession([
+        _FakeResult(scalar=plug),    # plug lookup
+        _FakeResult(scalar=None),    # id-scoped lookup: session 10 is COMPLETED
+        _FakeResult(scalar=None),    # REC-02 plug-scoped re-check: nothing ACTIVE
+        _FakeResult(scalar=ended),   # the session that ended after the baseline
+    ])
+    mgr = MQTTManager(db_session_factory=lambda: session)
+    mgr._persist_gateway_event = AsyncMock()
+    mgr.send_plug_command = MagicMock(return_value=True)
+
+    await mgr._persist_telemetry(
+        "gw-1", 5, 3500.0, 15.6, session_id=10, sample=None, relay_on=True,
+        today_kwh=16.0, month_kwh=25.0,
+    )
+
+    mgr._persist_gateway_event.assert_awaited_once()
+    args = mgr._persist_gateway_event.await_args.args
+    assert args[2] == "UNMETERED_CONSUMPTION"
+    # 15 kWh minus 3.5 kW x (300 s stale + 60 s sweep + 15 s slack).
+    assert "14.635" in args[4]
+
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
 async def test_persist_telemetry_unmetered_no_recent_session_still_flagged():
     """The plug has been seen live since its last session ended (no session
     ended after the baseline), so nothing is excused: a jump still alarms in

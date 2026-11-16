@@ -327,6 +327,8 @@ class MQTTTelemetryMixin:
 
         Bounded by the session's own end (ended_at), never by "now": energy
         after the session ended is genuinely unmetered and must still alarm.
+        The gap is also capped at the reaper's stale window plus one sweep, so
+        an hours-long outage gap cannot swallow outage-sized energy.
         Returns 0.0 (excuse nothing) when there is no such session or it lacks
         the timestamps/peak power to bound it. Plain SELECT, no row lock."""
         if since is None:
@@ -345,7 +347,14 @@ class MQTTTelemetryMixin:
         ended = result.scalar_one_or_none()
         if ended is None or ended.last_telemetry_at is None or not ended.peak_power_w:
             return 0.0
+        from backend.services.session_reaper import REAPER_INTERVAL_SEC, STALE_TIMEOUT_SEC
+
+        # Cap the gap at the reaper's worst case (stale window + one sweep).
+        # A longer gap means a backend outage, not a relay-off lag: the energy
+        # the plug delivered across it is exactly what this cross-check must
+        # still report, so it must not be excused as tail.
         gap = max(0.0, (ended.ended_at - ended.last_telemetry_at).total_seconds())
+        gap = min(gap, STALE_TIMEOUT_SEC + REAPER_INTERVAL_SEC)
         return ended.peak_power_w * (gap + UNMETERED_SESSION_TAIL_SLACK_SEC) / 3_600_000.0
 
     async def _persist_gateway_seen(self, gateway_id: str):
