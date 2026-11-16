@@ -179,6 +179,55 @@ async def test_flush_isolates_bad_row_and_persists_good_rows():
     assert len(svc._buffer) == 0  # nothing re-buffered, no infinite retry
 
 
+class _PgOrig(Exception):
+    """Stand-in for SQLAlchemy's translated asyncpg error (carries sqlstate)."""
+
+    def __init__(self, msg, sqlstate=None):
+        super().__init__(msg)
+        self.sqlstate = self.pgcode = sqlstate
+
+
+def _asyncpg_style_error(sqlstate):
+    """A plain DBAPIError (not IntegrityError/DataError), as the asyncpg adapter
+    produces for Postgres class-22 errors such as StringDataRightTruncation."""
+    from sqlalchemy.exc import DBAPIError
+
+    return DBAPIError("INSERT", {}, _PgOrig("value too long", sqlstate))
+
+
+@pytest.mark.asyncio
+async def test_flush_isolates_asyncpg_class22_error():
+    """U6: asyncpg class-22 errors arrive as a generic DBAPIError; the SQLSTATE,
+    not the wrapper class, must mark them as bad-row errors (e.g. status > 20 chars)."""
+    assert tp._is_data_error(_asyncpg_style_error("22001"))
+    assert tp._is_data_error(_asyncpg_style_error("22003"))
+    assert not tp._is_data_error(_asyncpg_style_error("08006"))
+    assert not tp._is_data_error(_asyncpg_style_error(None))
+
+    class DataError(Exception):  # name-matches asyncpg's client-side DataError
+        pass
+
+    client_side = _asyncpg_style_error(None)
+    client_side.orig.__cause__ = DataError("invalid input for query argument $1")
+    assert tp._is_data_error(client_side)
+
+    class _Session(_FlushSession):
+        async def execute(self, stmt, params=None):
+            if params is not None and any(r.get("bad") for r in params):
+                raise _asyncpg_style_error("22001")
+            return await super().execute(stmt, params)
+
+    store = []
+    svc = tp.TelemetryPersistenceService(db_session_factory=lambda: _Session(store, None))
+    for i, bad in enumerate([False, True, False]):
+        svc.enqueue({"plug_id": 1, "power_w": float(i), "bad": bad})
+    await svc._flush_once()
+
+    assert [r["power_w"] for r in store] == [0.0, 2.0]
+    assert svc._bad_rows_dropped == 1
+    assert len(svc._buffer) == 0
+
+
 @pytest.mark.asyncio
 async def test_flush_rebuffers_batch_on_transient_error():
     """A connection/DB-down error still re-buffers the whole batch, in order."""

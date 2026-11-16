@@ -51,6 +51,19 @@ def _is_data_error(exc: BaseException) -> bool:
     same row can never fix, as opposed to a transient connection/DB-down error."""
     if isinstance(exc, (IntegrityError, DataError)):
         return True
+    # Under asyncpg, SQLAlchemy maps most Postgres class-22 data errors (e.g.
+    # string truncation, numeric out of range) to a generic DBAPIError, so
+    # classify by SQLSTATE: 22 = data exception, 23 = integrity violation.
+    orig = getattr(exc, "orig", None)
+    code = getattr(orig, "sqlstate", None) or getattr(orig, "pgcode", None)
+    if isinstance(code, str) and code[:2] in ("22", "23"):
+        return True
+    # asyncpg's client-side "invalid input for query argument" DataError has no
+    # SQLSTATE and is mapped to InterfaceError; a closed connection is also an
+    # InterfaceError (transient), so match the original class by name.
+    cause = getattr(orig, "__cause__", None)
+    if cause is not None and any(c.__name__ == "DataError" for c in type(cause).__mro__):
+        return True
     # Bind-processing failures (e.g. a wrongly-typed value) are StatementErrors
     # that are not DBAPIErrors; DBAPIErrors outside the classes above (operational,
     # interface, ...) stay transient.
