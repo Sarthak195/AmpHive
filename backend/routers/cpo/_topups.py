@@ -140,13 +140,15 @@ async def cpo_create_topup(
     # CURRENT_TIMESTAMP default: that is the transaction START time, which can
     # predate a payout that committed while we waited for the lock, putting
     # the top-up behind the new watermark where no payout ever deducts it.
+    # Floored at the under-lock watermark so a wall clock that steps back
+    # still cannot stamp the row behind it.
     topup = OfflineTopup(
         tenant_id=tenant_id,
         actor_user_id=user.id,
         driver_user_id=driver.id,
         amount_coins=amount,
         note=req.note,
-        created_at=datetime.now(timezone.utc),
+        created_at=max(datetime.now(timezone.utc), summary["watermark"]),
     )
     db.add(topup)
 
