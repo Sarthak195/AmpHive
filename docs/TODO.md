@@ -23,8 +23,8 @@ been fixed by the 2026-07-08…11 work — see the shipped sections below).*
 - [ ] U5: disputes page enriches from only the 200 newest sessions, so older disputes show blank driver, cost and charger (`frontend/src/pages/cpo/CpoDisputes.jsx:101`)
 - [ ] U6: telemetry flush re-buffers the whole batch on a non-connection error, so one bad row blocks history persistence (`backend/services/telemetry_persistence.py:185`)
 - [ ] F10: the unmetered-consumption cross-check can raise false (and large) alarms for the trailing interval of a session (`backend/services/mqtt/telemetry.py:652`)
-- [ ] firmware: wake the telemetry poll loop on SET_INTERVAL (a task notification) so a reopened session gets 1 s data at once; needs an OTA (`firmware/main/main.c:2249`, handler at `firmware/main/main.c:1765`)
-- [ ] boot: about 5 sequential round trips before the first live numbers (`frontend/src/contexts/AuthContext.jsx:35`)
+- [x] firmware: wake the telemetry poll loop on SET_INTERVAL so a reopened session gets fast data at once (fw 2.9.0-direct, OTA'd 2026-11-15; verified on session 128 2026-11-16: first fast reading 2.6 s after start, then every 1.5 s)
+- [x] boot: render from the cached user while `/api/auth/me` revalidates, so the route chunk and its data calls no longer wait for `/me` (PR #146, deployed 2026-11-16). Remaining floor from India: index.html plus one API round trip through Cloudflare to us-west1, about 2 to 3 s on a phone.
 
 ---
 
