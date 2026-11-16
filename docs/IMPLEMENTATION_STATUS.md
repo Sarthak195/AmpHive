@@ -9,7 +9,7 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 
 ---
 
-## 0c - 2026-11-16 batch (merged on b1116/release, NOT deployed)
+## 0c - 2026-11-16 batch (PR #148, merged as `ac00d46`, DEPLOYED 2026-11-16)
 
 Twelve branches merged with `--no-ff` onto `ad8fb9a`. Backend suite 1183 passed / 221 DB-gated skips, frontend 870 passed, ruff and eslint clean. Integration fixes: two merge conflicts (`_invoices.py` imports, `_gateways.py` create-route dependency, resolved as admin-only plus the existing in-body tenant check) and two test reconciliations for U4 versus the admin-only gateway create (`test_cpo_tenant_scope.py`, `test_gateway_create.py`).
 
@@ -34,7 +34,9 @@ Deploy order: backend first, then the frontend thin layer. The backend carries m
 
 ## 0 - 2026-11-15 fix batch
 
-**Production state (2026-11-16):** prod == `origin/main` at `e7bbcae` (PR #146, thin backend + frontend layers on the `6a42265` images; rollback tags `pre-e7bbcae`), alembic head `0042_revoked_sessions`, gateway firmware `2.9.0-direct`. PR #146: the app renders from the cached user while `/api/auth/me` revalidates (route chunk and data calls no longer wait for `/me`), and the hourly telemetry prune range-scans `idx_telemetry_plug_recorded` instead of scanning the whole table. Host changes the same day (not in the repo, see DEPLOYMENT.md "Memory and disk on the 1 GB VM"): `vm.swappiness=10` and `google-osconfig-agent` disabled. Live check of session 128 confirmed fw 2.9.0 fast mode: first fast reading 2.6 s after start, then every 1.5 s (the plug's own value refreshes about every 3 s).
+**Production state (2026-11-16, 15:12Z):** prod == `origin/main` at `ac00d46` (PR #148, the "0c" batch below). Backend: thin layer on the `e7bbcae` image plus a non-root layer (uid 10001, `cap_drop: ALL`, `no-new-privileges`); frontend: dist-only thin layer. Alembic head `0043_email_ci_unique`, gateway firmware `2.9.0-direct`. Backup before the deploy: `amphive-20261116-145613.dump`. Rollback images: `amphive_backend:rollback-ac00d46-m0043` (the e7bbcae code plus the 0043 migration file; use this one, because `pre-ac00d46` cannot boot on a database at 0043), `amphive_backend:pre-nonroot` (the batch image before the non-root layer), `amphive_frontend:pre-ac00d46`; the pre-non-root compose file is `~/amphive-relay/docker-compose.relay.yml.pre-nonroot`. Prod check: a repeat open is served by the service worker (index.html in 12 ms, all assets from Cache Storage, first contentful paint 0.56 s on Slow 4G with 4x CPU throttling).
+
+*Earlier on 2026-11-16:* prod was `e7bbcae` (PR #146, thin backend + frontend layers on the `6a42265` images; rollback tags `pre-e7bbcae`), alembic head `0042_revoked_sessions`, gateway firmware `2.9.0-direct`. PR #146: the app renders from the cached user while `/api/auth/me` revalidates (route chunk and data calls no longer wait for `/me`), and the hourly telemetry prune range-scans `idx_telemetry_plug_recorded` instead of scanning the whole table. Host changes the same day (not in the repo, see DEPLOYMENT.md "Memory and disk on the 1 GB VM"): `vm.swappiness=10` and `google-osconfig-agent` disabled. Live check of session 128 confirmed fw 2.9.0 fast mode: first fast reading 2.6 s after start, then every 1.5 s (the plug's own value refreshes about every 3 s).
 
 *Earlier on 2026-11-15:* prod was `825f27e` (the bug-fix release, alembic `0040_plug_photos`), then `6a42265` (features, alembic `0042_revoked_sessions`).
 

@@ -197,11 +197,11 @@ firmware-image upload — mirrored by an 8m nginx `location`) + nginx
 > migrated to PyJWT — it is current at 3.5.0 with no advisory of its own, and an
 > auth-path swap does not belong in a batch this wide.
 >
-> **Update 2026-11-16: non-root containers built, not yet deployed.** The
+> **Update 2026-11-16: non-root containers DEPLOYED (15:12Z, prod `ac00d46`).** The
 > backend and agent images now run as uid/gid 10001 and the backend service has
 > `cap_drop: ALL` plus `no-new-privileges` (relay, tls and prod compose files).
-> Until the infra deploy in docs/DEPLOYMENT.md "Non-root containers" is done on
-> the VM, prod containers still run as root. Frontend, db, mqtt and caddy are
+> The prod backend now runs as uid 10001 with CapEff 0 and NoNewPrivs 1 (see
+> docs/DEPLOYMENT.md "Non-root containers"). Frontend, db, mqtt and caddy are
 > unchanged by design.
 >
 > **Update 2026-11-15: python-jose replaced by PyJWT.** python-jose 3.5.0
@@ -925,7 +925,7 @@ by the route's real role dependency, claim route still open to cpo/admin),
 `tools/tests/test_fake_plug.py` (simulator reuses an owned gateway, explains
 mint plus claim on 403), `frontend/src/pages/cpo/CpoGateways.test.jsx`.
 
-### 8.9 2026-11-16 batch: tenant-less scope, email case, offline cache (merged, not deployed)
+### 8.9 2026-11-16 batch: tenant-less scope, email case, offline cache (deployed in ac00d46)
 
 - **Tenant-less callers (U4).** Tenant-scoped `/api/cpo/*` routes filtered with
   `tenant_id == user.tenant_id`, which compiles to `IS NULL` for a caller with

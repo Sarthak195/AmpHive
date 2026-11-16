@@ -120,7 +120,28 @@ nameservers (`harlee`/`ridge.ns.cloudflare.com`) answer for the zone (see
 below), the records are unchanged; the domain is still registered at
 name.com, whose old DNS records were left in place as the rollback.
 
-### Non-root containers (infra deploy runbook, written 2026-11-16, NOT yet deployed)
+### Non-root containers (infra deploy runbook, written 2026-11-16, DEPLOYED 2026-11-16)
+
+**Deployed 2026-11-16 at 15:12Z** on top of `ac00d46`, differently from step 4 below: no `deploy.ps1` (it
+would rebuild the frontend with npm on the 1 GB VM) and no disk snapshot (hosting
+stays free). Instead a thin layer on the VM: `FROM amphive_backend:pre-nonroot`
+(the running batch image) plus the exact `RUN` block and `USER 10001:10001` from
+`backend/Dockerfile`, built with `--network none`. The compose half and the
+volume chown were done as written. Verified: `id` is uid 10001, CapEff 0,
+NoNewPrivs 1, the firmware dir is writable, health 200, RestartCount 0, and the
+gateway kept sending telemetry. Rollback: tag `amphive_backend:pre-nonroot` as
+`:latest`, restore `docker-compose.relay.yml.pre-nonroot`, `up -d backend`, then
+reload nginx in the frontend container.
+
+**Rollback images and migrations (learned 2026-11-16).** `init_db` runs
+`alembic upgrade head` at startup and does not catch a failure. An image built
+before a migration therefore cannot boot on a database that already has it:
+alembic cannot find the newer revision and the backend crash-loops. So a
+`pre-<sha>` tag is NOT a usable rollback after a deploy that ran a migration,
+and neither is the kit's `rollback_backend.sh`. Before such a deploy, build a
+rollback image: the previous code plus only the new migration file(s), with a
+tree proof (on 2026-11-16: `amphive_backend:rollback-ac00d46-m0043`). The
+2026-11-15 rollback tags `pre-825f27e` / `pre-6a42265` had the same trap.
 
 `backend/Dockerfile` now runs as the fixed uid/gid **10001** (`app`) and
 `agent/Dockerfile` as 10001 (`amphive`); in the compose files the `backend`
