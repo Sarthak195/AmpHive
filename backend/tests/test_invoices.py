@@ -36,6 +36,7 @@ from backend.database.models import SessionStatus, UserRole
 from backend.routers.cpo import cpo_list_invoices
 from backend.routers.sessions import get_session_invoice
 from backend.services import invoices as invoices_service
+from backend.services.money import to_money
 
 TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL")
 
@@ -223,6 +224,64 @@ async def test_nonexistent_session_returns_404():
     with pytest.raises(HTTPException) as exc:
         await get_session_invoice(session_id=999, format=None, user=driver, db=db)
     assert exc.value.status_code == 404
+
+
+# --- U3: printed line must foot (energy x rate == line total) -------------------
+
+def _tod_invoice():
+    """An invoice for a session that crossed a time-of-day rate change:
+    5 kWh at 6 coins + 5 kWh at 8 coins = 70.00 billed, but the snapshotted
+    rate column only holds the LAST segment's rate (8.00)."""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        id=1, invoice_number="INV1-2026-27-00001", tenant_id=1, session_id=7,
+        driver_user_id=2, issued_at=datetime(2026, 11, 16, tzinfo=timezone.utc),
+        seller_legal_name="Acme", seller_gstin=None,
+        energy_kwh=10.0, rate_coins_per_kwh=Decimal("8.00"),
+        amount_coins=Decimal("70.00"), taxable_value_inr=Decimal("59.32"),
+        gst_rate_pct=Decimal("18.00"), gst_amount_inr=Decimal("10.68"),
+        total_inr=Decimal("70.00"),
+    )
+
+
+def test_invoice_dict_effective_rate_foots_for_tod_session():
+    line = invoices_service.invoice_to_dict(_tod_invoice())["line_item"]
+    assert round(line["energy_kwh"] * line["effective_rate_coins_per_kwh"], 2) == 70.00
+    # the legacy field is untouched (last segment's rate)
+    assert line["rate_coins_per_kwh"] == 8.0
+
+
+def test_effective_rate_has_precision_for_awkward_energy():
+    from types import SimpleNamespace
+
+    inv = SimpleNamespace(
+        energy_kwh=7.123, rate_coins_per_kwh=Decimal("9.00"), total_inr=Decimal("63.41"),
+    )
+    rate = invoices_service.effective_rate(inv)
+    assert to_money(Decimal(str(round(inv.energy_kwh, 3))) * rate) == Decimal("63.41")
+
+
+def test_effective_rate_zero_energy_falls_back_to_snapshot_rate():
+    from types import SimpleNamespace
+
+    inv = SimpleNamespace(
+        energy_kwh=0.0, rate_coins_per_kwh=Decimal("8.00"), total_inr=Decimal("0.00"),
+    )
+    assert invoices_service.effective_rate(inv) == Decimal("8.00")
+
+
+@pytest.mark.asyncio
+async def test_html_invoice_row_foots_for_tod_session():
+    import re
+
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=lambda: None))
+    body = await invoices_service.render_invoice_html(db, _tod_invoice())
+    row = re.search(r"<tbody>(.*?)</tbody>", body, re.S).group(1)
+    cells = [float(c) for c in re.findall(r"<td>([0-9.]+)</td>", row)]
+    energy, rate, total = cells[0], cells[1], cells[-1]
+    assert round(energy * rate, 2) == total
 
 
 # ===========================================================================
