@@ -28,7 +28,7 @@ Twelve branches merged with `--no-ff` onto `ad8fb9a`. Backend suite 1183 passed 
 | Non-root containers | Backend and agent images run as uid/gid 10001; backend gets `cap_drop ALL` and `no-new-privileges`. Code only. | INFRA DEPLOY, not the normal path: full image rebuild via `deploy.ps1`, hand-apply the compose half on the VM, chown the `firmware_images` volume to 10001, DB backup and snapshot first, tag `pre-nonroot` rollback images. See DEPLOYMENT.md "Non-root containers". |
 | Instant open | Service-worker app shell (cached index.html and hashed assets, revalidated on every open, kill switch) plus uid-tagged localStorage data snapshots rendered dimmed as "last saved" until refreshed. Follow-up: nginx.conf `/sw.js` comment still says push only. | Frontend thin layer. See DEPLOYMENT.md "Service worker and instant open". |
 
-Deploy order: backend thin layer (carries migration 0043), then frontend thin layer. The non-root change is a separate infra deploy and does not block the rest.
+Deploy order: backend first, then the frontend thin layer. The backend carries migration 0043, which the deploy kit's thin-layer script refuses (it rejects `backend/migrations/versions/*` and expects alembic unchanged), so ship it on the migration path with a DB backup first; it runs at boot via `init_db`. The non-root change is a separate infra deploy and does not block the rest.
 
 ---
 
