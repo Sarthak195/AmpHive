@@ -32,6 +32,7 @@ const renderModal = (props = {}) => {
       onClose={onClose}
       plug={props.plug || PLUG}
       mode={props.mode || 'start'}
+      priceStale={props.priceStale}
       onConfirm={onConfirm}
     />
   );
@@ -55,6 +56,16 @@ describe('ChargeSetupModal — copy per mode', () => {
     expect(screen.getByRole('dialog', { name: 'Queue this charge' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Join the queue' })).toBeInTheDocument();
     expect(screen.getByText(/starts automatically when the circuit has room/i)).toBeInTheDocument();
+  });
+
+  it('marks a saved price only while priceStale is set', () => {
+    renderModal({ priceStale: true });
+    expect(screen.getByText('(last saved price)')).toBeInTheDocument();
+  });
+
+  it('shows no saved-price tag by default', () => {
+    renderModal();
+    expect(screen.queryByText('(last saved price)')).not.toBeInTheDocument();
   });
 
   it("coverage line uses the plug's own price", () => {

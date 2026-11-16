@@ -39,10 +39,11 @@ vi.mock('../contexts/WalletContext', () => ({ useWallet: () => ({ balance: 500 }
 // The two modals have their own test files — stub them so these tests assert
 // only that Dashboard opens them with the right plug + mode.
 vi.mock('../components/ChargeSetupModal', () => ({
-  default: ({ open, mode, plug, onConfirm }) =>
+  default: ({ open, mode, plug, onConfirm, priceStale }) =>
     open ? (
       <div data-testid="setup-modal">
         {`${mode}:${plug.id}`}
+        <span data-testid="setup-price">{`${plug.price_per_kwh}${priceStale ? ' (last saved price)' : ''}`}</span>
         {/* [Scheduled start] stand-in for picking "At a time" + confirming */}
         <button
           type="button"
@@ -443,6 +444,19 @@ describe('Dashboard: instant open from saved data', () => {
     expect(screen.queryByText(/Showing your last saved data/)).not.toBeInTheDocument();
     expect(screen.getByRole('main')).not.toHaveClass('is-stale');
     expect(JSON.parse(localStorage.getItem('amphive_snap:plugs')).data).toHaveLength(PLUGS.length);
+  });
+
+  it('the charge setup opened from a saved card marks the price, then shows the live one', async () => {
+    let resolvePlugs;
+    setRoute('/api/plugs/available', () => new Promise((r) => { resolvePlugs = r; }));
+    save('plugs', [{ ...PLUGS[0], name: 'Saved Lobby Plug', price_per_kwh: 20 }]);
+    renderDash();
+    expect(screen.getByText('Saved Lobby Plug')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Charge' }));
+    expect(screen.getByTestId('setup-price')).toHaveTextContent('20 (last saved price)');
+
+    await act(async () => resolvePlugs(PLUGS));
+    expect(screen.getByTestId('setup-price')).toHaveTextContent(/^8$/);
   });
 
   it('keeps the saved chargers marked when the refresh fails, with a working Retry', async () => {

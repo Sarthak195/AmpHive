@@ -380,6 +380,13 @@ const Dashboard = () => {
   const [reservePlug, setReservePlug] = useState(null);
   const [reportPlug, setReportPlug] = useState(null);
 
+  // The modal shows the plug's price, so give it the live row once the
+  // refresh lands, and mark it while it is still the saved snapshot row (a
+  // charge-now lookup row is fetched live and is never marked).
+  const setupFromSaved = Boolean(plugsStale && setupPlug && plugs?.includes(setupPlug));
+  const setupPlugLive =
+    (!plugsStale && setupPlug && plugs?.find((p) => p.id === setupPlug.id)) || setupPlug;
+
   const openCharge = (plug) => {
     setSetupMode('start');
     setSetupPlug(plug);
@@ -925,7 +932,8 @@ const Dashboard = () => {
       <ChargeSetupModal
         open={Boolean(setupPlug)}
         onClose={() => setSetupPlug(null)}
-        plug={setupPlug}
+        plug={setupPlugLive}
+        priceStale={setupFromSaved}
         mode={setupMode}
         onConfirm={handleConfirmSetup}
       />
