@@ -209,9 +209,12 @@ delete the file and run `sudo sysctl -w vm.swappiness=60`. The Ops Agent's
 `agent.googleapis.com/swap/io` metric does not match the kernel's swap
 counters (it showed about 330 MB at a 10-minute spike while `pswpout` barely
 moved; its spikes line up with the apt cache writes). Use `/proc/vmstat`
-`pswpin`/`pswpout`/`pgpgin` and per-process `/proc/<pid>/io` instead. Status 2026-11-16: the prune fix is
-on a branch; the two host changes are NOT applied yet (awaiting the
-operator's go).
+`pswpin`/`pswpout`/`pgpgin` and per-process `/proc/<pid>/io` instead. Status 2026-11-16: all three are live. The
+prune fix shipped in `e7bbcae` (PR #146, deployed 10:26Z), and the
+swappiness file and the disabled OS Config agent were applied on the VM at
+10:22Z with the owner's approval. Check: `pg_stat_user_tables.seq_scan` for
+`telemetry_readings` (918 after the last old-style prune) should stop rising
+hourly, and `pkgcache.bin` should stop being rewritten every 10 minutes.
 
 ### Backend dependency lockfile — `backend/requirements.lock.txt`
 

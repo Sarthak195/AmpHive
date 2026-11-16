@@ -11,7 +11,9 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 
 ## 0 - 2026-11-15 fix batch
 
-**Production state:** prod == `origin/main` at `825f27e` (the 2026-11-15 bug-fix release), alembic head `0040_plug_photos`, deployed 2026-11-15.
+**Production state (2026-11-16):** prod == `origin/main` at `e7bbcae` (PR #146, thin backend + frontend layers on the `6a42265` images; rollback tags `pre-e7bbcae`), alembic head `0042_revoked_sessions`, gateway firmware `2.9.0-direct`. PR #146: the app renders from the cached user while `/api/auth/me` revalidates (route chunk and data calls no longer wait for `/me`), and the hourly telemetry prune range-scans `idx_telemetry_plug_recorded` instead of scanning the whole table. Host changes the same day (not in the repo, see DEPLOYMENT.md "Memory and disk on the 1 GB VM"): `vm.swappiness=10` and `google-osconfig-agent` disabled. Live check of session 128 confirmed fw 2.9.0 fast mode: first fast reading 2.6 s after start, then every 1.5 s (the plug's own value refreshes about every 3 s).
+
+*Earlier on 2026-11-15:* prod was `825f27e` (the bug-fix release, alembic `0040_plug_photos`), then `6a42265` (features, alembic `0042_revoked_sessions`).
 
 - Ops housekeeping: `stop_grace_period: 60s` on the postgres `db` service in the relay, prod and dev compose files (the live VM compose needs the same line by hand, see DEPLOYMENT.md).
 - Docs and deploy instructions now name the new GCP project (`project-6e290ffd-5954-4d48-aa9`), compute SA `626015685685-compute@developer.gserviceaccount.com`, IP `8.235.4.66` and the `-2` buckets; dated historical records are unchanged.
