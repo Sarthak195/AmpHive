@@ -134,6 +134,109 @@ describe('session restore on mount', () => {
   });
 });
 
+describe('optimistic restore from the cached user', () => {
+  const seedCached = () => {
+    localStorage.setItem('amphive_token', 'jwt-123');
+    localStorage.setItem('amphive_user', JSON.stringify({ email: 'cached@amphive.test', role: 'driver' }));
+  };
+  const deferredMe = () => {
+    let resolveMe;
+    let rejectMe;
+    api.get.mockReturnValue(new Promise((resolve, reject) => { resolveMe = resolve; rejectMe = reject; }));
+    return { resolve: (v) => resolveMe(v), reject: (e) => rejectMe(e) };
+  };
+
+  it('exposes the cached user with loading=false before /me resolves, then applies /me data', async () => {
+    seedCached();
+    const me = deferredMe();
+
+    renderProbe();
+
+    expect(screen.getByTestId('user')).toHaveTextContent('cached@amphive.test');
+    await waitFor(() => expect(screen.getByTestId('loading')).toHaveTextContent('false'));
+    expect(api.get).toHaveBeenCalledWith('/api/auth/me');
+
+    me.resolve({ email: 'fresh@amphive.test', role: 'driver' });
+    await waitFor(() => expect(screen.getByTestId('user')).toHaveTextContent('fresh@amphive.test'));
+    expect(JSON.parse(localStorage.getItem('amphive_user')).email).toBe('fresh@amphive.test');
+  });
+
+  it.each([401, 403])('signs out and clears storage when the background /me returns %i', async (status) => {
+    seedCached();
+    const me = deferredMe();
+
+    renderProbe();
+    expect(screen.getByTestId('user')).toHaveTextContent('cached@amphive.test');
+
+    me.reject(Object.assign(new Error('rejected'), { status }));
+    await waitFor(() => expect(screen.getByTestId('user')).toHaveTextContent('anonymous'));
+    expect(localStorage.getItem('amphive_token')).toBeNull();
+    expect(localStorage.getItem('amphive_user')).toBeNull();
+  });
+
+  it('keeps loading=true until /me resolves when a token has no usable cached user', async () => {
+    localStorage.setItem('amphive_token', 'jwt-123');
+    localStorage.setItem('amphive_user', 'null');
+    const me = deferredMe();
+
+    renderProbe();
+
+    expect(screen.getByTestId('user')).toHaveTextContent('anonymous');
+    expect(screen.getByTestId('loading')).toHaveTextContent('true');
+
+    me.resolve({ email: 'fresh@amphive.test', role: 'driver' });
+    await waitFor(() => expect(screen.getByTestId('loading')).toHaveTextContent('false'));
+    expect(screen.getByTestId('user')).toHaveTextContent('fresh@amphive.test');
+  });
+
+  it('does not resurrect the user or rewrite storage when logged out while /me is in flight', async () => {
+    seedCached();
+    const me = deferredMe();
+    api.post.mockResolvedValue({ status: 'logged_out' });
+
+    renderProbe();
+    await userEvent.click(screen.getByText('logout'));
+    await waitFor(() => expect(screen.getByTestId('user')).toHaveTextContent('anonymous'));
+
+    me.resolve({ email: 'fresh@amphive.test', role: 'driver', token: 'renewed-jwt' });
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(screen.getByTestId('user')).toHaveTextContent('anonymous');
+    expect(localStorage.getItem('amphive_token')).toBeNull();
+    expect(localStorage.getItem('amphive_user')).toBeNull();
+  });
+
+  it('ignores a late /me response when another account logged in meanwhile', async () => {
+    seedCached();
+    const me = deferredMe();
+
+    renderProbe();
+    // Another login replaced the stored token while /me was in flight.
+    localStorage.setItem('amphive_token', 'other-jwt');
+    localStorage.setItem('amphive_user', JSON.stringify({ email: 'other@amphive.test' }));
+
+    me.resolve({ email: 'fresh@amphive.test', role: 'driver', token: 'renewed-jwt' });
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(screen.getByTestId('user')).toHaveTextContent('cached@amphive.test');
+    expect(localStorage.getItem('amphive_token')).toBe('other-jwt');
+    expect(JSON.parse(localStorage.getItem('amphive_user')).email).toBe('other@amphive.test');
+  });
+
+  it('keeps the cached user and token on a network error', async () => {
+    seedCached();
+    api.get.mockRejectedValue(new TypeError('Failed to fetch'));
+
+    renderProbe();
+
+    await waitFor(() => expect(api.get).toHaveBeenCalled());
+    await new Promise((r) => setTimeout(r, 0));
+    expect(screen.getByTestId('user')).toHaveTextContent('cached@amphive.test');
+    expect(screen.getByTestId('loading')).toHaveTextContent('false');
+    expect(localStorage.getItem('amphive_token')).toBe('jwt-123');
+  });
+});
+
 describe('login / logout', () => {
   it('login stores the JWT + user and updates state', async () => {
     api.post.mockResolvedValue({
