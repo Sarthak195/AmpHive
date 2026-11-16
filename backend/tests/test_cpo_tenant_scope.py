@@ -70,6 +70,13 @@ def test_every_tenant_scoped_cpo_route_requires_a_tenant():
     # The allow-list must not go stale either.
     present = {(m, p) for m, p, _ in routes}
     assert TENANTLESS_ALLOWED <= present
+    # ...and the allow-listed routes really stay reachable without a tenant
+    # (admin payout actions, onboarding).
+    wrongly_guarded = [
+        (m, p) for m, p, r in routes
+        if (m, p) in TENANTLESS_ALLOWED and _uses_guard(r.dependant, require_cpo_tenant)
+    ]
+    assert wrongly_guarded == []
 
 
 def _recording_db():
