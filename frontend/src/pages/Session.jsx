@@ -19,7 +19,7 @@ import SessionReceipt from '../components/SessionReceipt';
 import { useSession } from '../contexts/SessionContext';
 import { useConfig } from '../contexts/ConfigContext';
 import { PageHeader, EmptyState, Money, Skeleton } from '../components/ui';
-import { fmtTime } from '../utils/reservationTime';
+import { fmtSavedAt } from '../utils/snapshot';
 import { formatINR, coinsToINR } from '../utils/money';
 import './Session.css';
 
@@ -99,7 +99,7 @@ const Session = () => {
           <div className="banner banner-info stale-note" role="status">
             <span>
               {sessionsSavedAt
-                ? `Showing your last saved session from ${fmtTime(sessionsSavedAt)}. `
+                ? `Showing your last saved session from ${fmtSavedAt(sessionsSavedAt)}. `
                 : 'Showing your last saved session. '}
               {sessionsError ? "Couldn't refresh." : 'Updating...'}
             </span>

@@ -103,7 +103,7 @@ const AppBar = () => {
             <Link
               to="/credit"
               className={`wallet-pill${balanceStale ? ' is-stale' : ''}`}
-              aria-label={balanceStale ? 'Charging credit balance (updating)' : 'Charging credit balance'}
+              aria-label={balanceStale ? 'Charging credit balance (last saved)' : 'Charging credit balance'}
             >
               <WalletIcon size={15} aria-hidden="true" />
               <Money coins={balance} />

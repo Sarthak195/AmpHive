@@ -229,6 +229,7 @@ export const SessionProvider = ({ children }) => {
     if (stoppingIdRef.current === endedId) return;
     const rest = remaining ?? activeSessionsRef.current.filter((s) => s.session_id !== endedId);
     setActiveSessions(rest);
+    writeSnapshot('sessions', userIdRef.current, rest);
     refreshUser().catch(() => {});
     if (rest.length > 0) {
       switchSession(rest[0]);
@@ -351,6 +352,7 @@ export const SessionProvider = ({ children }) => {
         const result = await api.post('/api/sessions/stop', { session_id: sessionId });
         const remaining = activeSessions.filter(s => s.session_id !== sessionId);
         setActiveSessions(remaining);
+        writeSnapshot('sessions', userIdRef.current, remaining);
         if (remaining.length > 0) {
           // Another concurrent session (a user can hold up to
           // MAX_ACTIVE_SESSIONS_PER_USER) is still charging — refocus the

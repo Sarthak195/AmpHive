@@ -67,7 +67,7 @@ import {
 import { apiErrorCopy, plugStateHint, plugStateLabel } from '../utils/statusCopy';
 import { coinsToINR, formatKw, formatKwh } from '../utils/money';
 import { fmtTime, fmtTimeInZone, fmtWindow } from '../utils/reservationTime';
-import { readSnapshot, writeSnapshot } from '../utils/snapshot';
+import { fmtSavedAt, readSnapshot, writeSnapshot } from '../utils/snapshot';
 import './Dashboard.css';
 
 // Sentinel for the group filter's "no group assigned" option — distinct from
@@ -91,7 +91,7 @@ const fmtCountdown = (iso, nowMs) => {
 };
 
 const Dashboard = () => {
-  const { user, refreshUser } = useAuth();
+  const { user, refreshUser, userError } = useAuth();
   const {
     activeSessions, sessionData, sessionId, switchSession, startSession, socket,
     sessionsStale, sessionsSavedAt, sessionsError, retrySessions,
@@ -210,7 +210,7 @@ const Dashboard = () => {
   const pageStale = staleTimes.length > 0;
   const staleFailed = Boolean(
     (plugsStale && plugsError) || (upNextStale && upNextError) || (statsStale && statsError)
-    || (sessionsStale && sessionsError)
+    || (sessionsStale && sessionsError) || (balanceStale && userError)
   );
   const retryStale = () => {
     if (plugsStale) fetchPlugs();
@@ -555,7 +555,7 @@ const Dashboard = () => {
       {pageStale && (
         <div className="banner banner-info stale-note" role="status">
           <span>
-            Showing your last saved data from {fmtTime(Math.min(...staleTimes))}.{' '}
+            Showing your last saved data from {fmtSavedAt(Math.min(...staleTimes))}.{' '}
             {staleFailed ? "Couldn't refresh." : 'Updating...'}
           </span>
           {staleFailed && (

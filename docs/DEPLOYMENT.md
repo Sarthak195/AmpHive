@@ -196,9 +196,11 @@ paths and root files are never answered from the cache.
 **Update flow after a deploy.** No `sw.js` change is needed for an app
 deploy. Each open serves the cached shell and revalidates it in the
 background: the worker fetches the new `index.html` and its entry assets, and
-swaps the shell only once all of them are cached. A phone therefore runs the
-previous bundle for at most one open (a shell older than 7 days is fetched
-network-first, with a 3 s timeout, before falling back to the cache). If the
+swaps the shell only once all of them are cached. A phone therefore normally
+runs the previous bundle for one open; this is not a guarantee (the browser
+can stop the worker before the swap finishes), so it is bounded instead by
+the 7-day rule (a shell older than 7 days is fetched network-first, with a
+3 s timeout, before falling back to the cache) and by the CACHE bump below. If the
 old bundle asks for a lazy chunk the deploy removed, the page drops the
 cached shell and reloads once onto the current app. Old assets are pruned one
 swap later, not in the same open. Rule this implies: **API changes must stay

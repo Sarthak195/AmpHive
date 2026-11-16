@@ -274,6 +274,12 @@ describe('sw.js activate and kill switch', () => {
     expect(sw.clients[0].postMessage).toHaveBeenCalledWith({ type: 'reload' });
   });
 
+  it('KILL with no cache to drop posts nothing (enabling push is not interrupted)', async () => {
+    const sw = loadSw({ kill: true });
+    await lifecycle(sw, 'activate');
+    expect(sw.clients[0].postMessage).not.toHaveBeenCalled();
+  });
+
   it('KILL: no fetch handler, no install fetch, caches dropped, pages told', async () => {
     const sw = loadSw({ kill: true });
     expect(sw.listeners.fetch).toBeUndefined();

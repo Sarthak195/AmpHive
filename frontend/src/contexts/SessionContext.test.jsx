@@ -715,3 +715,20 @@ describe('instant open: seeded session list', () => {
     expect(screen.getByTestId('stale')).toHaveTextContent('true');
   });
 });
+
+describe('instant open: the saved list follows a stop', () => {
+  it('saves the remaining list after a successful stop', async () => {
+    localStorage.clear();
+    localStorage.setItem('amphive_token', 't');
+    localStorage.setItem('amphive_user', JSON.stringify(MOCK_USER));
+    api.get.mockResolvedValue(TWO_SESSIONS);
+    api.post.mockResolvedValue({ status: 'completed', session_id: 2 });
+    renderProbe();
+    await waitFor(() => expect(screen.getByTestId('focused')).toHaveTextContent('2'));
+    api.get.mockReturnValue(new Promise(() => {})); // no refresh may rewrite it
+    await userEvent.click(screen.getByText('stop'));
+    await waitFor(() =>
+      expect(JSON.parse(localStorage.getItem('amphive_snap:sessions')).data.map((s) => s.session_id)).toEqual([1])
+    );
+  });
+});

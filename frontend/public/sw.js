@@ -56,27 +56,31 @@ async function doSwap() {
 
   const cache = await self.caches.open(CACHE);
   const old = await cache.match(SHELL_KEY, { ignoreVary: true });
-  if (!old || (await old.text()) !== text) {
+  const changed = !old || (await old.text()) !== text;
+  if (changed) {
     // Hashed names never change content, so fetch only the ones not cached.
     const have = await Promise.all(refs.map((p) => cache.match(p, { ignoreVary: true })));
     await cache.addAll(refs.filter((_, i) => !have[i])); // atomic: a failure keeps the old shell
-    // Deferred prune: delete what the previous swap marked, then mark the
-    // assets the new shell does not reference. The old bundle may still be
-    // running in this open and need its lazy chunks.
-    const marked = await cache.match(PRUNE_KEY);
-    const pending = marked ? await marked.json() : [];
-    await Promise.all(pending.filter((p) => !refs.includes(p)).map((p) => cache.delete(p)));
-    const next = (await cache.keys())
-      .map((r) => new URL(r.url).pathname)
-      .filter((p) => p.startsWith('/assets/') && !refs.includes(p));
-    await cache.put(PRUNE_KEY, new self.Response(JSON.stringify(next)));
   }
-  // Re-put even when unchanged, to restamp the fetch time.
+  // Store the shell (re-put even when unchanged, to restamp the fetch time)
+  // before any prune, so an interrupted swap never leaves a shell whose
+  // entry assets are gone.
   const headers = new self.Headers(res.headers);
   headers.delete('content-encoding');
   headers.delete('content-length');
   headers.set('x-shell-fetched-at', String(Date.now()));
   await cache.put(SHELL_KEY, new self.Response(text, { status: 200, statusText: 'OK', headers }));
+  if (!changed) return;
+  // Deferred prune: delete what the previous swap marked, then mark the
+  // assets the new shell does not reference. The old bundle may still be
+  // running in this open and need its lazy chunks.
+  const marked = await cache.match(PRUNE_KEY);
+  const pending = marked ? await marked.json() : [];
+  await Promise.all(pending.filter((p) => !refs.includes(p)).map((p) => cache.delete(p)));
+  const next = (await cache.keys())
+    .map((r) => new URL(r.url).pathname)
+    .filter((p) => p.startsWith('/assets/') && !refs.includes(p));
+  await cache.put(PRUNE_KEY, new self.Response(JSON.stringify(next)));
 }
 
 let swapping = null;
@@ -152,15 +156,19 @@ self.addEventListener('activate', (event) => {
   event.waitUntil(
     (async () => {
       await self.clients.claim();
+      let dropped = false;
       let replaced = false;
       for (const name of await self.caches.keys()) {
         if (!name.startsWith('amphive-shell-') || (name === CACHE && SHELL_ON)) continue;
         await self.caches.delete(name);
+        dropped = true;
         if (name !== CACHE) replaced = true;
       }
-      // An older CACHE name was dropped (operator bump): pages running that
-      // shell reload. KILL: pages reload once and unregister (swControl.js).
-      const type = KILL ? 'sw-killed' : replaced && SHELL_ON ? 'reload' : null;
+      // Only pages that may be running a cached shell are told, so a fresh
+      // registration (Account's push toggle under KILL) is never reloaded.
+      // An older CACHE name dropped (operator bump): reload onto the new
+      // shell. KILL: reload once and unregister (swControl.js).
+      const type = KILL ? (dropped ? 'sw-killed' : null) : replaced && SHELL_ON ? 'reload' : null;
       if (type) {
         for (const client of await self.clients.matchAll({ type: 'window' })) client.postMessage({ type });
       }

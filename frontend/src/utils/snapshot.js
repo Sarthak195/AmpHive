@@ -14,6 +14,8 @@
  * Callers must mark anything rendered from a snapshot as not live.
  */
 
+import { fmtTime } from './reservationTime';
+
 const PREFIX = 'amphive_snap:';
 // Bump when the shape of any snapshotted payload changes, so a new bundle
 // never renders an old shape (an old shape that crashes would repeat on every
@@ -79,6 +81,15 @@ export function clearStoredSession() {
     // Storage unavailable.
   }
   clearSnapshots();
+}
+
+/** "14:05" today, "12 Nov, 14:05" for an older snapshot (kept up to 7 days). */
+export function fmtSavedAt(ms) {
+  const d = new Date(ms);
+  const time = fmtTime(ms);
+  return d.toDateString() === new Date().toDateString()
+    ? time
+    : `${d.toLocaleDateString([], { day: 'numeric', month: 'short' })}, ${time}`;
 }
 
 /** The cached user's id, for a login that may switch accounts. */
