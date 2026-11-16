@@ -2866,6 +2866,14 @@ async def test_persist_telemetry_unmetered_no_recent_session_still_flagged():
         _FakeResult(scalar=None),
         _FakeResult(scalar=None),    # no session ended after the baseline
     ])
+    statements = []
+    fake_execute = session.execute
+
+    async def _recording_execute(stmt, *a, **k):
+        statements.append(stmt)
+        return await fake_execute(stmt, *a, **k)
+
+    session.execute = _recording_execute
     mgr = MQTTManager(db_session_factory=lambda: session)
     mgr._persist_gateway_event = AsyncMock()
 
@@ -2876,6 +2884,11 @@ async def test_persist_telemetry_unmetered_no_recent_session_still_flagged():
 
     mgr._persist_gateway_event.assert_awaited_once()
     assert "0.050" in mgr._persist_gateway_event.await_args.args[4]
+    # The tail lookup is scoped to THIS plug and to sessions that ended after
+    # the plug's previous live frame (the baseline), not any past session.
+    tail_sql = str(statements[2])
+    assert "charging_sessions.plug_id =" in tail_sql
+    assert "charging_sessions.ended_at >" in tail_sql
 
     MQTTManager._instance = None
 
