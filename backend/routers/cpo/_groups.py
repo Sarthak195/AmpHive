@@ -14,9 +14,14 @@ from backend.database.db import get_db
 from backend.database.models import ChargerGroup, GroupMembership, Plug, User
 from backend.schemas import CpoGroupCreateRequest, CpoGroupUpdateRequest
 from backend.services.audit import try_record_audit
-from backend.services.rbac import require_role
 
-from ._common import DEFAULT_LIST_LIMIT, _require_tenant_id, clamp_list_window, logger
+from ._common import (
+    DEFAULT_LIST_LIMIT,
+    _require_tenant_id,
+    clamp_list_window,
+    logger,
+    require_cpo_tenant,
+)
 
 router = APIRouter()
 
@@ -41,7 +46,7 @@ async def generate_unique_access_code(db: AsyncSession) -> str:
 
 @router.get("/api/cpo/groups")
 async def cpo_list_groups(
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
     limit: int = DEFAULT_LIST_LIMIT,
     offset: int = 0,
@@ -110,7 +115,7 @@ async def cpo_list_groups(
 @router.post("/api/cpo/groups")
 async def cpo_create_group(
     req: CpoGroupCreateRequest,
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -161,7 +166,7 @@ async def cpo_create_group(
 async def cpo_update_group(
     group_id: int,
     req: CpoGroupUpdateRequest,
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
 ):
     """Update a charger group's details. Can regenerate access codes for private groups."""
@@ -233,7 +238,7 @@ async def cpo_update_group(
 @router.delete("/api/cpo/groups/{group_id}")
 async def cpo_delete_group(
     group_id: int,
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -286,7 +291,7 @@ async def cpo_delete_group(
 @router.get("/api/cpo/groups/{group_id}/members")
 async def cpo_list_group_members(
     group_id: int,
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -325,7 +330,7 @@ async def cpo_list_group_members(
 async def cpo_remove_group_member(
     group_id: int,
     user_id: int,
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
 ):
     """

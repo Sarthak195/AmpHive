@@ -26,9 +26,8 @@ from backend.database.models import (
 from backend.services import payouts as payout_service
 from backend.services.csv_safe import sanitize_csv_cell
 from backend.services.pricing import _zone
-from backend.services.rbac import require_role
 
-from ._common import clamp_days
+from ._common import clamp_days, require_cpo_tenant
 
 router = APIRouter()
 
@@ -63,7 +62,7 @@ def _local_day(tz):
 
 @router.get("/api/cpo/analytics/overview")
 async def cpo_analytics_overview(
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -166,7 +165,7 @@ async def cpo_analytics_overview(
 
 @router.get("/api/cpo/analytics/sessions")
 async def cpo_analytics_sessions(
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
     plug_id: Optional[int] = None,
     status_filter: Optional[str] = None,
@@ -262,7 +261,7 @@ async def cpo_analytics_sessions(
 
 @router.get("/api/cpo/analytics/sessions.csv")
 async def cpo_export_sessions_csv(
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
     plug_id: Optional[int] = None,
     status_filter: Optional[str] = None,
@@ -329,7 +328,7 @@ async def cpo_export_sessions_csv(
 
 @router.get("/api/cpo/analytics/revenue")
 async def cpo_analytics_revenue(
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
     days: int = 30,
 ):
@@ -372,7 +371,7 @@ async def cpo_analytics_revenue(
 
 @router.get("/api/cpo/analytics/energy")
 async def cpo_analytics_energy(
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
     days: int = 30,
 ):
@@ -414,7 +413,7 @@ async def cpo_analytics_energy(
 
 @router.get("/api/cpo/analytics/telemetry")
 async def cpo_analytics_telemetry(
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
     plug_id: Optional[int] = None,
     days: int = 1,

@@ -42,10 +42,9 @@ from backend.services.rate_limit import (
     account_rate_limit_dependency,
     cpo_topup_account_rate_limiter,
 )
-from backend.services.rbac import require_role
 from backend.services.wallet import credit_wallet
 
-from ._common import _require_tenant_id, logger
+from ._common import _require_tenant_id, logger, require_cpo_tenant
 
 router = APIRouter()
 
@@ -73,7 +72,7 @@ def _topup_response(
 )
 async def cpo_create_topup(
     req: CpoTopupCreateRequest,
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -213,7 +212,7 @@ async def cpo_create_topup(
 
 @router.get("/api/cpo/topups")
 async def cpo_list_topups(
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
     limit: int = 50,
     offset: int = 0,

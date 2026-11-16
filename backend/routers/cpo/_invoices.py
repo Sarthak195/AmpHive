@@ -18,16 +18,15 @@ from backend.database.db import get_db
 from backend.database.models import Invoice, User
 from backend.services.csv_safe import sanitize_csv_cell
 from backend.services.invoices import effective_rate, invoice_to_dict
-from backend.services.rbac import require_role
 
-from ._common import _require_tenant_id, clamp_days
+from ._common import _require_tenant_id, clamp_days, require_cpo_tenant
 
 router = APIRouter()
 
 
 @router.get("/api/cpo/invoices")
 async def cpo_list_invoices(
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
     limit: int = 50,
     offset: int = 0,
@@ -61,7 +60,7 @@ async def cpo_list_invoices(
 
 @router.get("/api/cpo/invoices.csv")
 async def cpo_export_invoices_csv(
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
     days: Optional[int] = None,
 ):
