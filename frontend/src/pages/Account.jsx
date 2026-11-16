@@ -142,7 +142,9 @@ export default function Account() {
         setPushState(permission === 'denied' ? 'denied' : 'off');
         return;
       }
-      const reg = await navigator.serviceWorker.register('/sw.js');
+      // Same registration main.jsx makes (utils/swControl.js); updateViaCache
+      // 'none' keeps the browser's update check off the HTTP cache.
+      const reg = await navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' });
       const sub = await reg.pushManager.subscribe({
         userVisibleOnly: true,
         applicationServerKey: urlBase64ToUint8Array(vapidKey),
