@@ -26,16 +26,22 @@ from backend.schemas import (
 )
 from backend.services.money import to_money
 from backend.services.pricing import mark_tenant_sessions_for_reprice, slot_overlaps
-from backend.services.rbac import require_role
 
-from ._common import _fmt_min, _load_tenant_tariff, _require_tenant_id, _slot_dict, logger
+from ._common import (
+    _fmt_min,
+    _load_tenant_tariff,
+    _require_tenant_id,
+    _slot_dict,
+    logger,
+    require_cpo_tenant,
+)
 
 router = APIRouter()
 
 
 @router.get("/api/cpo/tariffs")
 async def cpo_list_tariffs(
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
 ):
     """List all tariffs (pricing plans) owned by the CPO's tenant."""
@@ -59,7 +65,7 @@ async def cpo_list_tariffs(
 @router.post("/api/cpo/tariffs")
 async def cpo_create_tariff(
     req: CpoTariffCreateRequest,
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
 ):
     """Create a new tariff under the CPO's tenant."""
@@ -92,7 +98,7 @@ async def cpo_create_tariff(
 async def cpo_update_tariff(
     tariff_id: int,
     req: CpoTariffUpdateRequest,
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
 ):
     """Update a tariff's name and/or rate. Tenant-scoped — a CPO can only
@@ -124,7 +130,7 @@ async def cpo_update_tariff(
 @router.delete("/api/cpo/tariffs/{tariff_id}")
 async def cpo_delete_tariff(
     tariff_id: int,
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -189,7 +195,7 @@ async def _validate_slot_window(db, tariff_id, start_min, end_min, days_mask, ex
 @router.get("/api/cpo/tariffs/{tariff_id}/slots")
 async def cpo_list_tariff_slots(
     tariff_id: int,
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
 ):
     """List a tariff's time-of-day slots (tenant-scoped via the parent tariff)."""
@@ -206,7 +212,7 @@ async def cpo_list_tariff_slots(
 async def cpo_create_tariff_slot(
     tariff_id: int,
     req: CpoTariffSlotCreateRequest,
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
 ):
     """Add a TOD slot to a tariff. Validates the window + non-overlap first."""
@@ -238,7 +244,7 @@ async def cpo_update_tariff_slot(
     tariff_id: int,
     slot_id: int,
     req: CpoTariffSlotUpdateRequest,
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
 ):
     """Update a slot's window / rate / days. Re-validates the resulting window
@@ -267,7 +273,7 @@ async def cpo_update_tariff_slot(
 async def cpo_delete_tariff_slot(
     tariff_id: int,
     slot_id: int,
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
 ):
     """Delete a TOD slot. The parent tariff's flat price then applies to that
@@ -285,7 +291,7 @@ async def cpo_delete_tariff_slot(
 async def cpo_assign_plug_tariff(
     plug_id: int,
     req: CpoTariffAssignRequest,
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -318,7 +324,7 @@ async def cpo_assign_plug_tariff(
 async def cpo_assign_group_tariff(
     group_id: int,
     req: CpoTariffAssignRequest,
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
 ):
     """Assign/unassign the tariff a charger group's plugs fall back to when
@@ -347,7 +353,7 @@ async def cpo_assign_group_tariff(
 @router.put("/api/cpo/tenant/default-tariff")
 async def cpo_assign_tenant_default_tariff(
     req: CpoTariffAssignRequest,
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
 ):
     """Assign/unassign the CPO's tenant-wide default tariff — the last link

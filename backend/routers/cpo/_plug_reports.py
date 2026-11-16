@@ -14,16 +14,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.database.db import get_db
 from backend.database.models import PlugReport, PlugReportStatus, User
 from backend.schemas import CpoPlugReportResolveRequest, PlugReportResponse
-from backend.services.rbac import require_role
 
-from ._common import _plug_report_response, logger
+from ._common import _plug_report_response, logger, require_cpo_tenant
 
 router = APIRouter()
 
 
 @router.get("/api/cpo/plug-reports", response_model=List[PlugReportResponse])
 async def cpo_list_plug_reports(
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
     status_filter: Optional[str] = None,
     limit: int = 100,
@@ -60,7 +59,7 @@ async def cpo_list_plug_reports(
 async def cpo_resolve_plug_report(
     report_id: int,
     req: CpoPlugReportResolveRequest,
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
 ):
     """

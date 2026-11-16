@@ -23,9 +23,8 @@ from backend.schemas import (
     CpoPlugUpdateRequest,
 )
 from backend.services.audit import try_record_audit
-from backend.services.rbac import require_role
 
-from ._common import DEFAULT_LIST_LIMIT, clamp_list_window, logger
+from ._common import DEFAULT_LIST_LIMIT, clamp_list_window, logger, require_cpo_tenant
 
 router = APIRouter()
 
@@ -34,7 +33,7 @@ router = APIRouter()
 
 @router.get("/api/cpo/plugs")
 async def cpo_list_plugs(
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
     limit: int = DEFAULT_LIST_LIMIT,
     offset: int = 0,
@@ -108,7 +107,7 @@ async def _publish_gateway_roster(db: AsyncSession, gateway_id: str) -> None:
 @router.post("/api/cpo/plugs")
 async def cpo_create_plug(
     req: CpoPlugCreateRequest,
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -184,7 +183,7 @@ async def cpo_create_plug(
 async def cpo_update_plug(
     plug_id: int,
     req: CpoPlugUpdateRequest,
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -287,7 +286,7 @@ async def cpo_update_plug(
 async def cpo_plug_maintenance(
     plug_id: int,
     req: CpoPlugMaintenanceRequest,
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
 ):
     """

@@ -25,17 +25,16 @@ from backend.database.models import (
 from backend.schemas import CpoDisputeResolveRequest, DisputeResponse
 from backend.services.invoices import adjust_invoice_for_session_refund
 from backend.services.money import ZERO_MONEY, to_money
-from backend.services.rbac import require_role
 from backend.services.wallet import credit_wallet
 
-from ._common import _dispute_response, logger
+from ._common import _dispute_response, logger, require_cpo_tenant
 
 router = APIRouter()
 
 
 @router.get("/api/cpo/disputes", response_model=List[DisputeResponse])
 async def cpo_list_disputes(
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
     status_filter: Optional[str] = None,
     limit: int = 100,
@@ -72,7 +71,7 @@ async def cpo_list_disputes(
 async def cpo_resolve_dispute(
     dispute_id: int,
     req: CpoDisputeResolveRequest,
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
 ):
     """

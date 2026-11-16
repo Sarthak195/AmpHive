@@ -32,7 +32,13 @@ from backend.services.rbac import require_role
 from backend.services.session_lifecycle import gateway_is_live
 from backend.services.versioning import version_sort_key
 
-from ._common import DEFAULT_LIST_LIMIT, _require_tenant_id, clamp_list_window, logger
+from ._common import (
+    DEFAULT_LIST_LIMIT,
+    _require_tenant_id,
+    clamp_list_window,
+    logger,
+    require_cpo_tenant,
+)
 
 router = APIRouter()
 
@@ -56,7 +62,7 @@ def _normalize_claim_code(raw: str) -> str:
 
 @router.get("/api/cpo/gateways")
 async def cpo_list_gateways(
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
     limit: int = DEFAULT_LIST_LIMIT,
     offset: int = 0,
@@ -102,7 +108,7 @@ async def cpo_list_gateways(
 @router.post("/api/cpo/gateways")
 async def cpo_create_gateway(
     req: CpoGatewayCreateRequest,
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -160,7 +166,7 @@ async def cpo_create_gateway(
 )
 async def cpo_claim_gateway(
     req: CpoGatewayClaimRequest,
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -261,7 +267,7 @@ async def cpo_list_firmware_releases(
 async def cpo_gateway_ota(
     gateway_id: str,
     req: CpoGatewayOtaRequest,
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
 ):
     """

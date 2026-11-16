@@ -35,6 +35,7 @@ from ._common import (
     _require_tenant_id,
     clamp_list_window,
     logger,
+    require_cpo_tenant,
 )
 
 router = APIRouter()
@@ -42,7 +43,7 @@ router = APIRouter()
 
 @router.get("/api/cpo/earnings")
 async def cpo_earnings(
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -94,7 +95,7 @@ async def cpo_earnings(
 
 @router.post("/api/cpo/payouts")
 async def cpo_request_payout(
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -235,7 +236,7 @@ async def cpo_request_payout(
 
 @router.get("/api/cpo/payouts")
 async def cpo_list_payouts(
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
     limit: int = DEFAULT_LIST_LIMIT,
     offset: int = 0,

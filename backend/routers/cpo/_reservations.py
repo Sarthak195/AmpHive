@@ -15,17 +15,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database.db import get_db
 from backend.database.models import Plug, Reservation, ReservationStatus, User
-from backend.services.rbac import require_role
 from backend.services.reservations import expire_lapsed_reservations
 
-from ._common import _require_tenant_id
+from ._common import _require_tenant_id, require_cpo_tenant
 
 router = APIRouter()
 
 
 @router.get("/api/cpo/reservations")
 async def cpo_list_reservations(
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_cpo_tenant),
     db: AsyncSession = Depends(get_db),
     status: Optional[str] = None,
     upcoming_only: bool = False,
