@@ -98,12 +98,12 @@ describe('refreshBalance', () => {
 });
 
 describe('shape', () => {
-  it('exposes exactly balance, availableBalance, and refreshBalance', () => {
+  it('exposes exactly balance, availableBalance, balanceFresh and refreshBalance', () => {
     mockUseAuth.mockReturnValue({ user: { coin_balance: 5 }, refreshUser: mockRefreshUser });
     renderProbe();
 
     expect(screen.getByTestId('shape')).toHaveTextContent(
-      'availableBalance,balance,refreshBalance'
+      'availableBalance,balance,balanceFresh,refreshBalance'
     );
   });
 });

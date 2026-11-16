@@ -23,6 +23,7 @@ import { createContext, useState, useContext, useEffect, useCallback, useRef } f
 import { io } from 'socket.io-client';
 import api from '../api/client';
 import { useAuth } from './AuthContext';
+import { readSnapshot, writeSnapshot } from '../utils/snapshot';
 
 const SessionContext = createContext();
 
@@ -74,10 +75,23 @@ export const SessionProvider = ({ children }) => {
   // shows a loading state instead of flashing "No active charge" for a
   // session that is in fact running.
   const [restoring, setRestoring] = useState(true);
+  // Instant open: `activeSessions` is seeded from the last saved list
+  // (utils/snapshot.js) while the restore runs. sessionsStale stays true
+  // until a /api/sessions/active call succeeds (never cleared on failure),
+  // so the UI marks those rows as not live. Only the list is seeded: never
+  // the focused session, so nothing subscribes to a session that may have
+  // ended. sessionsSavedAt: when the seeded list was saved (null = none).
+  const [sessionsStale, setSessionsStale] = useState(false);
+  const [sessionsSavedAt, setSessionsSavedAt] = useState(null);
+  const [sessionsError, setSessionsError] = useState(false);
   // Effects below key on the user's id, not the user object: refreshUser()
   // (after login, stop, limit edits, top-ups) always builds a new object, and
   // keying on it tore down the socket and zeroed the monitor each time.
   const userId = user?.id ?? null;
+  const userIdRef = useRef(userId);
+  useEffect(() => {
+    userIdRef.current = userId;
+  }, [userId]);
   // Epoch ms since which the monitor has been waiting on the live feed: set
   // on every subscribe, including the re-subscribe after a socket reconnect.
   // SessionMonitor uses it to tell a gateway still waking from its 10 s idle
@@ -148,6 +162,9 @@ export const SessionProvider = ({ children }) => {
     const res = await api.get('/api/sessions/active');
     const sessions = res.sessions || [];
     setActiveSessions(sessions);
+    writeSnapshot('sessions', userIdRef.current, sessions);
+    setSessionsStale(false);
+    setSessionsError(false);
     // Backfill the *focused* session's enriched fields (hold_coins, limits)
     // from the canonical GET — a caller like startSession may not have them
     // in its own response, and without this the low-balance warning (which
@@ -439,32 +456,41 @@ export const SessionProvider = ({ children }) => {
   }, []);
 
   // Check for active sessions on mount or auth change; focus the newest.
-  useEffect(() => {
-    const checkActiveSession = async () => {
-      if (!userId) {
-        setActiveSessions([]);
-        setSessionData(null);
-        setSessionId(null);
-        setIsActive(false);
-        setRestoring(false);
-        return;
-      }
+  // Also the Retry for a failed restore.
+  const restoreSessions = useCallback(async () => {
+    if (!userId) {
+      setActiveSessions([]);
+      setSessionData(null);
+      setSessionId(null);
+      setIsActive(false);
+      setSessionsStale(false);
+      setSessionsSavedAt(null);
+      setRestoring(false);
+      return;
+    }
 
-      setRestoring(true);
-      try {
-        const res = await refreshActiveSessions();
-        if (res.active) {
-          switchSession(res.sessions[0]);
-        }
-      } catch (err) {
-        console.error('Failed to restore active session:', err);
-      } finally {
-        setRestoring(false);
+    const snap = readSnapshot('sessions', userId);
+    if (Array.isArray(snap?.data)) setActiveSessions(snap.data);
+    setSessionsSavedAt(Array.isArray(snap?.data) ? snap.savedAt : null);
+    setSessionsStale(true);
+    setSessionsError(false);
+    setRestoring(true);
+    try {
+      const res = await refreshActiveSessions();
+      if (res.active) {
+        switchSession(res.sessions[0]);
       }
-    };
-
-    checkActiveSession();
+    } catch (err) {
+      console.error('Failed to restore active session:', err);
+      setSessionsError(true);
+    } finally {
+      setRestoring(false);
+    }
   }, [userId, refreshActiveSessions, switchSession]);
+
+  useEffect(() => {
+    restoreSessions();
+  }, [restoreSessions]);
 
   // Re-sync with the backend when something may have changed that this tab
   // was not told about: a queued charge auto-started, expired or failed, a
@@ -513,6 +539,7 @@ export const SessionProvider = ({ children }) => {
     <SessionContext.Provider value={{
       socket,
       activeSessions, sessionData, sessionId, isActive, error, restoring,
+      sessionsStale, sessionsSavedAt, sessionsError, retrySessions: restoreSessions,
       lastFrameAt, watchSince, focusedStartedAt, focusedLimits, focusedHoldCoins, alarms, receipt,
       startSession, stopSession, updateLimits, clearSession, switchSession, dismissReceipt,
     }}>

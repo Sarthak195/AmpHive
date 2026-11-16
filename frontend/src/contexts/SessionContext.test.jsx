@@ -671,3 +671,47 @@ describe('queued charge pushes (C10)', () => {
     expect(api.get.mock.calls.length).toBe(calls);
   });
 });
+
+describe('instant open: seeded session list', () => {
+  const StaleProbe = () => {
+    const { activeSessions, sessionsStale, sessionId } = useSession();
+    return (
+      <div>
+        <div data-testid="names">{activeSessions.map((s) => s.plug_name).join(',')}</div>
+        <div data-testid="stale">{String(sessionsStale)}</div>
+        <div data-testid="focused">{String(sessionId)}</div>
+      </div>
+    );
+  };
+  beforeEach(() => {
+    localStorage.clear();
+    localStorage.setItem('amphive_token', 't');
+    localStorage.setItem('amphive_user', JSON.stringify(MOCK_USER));
+    localStorage.setItem(
+      'amphive_snap:sessions',
+      JSON.stringify({ v: 1, uid: 1, savedAt: Date.now(), data: [{ session_id: 9, plug_id: 90, plug_name: 'Saved Plug' }] })
+    );
+  });
+
+  it('renders the saved list before the restore answers, without focusing it, then replaces it', async () => {
+    let resolve;
+    api.get.mockReturnValue(new Promise((r) => { resolve = r; }));
+    render(<SessionProvider><StaleProbe /></SessionProvider>);
+    expect(await screen.findByText('Saved Plug')).toBeInTheDocument();
+    expect(screen.getByTestId('stale')).toHaveTextContent('true');
+    expect(screen.getByTestId('focused')).toHaveTextContent('null');
+    await act(async () => resolve(TWO_SESSIONS));
+    await waitFor(() => expect(screen.getByTestId('stale')).toHaveTextContent('false'));
+    expect(screen.getByTestId('names')).toHaveTextContent('Plug B,Plug A');
+    expect(JSON.parse(localStorage.getItem('amphive_snap:sessions')).data).toHaveLength(2);
+  });
+
+  it('keeps the saved list marked stale when the restore fails', async () => {
+    api.get.mockRejectedValue(new Error('offline'));
+    render(<SessionProvider><StaleProbe /></SessionProvider>);
+    await waitFor(() => expect(api.get).toHaveBeenCalled());
+    await act(async () => {});
+    expect(screen.getByTestId('names')).toHaveTextContent('Saved Plug');
+    expect(screen.getByTestId('stale')).toHaveTextContent('true');
+  });
+});
