@@ -27,7 +27,7 @@ from backend.services import payouts as payout_service
 from backend.services.csv_safe import sanitize_csv_cell
 from backend.services.pricing import _zone
 
-from ._common import clamp_days, require_cpo_tenant
+from ._common import _require_tenant_id, clamp_days, require_cpo_tenant
 
 router = APIRouter()
 
@@ -71,7 +71,7 @@ async def cpo_analytics_overview(
     - Today's energy consumption and revenue
     - All-time totals
     """
-    tenant_id = user.tenant_id
+    tenant_id = _require_tenant_id(user)  # int for mypy; require_cpo_tenant already refused None
 
     # Total plugs count
     plug_count_result = await db.execute(
