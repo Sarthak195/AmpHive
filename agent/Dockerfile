@@ -24,9 +24,22 @@ COPY amphive_agent ./amphive_agent
 RUN if [ -n "$EXTRAS" ]; then pip install --no-cache-dir ".[$EXTRAS]"; \
     else pip install --no-cache-dir .; fi
 
+# Run as a fixed non-root uid/gid (10001). The agent only needs to write its
+# state file; it uses unprivileged ports only (outbound MQTT, UDP discovery
+# from an ephemeral port), so no capability is required, even with
+# --network host. /state is created and owned by the agent user BEFORE the
+# VOLUME line so a fresh named volume inherits that ownership; an existing
+# root-owned volume must be chowned once: docker run --rm -v <vol>:/state
+# alpine chown -R 10001:10001 /state
+RUN groupadd --system --gid 10001 amphive \
+    && useradd --system --uid 10001 --gid 10001 --no-create-home \
+        --home-dir /nonexistent --shell /usr/sbin/nologin amphive \
+    && mkdir -p /state && chown 10001:10001 /state
+
 # Persist the unique_id->plug_id map + session baselines across restarts.
 ENV AMPHIVE_STATE=/state/amphive_agent_state.json
 VOLUME ["/state"]
+USER 10001:10001
 
 # Unbuffered logs; run as the console entry point.
 ENV PYTHONUNBUFFERED=1
