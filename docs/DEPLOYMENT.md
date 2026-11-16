@@ -181,13 +181,13 @@ HTTPS handshakes fail (TLS alert 40) until it lands.
 
 ### Memory and disk on the 1 GB VM (measured 2026-11-16)
 
-Warm, the API answers in 25 to 200 ms on the VM. The slow phone opens came
-from the app being pushed out of memory and read back from the 30 GB
-`pd-standard` disk (about 22 read IOPS baseline) on the next request. One phone
-open at 08:38Z took about 21 s from page to dashboard data. In that minute
-the VM read about 280 MB back in, did 2,500 to 4,300 disk reads per minute
-(baseline 35 to 500) and spent 23% of CPU time in iowait. Two periodic jobs
-kept evicting the app:
+Warm, the API answers in 25 to 200 ms on the VM. The likely cause of the slow
+phone opens is the app's pages (code and data, mostly file cache rather than
+swap) being evicted and read back from the 30 GB `pd-standard` disk on the
+next request. One phone open at 08:38Z took about 21 s from page to dashboard
+data; in that minute and the next the VM did 2,500 to 4,300 disk reads per
+minute (baseline 35 to 500, GCE `instance/disk/read_ops_count`) and spent 23%
+of CPU time in iowait. Two periodic jobs churn the page cache:
 
 - **Hourly telemetry prune** (`services/telemetry_persistence.py
   _prune_old`): the retention DELETE filtered on `recorded_at` only, which has
@@ -202,12 +202,14 @@ kept evicting the app:
   (rollback `sudo systemctl enable --now google-osconfig-agent`).
 
 Host tuning, also not in the repo: `vm.swappiness=10` in
-`/etc/sysctl.d/99-amphive-swappiness.conf` keeps the app's memory in RAM and
-drops file cache first (the default 60 swapped the idle backend out). Rollback:
+`/etc/sysctl.d/99-amphive-swappiness.conf` is a precaution: it makes the kernel
+drop file cache before swapping the app's heap (real swap traffic in the
+measured windows was small, 0 to 14 MB per few minutes). Rollback:
 delete the file and run `sudo sysctl -w vm.swappiness=60`. The Ops Agent's
-`agent.googleapis.com/swap/io` metric is not swap: it tracks total disk paging
-(its 10-minute spikes were the apt cache writes). Use `/proc/vmstat`
-`pswpin`/`pswpout` for real swap traffic. Status 2026-11-16: the prune fix is
+`agent.googleapis.com/swap/io` metric does not match the kernel's swap
+counters (it showed about 330 MB at a 10-minute spike while `pswpout` barely
+moved; its spikes line up with the apt cache writes). Use `/proc/vmstat`
+`pswpin`/`pswpout`/`pgpgin` and per-process `/proc/<pid>/io` instead. Status 2026-11-16: the prune fix is
 on a branch; the two host changes are NOT applied yet (awaiting the
 operator's go).
 
