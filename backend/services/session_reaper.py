@@ -510,8 +510,8 @@ class SessionReaperService:
             start_at <= now < end_at) is replayed: a window held by a DIFFERENT
             user leaves the row WAITING rather than stealing their bookable
             slot. The queued charge's OWN user holding the window is not a
-            conflict — the start proceeds (the reservation itself is left for
-            the reservation sweep to reconcile).
+            conflict — the start proceeds and that reservation is handed to
+            begin_active_session, which marks it FULFILLED.
           - [Hold sizing] The user row locked for the cap check above is the
             SAME row passed into begin_active_session, so its
             available_balance() call reads a row this transaction already
@@ -779,8 +779,8 @@ class SessionReaperService:
                     #    force-stop — just a start to withhold — so this doesn't
                     #    need the reservation-start sweep's overrun handling.)
                     #    The queue's OWN user holding the window is not a
-                    #    conflict; the reservation itself is left BOOKED for the
-                    #    reservation sweep to reconcile.
+                    #    conflict; it is passed to begin_active_session below so it
+                    #    is FULFILLED with the session (same as the manual start).
                     await expire_lapsed_reservations(db, plug_id=plug.id, now=now)
                     covering = (await db.execute(
                         select(Reservation)
@@ -857,6 +857,10 @@ class SessionReaperService:
                             db, user, plug, gateway,
                             max_kwh=qc.max_kwh,
                             max_duration_seconds=qc.max_duration_seconds,
+                            # The owner's own window (the foreign case was
+                            # deferred above): fulfilled with the session,
+                            # exactly as the manual start route does.
+                            covering_reservation=covering,
                         )
                     except HTTPException as exc:
                         # 402 = balance floor no longer met -> EXPIRED (funds were
