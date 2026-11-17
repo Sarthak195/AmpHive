@@ -1295,6 +1295,7 @@ async def get_session_invoice(
 import re  # noqa: E402
 
 from backend.database.models import LedgerTransaction, TransactionType  # noqa: E402
+from backend.services import insights  # noqa: E402
 from backend.services.pricing import default_rate  # noqa: E402
 
 
@@ -1306,13 +1307,22 @@ async def get_my_stats(
     """
     Current-calendar-month + lifetime charging aggregates for the caller,
     for the driver dashboard/account page:
-    ``{month: {energy_kwh, spend_coins, sessions}, lifetime: {...}}``.
+    ``{month: {energy_kwh, spend_coins, sessions}, lifetime: {...}}``, plus
+    ``series`` (the last 12 UTC calendar months, oldest first, zero-filled:
+    ``{month: "YYYY-MM", energy_kwh, spend_coins, sessions}``) and ``impact``
+    (ESTIMATED CO2 avoided / petrol-equivalent for the month and lifetime
+    energy, with the assumptions used).
 
     Only FINISHED sessions count (status != ACTIVE — completed/paid/
     cancelled): ``coins_spent`` is only written at finalize, so an ACTIVE
     session has no billed spend yet and would skew energy-vs-spend. Same
     stored-column semantics /api/sessions/history rows expose. "Month" is
     the current UTC calendar month (started_at >= the 1st, 00:00 UTC).
+
+    ``series`` follows the CPO side's definition instead: COMPLETED/PAID
+    sessions only, and spend is net of APPROVED dispute refunds (taken off the
+    refunded session's month), so it agrees with the CPO revenue figures.
+    ``month``/``lifetime`` keep the gross finished-session totals above.
     """
     now = datetime.now(timezone.utc)
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
@@ -1339,9 +1349,70 @@ async def get_my_stats(
             "sessions": int(count or 0),
         }
 
+    month = await _bucket(ChargingSession.started_at >= month_start)
+    lifetime = await _bucket()
+
+    # 12-month series. UTC months (a driver has no tenant zone). Refunds are a
+    # separate aggregate, never a join, so coins_spent is never fanned out.
+    keys = insights.month_keys(now)
+    first_year, first_month = (int(x) for x in keys[0].split("-"))
+    window_start = datetime(first_year, first_month, 1, tzinfo=timezone.utc)
+    bucket_month = func.date_trunc(
+        literal_column("'month'"),
+        func.timezone(literal_column("'UTC'"), ChargingSession.started_at),
+    )
+    in_series = and_(
+        ChargingSession.user_id == user.id,
+        ChargingSession.started_at >= window_start,
+        ChargingSession.status.in_([SessionStatus.COMPLETED, SessionStatus.PAID]),
+    )
+    gross_rows = (
+        await db.execute(
+            select(
+                bucket_month,
+                func.count(ChargingSession.id),
+                func.coalesce(func.sum(ChargingSession.energy_kwh), 0),
+                func.coalesce(func.sum(ChargingSession.coins_spent), 0),
+            )
+            .where(in_series)
+            .group_by(bucket_month)
+        )
+    ).all()
+    refund_rows = (
+        await db.execute(
+            select(bucket_month, func.coalesce(func.sum(SessionDispute.refund_coins), 0))
+            .select_from(SessionDispute)
+            .join(ChargingSession, ChargingSession.id == SessionDispute.session_id)
+            .where(in_series, SessionDispute.status == DisputeStatus.APPROVED)
+            .group_by(bucket_month)
+        )
+    ).all()
+
+    def _key(d):
+        return f"{d.year:04d}-{d.month:02d}"
+
+    refunds = {_key(d): float(r or 0) for d, r in refund_rows}
+    by_month = {_key(d): (int(c or 0), float(e or 0), float(s or 0)) for d, c, e, s in gross_rows}
+    series = []
+    for key in keys:
+        count, energy, coins = by_month.get(key, (0, 0.0, 0.0))
+        series.append({
+            "month": key,
+            "energy_kwh": round(energy, 3),
+            # Floored like the CPO revenue series, against bad data.
+            "spend_coins": round(max(coins - refunds.get(key, 0.0), 0.0), 2),
+            "sessions": count,
+        })
+
     return {
-        "month": await _bucket(ChargingSession.started_at >= month_start),
-        "lifetime": await _bucket(),
+        "month": month,
+        "lifetime": lifetime,
+        "series": series,
+        "impact": {
+            "assumptions": insights.assumptions(),
+            "month": insights.estimate_impact(month["energy_kwh"]),
+            "lifetime": insights.estimate_impact(lifetime["energy_kwh"]),
+        },
     }
 
 

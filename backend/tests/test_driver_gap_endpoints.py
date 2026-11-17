@@ -38,6 +38,7 @@ from backend.routers.sessions import (
 from backend.routers.sessions import (
     router as sessions_router,
 )
+from backend.services import insights
 
 
 def _user(user_id=7, role=UserRole.DRIVER, tenant_id=None):
@@ -302,22 +303,75 @@ async def test_my_stats_month_and_lifetime_buckets():
     db = _db(
         _first((2, 3.5, Decimal("28.00"))),     # month
         _first((10, 50.25, Decimal("400.00"))), # lifetime
+        _all([]),                               # series gross rows
+        _all([]),                               # series refund rows
     )
 
     resp = await get_my_stats(_user(user_id=7), db)
 
-    assert resp == {
-        "month": {"energy_kwh": 3.5, "spend_coins": 28.0, "sessions": 2},
-        "lifetime": {"energy_kwh": 50.25, "spend_coins": 400.0, "sessions": 10},
-    }
+    assert resp["month"] == {"energy_kwh": 3.5, "spend_coins": 28.0, "sessions": 2}
+    assert resp["lifetime"] == {"energy_kwh": 50.25, "spend_coins": 400.0, "sessions": 10}
+    # Estimates ride along with the factors used.
+    assert resp["impact"]["assumptions"]["estimate"] is True
+    assert resp["impact"]["lifetime"]["co2_avoided_kg"] == insights.estimate_impact(50.25)["co2_avoided_kg"]
 
 
 @pytest.mark.asyncio
 async def test_my_stats_zero_history():
-    db = _db(_first((0, 0, 0)), _first((0, 0, 0)))
+    db = _db(_first((0, 0, 0)), _first((0, 0, 0)), _all([]), _all([]))
     resp = await get_my_stats(_user(), db)
     assert resp["month"] == {"energy_kwh": 0.0, "spend_coins": 0.0, "sessions": 0}
     assert resp["lifetime"] == {"energy_kwh": 0.0, "spend_coins": 0.0, "sessions": 0}
+    assert len(resp["series"]) == 12
+    assert all(m["sessions"] == 0 and m["spend_coins"] == 0 for m in resp["series"])
+    assert resp["impact"]["month"]["co2_avoided_kg"] == 0
+
+
+@pytest.mark.asyncio
+async def test_my_stats_series_nets_refunds_and_zero_fills():
+    now = datetime.now(timezone.utc)
+    keys = insights.month_keys(now)
+    this_m = datetime(now.year, now.month, 1)  # date_trunc returns a naive timestamp
+    db = _db(
+        _first((1, 2.0, Decimal("10"))),
+        _first((1, 2.0, Decimal("10"))),
+        _all([(this_m, 3, 6.5, Decimal("32.50"))]),
+        _all([(this_m, Decimal("5.00"))]),
+    )
+
+    resp = await get_my_stats(_user(), db)
+
+    series = resp["series"]
+    assert [m["month"] for m in series] == keys
+    assert series[-1] == {
+        "month": keys[-1], "energy_kwh": 6.5, "spend_coins": 27.5, "sessions": 3,
+    }
+    assert series[0]["sessions"] == 0
+    # Refunds are a separate aggregate query: 4 executes, no fan-out join.
+    assert db.execute.call_count == 4
+
+
+def test_month_keys_cross_year_boundary():
+    keys = insights.month_keys(datetime(2026, 2, 10, tzinfo=timezone.utc))
+    assert keys[0] == "2025-03" and keys[-1] == "2026-02" and len(keys) == 12
+
+
+def test_estimate_impact_nets_grid_against_petrol():
+    out = insights.estimate_impact(10)
+    expected_petrol = 10 * insights.EV_KM_PER_KWH / insights.ICE_KM_PER_L * insights.PETROL_CO2_KG_PER_L
+    assert out["petrol_co2_kg"] == round(expected_petrol, 2)
+    assert out["grid_co2_kg"] == round(10 * insights.GRID_EMISSION_FACTOR_KG_PER_KWH, 2)
+    assert out["co2_avoided_kg"] == round(expected_petrol - 10 * insights.GRID_EMISSION_FACTOR_KG_PER_KWH, 2)
+    assert insights.estimate_impact(-3)["co2_avoided_kg"] == 0
+
+
+def test_insights_env_falls_back_on_bad_values(monkeypatch):
+    monkeypatch.setenv("ICE_KM_PER_L", "abc")
+    assert insights._float_env("ICE_KM_PER_L", 15.0) == 15.0
+    monkeypatch.setenv("ICE_KM_PER_L", "-2")
+    assert insights._float_env("ICE_KM_PER_L", 15.0) == 15.0
+    monkeypatch.setenv("ICE_KM_PER_L", "20")
+    assert insights._float_env("ICE_KM_PER_L", 15.0) == 20.0
 
 
 # --- GET /api/sessions/disputes/my ---------------------------------------------
@@ -529,3 +583,22 @@ async def test_session_telemetry_access_matches_detail():
     ):
         db = _db(_scalar_one_or_none(_session(tenant_id=1)), _all([]))
         assert (await get_session_telemetry(42, viewer, db))["points"] == []
+
+
+def test_public_config_ships_co2_factor_for_the_receipt():
+    from backend.main import public_config
+
+    assert public_config()["co2_avoided_kg_per_kwh"] == round(insights.co2_avoided_kg_per_kwh(), 4)
+
+
+@pytest.mark.asyncio
+async def test_my_stats_series_sql_groups_by_one_literal_month_expr():
+    """The SELECT and GROUP BY must carry the same inline month expression
+    (no bind params, which Postgres would reject as not grouped)."""
+    from sqlalchemy.dialects import postgresql
+
+    db = _db(_first((0, 0, 0)), _first((0, 0, 0)), _all([]), _all([]))
+    await get_my_stats(_user(), db)
+    sql = str(db.execute.call_args_list[2].args[0].compile(dialect=postgresql.dialect())).lower()
+    expr = "date_trunc('month', timezone('utc', charging_sessions.started_at))"
+    assert sql.count(expr) == 2
