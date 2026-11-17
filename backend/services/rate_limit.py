@@ -371,6 +371,11 @@ resend_verification_email_rate_limiter = SlidingWindowRateLimiter(
 # open endpoint can't be hammered to enumerate/scrape or exhaust the DB.
 public_map_rate_limiter = SlidingWindowRateLimiter(*_rule_from_env("PUBLIC_MAP_RATE_LIMIT", "60/60"))
 
+# Public status page (GET /api/status). The payload is cached 60 s in-process,
+# so this only bounds how often one IP can ask; tighter than the map limiter
+# because the page is one small poll, not a browsing session.
+status_rate_limiter = SlidingWindowRateLimiter(*_rule_from_env("STATUS_RATE_LIMIT", "20/60"))
+
 # Socket.io handshake, per client IP. The blanket api_rate_limit_middleware
 # exempts everything outside /api/, so without this the namespace was
 # unlimited — and each attempt spends a JWT decode + a users SELECT before an
