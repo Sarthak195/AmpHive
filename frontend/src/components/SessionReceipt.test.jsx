@@ -20,7 +20,7 @@ vi.mock('react-router-dom', async (importOriginal) => {
 });
 vi.mock('../contexts/SessionContext', () => ({ useSession: vi.fn() }));
 vi.mock('../contexts/ConfigContext', () => ({
-  useConfig: () => ({ coins_per_kwh: 5, coin_inr_rate: 1 }),
+  useConfig: () => ({ coins_per_kwh: 5, coin_inr_rate: 1, co2_avoided_kg_per_kwh: 0.2 }),
 }));
 vi.mock('../api/client', () => ({ default: { get: vi.fn() } }));
 vi.mock('./DisputeModal', () => ({
@@ -82,6 +82,12 @@ describe('SessionReceipt — summary', () => {
     expect(api.get).toHaveBeenCalledWith('/api/sessions/42/telemetry');
     await waitFor(() =>
       expect(screen.getByText(/No power readings were recorded/)).toBeInTheDocument());
+  });
+
+  it('shows one CO2 line labelled as an estimate (energy x server factor)', () => {
+    renderReceipt();
+    expect(screen.getByText('CO₂ avoided (estimate)')).toBeInTheDocument();
+    expect(screen.getByText('≈ 0.25 kg')).toBeInTheDocument(); // 1.234 kWh x 0.2
   });
 
   it('renders nothing when there is no receipt', () => {

@@ -29,7 +29,7 @@ const Row = ({ label, children, strong }) => (
 
 const SessionReceipt = () => {
   const { receipt, dismissReceipt } = useSession();
-  const { coin_inr_rate } = useConfig();
+  const { coin_inr_rate, co2_avoided_kg_per_kwh: co2PerKwh } = useConfig();
   const navigate = useNavigate();
   const toast = useToast();
 
@@ -47,6 +47,9 @@ const SessionReceipt = () => {
   const chargedInr = coinsToINR(coins_spent ?? 0, coin_inr_rate);
   const shortfallInr = coinsToINR(shortfall_coins ?? 0, coin_inr_rate);
   const autoStopped = isAutoStopReason(reason);
+  // Estimate only: energy x the server's net per-kWh factor (petrol CO2 for the
+  // same distance minus grid CO2). Hidden until /api/config supplies it.
+  const co2Kg = co2PerKwh > 0 ? (energy_kwh ?? 0) * co2PerKwh : null;
   // The invoice endpoint 400s on a zero-cost session — only offer it when the
   // session actually billed something.
   const canInvoice = session_id != null && Number(coins_spent) > 0;
@@ -107,6 +110,11 @@ const SessionReceipt = () => {
         {peak_power_w != null && (
           <Row label="Peak power">
             <span className="num">{formatKw(peak_power_w)}</span>
+          </Row>
+        )}
+        {co2Kg != null && co2Kg >= 0.005 && (
+          <Row label="CO₂ avoided (estimate)">
+            <span className="num">≈ {co2Kg.toFixed(2)} kg</span>
           </Row>
         )}
         <Row label="Charged" strong>
