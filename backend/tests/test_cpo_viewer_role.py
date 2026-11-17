@@ -142,6 +142,25 @@ def test_viewer_gets_403_on_every_write_route(viewer_client, method, path):
     db.commit.assert_not_awaited()
 
 
+def test_wave2_write_routes_are_in_the_viewer_walk():
+    """Integration pin (release/2026-11-17-w2): the write routes added or
+    changed by F1 (auto_stop_when_full on start/queue), F7 (personal tokens)
+    and F12 (promo codes) must be reached by the route walk above, so each one
+    is asserted to return 403 read_only_demo for a viewer."""
+    walked = {(m, p) for m, p, _ in _write_routes()}
+    expected = {
+        ("POST", "/api/sessions/start"),  # F1
+        ("POST", "/api/sessions/queue"),  # F1
+        ("POST", "/api/me/tokens"),  # F7
+        ("DELETE", "/api/me/tokens/{token_id}"),  # F7
+        ("POST", "/api/wallet/redeem"),  # F12
+        ("POST", "/api/cpo/promos"),  # F12
+        ("POST", "/api/cpo/promos/{promo_id}/disable"),  # F12
+    }
+    assert expected <= walked, expected - walked
+    assert not expected & (PUBLIC_WRITES | VIEWER_EXEMPT)
+
+
 def test_viewer_may_sign_out(viewer_client):
     client, _ = viewer_client(_viewer())
     resp = client.post("/api/auth/logout")
