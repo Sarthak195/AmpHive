@@ -1837,3 +1837,33 @@ class RevokedSession(Base):
     user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     revoked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+
+
+class ApiToken(Base):
+    """[F7] A personal read-only API token (Home Assistant, evcc).
+
+    The raw token ("amph_" + secrets.token_urlsafe(32)) is shown to the user
+    once at creation and NEVER stored or logged: only its SHA-256 hex digest
+    lives here (same rationale as PasswordResetToken: ~256 bits of entropy, so
+    an unsalted digest is fine and lookup stays one indexed equality).
+    token_prefix is a short display stub so the user can tell tokens apart.
+
+    scope is always "read". The only endpoint that accepts a token is
+    GET /api/me/meter (services/api_tokens.py get_meter_user); every other
+    route authenticates through get_current_user, which only knows JWTs, so a
+    token is read-only by construction. revoked_at NULL = live. Revoked by
+    DELETE /api/me/tokens/{id}, log out everywhere, a password reset, a
+    Google first-link takeover and account closure. last_used_at is stamped
+    at most once a minute. Alembic revision 0046_api_tokens.
+    """
+    __tablename__ = "api_tokens"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(64), nullable=False)
+    token_prefix: Mapped[str] = mapped_column(String(16), nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    scope: Mapped[str] = mapped_column(String(16), default="read", server_default=text("'read'"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+    last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
