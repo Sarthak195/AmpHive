@@ -212,8 +212,10 @@ class ChargePoint:
                 raise
             except Exception as exc:  # reconnect on any transport or protocol failure
                 log.warning("%s: connection lost (%s: %s)", self.cp_id, type(exc).__name__, exc)
-            delay = 1.0 if booted else min(delay * 2, BACKOFF_MAX_S)
+            if booted:
+                delay = 1.0
             await asyncio.sleep(delay)
+            delay = min(delay * 2, BACKOFF_MAX_S)
 
     def _headers(self) -> dict[str, str]:
         if not self.cfg.basic_password:
@@ -241,7 +243,12 @@ class ChargePoint:
                 while True:
                     self.changed.clear()
                     if self.snapshot is not None:
-                        await self._sync()
+                        try:
+                            await self._sync()
+                        except OcppCallError as exc:
+                            # The CSMS refused one message: retry on the next poll
+                            # rather than reconnecting in a tight loop.
+                            log.warning("%s: CSMS returned CallError %s", self.cp_id, exc)
                     waiter = asyncio.create_task(self.changed.wait())
                     done, _ = await asyncio.wait({waiter, reader, heartbeat},
                                                  return_when=asyncio.FIRST_COMPLETED)
@@ -254,10 +261,7 @@ class ChargePoint:
                 for task in (reader, heartbeat):
                     if task is not None:
                         task.cancel()
-                for fut in self._pending.values():
-                    if not fut.done():
-                        fut.set_exception(ConnectionError("connection closed"))
-                self._pending.clear()
+                self._fail_pending()
                 self._ws = None
         return booted
 
@@ -280,24 +284,38 @@ class ChargePoint:
             finally:
                 self._pending.pop(msg_id, None)
 
+    def _fail_pending(self) -> None:
+        for fut in self._pending.values():
+            if not fut.done():
+                fut.set_exception(ConnectionError("connection closed"))
+
     async def _reader(self, ws: ClientConnection) -> None:
-        async for raw in ws:
-            try:
-                msg = json.loads(raw)
-                kind, msg_id = msg[0], msg[1]
-            except (ValueError, IndexError, KeyError, TypeError):
-                log.warning("%s: dropped malformed frame", self.cp_id)
-                continue
+        try:
+            async for raw in ws:
+                await self._dispatch(ws, raw)
+        finally:
+            self._fail_pending()  # a drop mid-call fails it now, not after 30 s
+
+    async def _dispatch(self, ws: ClientConnection, raw: str | bytes) -> None:
+        try:
+            msg = json.loads(raw)
+            kind, msg_id = msg[0], msg[1]
             if kind == CALL:
-                await ws.send(json.dumps(self._answer(msg_id, msg[2], msg[3] if len(msg) > 3 else {})))
-            elif kind in (CALLRESULT, CALLERROR):
-                fut = self._pending.get(msg_id)
-                if fut is None or fut.done():
-                    continue
-                if kind == CALLRESULT:
-                    fut.set_result(msg[2] if len(msg) > 2 else {})
-                else:
-                    fut.set_exception(OcppCallError(str(msg[2]), str(msg[3]) if len(msg) > 3 else ""))
+                action, payload = msg[2], (msg[3] if len(msg) > 3 else {})
+        except (ValueError, IndexError, KeyError, TypeError):
+            log.warning("%s: dropped malformed frame", self.cp_id)
+            return
+        if kind == CALL:
+            await ws.send(json.dumps(self._answer(msg_id, action, payload)))
+        elif kind in (CALLRESULT, CALLERROR):
+            fut = self._pending.get(msg_id)
+            if fut is None or fut.done():
+                return
+            if kind == CALLRESULT:
+                fut.set_result(msg[2] if len(msg) > 2 else {})
+            else:
+                code = str(msg[2]) if len(msg) > 2 else "GenericError"
+                fut.set_exception(OcppCallError(code, str(msg[3]) if len(msg) > 3 else ""))
 
     def _answer(self, msg_id: str, action: str, payload: Any) -> list[Any]:
         """Reply to a CSMS-initiated CALL. Read-only: nothing here touches AmpHive."""

@@ -156,9 +156,14 @@ Register or auto-commission the station as its docs describe.
 - Display only. It cannot be used to authorize, start, stop or limit charging,
   and that is deliberate. It is not a central system: AmpHive does not accept
   OCPP chargers, and a full CSMS stays out of scope.
-- Granularity is the poll period (default 10 s). If a session ends while the
-  bridge is down, `meterStop` uses the last energy the bridge saw, which can
-  be slightly below the final billed energy.
+- Granularity is the poll period (default 10 s). Energy is recorded only
+  while the bridge is running and connected to the CSMS: if a session ends
+  while either is down, `meterStop` uses the last energy the bridge saw,
+  which can be below the final billed energy.
+- A crash between the CSMS acknowledging a Start/StopTransaction and the
+  state file being written can repeat that message after the restart.
+- A CallError from the CSMS for one message is logged and the message is
+  retried on the next poll (no reconnect).
 - The register is virtual and per state file: deleting the file restarts it at
   0, and two bridges on different machines each keep their own.
 - `StopTransaction` uses the time the bridge noticed the end, not the
