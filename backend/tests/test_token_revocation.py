@@ -116,10 +116,12 @@ async def test_logout_bumps_token_version():
     res = await logout(user, db, _creds(create_access_token(1, "driver", "d@x.test", 4)))
 
     assert res == {"status": "logged_out", "scope": "all"}
-    stmt = str(db.execute.await_args.args[0])
+    stmt = str(db.execute.await_args_list[0].args[0])
     assert stmt.startswith("UPDATE users")
     assert "token_version + " in stmt
     assert "RETURNING users.token_version" in stmt
+    # [F7] scope "all" also revokes personal API tokens.
+    assert str(db.execute.await_args_list[1].args[0]).startswith("UPDATE api_tokens")
     db.commit.assert_awaited_once()
 
 
