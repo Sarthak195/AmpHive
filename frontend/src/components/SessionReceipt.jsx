@@ -16,6 +16,7 @@ import { useSession } from '../contexts/SessionContext';
 import { useConfig } from '../contexts/ConfigContext';
 import { Money, useToast } from './ui';
 import DisputeModal from './DisputeModal';
+import SessionPowerCurve from './SessionPowerCurve';
 import { stopReasonCopy, isAutoStopReason } from '../utils/statusCopy';
 import { formatINR, coinsToINR, formatKwh, formatKw, formatDuration } from '../utils/money';
 
@@ -40,7 +41,7 @@ const SessionReceipt = () => {
   const {
     session_id, plug_name, energy_kwh, peak_power_w, coins_spent,
     shortfall_coins, balance_before, balance_remaining, duration_sec,
-    ended_at, reason,
+    ended_at, reason, max_kwh,
   } = receipt;
 
   const chargedInr = coinsToINR(coins_spent ?? 0, coin_inr_rate);
@@ -121,6 +122,8 @@ const SessionReceipt = () => {
           </Row>
         )}
       </dl>
+
+      {session_id != null && <SessionPowerCurve sessionId={session_id} limitKwh={max_kwh} />}
 
       {shortfall_coins > 0 && (
         <p className="receipt-help text-3 text-sm">
