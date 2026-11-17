@@ -327,6 +327,35 @@ def test_viewer_get_never_persists_lazy_reservation_expiry(
     assert db.commit.await_count == (1 if persists else 0)
 
 
+@pytest.mark.parametrize("role,persists", [(UserRole.CPO_VIEWER, False), (UserRole.CPO, True)])
+def test_viewer_get_plug_schedule_never_persists_lazy_expiry(as_user, monkeypatch, role, persists):
+    import backend.routers.reservations as res_router
+
+    monkeypatch.setattr(res_router, "expire_lapsed_reservations", AsyncMock(return_value=1))
+    monkeypatch.setattr(res_router, "user_can_access_plug", AsyncMock(return_value=True))
+    client, db = as_user(_viewer(role=role))
+    db.execute.return_value.scalar_one_or_none.return_value = SimpleNamespace(id=1, group_id=None)
+    resp = client.get("/api/plugs/1/reservations")
+    assert resp.status_code == 200, resp.text
+    assert db.commit.await_count == (1 if persists else 0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role,persists", [(UserRole.CPO_VIEWER, False), (UserRole.CPO, True)])
+async def test_plug_reservation_fields_never_persist_for_a_viewer(monkeypatch, role, persists):
+    """The helper behind GET /api/plugs/available and GET /api/plugs/{id}."""
+    import backend.services.reservations as res_service
+    from backend.routers.plugs import _reservation_fields_for_plugs
+
+    monkeypatch.setattr(res_service, "expire_lapsed_reservations", AsyncMock(return_value=1))
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=MagicMock())
+    db.execute.return_value.scalars.return_value.all.return_value = []
+    db.commit = AsyncMock()
+    await _reservation_fields_for_plugs(db, [1], _viewer(role=role), datetime.now(timezone.utc))
+    assert db.commit.await_count == (1 if persists else 0)
+
+
 def test_session_detail_admits_a_viewer_of_the_owning_tenant_only():
     from backend.routers.sessions import _assert_session_viewer
 
