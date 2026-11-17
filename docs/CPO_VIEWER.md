@@ -29,7 +29,9 @@ would have failed open on any forgotten route.
    (`_assert_session_viewer`) admit a viewer of the owning tenant.
 3. **Side-effect-free GETs.** GETs that lazily persist reservation expiry
    (`/api/cpo/reservations`, `/api/reservations/my`,
-   `/api/plugs/{id}/reservations`) skip the commit for a viewer.
+   `/api/plugs/{id}/reservations`, and `/api/plugs/available` plus
+   `/api/plugs/{id}` through `_reservation_fields_for_plugs`) skip the commit
+   for a viewer.
    `GET /api/sessions/{id}/invoice` issues an invoice on first call, so it
    stays closed to the viewer (403).
 4. **Socket.io.** A viewer may connect and receive pushes; `subscribe_session`
