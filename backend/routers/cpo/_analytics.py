@@ -15,9 +15,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.database.db import get_db
 from backend.database.models import (
     ChargingSession,
+    DisputeStatus,
     Gateway,
     GatewayStatus,
     Plug,
+    SessionDispute,
     SessionStatus,
     TelemetryReading,
     Tenant,
@@ -103,7 +105,8 @@ async def cpo_analytics_overview(
     )
     gateways_total = gw_total_result.scalar() or 0
 
-    # Today's stats (energy and revenue from completed sessions started today)
+    # Today's stats: sessions that FINISHED today (ended_at), the same window
+    # the revenue figure below uses, so all three numbers describe one set.
     tz = await _tenant_zone(db, tenant_id)
     today_start = _local_midnight_utc(tz, datetime.now(timezone.utc))
     today_stats_result = await db.execute(
@@ -113,7 +116,7 @@ async def cpo_analytics_overview(
         )
         .where(and_(
             ChargingSession.tenant_id == tenant_id,
-            ChargingSession.started_at >= today_start,
+            ChargingSession.ended_at >= today_start,
             ChargingSession.status.in_([SessionStatus.COMPLETED, SessionStatus.PAID]),
         ))
     )
@@ -336,10 +339,18 @@ async def cpo_analytics_revenue(
     Daily revenue breakdown for the CPO's charting dashboard.
     Returns an array of {date, revenue_coins, session_count} for each day
     in the requested range, suitable for plotting a revenue trend line.
+    revenue_coins is net of APPROVED dispute refunds, each taken off its
+    own session's day (not the approval day), so a day never goes negative
+    and the series agrees with Earnings for the same sessions.
     """
     cutoff = datetime.now(timezone.utc) - timedelta(days=clamp_days(days))
 
     day = _local_day(await _tenant_zone(db, user.tenant_id))
+    finished = and_(
+        ChargingSession.tenant_id == user.tenant_id,
+        ChargingSession.started_at >= cutoff,
+        ChargingSession.status.in_([SessionStatus.COMPLETED, SessionStatus.PAID]),
+    )
 
     # Query: group completed sessions by date, sum revenue
     result = await db.execute(
@@ -348,21 +359,28 @@ async def cpo_analytics_revenue(
             func.coalesce(func.sum(ChargingSession.coins_spent), 0).label("revenue"),
             func.count(ChargingSession.id).label("count"),
         )
-        .where(and_(
-            ChargingSession.tenant_id == user.tenant_id,
-            ChargingSession.started_at >= cutoff,
-            ChargingSession.status.in_([SessionStatus.COMPLETED, SessionStatus.PAID]),
-        ))
+        .where(finished)
         .group_by(day)
         .order_by(day)
     )
-
     rows = result.all()
+
+    # Approved refunds per session day. A separate query, so a session with
+    # several disputes is never counted twice in the gross above.
+    refunds = await db.execute(
+        select(day.label("date"), func.coalesce(func.sum(SessionDispute.refund_coins), 0))
+        .select_from(SessionDispute)
+        .join(ChargingSession, ChargingSession.id == SessionDispute.session_id)
+        .where(finished, SessionDispute.status == DisputeStatus.APPROVED)
+        .group_by(day)
+    )
+    refund_by_day = {d: float(r) for d, r in refunds.all()}
 
     return [
         {
             "date": str(row[0]),
-            "revenue_coins": round(float(row[1]), 2),
+            # Floored like payouts.sum_completed_session_coins, against bad data.
+            "revenue_coins": round(max(float(row[1]) - refund_by_day.get(row[0], 0.0), 0.0), 2),
             "session_count": int(row[2]),
         }
         for row in rows

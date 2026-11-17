@@ -50,3 +50,67 @@ async def test_dashboard_revenue_comes_from_the_shared_earnings_helper(monkeypat
     assert out["all_time"]["revenue_coins"] == 25.0
     assert out["today"]["revenue_coins"] == 4.0
     assert None in calls and any(c is not None for c in calls)
+
+
+def _rows(*rows):
+    r = MagicMock()
+    r.all.return_value = list(rows)
+    return r
+
+
+def _sql(stmt):
+    from sqlalchemy.dialects import postgresql
+
+    return str(stmt.compile(dialect=postgresql.dialect())).lower()
+
+
+@pytest.mark.asyncio
+async def test_overview_today_counts_finished_sessions_like_the_revenue(monkeypatch):
+    """Today's energy and session count use ended_at, the window the revenue
+    figure (sum_completed_session_coins) uses, not started_at."""
+    monkeypatch.setattr(
+        _analytics.payout_service, "sum_completed_session_coins",
+        AsyncMock(return_value=Decimal("0")),
+    )
+    db = AsyncMock()
+    db.execute = AsyncMock(side_effect=[
+        _scalar(1), _scalar(0), _scalar(1), _scalar(1), _scalar("UTC"),
+        _row(1.0, 1), _row(1.0, 1),
+    ])
+    user = MagicMock()
+    user.tenant_id = 7
+    user.role = UserRole.CPO
+
+    await _analytics.cpo_analytics_overview(user=user, db=db)
+
+    today_sql = _sql(db.execute.call_args_list[5].args[0])
+    assert "charging_sessions.ended_at >=" in today_sql
+    assert "charging_sessions.started_at" not in today_sql
+
+
+@pytest.mark.asyncio
+async def test_revenue_chart_nets_refunds_on_the_sessions_own_day():
+    """Mon: a 100-coin session with a 40-coin approved refund -> 60. The
+    refund query groups by the session's day, never the approval day."""
+    from datetime import date
+
+    mon, tue = date(2026, 11, 16), date(2026, 11, 17)
+    db = AsyncMock()
+    db.execute = AsyncMock(side_effect=[
+        _scalar("UTC"),
+        _rows((mon, Decimal("100.00"), 1), (tue, Decimal("30.00"), 2)),
+        _rows((mon, Decimal("40.00"))),
+    ])
+    user = MagicMock()
+    user.tenant_id = 7
+
+    out = await _analytics.cpo_analytics_revenue(user=user, db=db, days=30)
+
+    assert out == [
+        {"date": "2026-11-16", "revenue_coins": 60.0, "session_count": 1},
+        {"date": "2026-11-17", "revenue_coins": 30.0, "session_count": 2},
+    ]
+    refund_sql = _sql(db.execute.call_args_list[2].args[0])
+    assert "session_disputes.status" in refund_sql
+    assert "charging_sessions.started_at" in refund_sql
+    assert "resolved_at" not in refund_sql
