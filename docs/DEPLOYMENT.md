@@ -400,6 +400,18 @@ swappiness file and the disabled OS Config agent were applied on the VM at
 `telemetry_readings` (918 after the last old-style prune) should stop rising
 hourly, and `pkgcache.bin` should stop being rewritten every 10 minutes.
 
+Housekeeping 2026-11-17 (owner approved): removed the 10 finished deploy
+payload folders under `/tmp/amphive-*` (including `amphive-maint` from the
+2026-10-20 logging install) and untagged 11 alias tags:
+`amphive_backend:thin-<sha>` and `amphive_frontend:thin-<sha>` for 2dc5c64,
+825f27e, 6a42265, e7bbcae and ac00d46, plus `amphive_backend:nonroot-ac00d46`.
+Each was a second name for an image that keeps another tag, so the 19 image
+IDs and the disk use (28% of 30 GB) are unchanged. All `pre-*`, `pre-nonroot`
+and `rollback-ac00d46-m0043` tags are kept. To restore a tag:
+`sudo docker tag <kept tag> <removed tag>`. Of the backend tags, only
+`rollback-ac00d46-m0043` and `pre-nonroot` can boot on a database at alembic
+0043 (see "Non-root containers" above); the older `pre-<sha>` tags cannot.
+
 ### Backend dependency lockfile — `backend/requirements.lock.txt`
 
 `backend/Dockerfile` installs `backend/requirements.lock.txt`, a fully-pinned
