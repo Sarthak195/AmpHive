@@ -1,16 +1,20 @@
 /**
- * SessionPowerCurve — the power-over-time curve of one session, drawn as an
+ * SessionPowerCurve: the power-over-time curve of one session, drawn as an
  * inline SVG (no chart library, so driver pages keep recharts out of the
  * first-load bundle).
  *
- * Fetches GET /api/sessions/{id}/telemetry once (server-bucketed to ~120
- * points). With `live` ({ power_w, energy_kwh, at }) it appends points as the
- * client's own telemetry frames arrive instead of refetching. When the session
- * has a kWh limit, cumulative energy is drawn as a thin line against a dashed
- * limit marker.
+ * Fetches GET /api/sessions/{id}/telemetry (server-bucketed to ~120 points).
+ * With `live` ({ power_w, energy_kwh, at }) the series is refetched at most
+ * every 60 s (replacing the server points, which fills any socket gaps) and
+ * the client's own telemetry frames are drawn after the last server point in
+ * between. Live frames carry power only, so the energy line always uses the
+ * server points as its single basis. When the session has a kWh limit,
+ * cumulative energy is drawn as a thin line against a dashed limit marker.
+ * `endedAt` (receipt use): a session that ended seconds ago may still have
+ * readings in the 10 s DB batch flush, so a short curve is refetched once.
  */
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import api from '../api/client';
 import { formatKw, formatKwh, formatDuration } from '../utils/money';
@@ -20,14 +24,17 @@ const W = 320;
 const H = 110;
 const PAD = { l: 4, r: 4, t: 8, b: 4 };
 const MIN_LIVE_GAP_SEC = 5;
-const MAX_POINTS = 720;
+const REFETCH_MS = 60_000;
+const RETRY_WINDOW_MS = 15_000;
+const RETRY_DELAY_MS = 12_000;
+const END_SLACK_SEC = 5;
 
 const line = (pts) => pts.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(' ');
 
-function buildCurve(points, limitKwh) {
+function buildCurve(points, serverPoints, limitKwh) {
   const maxT = Math.max(1, ...points.map((p) => p.t));
   const maxP = Math.max(1, ...points.map((p) => p.power_w));
-  const maxE = Math.max(0, ...points.map((p) => p.energy_kwh || 0));
+  const maxE = Math.max(0, ...serverPoints.map((p) => p.energy_kwh || 0));
   const eTop = limitKwh > 0 ? Math.max(Number(limitKwh), maxE) : 0;
   const iw = W - PAD.l - PAD.r;
   const ih = H - PAD.t - PAD.b;
@@ -41,76 +48,130 @@ function buildCurve(points, limitKwh) {
     maxP,
     power: line(power),
     area,
-    energy: eTop ? line(points.map((p) => [x(p.t), ey(p.energy_kwh || 0)])) : null,
+    energy: eTop && serverPoints.length >= 2
+      ? line(serverPoints.map((p) => [x(p.t), ey(p.energy_kwh || 0)]))
+      : null,
     limitY: eTop ? ey(Number(limitKwh)) : null,
   };
 }
 
-const SessionPowerCurve = ({ sessionId, limitKwh = null, live = null }) => {
-  const [state, setState] = useState({ loading: true, data: null, points: [] });
+const SessionPowerCurve = ({ sessionId, limitKwh = null, live = null, endedAt = null }) => {
+  const [state, setState] = useState({ loading: true, failed: false, data: null, server: [] });
+  const [livePts, setLivePts] = useState([]);
+  const reqRef = useRef(0);
+  const serverLastRef = useRef(-1);
+  const isLive = live != null;
+
+  // Latest request wins; a failure keeps whatever was already drawn.
+  const load = useCallback(async () => {
+    const req = ++reqRef.current;
+    try {
+      const data = await api.get(`/api/sessions/${sessionId}/telemetry`);
+      if (req !== reqRef.current) return null;
+      const server = (data.points || []).map((p) => ({
+        t: p.offset_sec,
+        power_w: p.power_w,
+        peak_w: p.peak_power_w ?? p.power_w,
+        current_a: p.current_a,
+        energy_kwh: p.energy_kwh,
+      }));
+      const lastT = server.length ? server[server.length - 1].t : -1;
+      serverLastRef.current = lastT;
+      setState({ loading: false, failed: false, data, server });
+      // Live frames at or before the last server offset are now covered.
+      setLivePts((prev) => prev.filter((p) => p.t > lastT));
+      return { data, server };
+    } catch {
+      if (req === reqRef.current) setState((prev) => ({ ...prev, loading: false, failed: true }));
+      return null;
+    }
+  }, [sessionId]);
 
   useEffect(() => {
-    let cancelled = false;
-    setState({ loading: true, data: null, points: [] });
+    let timer;
+    serverLastRef.current = -1;
+    setState({ loading: true, failed: false, data: null, server: [] });
+    setLivePts([]);
     if (sessionId == null) return undefined;
-    api
-      .get(`/api/sessions/${sessionId}/telemetry`)
-      .then((data) => {
-        if (cancelled) return;
-        const points = (data.points || []).map((p) => ({
-          t: p.offset_sec,
-          power_w: p.power_w,
-          energy_kwh: p.energy_kwh,
-        }));
-        // Live frames that arrived while the fetch was in flight are kept.
-        const lastT = points.length ? points[points.length - 1].t : -1;
-        setState((prev) => ({
-          loading: false,
-          data,
-          points: [...points, ...prev.points.filter((p) => p.t >= lastT + MIN_LIVE_GAP_SEC)],
-        }));
-      })
-      .catch(() => { if (!cancelled) setState({ loading: false, data: null, points: [] }); });
-    return () => { cancelled = true; };
-  }, [sessionId]);
+    const first = load();
+    if (endedAt) {
+      // Readings reach the DB on a 10 s batch flush: a session that ended
+      // moments ago can still be missing its tail, so look once more.
+      first.then((res) => {
+        if (!res) return;
+        const endMs = new Date(endedAt).getTime();
+        const startMs = new Date(res.data.started_at).getTime();
+        if (!(Date.now() - endMs < RETRY_WINDOW_MS)) return;
+        const last = res.server[res.server.length - 1];
+        const spanSec = (endMs - startMs) / 1000;
+        const short = !last || last.t + (res.data.bucket_seconds || 1) + END_SLACK_SEC < spanSec;
+        if (short) timer = setTimeout(load, RETRY_DELAY_MS);
+      });
+    }
+    return () => {
+      reqRef.current += 1;
+      clearTimeout(timer);
+    };
+  }, [sessionId, endedAt, load]);
+
+  // Live: pull the server series again every minute (a failed fetch retries
+  // on the next tick).
+  useEffect(() => {
+    if (!isLive || sessionId == null) return undefined;
+    const id = setInterval(() => {
+      if (!document.hidden) load();
+    }, REFETCH_MS);
+    return () => clearInterval(id);
+  }, [isLive, sessionId, load]);
 
   const startedMs = state.data?.started_at ? new Date(state.data.started_at).getTime() : null;
   const liveAt = live?.at ?? null;
   const livePower = live?.power_w;
-  const liveEnergy = live?.energy_kwh;
   useEffect(() => {
     if (state.loading || startedMs == null || liveAt == null) return;
     const t = Math.round((liveAt - startedMs) / 1000);
-    if (t < 0 || Number.isNaN(Number(livePower))) return;
-    setState((prev) => {
-      const last = prev.points[prev.points.length - 1];
+    if (t <= serverLastRef.current || Number.isNaN(Number(livePower))) return;
+    setLivePts((prev) => {
+      const last = prev[prev.length - 1];
       if (last && t - last.t < MIN_LIVE_GAP_SEC) return prev;
-      const next = [...prev.points, {
-        t, power_w: Number(livePower) || 0, energy_kwh: Number(liveEnergy) || 0,
-      }];
-      return { ...prev, points: next.length > MAX_POINTS ? next.slice(-MAX_POINTS) : next };
+      return [...prev, { t, power_w: Number(livePower) || 0 }];
     });
-  }, [liveAt, livePower, liveEnergy, startedMs, state.loading]);
+  }, [liveAt, livePower, startedMs, state.loading]);
 
   const limit = limitKwh ?? state.data?.max_kwh ?? null;
+  const { server } = state;
+  const points = useMemo(() => [...server, ...livePts], [server, livePts]);
   const curve = useMemo(
-    () => (state.points.length >= 2 ? buildCurve(state.points, limit) : null),
-    [state.points, limit],
+    () => (points.length >= 2 ? buildCurve(points, server, limit) : null),
+    [points, server, limit],
   );
+  // The real peak (per-bucket maxima / live frames), not the max of averages,
+  // so it matches the receipt's "Peak power" row.
+  const peakW = useMemo(
+    () => Math.max(0, ...server.map((p) => p.peak_w), ...livePts.map((p) => p.power_w)),
+    [server, livePts],
+  );
+  const avgA = useMemo(() => {
+    const amps = server.map((p) => Number(p.current_a)).filter((a) => a > 0);
+    return amps.length ? amps.reduce((a, b) => a + b, 0) / amps.length : null;
+  }, [server]);
 
   if (state.loading) return null;
 
   if (!curve) {
     return (
       <p className="power-curve-empty text-3 text-sm">
-        {state.points.length === 1 || live
-          ? 'Collecting power readings…'
-          : 'No power readings were recorded for this session.'}
+        {state.failed
+          ? 'Power curve unavailable'
+          : points.length === 1 || isLive
+            ? 'Collecting power readings…'
+            : 'No power readings were recorded for this session.'}
       </p>
     );
   }
 
-  const label = `Power over time, peak ${formatKw(curve.maxP)} over ${formatDuration(curve.maxT)}` +
+  const label = `Power over time, peak ${formatKw(peakW)} over ${formatDuration(curve.maxT)}` +
+    (avgA != null ? `, average current ${avgA.toFixed(1)} A` : '') +
     (limit ? `, energy limit ${formatKwh(Number(limit))}` : '');
 
   return (
@@ -124,7 +185,8 @@ const SessionPowerCurve = ({ sessionId, limitKwh = null, live = null }) => {
         )}
       </svg>
       <figcaption className="power-curve-caption text-3 text-xs">
-        <span>Peak <span className="num">{formatKw(curve.maxP)}</span></span>
+        <span>Peak <span className="num">{formatKw(peakW)}</span></span>
+        {avgA != null && <span>Avg <span className="num">{avgA.toFixed(1)} A</span></span>}
         {curve.energy && (
           <span className="power-curve-key">
             Energy vs <span className="num">{formatKwh(Number(limit))}</span> limit (dashed)

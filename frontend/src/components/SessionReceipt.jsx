@@ -131,7 +131,7 @@ const SessionReceipt = () => {
         )}
       </dl>
 
-      {session_id != null && <SessionPowerCurve sessionId={session_id} limitKwh={max_kwh} />}
+      {session_id != null && <SessionPowerCurve sessionId={session_id} limitKwh={max_kwh} endedAt={ended_at} />}
 
       {shortfall_coins > 0 && (
         <p className="receipt-help text-3 text-sm">
