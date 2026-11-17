@@ -134,7 +134,7 @@ def test_every_admin_route_is_admin_only():
     # /api/firmware/images/{filename} deliberately lives in a SEPARATE router
     # (routers/firmware_images.py), not here — it must be reachable without the
     # admin gate — so it is not counted among these admin-only routes.
-    assert len(routes) == 20
+    assert len(routes) == 21
     for route in routes:
         assert route.path.startswith("/api/admin/")
         gates = [
