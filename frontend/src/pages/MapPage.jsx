@@ -29,6 +29,7 @@ import { useConfig } from '../contexts/ConfigContext';
 import usePoll from '../hooks/usePoll';
 import { PageHeader, ErrorState, EmptyState, Skeleton, StatusDot, Money, useToast } from '../components/ui';
 import MapComponent from '../components/MapComponent';
+import NetworkStatus from '../components/NetworkStatus';
 import ReportProblemModal from '../components/ReportProblemModal';
 import PlugReviewsModal from '../components/PlugReviewsModal';
 import { AVAILABILITY_STATES, AVAILABILITY_LABELS, getPlugAvailability } from '../utils/plugAvailability';
@@ -331,6 +332,8 @@ export default function MapPage() {
               </span>
             ))}
           </div>
+
+          <NetworkStatus />
 
           <div className="map-list-body" aria-busy={loading} aria-live="polite">
             {loading ? (

@@ -360,6 +360,7 @@ from backend.routers import (  # noqa: E402
     plugs,
     reservations,
     sessions,
+    status,
 )
 
 app.include_router(auth.router)
@@ -379,6 +380,8 @@ app.include_router(reservations.router)
 # Platform-admin console surface (redesign/ui-v3, 2026-07-21) — appended
 # last, same OpenAPI-order rationale as reservations.
 app.include_router(admin.router)
+# Public network status (feat/f11-status) - appended last, same OpenAPI-order rationale.
+app.include_router(status.router)
 
 import socketio  # noqa: E402
 
