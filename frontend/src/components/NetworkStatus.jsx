@@ -12,13 +12,25 @@ import './NetworkStatus.css';
 const OVERALL_LABEL = {
   operational: 'All systems operational',
   degraded: 'Some chargers unreachable',
+  no_public_chargers: 'No public chargers listed yet',
   down: 'Service down',
 };
+
+// Current hour in the tariff's own timezone (the 24 rates are tenant-local).
+function hourIn(timeZone) {
+  try {
+    return Number(
+      new Intl.DateTimeFormat('en-GB', { hour: '2-digit', hourCycle: 'h23', timeZone }).format(new Date()),
+    );
+  } catch {
+    return new Date().getHours();
+  }
+}
 
 function StatusBody({ data }) {
   const hourly = data.tariff_today?.hourly ?? [];
   const max = Math.max(...hourly, 0.01);
-  const nowHour = new Date().getHours();
+  const nowHour = hourIn(data.tariff_today?.timezone);
   const { gateways, plugs } = data;
   return (
     <div className="net-status-body">

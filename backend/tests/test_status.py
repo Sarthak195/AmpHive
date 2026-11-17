@@ -108,6 +108,7 @@ def test_minute_truncation_and_overall():
     assert status_mod._minute(None) is None
     assert status_mod._overall(1, 1) == "operational"
     assert status_mod._overall(0, 1) == "degraded"
+    assert status_mod._overall(0, 0) == "no_public_chargers"
 
 
 @pytest.mark.asyncio
@@ -153,3 +154,37 @@ async def test_build_payload_is_minimal_and_coarsened():
     assert len(body["tariff_today"]["hourly"]) == 24
     blob = str(body)
     assert "2.9.0" not in blob and "10.0.0.9" not in blob
+
+
+@pytest.mark.asyncio
+async def test_build_with_no_public_plugs_ignores_other_gateways():
+    """A gateway hosting only unmappable plugs must not change status/total,
+    and the gateway query is not even issued without public plugs."""
+    db = AsyncMock()
+    with patch.object(status_mod, "get_public_plugs", AsyncMock(return_value=[])):
+        body = await status_mod._build(db, 1000.0)
+    assert body["status"] == "no_public_chargers"
+    assert body["gateways"]["total"] == 0 and body["gateways"]["online"] == 0
+    assert body["plugs"]["total"] == 0 and body["tariff_today"] is None
+    # Only the SELECT 1 probe ran; no gateway scan keyed off ungrouped plugs.
+    assert db.execute.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_build_gateway_set_is_keyed_to_public_plug_ids():
+    gw = MagicMock(last_seen_at=datetime.now(timezone.utc))
+    scalars = MagicMock()
+    scalars.all.return_value = [gw]
+    result = MagicMock()
+    result.scalars.return_value = scalars
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=result)
+    plug = MagicMock(id=3, status="available", gateway_online=True)
+    plug.name = "Pub A"
+    with patch.object(status_mod, "get_public_plugs", AsyncMock(return_value=[plug])),          patch.object(status_mod, "gateway_is_live", return_value=False),          patch.object(status_mod, "_reachability", AsyncMock(return_value=None)),          patch.object(status_mod, "_tariff_today",
+                      AsyncMock(return_value={"timezone": "UTC", "hourly": []})):
+        body = await status_mod._build(db, 1000.0)
+    assert body["status"] == "degraded"
+    assert body["gateways"] == {"online": 0, "total": 1, "last_seen_at": body["gateways"]["last_seen_at"]}
+    sql = str(db.execute.await_args_list[1].args[0])
+    assert "plugs.id IN" in sql

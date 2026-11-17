@@ -23,7 +23,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, Response
 from fastapi.responses import JSONResponse
-from sqlalchemy import or_, select, text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database.db import get_db
@@ -85,6 +85,8 @@ def _availability_counts(plugs) -> dict:
 
 
 def _overall(gw_online: int, gw_total: int) -> str:
+    if gw_total == 0:
+        return "no_public_chargers"
     return "operational" if gw_online == gw_total else "degraded"
 
 
@@ -144,17 +146,16 @@ async def _build(db: AsyncSession, now: float) -> dict:
     await db.execute(text("SELECT 1"))
     plugs = await get_public_plugs(db=db)
 
-    public_group_ids = (
-        select(ChargerGroup.id).where(ChargerGroup.is_public == True)  # noqa: E712
-        .scalar_subquery()
-    )
-    gateways = (await db.execute(
-        select(Gateway).where(Gateway.id.in_(
-            select(Plug.gateway_id).where(
-                or_(Plug.group_id.is_(None), Plug.group_id.in_(public_group_ids))
-            )
-        ))
-    )).scalars().all()
+    # Same set as the plug list: gateways hosting a plug that is actually
+    # public AND mappable (get_public_plugs applies tenant + coordinate
+    # rules), so an inert gateway no driver can see never moves the headline.
+    gateways = []
+    if plugs:
+        gateways = (await db.execute(
+            select(Gateway).where(Gateway.id.in_(
+                select(Plug.gateway_id).where(Plug.id.in_([p.id for p in plugs]))
+            ))
+        )).scalars().all()
     utc_now = datetime.now(timezone.utc)
     live = [g for g in gateways if gateway_is_live(g, utc_now)]
     seen = [
