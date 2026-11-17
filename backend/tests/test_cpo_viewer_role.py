@@ -320,3 +320,48 @@ async def test_socket_subscribe_refused_for_viewer(monkeypatch):
     emit.assert_awaited_once()
     assert emit.await_args.args[1] == {"detail": "read_only_demo"}
     factory.assert_not_called()
+
+
+# --- Seed script (imported, never run against a database) -----------------
+
+def _seed_db(tenant, existing):
+    results = []
+    for value in (tenant, existing):
+        r = MagicMock()
+        r.scalar_one_or_none.return_value = value
+        results.append(r)
+    db = MagicMock()
+    db.execute = AsyncMock(side_effect=results)
+    db.add = MagicMock()
+    return db
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", [UserRole.DRIVER, UserRole.CPO, UserRole.ADMIN])
+async def test_seed_refuses_to_convert_a_real_account(role):
+    from backend.seed_cpo_viewer import SeedError, upsert_viewer
+
+    existing = _viewer(role=role)
+    db = _seed_db(SimpleNamespace(id=5), existing)
+    with pytest.raises(SeedError):
+        await upsert_viewer(db, 5, "Viewer@AmpHive.test", "Demo")
+    assert existing.role == role
+    db.add.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_seed_creates_a_viewer_and_resets_an_existing_one():
+    from backend.seed_cpo_viewer import upsert_viewer
+
+    db = _seed_db(SimpleNamespace(id=5), None)
+    pw = await upsert_viewer(db, 5, "Viewer@AmpHive.test", "Demo")
+    created = db.add.call_args.args[0]
+    assert created.role == UserRole.CPO_VIEWER and created.tenant_id == 5
+    assert created.email == "viewer@amphive.test" and len(pw) >= 20
+
+    existing = _viewer()
+    existing.hashed_password = "old"
+    db = _seed_db(SimpleNamespace(id=5), existing)
+    pw2 = await upsert_viewer(db, 5, "viewer@amphive.test", "Demo")
+    assert pw2 != pw and existing.hashed_password != "old"
+    assert existing.token_version == 1
