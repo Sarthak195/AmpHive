@@ -137,6 +137,7 @@ const STOP_REASON_PATTERNS = [
   [/overheat|thermal/i, 'Stopped for safety — the plug reported overheating'],
   [/over-current|overcurrent|current cap/i, 'Stopped for safety — the plug drew too much current'],
   [/telemetry lost/i, 'Stopped automatically — connection to the charger was lost'],
+  [/charge complete/i, 'Stopped automatically: the car looked fully charged'],
   [/energy\/duration limit|limit reached/i, 'Stopped automatically — session limit reached'],
 ];
 

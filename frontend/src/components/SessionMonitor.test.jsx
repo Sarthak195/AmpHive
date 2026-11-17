@@ -133,6 +133,21 @@ describe('SessionMonitor — notices', () => {
     expect(screen.getByText(/Live readings paused/)).toBeInTheDocument();
   });
 
+  it('shows the car-looks-full banner once the backend flags charge_full', async () => {
+    useSession.mockReturnValue(baseSession());
+    const { rerender } = await renderMonitor();
+    expect(screen.queryByText(/looks fully charged/)).not.toBeInTheDocument();
+    useSession.mockReturnValue(
+      baseSession({ sessionData: { ...baseData, is_stale: false, power_w: 0, charge_full: true } })
+    );
+    rerender(
+      <MemoryRouter>
+        <SessionMonitor />
+      </MemoryRouter>
+    );
+    expect(screen.getByText(/looks fully charged/)).toBeInTheDocument();
+  });
+
   it('honors the server-side is_stale flag even with a fresh frame timestamp', async () => {
     useSession.mockReturnValue(
       baseSession({ sessionData: { ...baseData, is_stale: true } })
