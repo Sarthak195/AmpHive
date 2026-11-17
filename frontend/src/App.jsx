@@ -73,6 +73,7 @@ const CpoDisputes = lazy(() => import('./pages/cpo/CpoDisputes'));
 const CpoPlugReports = lazy(() => import('./pages/cpo/CpoPlugReports'));
 const CpoPlugPhotos = lazy(() => import('./pages/cpo/CpoPlugPhotos'));
 const CpoSettings = lazy(() => import('./pages/cpo/CpoSettings'));
+const CpoAudit = lazy(() => import('./pages/cpo/CpoAudit'));
 // Admin pages
 const AdminOverview = lazy(() => import('./pages/admin/AdminOverview'));
 const AdminTenants = lazy(() => import('./pages/admin/AdminTenants'));
@@ -233,6 +234,9 @@ const cpoDashboardRoutes = (
     } />
     <Route path="/cpo/plug-photos" element={
       <CpoProtectedRoute><CpoPlugPhotos /></CpoProtectedRoute>
+    } />
+    <Route path="/cpo/audit" element={
+      <CpoProtectedRoute><CpoAudit /></CpoProtectedRoute>
     } />
     <Route path="/cpo/settings" element={
       <CpoProtectedRoute><CpoSettings /></CpoProtectedRoute>

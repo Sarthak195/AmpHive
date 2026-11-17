@@ -60,6 +60,14 @@ const mockApiRoutes = ({ gateways = GATEWAYS, releases = RELEASES } = {}) => {
   api.get.mockImplementation((url) => {
     if (url === '/api/cpo/gateways') return Promise.resolve(gateways);
     if (url === '/api/cpo/firmware-releases') return Promise.resolve(releases);
+    if (url.startsWith('/api/cpo/gateways/aa11bb22cc33/logs')) {
+      return Promise.resolve({
+        total: 1,
+        items: [
+          { id: 5, gateway_id: 'aa11bb22cc33', level: 'error', message: 'E (1) mqtt: lost broker', created_at: '2026-11-17T10:00:00Z' },
+        ],
+      });
+    }
     return Promise.reject(new Error(`unhandled url ${url}`));
   });
 };
@@ -73,6 +81,18 @@ beforeEach(() => {
 });
 
 describe('CpoGateways', () => {
+  it('opens the diagnostics drawer with the gateway logs from the logs endpoint', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText('Basement gateway');
+
+    await user.click(screen.getAllByRole('button', { name: 'Logs' })[0]);
+    expect((await screen.findAllByText('E (1) mqtt: lost broker')).length).toBeGreaterThan(0);
+    const logCalls = api.get.mock.calls.map((c) => c[0]).filter((u) => u.includes('/logs'));
+    expect(logCalls.length).toBeGreaterThan(0);
+    expect(logCalls.every((u) => u.startsWith('/api/cpo/gateways/aa11bb22cc33/logs?'))).toBe(true);
+  });
+
   it('renders the fleet table with status, firmware (behind badge), and plug counts', async () => {
     renderPage();
 

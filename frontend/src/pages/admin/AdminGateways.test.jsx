@@ -67,6 +67,44 @@ beforeEach(() => vi.clearAllMocks());
 afterEach(() => vi.restoreAllMocks());
 
 describe('AdminGateways', () => {
+  it('Logs tab lists cross-tenant firmware logs and narrows by gateway', async () => {
+    api.get.mockImplementation((url) => {
+      if (url.startsWith('/api/admin/gateway-logs') && url.includes('level=error')) {
+        return Promise.resolve({ total: 0, items: [] });
+      }
+      if (url.startsWith('/api/admin/gateway-logs')) {
+        return Promise.resolve({
+          total: 1,
+          items: [
+            {
+              id: 9,
+              gateway_id: 'gw-3',
+              tenant_name: 'EV Express',
+              level: 'warning',
+              message: 'W (5) wifi: weak signal',
+              created_at: '2026-11-17T10:00:00Z',
+            },
+          ],
+        });
+      }
+      return Promise.resolve(GATEWAYS);
+    });
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText('Main Hub');
+
+    await user.click(screen.getByRole('tab', { name: 'Logs' }));
+    expect(await screen.findByText('W (5) wifi: weak signal')).toBeInTheDocument();
+    const logUrls = () => api.get.mock.calls.map((c) => c[0]).filter((u) => u.startsWith('/api/admin/gateway-logs'));
+    expect(logUrls().every((u) => !u.includes('gateway_id='))).toBe(true);
+
+    api.get.mockClear();
+    await user.selectOptions(screen.getByLabelText('Filter by gateway'), 'gw-3');
+    await screen.findByText('W (5) wifi: weak signal');
+    expect(logUrls().length).toBeGreaterThan(0);
+    expect(logUrls().every((u) => u.includes('gateway_id=gw-3'))).toBe(true);
+  });
+
   it('renders the gateway table with all expected columns and data', async () => {
     api.get.mockResolvedValue(GATEWAYS);
     renderPage();

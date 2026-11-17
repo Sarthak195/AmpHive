@@ -23,14 +23,18 @@
  * CpoLayout/TenantContext already own the org name and nav badges — this
  * page fetches only its own gateway list.
  *
+ * Diagnostics: the per-row "Logs" button opens a drawer of the gateway's
+ * forwarded firmware log lines (GatewayLogsPanel, GET .../gateways/{id}/logs).
+ *
  * Data: GET /api/cpo/gateways, POST /api/cpo/gateways/claim (add),
  * GET /api/cpo/firmware-releases
  * (version picker), POST /api/cpo/gateways/{id}/ota.
  */
 
 import { useCallback, useState } from 'react';
-import { Plus, Radio, UploadCloud } from 'lucide-react';
+import { Plus, Radio, ScrollText, UploadCloud } from 'lucide-react';
 import CpoLayout from '../../components/CpoLayout';
+import GatewayLogsPanel from '../../components/GatewayLogsPanel';
 import { PageHeader, DataTable, Modal, ConfirmDialog, StatusDot, useToast } from '../../components/ui';
 import api from '../../api/client';
 import { useAuth } from '../../contexts/AuthContext';
@@ -115,6 +119,9 @@ export default function CpoGateways() {
       setClaimBusy(false);
     }
   };
+
+  // ---- Diagnostics drawer: forwarded firmware logs ----------------------
+  const [logsTarget, setLogsTarget] = useState(null);
 
   // ---- OTA: version picker, then a named confirm step -------------------
   const [otaTarget, setOtaTarget] = useState(null);
@@ -218,22 +225,28 @@ export default function CpoGateways() {
       key: 'actions',
       label: 'Actions',
       render: (gw) => (
-        <button
-          type="button"
-          className="btn btn-quiet btn-sm"
-          disabled={gw.status !== 'online' || gw.plug_count === 0}
-          title={
-            gw.status !== 'online'
-              ? 'Gateway must be online to receive an update'
-              : gw.plug_count === 0
-                ? 'Add a charger to this gateway first'
-                : 'Push a firmware update over the air'
-          }
-          onClick={() => openOta(gw)}
-        >
-          <UploadCloud size={15} aria-hidden="true" />
-          Update firmware
-        </button>
+        <span className="row">
+          <button type="button" className="btn btn-quiet btn-sm" onClick={() => setLogsTarget(gw)}>
+            <ScrollText size={15} aria-hidden="true" />
+            Logs
+          </button>
+          <button
+            type="button"
+            className="btn btn-quiet btn-sm"
+            disabled={gw.status !== 'online' || gw.plug_count === 0}
+            title={
+              gw.status !== 'online'
+                ? 'Gateway must be online to receive an update'
+                : gw.plug_count === 0
+                  ? 'Add a charger to this gateway first'
+                  : 'Push a firmware update over the air'
+            }
+            onClick={() => openOta(gw)}
+          >
+            <UploadCloud size={15} aria-hidden="true" />
+            Update firmware
+          </button>
+        </span>
       ),
     },
   ];
@@ -267,6 +280,16 @@ export default function CpoGateways() {
         }
         collapse
       />
+
+      {/* Diagnostics: forwarded firmware log lines */}
+      <Modal
+        open={Boolean(logsTarget)}
+        onClose={() => setLogsTarget(null)}
+        title={logsTarget ? `Logs: ${logsTarget.name}` : 'Logs'}
+        size="lg"
+      >
+        {logsTarget && <GatewayLogsPanel path={`/api/cpo/gateways/${logsTarget.id}/logs`} />}
+      </Modal>
 
       {/* Add gateway: claim code (primary flow) */}
       <Modal open={claimOpen} onClose={closeClaim} title="Add gateway">
