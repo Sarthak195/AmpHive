@@ -84,6 +84,7 @@ const AdminPlugs = lazy(() => import('./pages/admin/AdminPlugs'));
 const AdminFirmwareReleases = lazy(() => import('./pages/admin/AdminFirmwareReleases'));
 const AdminDisputes = lazy(() => import('./pages/admin/AdminDisputes'));
 const AdminAudit = lazy(() => import('./pages/admin/AdminAudit'));
+const AdminHealth = lazy(() => import('./pages/admin/AdminHealth'));
 
 /** Driver-host "/": Dashboard when signed in, Marketing otherwise. The
     printed-QR deep link `/?plug=<id>` keeps working: anonymous visitors go
@@ -257,6 +258,7 @@ const adminRoutes = (
     <Route path="/admin/firmware-releases" element={<AdminFirmwareReleases />} />
     <Route path="/admin/disputes" element={<AdminDisputes />} />
     <Route path="/admin/audit" element={<AdminAudit />} />
+    <Route path="/admin/health" element={<AdminHealth />} />
   </Route>
 );
 

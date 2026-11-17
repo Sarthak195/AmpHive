@@ -22,6 +22,7 @@ import {
   UploadCloud,
   Scale,
   ScrollText,
+  Activity,
   Zap,
   LogOut,
   Menu,
@@ -42,6 +43,7 @@ const NAV_ITEMS = [
   { path: '/admin/firmware-releases', label: 'Firmware', icon: UploadCloud },
   { path: '/admin/disputes', label: 'Disputes', icon: Scale },
   { path: '/admin/audit', label: 'Audit', icon: ScrollText },
+  { path: '/admin/health', label: 'Health', icon: Activity },
 ];
 
 const navLinkClass = ({ isActive }) => `console-link${isActive ? ' active' : ''}`;
