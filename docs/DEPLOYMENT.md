@@ -475,9 +475,13 @@ backfill and no new index on a hot table.
    npm on the 1 GB VM.
 1. **Rollback image first.** Same rule as "Rollback images and migrations"
    above: before deploying, build and tag a rollback image from the code now in
-   prod plus only the four new migration files (for example
-   `amphive_backend:rollback-<prod sha>-m0047`), with a tree proof. A
-   `pre-<sha>` tag cannot boot on a database at 0047. `0045_cpo_viewer_role`
+   prod plus only the four new migration files, named after the sha being
+   deployed like the `rollback-ac00d46-m0043` precedent
+   (`amphive_backend:rollback-<new sha>-m0047`), with a tree proof, and also
+   tag it `amphive_backend:pre-<new sha>`: the kit's `rollback_backend.sh`
+   only accepts `pre-<sha>` tags, so its standard `rollback_backend.sh <new
+   sha>` then lands on an image that can boot. Any other `pre-<sha>` tag
+   cannot boot on a database at 0047. `0045_cpo_viewer_role`
    downgrade is a no-op (an enum value cannot be dropped), so `alembic
    downgrade` is not a full rollback. If a `cpo_viewer` login exists, set its
    role back to `driver` (owner connection) before rolling back: older code

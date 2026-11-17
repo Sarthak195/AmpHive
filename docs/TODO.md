@@ -29,6 +29,8 @@ been fixed by the 2026-07-08…11 work — see the shipped sections below).*
 - [x] DB-gated enum drift check in `backend/tests/test_migrations.py` (pg_enum labels equal the model enums after `alembic upgrade head`).
 - [ ] F10, before seeding a public viewer: `GET /api/sessions/{id}/invoice` answers a viewer 403 for another tenant's session but 404 for a missing one (existence oracle); apply the tenant check first.
 - [ ] F10, before seeding a public viewer: driver full names are shown unmasked to a viewer, and for a Google signup without a name claim `full_name` is the email's local part, which undoes the masked email (reservations `user_name`, group members `full_name`).
+- [ ] F10, before seeding a public viewer: plug LAN addresses (`local_ip`, private RFC 1918 addresses) are shown to the viewer by `GET /api/cpo/plugs`; hide them if the demo login is shared publicly.
+- [x] OCPP review fix: the reconnect backoff resets after a healthy boot, a StopTransaction the CSMS keeps refusing is closed locally after 3 CallErrors, a Heartbeat CallError keeps the link, and StartTransaction goes before the Charging status; `backend/tests/test_meter_ocpp_contract.py` pins the meter contract.
 - [ ] OCPP bridge: run it against the real `GET /api/me/meter` and a real CSMS once F7 is deployed.
 
 ## 2026-11-17 features wave 1 (built 2026-11-17 on release/2026-11-17-w1, not deployed)
