@@ -19,7 +19,7 @@ pending per-gateway tasks live in a dict created lazily on the manager
 build a manager any which way keep working; MQTTManager.stop() cancels
 whatever is still pending.
 
-[Operator alert] After the driver notice, the same deferred path also calls
+[Operator alert] Right after the commit point (before the driver notice), the same deferred path also calls
 services/operator_alerts.alert_gateway_offline (CPOs + admins, any session
 state, per-gateway cooldown); the matching "back online" follow-up fires on
 `online` only when an offline alert was sent.
@@ -165,9 +165,9 @@ class MQTTStatusMixin:
             if GATEWAY_OFFLINE_NOTIFY_DELAY_SEC > 0:
                 self._schedule_offline_notice(gateway_id, GATEWAY_OFFLINE_NOTIFY_DELAY_SEC)
             else:
+                await operator_alerts.alert_gateway_offline(self.db_session_factory, gateway_id)
                 await self._notify_drivers_gateway_offline(gateway_id)
                 await self._broadcast_plug_connectivity(gateway_id, False)
-                await operator_alerts.alert_gateway_offline(self.db_session_factory, gateway_id)
 
     # -----------------------------------------------------------------------
     # [Offline debounce] Deferred offline side effects, one pending task per
@@ -246,11 +246,15 @@ class MQTTStatusMixin:
                 "Gateway still offline after the notice window - notifying",
                 extra={"gateway_id": gateway_id, "delay_sec": delay},
             )
+            # [Operator alert] Idle or not: CPOs + admins get the bell/push
+            # (and optional email), cooldown-limited per gateway. First, right
+            # after the commit point: an `online` landing during the driver
+            # awaits below must find the alert already armed so its "back
+            # online" follow-up fires instead of leaving "offline" as the last
+            # word.
+            await operator_alerts.alert_gateway_offline(self.db_session_factory, gateway_id)
             await self._notify_drivers_gateway_offline(gateway_id)
             await self._broadcast_plug_connectivity(gateway_id, False)
-            # [Operator alert] Idle or not: CPOs + admins get the bell/push
-            # (and optional email), cooldown-limited per gateway.
-            await operator_alerts.alert_gateway_offline(self.db_session_factory, gateway_id)
         except Exception:
             logger.exception(f"Deferred offline notice failed for gateway {gateway_id}")
         finally:

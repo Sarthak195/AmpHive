@@ -206,3 +206,155 @@ async def test_persist_gateway_event_alerts_operators():
         mgr.db_session_factory, "gw-1", None, "UNAUTHORIZED_ON", "critical", "x"
     )
     MQTTManager._instance = None
+
+
+# ---------------------------------------------- cooldown re-check (fix round) --
+
+@pytest.mark.asyncio
+async def test_short_outage_then_long_outage_is_reported_at_cooldown_expiry(mocks, monkeypatch):
+    """offline -> online (10 min) -> offline again inside the cooldown and
+    down for good: the second offline alert is suppressed, so at cooldown
+    expiry a "Gateway still offline" must go out, not leave "back online" as
+    the operator's last message."""
+    notify_mock, _, _ = mocks
+    clock = [0.0]
+    monkeypatch.setattr(oa, "_now", lambda: clock[0])
+    sleeps = []
+
+    async def fake_sleep(sec):
+        sleeps.append(sec)
+
+    monkeypatch.setattr(oa.asyncio, "sleep", fake_sleep)
+    still_down = AsyncMock(return_value=True)
+    monkeypatch.setattr(oa, "_is_offline", still_down)
+
+    await oa.alert_gateway_offline(MagicMock(), "gw-1")  # t=0
+    clock[0] = 600
+    await oa.alert_gateway_online(MagicMock(), "gw-1")
+    clock[0] = 1200
+    await oa.alert_gateway_offline(MagicMock(), "gw-1")  # suppressed
+    titles = [c.args[2] for c in notify_mock.await_args_list]
+    assert titles == ["Gateway offline"] * 2 + ["Gateway back online"] * 2
+
+    await oa.alert_gateway_offline(MagicMock(), "gw-1")  # still one re-check only
+    task = oa._rechecks["gw-1"]
+    await task
+    assert sleeps == [10800 - 1200]
+    titles = [c.args[2] for c in notify_mock.await_args_list]
+    assert titles[-2:] == ["Gateway still offline"] * 2
+    assert "gw-1" not in oa._rechecks
+    # The follow-up is armed again for the new offline alert.
+    await oa.alert_gateway_online(MagicMock(), "gw-1")
+    assert notify_mock.await_args_list[-1].args[2] == "Gateway back online"
+
+
+@pytest.mark.asyncio
+async def test_recheck_silent_when_gateway_recovered_or_already_alerted(mocks, monkeypatch):
+    notify_mock, _, _ = mocks
+    clock = [0.0]
+    monkeypatch.setattr(oa, "_now", lambda: clock[0])
+    monkeypatch.setattr(oa.asyncio, "sleep", AsyncMock())
+
+    await oa.alert_gateway_offline(MagicMock(), "gw-1")
+    await oa.alert_gateway_online(MagicMock(), "gw-1")
+    notify_mock.reset_mock()
+    clock[0] = 100
+    await oa.alert_gateway_offline(MagicMock(), "gw-1")  # suppressed, re-check armed
+    monkeypatch.setattr(oa, "_is_offline", AsyncMock(return_value=False))
+    await oa._rechecks["gw-1"]
+    notify_mock.assert_not_awaited()  # back online by then
+
+    # An unanswered offline alert needs no re-check at all.
+    await oa.alert_gateway_offline(MagicMock(), "gw-2")
+    clock[0] = 200
+    await oa.alert_gateway_offline(MagicMock(), "gw-2")
+    assert "gw-2" not in oa._rechecks
+
+
+@pytest.mark.asyncio
+async def test_recipients_query_filters_cpo_of_tenant_and_admins(monkeypatch):
+    """_recipients is the only real SQL here: check the filters it builds."""
+    from backend.database.models import UserRole
+
+    class _Res:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def scalar_one_or_none(self):
+            return self._rows[0]
+
+        def scalars(self):
+            return self
+
+        def all(self):
+            return self._rows
+
+    stmts = []
+
+    class _S:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def execute(self, stmt):
+            stmts.append(stmt)
+            return _Res([42]) if len(stmts) == 1 else _Res([7, 8])
+
+    ids = await oa._recipients(_S, "gw-1", include_admins=True, exclude_active_drivers=True)
+    assert ids == [7, 8]
+    params = list(stmts[1].compile().params.values())
+    assert UserRole.CPO in params and UserRole.ADMIN in params and 42 in params
+    assert "NOT IN" in str(stmts[1]).upper()
+
+    stmts.clear()
+    await oa._recipients(_S, "gw-1", include_admins=False)
+    assert UserRole.ADMIN not in stmts[1].compile().params.values()
+    assert "NOT IN" not in str(stmts[1]).upper()
+
+
+@pytest.mark.asyncio
+async def test_online_status_calls_alert_gateway_online():
+    from backend.database.models import GatewayStatus
+
+    MQTTManager._instance = None
+    gw = MagicMock()
+    gw.status = GatewayStatus.OFFLINE
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = gw
+    mgr = MQTTManager(db_session_factory=lambda: _Session(result))
+    mgr._republish_off_for_orphaned_plugs = AsyncMock()
+    mgr._publish_roster_for_gateway = AsyncMock()
+    mgr._broadcast_plug_connectivity = AsyncMock()
+    with patch.object(oa, "alert_gateway_online", AsyncMock()) as alert:
+        await mgr._persist_gateway_status("gw-1", "online")
+    alert.assert_awaited_once_with(mgr.db_session_factory, "gw-1")
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_immediate_offline_path_alerts_operators_before_driver_notice(monkeypatch):
+    """delay<=0 path: operator alert fires, and ahead of the driver awaits so
+    a racing `online` finds the follow-up armed."""
+    import backend.services.mqtt_manager as mm
+    from backend.database.models import GatewayStatus
+
+    monkeypatch.setattr(mm, "GATEWAY_OFFLINE_NOTIFY_DELAY_SEC", 0)
+    MQTTManager._instance = None
+    gw = MagicMock()
+    gw.status = GatewayStatus.ONLINE
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = gw
+    mgr = MQTTManager(db_session_factory=lambda: _Session(result))
+    order = []
+    mgr._notify_drivers_gateway_offline = AsyncMock(side_effect=lambda *_: order.append("drivers"))
+    mgr._broadcast_plug_connectivity = AsyncMock()
+
+    async def fake_alert(*_a):
+        order.append("operators")
+
+    with patch.object(oa, "alert_gateway_offline", fake_alert):
+        await mgr._persist_gateway_status("gw-1", "offline")
+    assert order == ["operators", "drivers"]
+    MQTTManager._instance = None
