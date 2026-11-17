@@ -9,7 +9,9 @@
  *                      rate line from /api/plugs/{id}/tariff-preview (hidden
  *                      on fetch failure — never the global config rate).
  *   - notices        — .banner rows: stale telemetry, gateway alarms
- *                      (eventTypeCopy), low balance (with an Add credit link).
+ *                      (eventTypeCopy), low balance (with an Add credit link),
+ *                      car looks full (telemetry frame charge_full, set by the
+ *                      backend's charge-complete detection).
  *   - limit target   — progress toward the auto-stop target + inline editor
  *                      (PATCH limits via SessionContext.updateLimits).
  *   - stop           — ConfirmDialog stating the kWh/₹ consequence.
@@ -182,6 +184,12 @@ const SessionMonitor = () => {
   );
   const recentAlarm = latestAlarm && latestAlarm.severity !== 'info' ? latestAlarm : null;
 
+  // [Charge complete] The backend saw the car's draw stay near zero long
+  // enough to call it full (backend/services/mqtt/charge_full.py). The flag is
+  // sticky for the session, so hide the banner if the car clearly resumed
+  // charging (200 W = the backend's default CHARGE_FULL_ACTIVE_W).
+  const chargeFull = isActive && sessionData?.charge_full === true && powerW < 200;
+
   // Ring progress toward the auto-stop target — the backend stops at whichever
   // limit trips first, so show the nearer of the two. No limit → indeterminate.
   const limitMaxKwh = focusedLimits?.max_kwh;
@@ -317,8 +325,16 @@ const SessionMonitor = () => {
       )}
 
       {/* Notices — only what's currently true. */}
-      {(isStale || recentAlarm || lowBalance) && (
+      {(isStale || recentAlarm || lowBalance || chargeFull) && (
         <div className="session-notices" aria-live="polite">
+          {chargeFull && (
+            <div className="banner banner-info">
+              <p>
+                <strong>Your car looks fully charged.</strong> Its power draw has stayed near
+                zero. Stop charging to free the plug.
+              </p>
+            </div>
+          )}
           {isStale && (
             <div className="banner banner-warn">
               <p>

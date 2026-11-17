@@ -177,6 +177,9 @@ class SessionStartRequest(BaseModel):
     # which the firmware reads unsafely).
     max_duration_seconds: Optional[int] = Field(default=None, gt=0, le=86400)
     max_kwh: Optional[float] = Field(default=None, gt=0, le=100.0)
+    # [Charge complete] Opt-in: stop the session once the car looks full
+    # (services/mqtt/charge_full.py). Omitted/false = only notify.
+    auto_stop_when_full: bool = False
 
 
 class QueueChargeRequest(BaseModel):
@@ -188,6 +191,8 @@ class QueueChargeRequest(BaseModel):
     plug_id: int
     max_duration_seconds: Optional[int] = Field(default=None, gt=0, le=86400)
     max_kwh: Optional[float] = Field(default=None, gt=0, le=100.0)
+    # [Charge complete] Carried to the auto-started session.
+    auto_stop_when_full: bool = False
     # [Scheduled start] Set = "start at this instant" on a POWERED plug instead
     # of the outage queue. Must carry a UTC offset: a naive value would be read
     # as UTC (the C12 bug class), so the client converts the tenant wall-clock

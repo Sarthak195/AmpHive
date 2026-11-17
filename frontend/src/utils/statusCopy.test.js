@@ -55,6 +55,9 @@ describe('txTypeLabel', () => {
 
 describe('stopReasonCopy', () => {
   it('maps the backend finalize reasons to friendly copy', () => {
+    expect(stopReasonCopy('auto-stopped: charge complete')).toBe(
+      'Stopped automatically: the car looked fully charged'
+    );
     expect(stopReasonCopy('auto-stopped: wallet balance exhausted')).toBe(
       'Stopped automatically — charging credit used up'
     );

@@ -143,6 +143,30 @@ def test_ramp_reaches_full_target_after_ramp_completes():
     assert payload["watts"] == pytest.approx(3600.0)
 
 
+def _charging(plug):
+    plug._session_start = 1000.0
+    plug._last_tick = 1000.0
+    plug.session_active = True
+    return plug
+
+
+def test_drop_to_zero_after_reports_zero_watts_with_the_relay_still_on():
+    plug = _charging(_plug(watts=3600.0, drop_after_s=60.0))
+    before, _ = plug.tick_and_build_telemetry(1059.0, 0.0)
+    after, _ = plug.tick_and_build_telemetry(1061.0, 0.0)
+    assert before["watts"] == pytest.approx(3600.0)
+    assert after["watts"] == 0.0
+    assert after["relay"] is True and after["status"] == "occupied"
+
+
+def test_taper_after_falls_linearly_to_zero():
+    plug = _charging(_plug(watts=3600.0, taper_after_s=60.0))
+    half, _ = plug.tick_and_build_telemetry(1000.0 + 60 + fake_plug.TAPER_SECONDS / 2, 0.0)
+    done, _ = plug.tick_and_build_telemetry(1000.0 + 60 + fake_plug.TAPER_SECONDS + 1, 0.0)
+    assert half["watts"] == pytest.approx(1800.0)
+    assert done["watts"] == 0.0 and done["relay"] is True
+
+
 # ---------------------------------------------------------------------------
 # PlugSim — ON / OFF / SET_LIMITS
 # ---------------------------------------------------------------------------

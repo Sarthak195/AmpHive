@@ -561,6 +561,13 @@ class ChargingSession(Base):
     energy_counter_last_raw_kwh: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     energy_reset_offset_kwh: Mapped[float] = mapped_column(Float, default=0.0, server_default="0", nullable=False)
 
+    # [Charge complete] Driver opt-in (start request or queued charge): when the
+    # telemetry path decides the car looks full (services/mqtt/charge_full.py),
+    # finalize through the same finalize_charging_session call a driver stop
+    # makes. NULL/false = off: the driver is only told. Alembic revision
+    # 0044_session_auto_stop_full.
+    auto_stop_when_full: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+
     # Hot-path composite indexes (Alembic revision 0024_session_ledger_indexes):
     # plug_id/status backs "is this plug's session still active", user_id/status
     # backs a driver's active/past sessions, tenant_id/started_at backs CPO
@@ -1728,6 +1735,9 @@ class QueuedCharge(Base):
     # Linked once the reaper starts the session; SET NULL keeps the queue
     # history row if the session is later deleted.
     started_session_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("charging_sessions.id", ondelete="SET NULL"), nullable=True)
+    # [Charge complete] Carried onto the session the reaper starts
+    # (ChargingSession.auto_stop_when_full). Migration 0044_session_auto_stop_full.
+    auto_stop_when_full: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
 
     __table_args__ = (
         # "At most one WAITING queued charge per (driver, plug)" as a DB

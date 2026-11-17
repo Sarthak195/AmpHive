@@ -7,6 +7,7 @@ from typing import Callable, Dict, Optional
 import paho.mqtt.client as mqtt
 
 from backend.services.mqtt.alarms import MQTTAlarmMixin
+from backend.services.mqtt.charge_full import ChargeFullDetector
 from backend.services.mqtt.commands import MQTTCommandMixin
 from backend.services.mqtt.connection import MQTTConnectionMixin
 from backend.services.mqtt.discovery import MQTTDiscoveryMixin
@@ -114,6 +115,21 @@ UNMETERED_ALERT_COOLDOWN_SEC = float(os.getenv("UNMETERED_ALERT_COOLDOWN_SEC", "
 # peak_power_w x (ended_at - its last frame + this slack) instead of reporting
 # it as unmetered. See _session_tail_kwh in services/mqtt/telemetry.py.
 UNMETERED_SESSION_TAIL_SLACK_SEC = float(os.getenv("UNMETERED_SESSION_TAIL_SLACK_SEC", "15"))
+
+# [Charge complete] "The car looks fully charged" detection on the telemetry
+# path (services/mqtt/charge_full.py). A session must first have drawn at least
+# CHARGE_FULL_ACTIVE_W once (its persisted peak_power_w): 200 W sits far above
+# an EVSE's standby/pilot draw (a few watts) and far below the smallest real AC
+# charge (6 A x 230 V, about 1.4 kW), so a car that never really started
+# charging can never look "full". Then, once CHARGE_FULL_GRACE_MIN have passed
+# since the session start (cars often pause while they handshake), power must
+# stay below CHARGE_FULL_IDLE_W (30 W: above standby draw and the P110's noise
+# floor, below any real charging) for CHARGE_FULL_MINUTES of sample time.
+# `or` defaults so an empty compose passthrough keeps the default.
+CHARGE_FULL_ACTIVE_W = float(os.getenv("CHARGE_FULL_ACTIVE_W") or "200")
+CHARGE_FULL_IDLE_W = float(os.getenv("CHARGE_FULL_IDLE_W") or "30")
+CHARGE_FULL_GRACE_MIN = float(os.getenv("CHARGE_FULL_GRACE_MIN") or "5")
+CHARGE_FULL_MINUTES = float(os.getenv("CHARGE_FULL_MINUTES") or "10")
 
 # [Opt-in charging limits] Charging limits (max_duration_seconds / max_kwh)
 # are opt-in: a session with no explicit limit charges until the driver (or a
@@ -233,6 +249,9 @@ class MQTTManager(
         # re-fire one alert; the underlying GatewayEvent audit trail and the
         # persisted plug.last_*_energy_kwh baseline stay exact either way).
         self._unmetered_alert_cooldown: Dict[int, float] = {}
+        # [Charge complete] Per-plug low-draw state (services/mqtt/charge_full.py).
+        # In memory only: a restart clears it, which only delays detection.
+        self._charge_full = ChargeFullDetector()
 
         self.client = mqtt.Client(client_id="amphive_backend_server", callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
 

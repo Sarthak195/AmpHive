@@ -125,7 +125,7 @@ async def test_session_id_parsed_and_forwarded_to_persist(reported_sid, expected
 
     async def fake_persist(gateway_id, plug_id, watts, kwh, session_id=None,
                            sample=None, relay_on=False, is_offline=False,
-                           today_kwh=None, month_kwh=None):
+                           today_kwh=None, month_kwh=None, **_kw):
         captured.update(gateway_id=gateway_id, plug_id=plug_id, watts=watts,
                         kwh=kwh, session_id=session_id, is_offline=is_offline)
 
@@ -158,7 +158,7 @@ async def test_handler_forwards_is_offline_for_resync_frame():
 
     async def fake_persist(gateway_id, plug_id, watts, kwh, session_id=None,
                            sample=None, relay_on=False, is_offline=False,
-                           today_kwh=None, month_kwh=None):
+                           today_kwh=None, month_kwh=None, **_kw):
         captured.update(session_id=session_id, is_offline=is_offline)
 
     mgr._persist_telemetry = fake_persist
@@ -1113,7 +1113,7 @@ async def test_kwh_at_the_plausible_ceiling_is_not_dropped():
 
     async def fake_persist(gateway_id, plug_id, watts, kwh, session_id=None,
                            sample=None, relay_on=False, is_offline=False,
-                           today_kwh=None, month_kwh=None):
+                           today_kwh=None, month_kwh=None, **_kw):
         persists.append(kwh)
 
     mgr._persist_telemetry = fake_persist
@@ -1150,7 +1150,7 @@ async def test_implausible_kwh_frame_does_not_block_a_following_normal_frame():
 
     async def fake_persist(gateway_id, plug_id, watts, kwh, session_id=None,
                            sample=None, relay_on=False, is_offline=False,
-                           today_kwh=None, month_kwh=None):
+                           today_kwh=None, month_kwh=None, **_kw):
         persists.append(kwh)
 
     mgr._persist_telemetry = fake_persist
