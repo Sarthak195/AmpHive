@@ -1,0 +1,15 @@
+/* ApiTokens: layout only (identity comes from tokens/primitives). */
+
+/* The one-time token: long and unbroken, so let it wrap anywhere instead of
+   pushing the card wider than a phone screen. */
+.api-token-secret {
+  display: block;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
+.api-token-list {
+  display: grid;
+  gap: var(--sp-3);
+  margin-top: var(--sp-2);
+}

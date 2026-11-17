@@ -5,7 +5,8 @@
  * NotificationBell's footer per the redesign contract), a driver-only
  * link out to the host console, "Log out everywhere" (Security card; the
  * normal Log out only signs out this device), and the self-service data
- * rights ("Your data": export + account closure).
+ * rights ("Your data": export + account closure), and personal read-only
+ * API tokens for Home Assistant / evcc (components/ApiTokens.jsx, F7).
  *
  * Why the data-rights controls live HERE and not behind an email request:
  * the Privacy Policy promises the user can get a copy of their data and
@@ -27,6 +28,7 @@ import {
   Download,
   Trash2,
 } from 'lucide-react';
+import ApiTokens from '../components/ApiTokens';
 import LogoutEverywhere from '../components/LogoutEverywhere';
 import PageHeader from '../components/ui/PageHeader';
 import Skeleton from '../components/ui/Skeleton';
@@ -393,6 +395,8 @@ export default function Account() {
             </div>
           )}
         </section>
+
+        <ApiTokens />
 
         {user?.role === 'driver' && (
           <section className="card">
