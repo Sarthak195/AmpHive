@@ -25,6 +25,11 @@ Interactive docs: `http://<host>:8000/docs`.
   describes the whole filtered set, never the page.
 - **CORS:** explicit allowlist (localhost dev origins, `amphive.app`, `cpo.amphive.app`) —
   locked down 2026-07-06.
+- **2026-11-17 (`release/2026-11-17-w2`):** routers now also include
+  `status.py` (F11) and `tokens.py` (F7, `/api/me/tokens*`, `/api/me/meter`);
+  the promo routes live in `cpo/_promos.py` and `payments.py`. A grep finds
+  149 route decorators under `backend/routers/`; the per-router breakdown
+  below is the 2026-08 snapshot.
 - **105 `@router` route decorators total** across 10 routers (see Swagger
   `/docs` for the live, authoritative list): admin (10), auth (6), cpo (48),
   groups (3), notifications (6), payments (4), plugs (7),

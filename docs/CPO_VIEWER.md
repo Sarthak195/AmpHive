@@ -40,7 +40,8 @@ would have failed open on any forgotten route.
 5. **Privacy.** `routers/cpo/_common.redact_for` is the one helper that masks
    emails (`d***@example.com`) and phone numbers for a viewer, in whole fields
    and inside free text: sessions list and CSV, disputes, audit log (actor
-   and detail), group members, reservations, top-ups, plug reports. A private
+   and detail), group members, reservations, top-ups, plug reports, promo
+   codes (`created_by_email` and `note`, added at the wave 2 merge). A private
    group's `access_code` is never returned to a viewer (it is a credential).
 
 `backend/tests/test_cpo_viewer_role.py` walks every route the app serves and

@@ -464,14 +464,25 @@ from `0043_email_ci_unique` through `0044_session_auto_stop_full`,
 transaction. All four are additive and idempotent (IF NOT EXISTS), with no
 backfill and no new index on a hot table.
 
+0. **Path.** The deploy kit's thin-layer script refuses
+   `backend/migrations/versions/*`, so ship it on the migration path the
+   2026-11-16 `0043` deploy used (IMPLEMENTATION_STATUS.md §0c): take a DB
+   backup, tag the rollback image (step 1), build the backend layer with the
+   merged source including `0044` to `0047`, `up -d backend` (`init_db` runs
+   the upgrade at boot), verify `/api/health`, `alembic_version` ==
+   `0047_promo_codes` and RestartCount 0, then ship the frontend as the usual
+   dist-only thin layer. `deploy.ps1` also works but rebuilds the frontend with
+   npm on the 1 GB VM.
 1. **Rollback image first.** Same rule as "Rollback images and migrations"
    above: before deploying, build and tag a rollback image from the code now in
    prod plus only the four new migration files (for example
    `amphive_backend:rollback-<prod sha>-m0047`), with a tree proof. A
    `pre-<sha>` tag cannot boot on a database at 0047. `0045_cpo_viewer_role`
    downgrade is a no-op (an enum value cannot be dropped), so `alembic
-   downgrade` is not a full rollback. If a `cpo_viewer` login exists, disable
-   or delete it before rolling back, since older code does not know the role.
+   downgrade` is not a full rollback. If a `cpo_viewer` login exists, set its
+   role back to `driver` (owner connection) before rolling back: older code
+   does not know the enum value, and disabling the account leaves the value on
+   the row (untested either way).
 2. **Backend and frontend ship together** (F10 viewer UI, F1 opt-in toggle,
    F7 token panel, F12 promo card and wallet redeem). An old frontend with the
    new backend is harmless (the server still refuses viewer writes) but hides

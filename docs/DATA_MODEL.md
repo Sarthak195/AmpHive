@@ -396,9 +396,10 @@ full column list of each:
   `idx_promo_redemptions_code_user` (`code_id`, `user_id`). Limits are
   COUNT(*) of these rows, taken under the `promo_codes` row lock.
 
-The live schema is now **35 tables** as of `0047_promo_codes` (ORM
-`__tablename__` count, rechecked 2026-11-17; the earlier "26" had drifted, and
-32 is the count before wave 2), all applied via Alembic per §4 below.
+The ORM declares **35 tables** as of `0047_promo_codes` (`__tablename__`
+count, rechecked 2026-11-17; the earlier "26" had drifted). Prod, at
+`0043_email_ci_unique`, has 32; it reaches 35 once wave 2's migrations are
+applied. All are applied via Alembic per §4 below.
 
 ## 3. Relationships
 
@@ -432,7 +433,7 @@ joined via `access_code`.
   arrived via `0005_gateway_events` (2026-07-10), `audit_logs` via
   `0007_audit_log` (2026-07-12), and `notifications` + `push_subscriptions`
   via `0008_notifications` (2026-07-11, renumbered from 0007 at merge); it's
-  **35 tables** as of `0047_promo_codes`; see "Tables added since" in §2 above for the rest.)
+  **35 tables** once `0047_promo_codes` is applied (32 at `0043`); see "Tables added since" in §2 above for the rest.)
 - **Wave 2 chain (2026-11-17, `release/2026-11-17-w2`, not deployed).**
   `0043_email_ci_unique` -> `0044_session_auto_stop_full` (two nullable
   booleans, IF NOT EXISTS) -> `0045_cpo_viewer_role` (enum value, downgrade is

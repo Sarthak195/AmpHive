@@ -21,7 +21,7 @@ Branch `release/2026-11-17-w2`, cut from `release/2026-11-17-w1` at `42f6c85` (w
 | F12 promo codes | CPO issues, lists and disables codes on the Earnings page; drivers redeem on the Wallet page. Funded from the tenant's offline top-up pool, checked at redemption; no pool reservation, no referral credit. The `cpo_topup` ledger label is now "Credit added by operator" (cash and promo credits share the type). | Migration `0047_promo_codes`. Optional `PROMO_REDEEM_RATE_LIMIT`, `PROMO_REDEEM_ACCOUNT_RATE_LIMIT`. |
 | OCPP 1.6J bridge | `tools/ocpp_bridge`, laptop-side, read-only: presents each plug as a virtual OCPP charge point (status, transactions, meter values) to any OCPP central system. Built and unit-tested against a fake CSMS and a fake meter API; not yet run against the real `GET /api/me/meter` or a real CSMS. Every CSMS command is refused. See [OCPP_BRIDGE.md](OCPP_BRIDGE.md). | Nothing to deploy. Needs F7 live first. |
 
-Deploy: this is a migration deploy (0043 to 0047 in one boot), not the wave 1 thin-layer-only path. Tag a rollback image first, then ship backend and frontend together. Details in [DEPLOYMENT.md](DEPLOYMENT.md) "Features wave 2".
+Deploy: this is a migration deploy (0043 to 0047 in one boot), so the deploy kit's thin-layer script (which refuses `backend/migrations/versions/*`) does not apply as is. Use the migration path the 0c batch used for 0043: DB backup, rollback image tagged first, backend layer carrying the four migration files (applied at boot by `init_db`), then the frontend dist-only thin layer; backend and frontend ship together. No manual VM step is required. Details in [DEPLOYMENT.md](DEPLOYMENT.md) "Features wave 2".
 
 ---
 
