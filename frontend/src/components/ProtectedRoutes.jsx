@@ -2,7 +2,8 @@
  * Route guards (extracted from App.jsx so they can be unit-tested).
  *
  * ProtectedRoute      — requires a signed-in user; otherwise → /login.
- * CpoProtectedRoute   — requires the 'cpo' or 'admin' role; authenticated
+ * CpoProtectedRoute   — requires the 'cpo', 'admin' or read-only 'cpo_viewer'
+ *                       role (utils/roles.js hasCpoConsole); authenticated
  *                       non-CPOs → /cpo (setup/onboarding page); anonymous
  *                       users → /login.
  * AdminProtectedRoute — requires the 'admin' role; authenticated non-admins
@@ -17,6 +18,7 @@
 
 import { Navigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
+import { hasCpoConsole } from '../utils/roles';
 
 export const ProtectedRoute = ({ children }) => {
   const { user } = useAuth();
@@ -33,7 +35,7 @@ export const CpoProtectedRoute = ({ children }) => {
   if (!user) {
     return <Navigate to="/login" replace state={{ from: location }} />;
   }
-  if (user.role !== 'cpo' && user.role !== 'admin') {
+  if (!hasCpoConsole(user)) {
     return <Navigate to="/cpo" replace />;
   }
   return children;

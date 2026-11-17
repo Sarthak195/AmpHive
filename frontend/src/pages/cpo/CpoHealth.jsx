@@ -304,7 +304,7 @@ function CpoHealthContent() {
         return (
           <span className="row health-row-actions">
             {!ev.acknowledged && (
-              <button
+              <button data-write
                 type="button"
                 className="btn btn-quiet btn-sm"
                 disabled={ackBusy === ev.id}
@@ -314,7 +314,7 @@ function CpoHealthContent() {
               </button>
             )}
             {isMaintFault && !inMaintenance && (
-              <button
+              <button data-write
                 type="button"
                 className="btn btn-quiet btn-sm"
                 disabled={maintBusy === ev.plug_id}
@@ -324,7 +324,7 @@ function CpoHealthContent() {
               </button>
             )}
             {isMaintFault && inMaintenance && (
-              <button
+              <button data-write
                 type="button"
                 className="btn btn-quiet btn-sm"
                 disabled={maintBusy === ev.plug_id}
@@ -353,7 +353,7 @@ function CpoHealthContent() {
             {maintenancePlugs.map((p) => (
               <li key={p.id} className="chip health-strip-chip">
                 <span>{p.name}</span>
-                <button
+                <button data-write
                   type="button"
                   className="btn btn-quiet btn-sm"
                   disabled={maintBusy === p.id}
@@ -415,7 +415,7 @@ function CpoHealthContent() {
           <button type="button" className="btn btn-quiet btn-sm" onClick={() => setSelectedIds(new Set())}>
             Clear selection
           </button>
-          <button type="button" className="btn btn-primary btn-sm" disabled={bulkBusy} onClick={acknowledgeSelected}>
+          <button data-write type="button" className="btn btn-primary btn-sm" disabled={bulkBusy} onClick={acknowledgeSelected}>
             {bulkBusy ? 'Acknowledging…' : 'Acknowledge selected'}
           </button>
         </div>

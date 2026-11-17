@@ -20,6 +20,7 @@ import {
   BatteryCharging,
   CalendarClock,
   ExternalLink,
+  Eye,
   FileText,
   Flag,
   Image,
@@ -41,6 +42,7 @@ import { useAuth } from '../contexts/AuthContext';
 import { TenantProvider, useTenant } from '../contexts/TenantContext';
 import useTheme from '../hooks/useTheme';
 import { driverOrigin } from '../utils/appHost';
+import { isReadOnlyViewer } from '../utils/roles';
 import NotificationBell from './NotificationBell';
 import CpoAlerts from './CpoAlerts';
 import SiteFooter from './SiteFooter';
@@ -111,6 +113,9 @@ const CpoLayoutInner = ({ children }) => {
   const [isMobile, setIsMobile] = useState(() => window.matchMedia(MOBILE_QUERY).matches);
   const { pathname } = useLocation();
   const { user, logout } = useAuth();
+  // [F10] Read-only demo viewer: banner, and every [data-write] control in
+  // the page is hidden by .console-readonly (CpoLayout.css).
+  const readOnly = isReadOnlyViewer(user);
   const { profile, counts } = useTenant();
   const sidebarRef = useRef(null);
   const menuButtonRef = useRef(null);
@@ -220,7 +225,15 @@ const CpoLayoutInner = ({ children }) => {
           <NotificationBell />
         </header>
 
-        <main className="console-main">
+        <main className={`console-main${readOnly ? ' console-readonly' : ''}`}>
+          {readOnly && (
+            <div className="console-readonly-banner" role="status">
+              <Eye size={16} aria-hidden="true" />
+              <span>
+                <strong>Read-only demo.</strong> Look around freely; changes are turned off.
+              </span>
+            </div>
+          )}
           <CpoAlerts />
           {children ?? <Outlet />}
         </main>

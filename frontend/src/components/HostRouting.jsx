@@ -7,7 +7,7 @@
  *                    "moved" note in the meantime (also what tests assert on,
  *                    since jsdom can't actually navigate).
  * CpoLanding       — the CPO host's "/" route: anonymous → /login; admin →
- *                    /admin; cpo → /cpo/dashboard; a driver-role login gets
+ *                    /admin; cpo or cpo_viewer → /cpo/dashboard; a driver-role login gets
  *                    a clear "not an operator account" message with links to
  *                    the driver origin and to the /cpo become-a-host flow.
  */
@@ -17,6 +17,7 @@ import { Navigate, useLocation, Link } from 'react-router-dom';
 import { UserX } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { driverOrigin } from '../utils/appHost';
+import { hasCpoConsole } from '../utils/roles';
 
 export const ExternalRedirect = ({ origin }) => {
   const location = useLocation();
@@ -43,7 +44,7 @@ export const CpoLanding = () => {
   if (user.role === 'admin') {
     return <Navigate to="/admin" replace />;
   }
-  if (user.role === 'cpo') {
+  if (hasCpoConsole(user)) {
     return <Navigate to="/cpo/dashboard" replace />;
   }
   // Driver-role account on the operator portal.

@@ -282,7 +282,7 @@ export default function CpoEarnings() {
       label: 'Actions',
       render: (p) =>
         p.status === 'requested' ? (
-          <button type="button" className="btn btn-quiet btn-sm" onClick={() => openCancel(p)}>
+          <button data-write type="button" className="btn btn-quiet btn-sm" onClick={() => openCancel(p)}>
             Cancel
           </button>
         ) : (
@@ -310,7 +310,7 @@ export default function CpoEarnings() {
         sub="What your chargers have earned, and settlement of what you're owed."
         actions={
           <div className="earnings-request-action">
-            <button
+            <button data-write
               type="button"
               className="btn btn-primary"
               onClick={openRequest}
@@ -379,7 +379,7 @@ export default function CpoEarnings() {
                   never created from nothing.
                 </p>
               </div>
-              <button
+              <button data-write
                 type="button"
                 className="btn btn-primary"
                 onClick={openCredit}

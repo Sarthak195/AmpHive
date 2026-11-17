@@ -23,6 +23,7 @@ import { Compass, Home, LifeBuoy } from 'lucide-react';
 import useDocumentMeta from '../hooks/useDocumentMeta';
 import { useAuth } from '../contexts/AuthContext';
 import { isCpoHost } from '../utils/appHost';
+import { hasCpoConsole } from '../utils/roles';
 
 export default function NotFound() {
   const { user } = useAuth();
@@ -31,7 +32,7 @@ export default function NotFound() {
     description: 'That AmpHive page does not exist.',
   });
 
-  const console_ = isCpoHost() || user?.role === 'cpo' || user?.role === 'admin';
+  const console_ = isCpoHost() || hasCpoConsole(user);
 
   return (
     <main className="page">

@@ -50,6 +50,8 @@ import { useToast } from '../../components/ui';
 import api from '../../api/client';
 import { apiErrorCopy } from '../../utils/statusCopy';
 import { useConfig } from '../../contexts/ConfigContext';
+import { useAuth } from '../../contexts/AuthContext';
+import { isReadOnlyViewer } from '../../utils/roles';
 import { getPricingSummary } from '../../utils/pricingUniformity';
 import CpoPricingSimple from './CpoPricingSimple';
 import './CpoPricing.css';
@@ -96,6 +98,8 @@ const CELL_TINTS = ['a', 'b', 'c', 'd', 'e'];
 const CpoPricing = () => {
   const toast = useToast();
   const config = useConfig();
+  // [F10] The read-only demo viewer sees assignments but cannot change them.
+  const readOnly = isReadOnlyViewer(useAuth().user);
 
   const [tariffs, setTariffs] = useState([]);
   const [groups, setGroups] = useState([]);
@@ -543,10 +547,10 @@ const CpoPricing = () => {
           <button type="button" className="btn btn-quiet btn-sm" onClick={() => toggleSlots(t)}>
             {selectedTariffId === t.id ? 'Hide slots' : 'Manage slots'}
           </button>
-          <button type="button" className="btn btn-quiet btn-sm" onClick={() => openEdit(t)}>
+          <button data-write type="button" className="btn btn-quiet btn-sm" onClick={() => openEdit(t)}>
             Edit
           </button>
-          <button
+          <button data-write
             type="button"
             className="btn btn-danger btn-sm"
             onClick={() => setDeleteTarget(t)}
@@ -580,7 +584,7 @@ const CpoPricing = () => {
       key: 'actions',
       label: '',
       render: (s) => (
-        <button
+        <button data-write
           type="button"
           className="btn btn-ghost btn-sm"
           onClick={() => setSlotDeleteTarget(s)}
@@ -606,6 +610,7 @@ const CpoPricing = () => {
           className="select"
           aria-label={`Pricing for ${r.name}`}
           value={r.tariffId ?? ''}
+          disabled={readOnly}
           onChange={(e) => r.onAssign(e.target.value ? Number(e.target.value) : null)}
         >
           <option value="">Inherited</option>
@@ -636,7 +641,7 @@ const CpoPricing = () => {
         }
         actions={
           mode === 'advanced' ? (
-            <button type="button" className="btn btn-primary" onClick={openCreate}>
+            <button data-write type="button" className="btn btn-primary" onClick={openCreate}>
               <Plus size={16} aria-hidden="true" /> New tariff
             </button>
           ) : undefined
@@ -691,7 +696,7 @@ const CpoPricing = () => {
                     emptyTitle="No tariffs yet"
                     emptyBody="Create a pricing plan to set your rate per kWh, then assign it below."
                     emptyAction={
-                      <button type="button" className="btn btn-primary" onClick={openCreate}>
+                      <button data-write type="button" className="btn btn-primary" onClick={openCreate}>
                         New tariff
                       </button>
                     }
@@ -716,7 +721,7 @@ const CpoPricing = () => {
                       /kWh) applies.
                     </p>
 
-                    <form className="pricing-slot-form" onSubmit={submitSlot}>
+                    <form data-write className="pricing-slot-form" onSubmit={submitSlot}>
                       <div className="field">
                         <label className="field-label" htmlFor="slot-start">
                           From
@@ -783,7 +788,7 @@ const CpoPricing = () => {
                           {slotFormError}
                         </p>
                       )}
-                      <button type="submit" className="btn btn-primary btn-sm" disabled={slotBusy}>
+                      <button data-write type="submit" className="btn btn-primary btn-sm" disabled={slotBusy}>
                         {slotBusy ? 'Adding…' : 'Add slot'}
                       </button>
                     </form>
@@ -868,6 +873,7 @@ const CpoPricing = () => {
                     <select
                       id="tenant-default-tariff"
                       className="select"
+                      disabled={readOnly}
                       value={defaultTariffId ?? ''}
                       onChange={(e) =>
                         assignTenantDefault(e.target.value ? Number(e.target.value) : null)

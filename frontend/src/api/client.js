@@ -19,6 +19,7 @@
  */
 
 import { clearStoredSession } from '../utils/snapshot';
+import { READ_ONLY_DEMO_MESSAGE } from '../utils/roles';
 
 const REQUEST_TIMEOUT_MS = 20_000;
 
@@ -110,6 +111,12 @@ export async function apiRequest(endpoint, options = {}) {
       // callers can branch (e.g. "circuit_full" → offer "Request capacity").
       errorCode = errorMessage.code;
       errorMessage = errorMessage.message || JSON.stringify(errorMessage);
+    }
+    // [F10] The read-only demo login: the server refuses every write with
+    // this machine detail; show a sentence instead of the code.
+    if (errorMessage === 'read_only_demo') {
+      errorCode = 'read_only_demo';
+      errorMessage = READ_ONLY_DEMO_MESSAGE;
     }
     const err = new Error(errorMessage || `Request failed with status ${response.status}`);
     err.status = response.status;

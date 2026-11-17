@@ -202,3 +202,15 @@ describe('apiRequest: 401 handling', () => {
     window.history.pushState({}, '', '/');
   });
 });
+
+describe('apiRequest — read-only demo viewer (F10)', () => {
+  it('turns the read_only_demo 403 into a readable sentence with a code', async () => {
+    fetch.mockResolvedValue(jsonResponse({ detail: 'read_only_demo' }, { ok: false, status: 403 }));
+
+    await expect(apiRequest('/api/cpo/plugs', { method: 'POST' })).rejects.toMatchObject({
+      status: 403,
+      code: 'read_only_demo',
+      message: expect.stringMatching(/read-only demo/),
+    });
+  });
+});

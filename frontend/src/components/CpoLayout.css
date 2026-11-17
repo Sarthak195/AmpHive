@@ -63,3 +63,21 @@
   color: var(--ink);
   text-decoration: none;
 }
+
+/* [F10] Read-only demo viewer. Every write entry point in the console carries
+   data-write; the server refuses the write anyway, this keeps the UI honest. */
+.console-readonly [data-write] {
+  display: none !important;
+}
+
+.console-readonly-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: var(--info-soft);
+  color: var(--info);
+  font-size: 0.9rem;
+}

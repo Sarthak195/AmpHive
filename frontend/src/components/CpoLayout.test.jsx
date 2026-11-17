@@ -187,3 +187,31 @@ describe('CpoLayout', () => {
     expect(document.querySelector('.console-sidebar')).not.toHaveAttribute('inert');
   });
 });
+
+describe('CpoLayout read-only viewer (F10)', () => {
+  const renderWithWrite = () =>
+    render(
+      <MemoryRouter initialEntries={['/cpo/chargers']}>
+        <CpoLayout>
+          <button data-write type="button">Add charger</button>
+        </CpoLayout>
+      </MemoryRouter>
+    );
+
+  it('shows the read-only banner and marks the page read-only for a cpo_viewer', () => {
+    useAuth.mockReturnValue({
+      user: { email: 'demo@amphive.test', role: 'cpo_viewer' },
+      logout,
+    });
+    renderWithWrite();
+    expect(screen.getByRole('status')).toHaveTextContent('Read-only demo.');
+    const write = screen.getByText('Add charger');
+    expect(write.closest('main')).toHaveClass('console-readonly');
+  });
+
+  it('shows no banner and keeps write controls for a cpo', () => {
+    renderWithWrite();
+    expect(screen.queryByText('Read-only demo.')).not.toBeInTheDocument();
+    expect(screen.getByText('Add charger').closest('main')).not.toHaveClass('console-readonly');
+  });
+});

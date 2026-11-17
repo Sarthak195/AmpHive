@@ -241,7 +241,7 @@ const CpoSettings = () => {
               )}
 
               <div>
-                <button type="submit" className="btn btn-primary btn-sm" disabled={defaultsBusy}>
+                <button data-write type="submit" className="btn btn-primary btn-sm" disabled={defaultsBusy}>
                   {defaultsBusy ? 'Saving…' : 'Save changes'}
                 </button>
               </div>
@@ -312,7 +312,7 @@ const CpoSettings = () => {
               </div>
 
               <div>
-                <button type="submit" className="btn btn-primary btn-sm" disabled={gstBusy}>
+                <button data-write type="submit" className="btn btn-primary btn-sm" disabled={gstBusy}>
                   {gstBusy ? 'Saving…' : 'Save changes'}
                 </button>
               </div>
