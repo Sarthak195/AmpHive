@@ -23,7 +23,7 @@ from backend.database.models import PromoCode, PromoRedemption, User
 from backend.schemas import PromoCodeCreateRequest, PromoCodeResponse
 from backend.services import promos as promo_service
 from backend.services.audit import try_record_audit
-from backend.services.money import to_money
+from backend.services.money import ZERO_MONEY, to_money
 
 from ._common import _require_tenant_id, logger, redact_for, require_cpo_tenant
 
@@ -62,6 +62,16 @@ def _promo_response(
     )
 
 
+def _is_code_hash_collision(exc: IntegrityError) -> bool:
+    """True when the violated key is promo_codes.code_hash (a re-rollable code
+    collision). Any other IntegrityError (a CHECK, a foreign key) is a real
+    error and must not be retried."""
+    orig = getattr(exc, "orig", None)
+    names = [getattr(o, "constraint_name", None) for o in (orig, getattr(orig, "__cause__", None))]
+    names.append(str(orig))
+    return any("code_hash" in n for n in names if isinstance(n, str))
+
+
 @router.post("/api/cpo/promos", response_model=PromoCodeResponse)
 async def cpo_create_promo(
     req: PromoCodeCreateRequest,
@@ -75,6 +85,12 @@ async def cpo_create_promo(
     actor_id, actor_email = user.id, user.email
     now = datetime.now(timezone.utc)
 
+    # A sub-cent amount passes the schema's gt=0 but rounds to 0.00, which the
+    # amount CHECK would reject as an opaque 500 (same guard as the top-ups).
+    amount = to_money(req.amount_coins)
+    if amount <= ZERO_MONEY:
+        raise HTTPException(status_code=400, detail="amount_coins must be greater than 0.")
+
     # 79 bits of randomness makes a digest collision academic; the retry just
     # turns one into a re-roll instead of a 500 (same idea as the claim-code
     # and access-code generators).
@@ -84,7 +100,7 @@ async def cpo_create_promo(
             tenant_id=tenant_id,
             code_hash=promo_service.hash_code(code),
             code_hint=code[-promo_service.HINT_LEN:],
-            amount_coins=to_money(req.amount_coins),
+            amount_coins=amount,
             expires_at=now + timedelta(days=req.expires_in_days) if req.expires_in_days else None,
             max_redemptions=req.max_redemptions,
             per_user_limit=req.per_user_limit,
@@ -96,8 +112,10 @@ async def cpo_create_promo(
         try:
             await db.commit()
             break
-        except IntegrityError:
+        except IntegrityError as exc:
             await db.rollback()
+            if not _is_code_hash_collision(exc):
+                raise
     else:
         raise HTTPException(status_code=500, detail="Could not generate a unique code; try again.")
 

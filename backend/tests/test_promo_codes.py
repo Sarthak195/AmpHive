@@ -179,6 +179,69 @@ async def test_list_query_compiles_for_postgres():
     assert "LEFT OUTER JOIN" in compiled[1] and "promo_redemptions" in compiled[1]
 
 
+def _create_promo_db(commit_side_effect=None):
+    from unittest.mock import MagicMock
+
+    db = MagicMock()
+    db.add = MagicMock()
+    db.commit = AsyncMock(side_effect=commit_side_effect)
+    db.rollback = AsyncMock()
+    db.refresh = AsyncMock()
+    return db
+
+
+def _issuer():
+    from backend.database.models import UserRole
+
+    return SimpleNamespace(id=1, tenant_id=1, role=UserRole.CPO, email="cpo@amphive.test")
+
+
+@pytest.mark.asyncio
+async def test_create_promo_sub_cent_amount_is_a_400_with_no_insert():
+    """0.004 passes the schema's gt=0 but rounds to 0.00: a clear 400, never an
+    INSERT that trips the amount CHECK and burns the collision retries."""
+    from backend.routers.cpo import cpo_create_promo
+    from backend.schemas import PromoCodeCreateRequest
+
+    db = _create_promo_db()
+    with pytest.raises(HTTPException) as exc:
+        await cpo_create_promo(PromoCodeCreateRequest(amount_coins=0.004), _issuer(), db)
+    assert exc.value.status_code == 400
+    assert exc.value.detail == "amount_coins must be greater than 0."
+    db.add.assert_not_called()
+    db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_create_promo_only_retries_a_code_hash_collision():
+    from sqlalchemy.exc import IntegrityError
+
+    from backend.routers.cpo import cpo_create_promo
+    from backend.schemas import PromoCodeCreateRequest
+
+    class _Orig(Exception):
+        def __init__(self, constraint_name):
+            super().__init__(f'violates constraint "{constraint_name}"')
+            self.constraint_name = constraint_name
+
+    def _integrity(name):
+        return IntegrityError("INSERT INTO promo_codes", {}, _Orig(name))
+
+    # A CHECK violation is a real error: re-raised on the first attempt.
+    db = _create_promo_db([_integrity("ck_promo_codes_amount_positive")])
+    with pytest.raises(IntegrityError):
+        await cpo_create_promo(PromoCodeCreateRequest(amount_coins=5), _issuer(), db)
+    assert db.commit.await_count == 1
+    db.rollback.assert_awaited_once()
+
+    # A code-hash collision is re-rolled: the second commit succeeds.
+    db = _create_promo_db([_integrity("promo_codes_code_hash_key"), None])
+    db.refresh = AsyncMock(side_effect=RuntimeError("stop after the insert"))
+    with pytest.raises(RuntimeError, match="stop after the insert"):
+        await cpo_create_promo(PromoCodeCreateRequest(amount_coins=5), _issuer(), db)
+    assert db.commit.await_count == 2
+
+
 # ===========================================================================
 # DB-gated
 # ===========================================================================
