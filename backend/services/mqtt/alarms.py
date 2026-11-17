@@ -21,6 +21,8 @@ import math
 import re
 from typing import Any, Dict, List, Optional
 
+from backend.services import operator_alerts
+
 logger = logging.getLogger("amphive.mqtt")
 
 # GatewayEvent.detail is String(255) (database/models.py). Postgres rejects an
@@ -409,6 +411,14 @@ class MQTTAlarmMixin:
         # otherwise the plug is orphaned OCCUPIED until the reaper.
         if plug_id is not None and event_type in self._FINALIZE_ALARM_REASONS:
             await self._finalize_session_after_cutoff(plug_id, event_type)
+
+        # [Operator alert] Page the tenant's CPOs (bell + push, optional email)
+        # for the safety faults and a failed OTA, cooldown-deduplicated per
+        # (gateway, plug, event). Last, so SMTP/notify never delays the
+        # maintenance flip or the finalize above; never raises.
+        await operator_alerts.alert_safety_fault(
+            self.db_session_factory, gateway_id, plug_id, event_type, severity, detail
+        )
 
     # Alarms after which the firmware has already stopped charging locally, so the
     # backend must finalize the session to match. The value is the finalize reason,
