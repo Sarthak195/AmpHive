@@ -13,7 +13,7 @@ from pathlib import Path
 
 import httpx
 import pytest
-from ocpp_bridge import AuthError, Bridge, Config, StateStore, ocpp_status
+from ocpp_bridge import AuthError, Bridge, ChargePoint, Config, StateStore, ocpp_status
 from websockets.asyncio.server import ServerConnection, serve
 
 TOKEN = "amph_test-secret-123"
@@ -34,8 +34,13 @@ class FakeMeter:
 
 
 class FakeCsms:
-    def __init__(self, boot_statuses: tuple[str, ...] = ("Accepted",)) -> None:
+    def __init__(self, boot_statuses: tuple[str, ...] = ("Accepted",),
+                 error_actions: tuple[str, ...] = (), heartbeat_s: int = 300,
+                 close_after_boot: bool = False) -> None:
         self.boot_statuses = list(boot_statuses)
+        self.error_actions = set(error_actions)  # answered with a CallError
+        self.heartbeat_s = heartbeat_s
+        self.close_after_boot = close_after_boot
         self.received: list[tuple[str, str, dict]] = []
         self.conns: dict[str, ServerConnection] = {}
         self.auth: dict[str, str | None] = {}
@@ -49,7 +54,7 @@ class FakeCsms:
         if action == "BootNotification":
             status = self.boot_statuses.pop(0) if len(self.boot_statuses) > 1 else self.boot_statuses[0]
             return {"status": status, "currentTime": "2026-11-17T10:00:00Z",
-                    "interval": 300 if status == "Accepted" else 1}
+                    "interval": self.heartbeat_s if status == "Accepted" else 1}
         if action == "StartTransaction":
             self.next_tx += 1
             return {"transactionId": self.next_tx - 1, "idTagInfo": {"status": "Accepted"}}
@@ -68,7 +73,12 @@ class FakeCsms:
             msg = json.loads(raw)
             if msg[0] == 2:
                 self.received.append((cp_id, msg[2], msg[3]))
+                if msg[2] in self.error_actions:
+                    await ws.send(json.dumps([4, msg[1], "InternalError", "boom", {}]))
+                    continue
                 await ws.send(json.dumps([3, msg[1], self._result(msg[2])]))
+                if msg[2] == "BootNotification" and self.close_after_boot:
+                    await ws.close()
             else:
                 self.replies[msg[1]] = msg
 
@@ -301,3 +311,118 @@ def test_config_requires_token_and_safe_urls():
     cfg = Config.from_env({**base, "AMPHIVE_METER_TOKEN": TOKEN})
     assert cfg.prefix == "AMPHIVE-" and cfg.poll_seconds == 10.0 and cfg.id_tag == "AMPHIVE"
     assert TOKEN not in repr(cfg)
+
+
+def test_backoff_resets_after_a_healthy_connection(tmp_path):
+    csms = FakeCsms(close_after_boot=True)
+    delays: list[float] = []
+
+    async def scenario():
+        async with serve(csms.handler, "127.0.0.1", 0, subprotocols=["ocpp1.6"]) as server:
+            port = server.sockets[0].getsockname()[1]
+            cfg = Config(api_url="https://meter.test", token=TOKEN,
+                         csms_url=f"ws://127.0.0.1:{port}/ocpp", state_file=tmp_path / "s.json")
+            cp = ChargePoint("AMPHIVE-7", 7, cfg, StateStore(cfg.state_file))
+
+            async def fake_sleep(seconds: float) -> None:
+                delays.append(seconds)
+                await asyncio.sleep(0.01)
+
+            cp._sleep = fake_sleep
+            task = asyncio.create_task(cp.run())
+            try:
+                await wait_until(lambda: len(delays) >= 4)
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(scenario())
+    assert delays[:4] == [1.0, 1.0, 1.0, 1.0]  # each connection booted, so no doubling
+
+
+def test_persistent_stop_call_error_is_given_up_after_three(tmp_path):
+    state_file = tmp_path / "s.json"
+    meter, csms = FakeMeter(), FakeCsms(error_actions=("StopTransaction",))
+    meter.plugs = [plug(status="occupied", power_w=2000.0, session=session(0.5))]
+
+    async def scenario():
+        async with running(meter, csms, state_file):
+            await wait_until(lambda: csms.actions("MeterValues"))
+            # the next session replaces the open one: the stop is refused, not wedging
+            meter.plugs = [plug(status="occupied", power_w=1500.0, session=session(0.2, sid=56))]
+            await wait_until(lambda: len(csms.actions("StartTransaction")) == 2)
+            assert len(csms.actions("StopTransaction")) == 3
+            assert csms.actions("StartTransaction")[1]["meterStart"] == 500
+            await wait_until(lambda: samples(csms.actions("MeterValues")[-1])
+                             ["Energy.Active.Import.Register"] == "700")
+            meter.plugs = [plug(status="available")]  # and a later session end is not stuck
+            await wait_until(lambda: csms.actions("StatusNotification")[-1]["status"] == "Available")
+        saved = json.loads(state_file.read_text())["AMPHIVE-7"]
+        assert saved["transaction_id"] is None and saved["base_wh"] == 700.0
+
+    asyncio.run(scenario())
+
+
+def test_stop_call_error_counter_resets_on_success(tmp_path):
+    meter, csms = FakeMeter(), FakeCsms()
+    meter.plugs = [plug(status="occupied", power_w=2000.0, session=session(0.5))]
+
+    async def scenario():
+        async with running(meter, csms, tmp_path / "s.json"):
+            await wait_until(lambda: csms.actions("MeterValues"))
+            csms.error_actions.add("StopTransaction")
+            meter.plugs = [plug(status="available")]
+            await wait_until(lambda: len(csms.actions("StopTransaction")) == 2)
+            csms.error_actions.clear()  # the third attempt is acked: nothing is dropped
+            await wait_until(lambda: csms.actions("StatusNotification")[-1]["status"] == "Available")
+            assert len(csms.actions("StopTransaction")) == 3
+            # a fresh refused stop starts counting again from zero (needs 3 more)
+            meter.plugs = [plug(status="occupied", power_w=2000.0, session=session(0.4, sid=57))]
+            await wait_until(lambda: len(csms.actions("StartTransaction")) == 2)
+            csms.error_actions.add("StopTransaction")
+            meter.plugs = [plug(status="available")]
+            await wait_until(lambda: len(csms.actions("StopTransaction")) == 6)
+
+    asyncio.run(scenario())
+
+
+def test_heartbeat_call_error_keeps_the_connection(tmp_path):
+    meter, csms = FakeMeter(), FakeCsms(error_actions=("Heartbeat",), heartbeat_s=1)
+    meter.plugs = [plug()]
+
+    async def scenario():
+        async with running(meter, csms, tmp_path / "s.json"):
+            await wait_until(lambda: len(csms.actions("Heartbeat")) >= 2, timeout=8)
+        assert len(csms.actions("BootNotification")) == 1  # never reconnected
+
+    asyncio.run(scenario())
+
+
+def test_start_transaction_precedes_the_charging_status(tmp_path):
+    meter, csms = FakeMeter(), FakeCsms()
+    meter.plugs = [plug()]
+
+    async def scenario():
+        async with running(meter, csms, tmp_path / "s.json"):
+            await wait_until(lambda: csms.actions("StatusNotification"))
+            meter.plugs = [plug(status="occupied", power_w=2000.0, session=session(0.5))]
+            await wait_until(lambda: csms.actions("MeterValues"))
+        order = [a for _, a, _ in csms.received if a != "BootNotification"]
+        assert order == ["StatusNotification", "StartTransaction",
+                         "StatusNotification", "MeterValues"]
+        assert csms.actions("StatusNotification")[-1]["status"] == "Charging"
+
+    asyncio.run(scenario())
+
+
+def test_failed_start_never_announces_charging(tmp_path):
+    meter, csms = FakeMeter(), FakeCsms(error_actions=("StartTransaction",))
+    meter.plugs = [plug(status="occupied", power_w=2000.0, session=session(0.5))]
+
+    async def scenario():
+        async with running(meter, csms, tmp_path / "s.json"):
+            await wait_until(lambda: len(csms.actions("StartTransaction")) >= 3)
+        assert not csms.actions("StatusNotification")
+        assert not csms.actions("MeterValues")
+
+    asyncio.run(scenario())
