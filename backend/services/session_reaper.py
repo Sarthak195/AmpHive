@@ -107,6 +107,8 @@ class SessionReaperService:
         # prune to every GATEWAY_LOGS_PRUNE_EVERY_N_TICKS ticks (see
         # reap_gateway_logs_once).
         self._tick_count = 0
+        # Wall-clock time of the last completed sweep loop (admin health page).
+        self.last_run_at: Optional[datetime] = None
         # [Faster-offline lever 1, silence case] Gateway ids currently flagged
         # offline by the silence sweep (see reap_gateway_silence_once) —
         # bounded in-memory dedup so a still-stale gateway isn't re-emitted
@@ -165,6 +167,7 @@ class SessionReaperService:
             except Exception:
                 logger.exception("Gateway silence sweep failed")
             self._tick_count += 1
+            self.last_run_at = datetime.now(timezone.utc)
             if self._tick_count % GATEWAY_LOGS_PRUNE_EVERY_N_TICKS == 0:
                 try:
                     await self.reap_gateway_logs_once()
