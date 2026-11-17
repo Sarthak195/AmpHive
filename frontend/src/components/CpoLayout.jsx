@@ -1,7 +1,7 @@
 /**
  * CpoLayout — the operator console shell.
  * =======================================
- * Volt-theme sidebar chrome for all 13 console pages: brand, org name
+ * Volt-theme sidebar chrome for all 14 console pages: brand, org name
  * (TenantContext), grouped navigation with live count-pill badges
  * (Health = unacked events, Disputes = open disputes, Groups = pending
  * capacity requests), a footer with the signed-in email / driver-app link /
@@ -30,6 +30,7 @@ import {
   PlugZap,
   Radio,
   Scale,
+  ScrollText,
   Settings,
   Tags,
   Users,
@@ -67,6 +68,7 @@ const NAV_GROUPS = [
     items: [
       { to: '/cpo/sessions', label: 'Sessions', icon: BatteryCharging },
       { to: '/cpo/reservations', label: 'Reservations', icon: CalendarClock },
+      { to: '/cpo/audit', label: 'Audit log', icon: ScrollText },
     ],
   },
   {

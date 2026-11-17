@@ -16,6 +16,10 @@
  * (GET /api/admin/gateways inner-joins Tenant); unclaimed inventory has no
  * tenant to join and doesn't belong in a tenant fleet view.
  *
+ * A "Logs" tab shows forwarded firmware log lines across tenants
+ * (GatewayLogsPanel on GET /api/admin/gateway-logs, optionally narrowed to one
+ * gateway from the fleet list).
+ *
  * Data source: GET /api/admin/gateways?online=&limit=&offset=
  */
 
@@ -28,8 +32,10 @@ import {
   Modal,
   PageHeader,
   StatusDot,
+  Tabs,
   useToast,
 } from '../../components/ui';
+import GatewayLogsPanel from '../../components/GatewayLogsPanel';
 import api from '../../api/client';
 import usePoll from '../../hooks/usePoll';
 import { apiErrorCopy } from '../../utils/statusCopy';
@@ -97,6 +103,9 @@ export default function AdminGateways() {
   });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+
+  const [tab, setTab] = useState('fleet'); // 'fleet' | 'logs'
+  const [logGateway, setLogGateway] = useState('');
 
   // Filters
   const [onlineFilter, setOnlineFilter] = useState('all'); // 'all' | 'online' | 'offline'
@@ -408,10 +417,62 @@ export default function AdminGateways() {
     </Modal>
   );
 
+  const tabStrip = (
+    <Tabs
+      ariaLabel="Gateway views"
+      className="gw-tabs"
+      active={tab}
+      onChange={setTab}
+      tabs={[
+        { id: 'fleet', label: 'Fleet' },
+        { id: 'logs', label: 'Logs' },
+      ]}
+    />
+  );
+
+  if (tab === 'logs') {
+    return (
+      <>
+        <PageHeader
+          title="Gateways"
+          sub="Forwarded firmware log lines across all organizations"
+          actions={mintAction}
+        />
+        {tabStrip}
+        <div className="filter-bar">
+          <label htmlFor="logs-gateway-filter" className="sr-only">
+            Filter by gateway
+          </label>
+          <select
+            id="logs-gateway-filter"
+            className="select"
+            value={logGateway}
+            onChange={(e) => setLogGateway(e.target.value)}
+          >
+            <option value="">All gateways</option>
+            {items.map((g) => (
+              <option key={g.id} value={g.id}>
+                {g.tenant_name ? `${g.tenant_name} · ` : ''}
+                {g.name}
+              </option>
+            ))}
+          </select>
+        </div>
+        <GatewayLogsPanel
+          path="/api/admin/gateway-logs"
+          params={logGateway ? { gateway_id: logGateway } : {}}
+          showGateway
+        />
+        {mintModal}
+      </>
+    );
+  }
+
   if (error) {
     return (
       <>
         <PageHeader title="Gateways" sub="Fleet overview and status" actions={mintAction} />
+        {tabStrip}
         <ErrorState error={error} onRetry={fetchGateways} title="Couldn't load gateways" />
         {mintModal}
       </>
@@ -425,6 +486,7 @@ export default function AdminGateways() {
         sub={`${total} gateway${total !== 1 ? 's' : ''} across the network`}
         actions={mintAction}
       />
+      {tabStrip}
 
       {/* Firmware spread summary */}
       {!loading && items.length > 0 && (
