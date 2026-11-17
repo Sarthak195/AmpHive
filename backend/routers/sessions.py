@@ -2,12 +2,13 @@
 Sessions routes — moved verbatim from main.py (2026-07-07, TD#7 split).
 """
 import logging
+import math
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import and_, func, select, update
+from sqlalchemy import and_, func, literal_column, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,6 +24,7 @@ from backend.database.models import (
     PlugStatus,
     SessionDispute,
     SessionStatus,
+    TelemetryReading,
     Tenant,
     User,
     UserRole,
@@ -1376,6 +1378,20 @@ async def get_my_disputes(
     ]
 
 
+def _assert_session_viewer(session: ChargingSession, user: User) -> None:
+    """Access rule shared by the session detail and telemetry reads: the
+    owning driver, or a cpo/admin of the owning tenant. Anyone else gets 404,
+    not 403, so existence isn't leaked."""
+    if user.role == UserRole.DRIVER:
+        if session.user_id != user.id:
+            raise HTTPException(status_code=404, detail="Session not found.")
+    elif user.role == UserRole.CPO:
+        if session.tenant_id != user.tenant_id:
+            raise HTTPException(status_code=404, detail="Session not found.")
+    elif user.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Access denied.")
+
+
 @router.get("/api/sessions/{session_id}")
 async def get_session_detail(
     session_id: int,
@@ -1413,14 +1429,7 @@ async def get_session_detail(
         raise HTTPException(status_code=404, detail="Session not found.")
     session, plug_name = row
 
-    if user.role == UserRole.DRIVER:
-        if session.user_id != user.id:
-            raise HTTPException(status_code=404, detail="Session not found.")
-    elif user.role == UserRole.CPO:
-        if session.tenant_id != user.tenant_id:
-            raise HTTPException(status_code=404, detail="Session not found.")
-    elif user.role != UserRole.ADMIN:
-        raise HTTPException(status_code=403, detail="Access denied.")
+    _assert_session_viewer(session, user)
 
     energy = session.energy_kwh or 0.0
     rate = (
@@ -1498,3 +1507,85 @@ async def get_session_detail(
     }
 
 
+# Target upper bound on points returned by the session power curve.
+_TELEMETRY_MAX_POINTS = 120
+
+
+@router.get("/api/sessions/{session_id}/telemetry")
+async def get_session_telemetry(
+    session_id: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Power/current curve of ONE session, bucketed in SQL to at most ~120 points
+    (raw rows never reach Python). Same access rules as get_session_detail.
+
+    Rows are selected by plug_id and the session window, NOT by
+    telemetry_readings.session_id: that column is stamped at the 10 s batch
+    flush, so the last seconds of a session can carry a NULL session_id. The
+    (plug_id, recorded_at) index serves the range scan. A session with no
+    stored readings returns ``points: []``.
+    """
+    session = (
+        await db.execute(
+            select(ChargingSession).where(ChargingSession.id == session_id)
+        )
+    ).scalar_one_or_none()
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session not found.")
+    _assert_session_viewer(session, user)
+
+    started = session.started_at
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    ended = session.ended_at
+    if ended is not None and ended.tzinfo is None:
+        ended = ended.replace(tzinfo=timezone.utc)
+    window_end = ended or datetime.now(timezone.utc)
+    span = max((window_end - started).total_seconds(), 1.0)
+    bucket_sec = max(1, math.ceil(span / _TELEMETRY_MAX_POINTS))
+
+    rec = TelemetryReading.recorded_at
+    bucket = func.floor(
+        (func.extract("epoch", rec) - started.timestamp()) / bucket_sec
+    ).label("bucket")
+    rows = (
+        await db.execute(
+            select(
+                bucket,
+                func.avg(TelemetryReading.power_w),
+                func.max(TelemetryReading.power_w),
+                func.avg(TelemetryReading.current_a),
+                func.max(TelemetryReading.energy_kwh),
+            )
+            .where(
+                TelemetryReading.plug_id == session.plug_id,
+                rec >= started,
+                rec <= window_end,
+            )
+            # By output-column name: re-rendering the expression would repeat
+            # its bound parameters, which Postgres can't prove equal.
+            .group_by(literal_column("bucket"))
+            .order_by(literal_column("bucket"))
+        )
+    ).all()
+
+    return {
+        "session_id": session.id,
+        "status": session.status.value,
+        "started_at": started.isoformat(),
+        "ended_at": ended.isoformat() if ended else None,
+        "bucket_seconds": bucket_sec,
+        "max_kwh": session.max_kwh,
+        "points": [
+            {
+                "offset_sec": int(b) * bucket_sec,
+                "power_w": round(float(avg_p or 0.0), 1),
+                "peak_power_w": round(float(max_p or 0.0), 1),
+                "current_a": round(float(avg_a or 0.0), 2),
+                "energy_kwh": round(float(max_e or 0.0), 3),
+            }
+            for b, avg_p, max_p, avg_a, max_e in rows
+        ],
+    }

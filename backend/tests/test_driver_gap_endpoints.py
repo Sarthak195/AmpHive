@@ -33,6 +33,7 @@ from backend.routers.sessions import (
     get_my_stats,
     get_session_detail,
     get_session_history,
+    get_session_telemetry,
 )
 from backend.routers.sessions import (
     router as sessions_router,
@@ -475,3 +476,56 @@ async def test_leave_group_not_a_member_404():
     assert exc.value.status_code == 404
     db.delete.assert_not_awaited()
     db.commit.assert_not_awaited()
+
+
+# --- GET /api/sessions/{session_id}/telemetry --------------------------------
+
+
+@pytest.mark.asyncio
+async def test_session_telemetry_buckets_and_shape():
+    session = _session(status=SessionStatus.COMPLETED)  # 90 min window
+    rows = [(0, 1500.04, 1600.0, 6.5, 0.012), (3, 2300.0, 2400.5, 10.0, 0.4)]
+    db = _db(_scalar_one_or_none(session), _all(rows))
+
+    resp = await get_session_telemetry(42, _user(user_id=7), db)
+
+    assert resp["bucket_seconds"] == 45  # ceil(5400 / 120)
+    assert resp["max_kwh"] == 30.0
+    assert resp["status"] == "completed"
+    assert resp["points"] == [
+        {"offset_sec": 0, "power_w": 1500.0, "peak_power_w": 1600.0,
+         "current_a": 6.5, "energy_kwh": 0.012},
+        {"offset_sec": 135, "power_w": 2300.0, "peak_power_w": 2400.5,
+         "current_a": 10.0, "energy_kwh": 0.4},
+    ]
+    # One query stays in SQL: the grouped aggregate, filtered by plug and window.
+    sql = str(db.execute.await_args_list[1].args[0])
+    assert "GROUP BY" in sql and "telemetry_readings.plug_id" in sql
+
+
+@pytest.mark.asyncio
+async def test_session_telemetry_empty_session_has_no_points():
+    db = _db(_scalar_one_or_none(_session()), _all([]))
+    resp = await get_session_telemetry(42, _user(user_id=7), db)
+    assert resp["points"] == []
+
+
+@pytest.mark.asyncio
+async def test_session_telemetry_access_matches_detail():
+    # Unknown, foreign driver and cross-tenant CPO all 404; no readings query runs.
+    for sess, viewer in (
+        (None, _user()),
+        (_session(user_id=8), _user(user_id=7)),
+        (_session(tenant_id=1), _user(user_id=99, role=UserRole.CPO, tenant_id=2)),
+    ):
+        db = _db(_scalar_one_or_none(sess))
+        with pytest.raises(HTTPException) as exc:
+            await get_session_telemetry(42, viewer, db)
+        assert exc.value.status_code == 404
+        assert db.execute.await_count == 1
+    for viewer in (
+        _user(user_id=99, role=UserRole.CPO, tenant_id=1),
+        _user(user_id=100, role=UserRole.ADMIN),
+    ):
+        db = _db(_scalar_one_or_none(_session(tenant_id=1)), _all([]))
+        assert (await get_session_telemetry(42, viewer, db))["points"] == []
