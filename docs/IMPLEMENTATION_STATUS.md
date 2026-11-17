@@ -11,7 +11,7 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 
 ## 0d - 2026-11-17 features wave 1 (built, not deployed)
 
-Seven feature branches merged with `--no-ff` onto `38b887a` on `release/2026-11-17-w1` (F8 carries F2). No merge conflicts; the shared files (`backend/main.py`, `frontend/src/App.jsx`, `backend/tests/test_driver_gap_endpoints.py`) merged cleanly with every route and nav entry kept. Backend suite 1236 passed / 222 DB-gated skips, tools 79 passed, frontend 898 passed (91 files), ruff, mypy and eslint clean, build OK. No migration (alembic stays at 0043), no nginx, compose, Dockerfile or dependency change. Prod is `ac00d46`, so this release also carries the undeployed `3eff918` CPO dashboard fix.
+Seven feature branches merged with `--no-ff` onto `38b887a` on `release/2026-11-17-w1` (F8 carries F2). No merge conflicts; the shared files (`backend/main.py`, `frontend/src/App.jsx`, `backend/tests/test_driver_gap_endpoints.py`) merged cleanly with every route and nav entry kept. Backend suite 1236 passed / 222 DB-gated skips, tools 79 passed, frontend 898 passed (91 files), ruff, mypy and eslint clean, build OK. No migration (alembic stays at 0043), no nginx, compose, Dockerfile or dependency change. The `3eff918` CPO dashboard fix it carries is already live: PR #150 merged as `a27841d` and its backend was deployed on 2026-11-17 17:44Z as a thin layer (backup `amphive-20261117-174047.dump`, rollback `./rollback_backend.sh a27841d`), so prod is backend `a27841d`, frontend `ac00d46`, alembic `0043`.
 
 | Change | What changed | Deploy notes |
 |---|---|---|
