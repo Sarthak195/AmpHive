@@ -99,7 +99,7 @@ const CpoPricing = () => {
   const toast = useToast();
   const config = useConfig();
   // [F10] The read-only demo viewer sees assignments but cannot change them.
-  const readOnly = isReadOnlyViewer(useAuth().user);
+  const readOnly = isReadOnlyViewer(useAuth()?.user);
 
   const [tariffs, setTariffs] = useState([]);
   const [groups, setGroups] = useState([]);
