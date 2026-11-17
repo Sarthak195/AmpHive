@@ -800,13 +800,22 @@ class MQTTTelemetryMixin:
         # [Charge complete] Feed the detector now the frame is committed.
         # Synchronous, before any await, so concurrent frames can't both fire.
         charge_full_fired = False
+        charge_stop_retry = False
+        at = (sample or {}).get("recorded_at") or datetime.now(timezone.utc)
         if charge_sample is not None:
-            at = (sample or {}).get("recorded_at") or datetime.now(timezone.utc)
             charge_full_fired = self._charge_full.observe(
                 plug_id, charge_sample[0], at, watts, charge_sample[1], charge_sample[2],
             )
+            if not charge_full_fired and updated_auto_stop_full:
+                charge_stop_retry = self._charge_full.stop_retry_due(
+                    plug_id, charge_sample[0], at, watts,
+                )
         elif charge_relay_off_session is not None:
             self._charge_full.interrupt(plug_id, charge_relay_off_session)
+            if updated_auto_stop_full:
+                charge_stop_retry = self._charge_full.stop_retry_due(
+                    plug_id, charge_relay_off_session, at, watts,
+                )
 
         # [Unmetered consumption] Raise the GatewayEvent (+ CPO bell notify —
         # see MQTTAlarmMixin._persist_gateway_event) in its own transaction,
@@ -869,6 +878,8 @@ class MQTTTelemetryMixin:
                 await self._on_charge_full(
                     updated_session_id, updated_user_id, plug_id, updated_auto_stop_full,
                 )
+            elif charge_stop_retry:
+                await self._charge_full_stop(updated_session_id, updated_user_id, plug_id)
 
     async def _on_charge_full(self, session_id: int, user_id: int, plug_id: int,
                               auto_stop: bool):
@@ -880,7 +891,6 @@ class MQTTTelemetryMixin:
         OFF + bill + free the plug). Never switches anything ON. The stop
         re-checks ACTIVE under its row lock, so a concurrent driver stop,
         limit or reaper settles the session exactly once."""
-        from backend.services.mqtt.charge_full import CHARGE_COMPLETE_REASON
         from backend.services.mqtt_manager import CHARGE_FULL_MINUTES
         from backend.services.notifications import notify
 
@@ -890,8 +900,11 @@ class MQTTTelemetryMixin:
             "Car looks fully charged",
             extra={"session_id": session_id, "plug_id": plug_id, "auto_stop": auto_stop},
         )
+        # The notice never says the session is stopping: the stop can fail and
+        # is retried, and finalize_charging_session sends its own "Charging
+        # complete" notification when it succeeds.
         follow_up = (
-            "Stopping the session for you now."
+            "Auto-stop is on for this session."
             if auto_stop else "Stop the session when you are ready to free the plug."
         )
         await notify(
@@ -899,7 +912,17 @@ class MQTTTelemetryMixin:
             f"Power draw has stayed near zero for {CHARGE_FULL_MINUTES:g} minutes. {follow_up}",
             severity="info", plug_id=plug_id, session_id=session_id,
         )
-        if not auto_stop or not self.db_session_factory:
+        if auto_stop:
+            await self._charge_full_stop(session_id, user_id, plug_id)
+
+    async def _charge_full_stop(self, session_id: int, user_id: int, plug_id: int):
+        """Opted-in stop through finalize_charging_session (which notifies the
+        driver on success). A failure is logged and left pending: the detector
+        offers a retry on later idle frames (ChargeFullDetector.stop_retry_due).
+        A None outcome (no longer ACTIVE) ends the retries."""
+        from backend.services.mqtt.charge_full import CHARGE_COMPLETE_REASON
+
+        if not self.db_session_factory:
             return
         try:
             from backend.services.session_lifecycle import finalize_charging_session
@@ -907,6 +930,7 @@ class MQTTTelemetryMixin:
                 outcome = await finalize_charging_session(
                     db, session_id, expected_user_id=user_id, reason=CHARGE_COMPLETE_REASON,
                 )
+            self._charge_full.note_stop_done(plug_id, session_id)
             if outcome is not None:
                 logger.info(
                     "Auto-stopped session: car looks fully charged",
@@ -917,8 +941,9 @@ class MQTTTelemetryMixin:
                     },
                 )
         except Exception:
+            self._charge_full.note_stop_failed(plug_id, session_id)
             logger.exception(
-                "Charge-complete auto-stop failed",
+                "Charge-complete auto-stop failed, will retry on a later idle frame",
                 extra={"session_id": session_id, "user_id": user_id},
             )
 

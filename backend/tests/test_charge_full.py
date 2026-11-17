@@ -365,3 +365,93 @@ async def test_begin_active_session_persists_the_opt_in(opt_in, stored):
 
     assert isinstance(session, ChargingSession)
     assert session.auto_stop_when_full is stored
+
+
+# --------------------------------------------------------------------------
+# Failed opted-in stop is retried on later idle frames
+# --------------------------------------------------------------------------
+
+def _real_handler_manager():
+    """Manager with the real _on_charge_full (the other helpers mock it)."""
+    from backend.services.mqtt_manager import MQTTManager
+
+    MQTTManager._instance = None
+    mgr = MQTTManager(telemetry_store=MagicMock(), db_session_factory=lambda: None)
+    mgr._maybe_auto_stop_on_exhaustion = AsyncMock()
+    mgr._maybe_auto_stop_on_limits = AsyncMock()
+    return mgr
+
+
+@pytest.mark.asyncio
+async def test_failed_opted_in_stop_is_retried_at_most_once_a_minute():
+    mgr = _real_handler_manager()
+    row = _session_row(auto_stop=True)
+    finalize = AsyncMock(side_effect=[RuntimeError("db down"), {"energy_kwh": 5.0, "coins_spent": 25.0}])
+    with patch("backend.services.session_lifecycle.finalize_charging_session", finalize), \
+         patch("backend.services.notifications.notify", AsyncMock()) as notify:
+        for m in range(10, 20):
+            await _persist_frame(mgr, row, m, 0.0)
+        assert finalize.await_count == 0
+        await _persist_frame(mgr, row, 20, 0.0)          # fires: first attempt raises
+        assert finalize.await_count == 1
+        await _persist_frame(mgr, row, 20.5, 0.0)        # 30 s later: too soon
+        await _persist_frame(mgr, row, 20 + 59 / 60, 0.0)  # 59 s later: too soon
+        assert finalize.await_count == 1
+        await _persist_frame(mgr, row, 21, 0.0)          # 60 s later: retry succeeds
+        assert finalize.await_count == 2
+        for m in (22, 23, 30):                           # done: never again
+            await _persist_frame(mgr, row, m, 0.0)
+        assert finalize.await_count == 2
+
+    # One "looks full" notice, and it never claims the session is stopping:
+    # a successful finalize sends its own receipt notification.
+    notify.assert_awaited_once()
+    assert notify.await_args.args[:3] == (3, "charge_full", "Your car looks fully charged")
+    body = notify.await_args.args[3]
+    assert "Stopping" not in body and "stopped" not in body.lower()
+    for call in finalize.await_args_list:
+        assert call.kwargs == {"expected_user_id": 3, "reason": CHARGE_COMPLETE_REASON}
+    _reset_manager()
+
+
+def _reset_manager():
+    from backend.services.mqtt_manager import MQTTManager
+
+    MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
+async def test_failed_stop_retry_stops_when_session_gone_draws_power_or_not_opted_in():
+    # Session already settled elsewhere: finalize returns None, retries end.
+    mgr = _real_handler_manager()
+    row = _session_row(auto_stop=True)
+    finalize = AsyncMock(side_effect=[RuntimeError("boom"), None, None])
+    with patch("backend.services.session_lifecycle.finalize_charging_session", finalize), \
+         patch("backend.services.notifications.notify", AsyncMock()):
+        for m in range(10, 21):
+            await _persist_frame(mgr, row, m, 0.0)
+        await _persist_frame(mgr, row, 22, 0.0)
+        await _persist_frame(mgr, row, 24, 0.0)
+    assert finalize.await_count == 2
+
+    # Car draws power again: no retry while it is not idle.
+    mgr = _real_handler_manager()
+    finalize = AsyncMock(side_effect=[RuntimeError("boom"), None])
+    with patch("backend.services.session_lifecycle.finalize_charging_session", finalize), \
+         patch("backend.services.notifications.notify", AsyncMock()):
+        for m in range(10, 21):
+            await _persist_frame(mgr, row, m, 0.0)
+        await _persist_frame(mgr, row, 22, 800.0)
+    assert finalize.await_count == 1
+
+    # Opt-in withdrawn (flag off on the row): never retried.
+    finalize = AsyncMock(side_effect=[RuntimeError("boom"), None])
+    with patch("backend.services.session_lifecycle.finalize_charging_session", finalize), \
+         patch("backend.services.notifications.notify", AsyncMock()):
+        mgr = _real_handler_manager()
+        for m in range(10, 21):
+            await _persist_frame(mgr, row, m, 0.0)
+        row.auto_stop_when_full = False
+        await _persist_frame(mgr, row, 23, 0.0)
+    assert finalize.await_count == 1
+    _reset_manager()

@@ -18,7 +18,8 @@ can monkeypatch them like the other telemetry knobs):
      above the idle threshold restarts the timer, and so does a gap between
      samples longer than the reaper's stale window (the gateway was offline,
      so nothing is known about that stretch).
-It fires once per session. State is keyed by plug and replaced when a new
+It fires once per session (one notice). An opted-in stop that fails is
+retried on later idle frames, at most once per CHARGE_FULL_STOP_RETRY_SEC. State is keyed by plug and replaced when a new
 session id shows up on that plug, so it stays bounded with no cleanup.
 
 State is in memory only. A backend restart clears it: the idle timer starts
@@ -36,6 +37,10 @@ from typing import Dict, Optional
 # description wraps it in [...] and the session-detail route parses it back).
 CHARGE_COMPLETE_REASON = "auto-stopped: charge complete"
 
+# An opted-in stop that failed is retried on later idle frames, at most this
+# often (seconds, measured on frame timestamps).
+CHARGE_FULL_STOP_RETRY_SEC = 60.0
+
 
 @dataclass
 class _PlugState:
@@ -43,6 +48,10 @@ class _PlugState:
     idle_since: Optional[datetime] = None
     last_at: Optional[datetime] = None
     fired: bool = False
+    # An opted-in auto-stop that raised: retry until it succeeds or the
+    # session is no longer ACTIVE. stop_tried_at is the last attempt's frame time.
+    stop_pending: bool = False
+    stop_tried_at: Optional[datetime] = None
 
 
 class ChargeFullDetector:
@@ -94,6 +103,43 @@ class ChargeFullDetector:
             st.fired = True
             return True
         return False
+
+    def note_stop_failed(self, plug_id: int, session_id: int) -> None:
+        """The opted-in finalize raised: keep retrying. The first failure is
+        timed from the frame that fired; a failed retry keeps its own claim."""
+        st = self._plugs.get(plug_id)
+        if st is None or st.session_id != session_id:
+            return
+        if not st.stop_pending:
+            st.stop_pending = True
+            st.stop_tried_at = st.last_at
+
+    def note_stop_done(self, plug_id: int, session_id: int) -> None:
+        """The stop succeeded, or the session is already no longer ACTIVE."""
+        st = self._plugs.get(plug_id)
+        if st is not None and st.session_id == session_id:
+            st.stop_pending = False
+            st.stop_tried_at = None
+
+    def stop_retry_due(self, plug_id: int, session_id: int, at: datetime,
+                       watts: float) -> bool:
+        """True when a failed stop should be retried on this live frame: still
+        idle (below CHARGE_FULL_IDLE_W) and at least CHARGE_FULL_STOP_RETRY_SEC
+        since the last attempt. Claims the attempt synchronously, so two frames
+        in flight cannot both retry."""
+        from backend.services.mqtt_manager import CHARGE_FULL_IDLE_W
+
+        st = self._plugs.get(plug_id)
+        if st is None or st.session_id != session_id or not st.stop_pending:
+            return False
+        if watts >= CHARGE_FULL_IDLE_W:
+            return False
+        if st.stop_tried_at is not None and (
+            (at - st.stop_tried_at).total_seconds() < CHARGE_FULL_STOP_RETRY_SEC
+        ):
+            return False
+        st.stop_tried_at = at
+        return True
 
     def interrupt(self, plug_id: int, session_id: int) -> None:
         """A live frame of this session that is not a reading of the car (relay
