@@ -36,6 +36,9 @@ over `--ramp-seconds` (soft-start realism, not an instant jump) with
 exactly like the firmware does (kwh resets to 0 at ON, reports 0 while idle),
 so the wallet debits and the live cost tick up predictably. At the default
 10 kW that's ~0.167 kWh/min (~0.83 coins/min at the default COINS_PER_KWH=5).
+`--taper-after` / `--drop-to-zero-after` model a car that finishes charging
+while the relay stays ON (for the backend's charge-complete detection,
+backend/services/mqtt/charge_full.py).
 
 Registration (creating the gateway + plug rows) goes through the public CPO
 API, not the DB, so this never touches the database directly. A gateway id the
@@ -148,6 +151,9 @@ DEFAULT_JITTER = float(os.getenv("FAKE_PLUG_JITTER", "0.02"))
 # percent ABOVE the naive power/voltage figure, exercising the
 # measured-vs-derived path end-to-end on the fake rig.
 POWER_FACTOR = float(os.getenv("FAKE_PLUG_POWER_FACTOR", "0.95"))
+# --taper-after: once tapering starts, the load falls linearly to 0 W over this
+# many seconds (a car's charger winding down near 100%).
+TAPER_SECONDS = 300.0
 # Reported in the retained online status payload. Prefixed "fake-" so it can
 # never be confused with a real device in the backend/UI; the numeric part
 # tracks the firmware generation this simulator mirrors (firmware/CMakeLists.txt
@@ -318,8 +324,15 @@ class PlugSim:
     """
 
     def __init__(self, plug_id: int, local_ip: str, watts: float, voltage: float,
-                 jitter: float, power_factor: float, ramp_seconds: float):
+                 jitter: float, power_factor: float, ramp_seconds: float,
+                 taper_after_s: Optional[float] = None,
+                 drop_after_s: Optional[float] = None):
         self.plug_id = plug_id
+        # [Charge complete] Seconds after ON at which the simulated car starts
+        # tapering (linear to 0 W over TAPER_SECONDS) / drops straight to 0 W.
+        # The relay stays ON either way, so frames keep reporting a real 0 W.
+        self.taper_after_s = taper_after_s
+        self.drop_after_s = drop_after_s
         self.local_ip = local_ip
         self.watts = watts
         self.voltage = voltage
@@ -397,10 +410,14 @@ class PlugSim:
 
     def _ramped_watts(self, now: float) -> float:
         target = self.watts
+        elapsed = now - self._session_start
+        if self.drop_after_s is not None and elapsed >= self.drop_after_s:
+            return 0.0
         if self.ramp_seconds > 0:
-            elapsed = now - self._session_start
             frac = min(1.0, max(0.0, elapsed / self.ramp_seconds))
             target *= frac
+        if self.taper_after_s is not None and elapsed > self.taper_after_s:
+            target *= max(0.0, 1.0 - (elapsed - self.taper_after_s) / TAPER_SECONDS)
         if self.jitter > 0:
             target *= 1.0 + random.uniform(-self.jitter, self.jitter)
         return max(0.0, target)
@@ -511,6 +528,8 @@ class GatewayConfig:
     ramp_seconds: float = DEFAULT_RAMP_SECONDS
     watts_map: dict[int, float] = field(default_factory=dict)
     reset_specs: dict[int, tuple[float, float]] = field(default_factory=dict)
+    taper_after_s: Optional[float] = None
+    drop_after_s: Optional[float] = None
     bootstrap_plug_id: Optional[int] = None
     bootstrap_local_ip: str = DEFAULT_LOCAL_IP
 
@@ -654,6 +673,7 @@ class FakeGateway:
             watts=self.cfg.watts_map.get(plug_id, self.cfg.default_watts),
             voltage=self.cfg.voltage, jitter=self.cfg.jitter,
             power_factor=self.cfg.power_factor, ramp_seconds=self.cfg.ramp_seconds,
+            taper_after_s=self.cfg.taper_after_s, drop_after_s=self.cfg.drop_after_s,
         )
         reset_spec = self.cfg.reset_specs.get(plug_id)
         if reset_spec is not None:
@@ -937,6 +957,13 @@ def main():
                          "for exercising the backend's ENERGY_COUNTER_RESET_DROP_KWH detection "
                          "(backend/services/mqtt/telemetry.py). Same shape as tools/p110_sim's "
                          "--reset-counter.")
+    ap.add_argument("--taper-after", type=float, default=None, metavar="SECONDS",
+                    help="SECONDS after each ON, taper the load linearly to 0 W over %d s "
+                         "(relay stays ON): a car finishing its charge, for the backend's "
+                         "charge-complete detection." % TAPER_SECONDS)
+    ap.add_argument("--drop-to-zero-after", type=float, default=None, metavar="SECONDS",
+                    help="SECONDS after each ON, drop the load straight to 0 W (relay stays "
+                         "ON): a car that is suddenly full.")
 
     # Identity / provisioning
     ap.add_argument("--gateway-id", default=DEFAULT_GATEWAY_ID)
@@ -1023,6 +1050,7 @@ def main():
         ramp_seconds=args.ramp_seconds,
         watts_map=_parse_watts_map(args.watts_map),
         reset_specs=_parse_reset_specs(args.reset_counter),
+        taper_after_s=args.taper_after, drop_after_s=args.drop_to_zero_after,
         bootstrap_plug_id=plug_id, bootstrap_local_ip=args.local_ip,
     )
     gateway = FakeGateway(cfg)
