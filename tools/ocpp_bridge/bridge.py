@@ -33,7 +33,9 @@ SUBPROTOCOL = "ocpp1.6"
 VENDOR, MODEL = "AmpHive", "Tapo P110 bridge"
 DEFAULT_HEARTBEAT_S = 300
 DEFAULT_BOOT_RETRY_S = 30
+BACKOFF_BASE_S = 1.0
 BACKOFF_MAX_S = 60.0
+STOP_GIVE_UP = 3  # consecutive CallErrors on one StopTransaction before it is dropped locally
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
 # CSMS-initiated calls the bridge answers with a refusal. It is a read-only
@@ -197,24 +199,27 @@ class ChargePoint:
         self._pending: dict[str, asyncio.Future[Any]] = {}
         self._call_lock = asyncio.Lock()
         self._last_status: str | None = None
+        self._booted = False  # set once a connection's BootNotification was accepted
+        self._stop_errors = 0  # consecutive CallErrors on the open transaction's StopTransaction
+        self._sleep = asyncio.sleep  # reconnect delay; tests replace it
 
     def update(self, snapshot: dict[str, Any]) -> None:
         self.snapshot = snapshot
         self.changed.set()
 
     async def run(self) -> None:
-        delay = 1.0
+        delay = BACKOFF_BASE_S
         while True:
-            booted = False
+            self._booted = False
             try:
-                booted = await self._connection()
+                await self._connection()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # reconnect on any transport or protocol failure
                 log.warning("%s: connection lost (%s: %s)", self.cp_id, type(exc).__name__, exc)
-            if booted:
-                delay = 1.0
-            await asyncio.sleep(delay)
+            if self._booted:  # the link was healthy once: start the backoff over
+                delay = BACKOFF_BASE_S
+            await self._sleep(delay)
             delay = min(delay * 2, BACKOFF_MAX_S)
 
     def _headers(self) -> dict[str, str]:
@@ -224,9 +229,8 @@ class ChargePoint:
         raw = f"{user}:{self.cfg.basic_password}".encode()
         return {"Authorization": "Basic " + base64.b64encode(raw).decode()}
 
-    async def _connection(self) -> bool:
+    async def _connection(self) -> None:
         url = f"{self.cfg.csms_url.rstrip('/')}/{self.cp_id}"
-        booted = False
         async with connect(url, subprotocols=[Subprotocol(SUBPROTOCOL)],
                            additional_headers=self._headers(), proxy=None) as ws:
             if ws.subprotocol != SUBPROTOCOL:
@@ -236,7 +240,7 @@ class ChargePoint:
             heartbeat: asyncio.Task[None] | None = None
             try:
                 await self._boot()
-                booted = True
+                self._booted = True
                 log.info("%s: boot accepted, heartbeat %ss", self.cp_id, self.heartbeat_interval)
                 heartbeat = asyncio.create_task(self._heartbeat())
                 self._last_status = None  # re-send status after every (re)connect
@@ -263,7 +267,6 @@ class ChargePoint:
                         task.cancel()
                 self._fail_pending()
                 self._ws = None
-        return booted
 
     async def call(self, action: str, payload: dict[str, Any]) -> dict[str, Any]:
         """Send one CALL and wait for its result. One outstanding CALL at a time."""
@@ -358,7 +361,10 @@ class ChargePoint:
     async def _heartbeat(self) -> None:
         while True:
             await asyncio.sleep(self.heartbeat_interval)
-            await self.call("Heartbeat", {})
+            try:
+                await self.call("Heartbeat", {})
+            except OcppCallError as exc:  # the CSMS refused one heartbeat: the link is fine
+                log.warning("%s: Heartbeat CallError %s", self.cp_id, exc)
 
     async def _sync(self) -> None:
         plug = self.snapshot
@@ -368,20 +374,22 @@ class ChargePoint:
         session_id = int(session["id"]) if session else None
 
         if st["transaction_id"] is not None and st["session_id"] != session_id:
-            await self._stop(st)
+            try:
+                await self._stop(st)
+                self._stop_errors = 0
+            except OcppCallError as exc:
+                self._stop_errors += 1
+                if self._stop_errors < STOP_GIVE_UP:
+                    raise
+                # The CSMS keeps refusing this stop (for example it does not know the
+                # transactionId): treat it as acked so the charge point is not wedged.
+                log.warning("%s: StopTransaction refused %s times (%s); closing transaction "
+                            "%s locally", self.cp_id, self._stop_errors, exc, st["transaction_id"])
+                self._stop_errors = 0
+                self._close_locally(st)
 
-        status = ocpp_status(plug)
-        if status != self._last_status:
-            await self.call("StatusNotification", {
-                "connectorId": 1, "errorCode": "NoError", "status": status,
-                "timestamp": utc_iso(),
-            })
-            self._last_status = status
-
-        if session is None:
-            return
-        energy_wh = float(session["energy_kwh"]) * 1000.0
-        if st["transaction_id"] is None:
+        energy_wh = float(session["energy_kwh"]) * 1000.0 if session else 0.0
+        if session is not None and st["transaction_id"] is None:
             res = await self.call("StartTransaction", {
                 "connectorId": 1, "idTag": self.cfg.id_tag,
                 "meterStart": round(st["base_wh"]),
@@ -397,6 +405,16 @@ class ChargePoint:
             log.info("%s: transaction %s started for session %s",
                      self.cp_id, st["transaction_id"], session_id)
 
+        status = ocpp_status(plug)
+        if status != self._last_status:
+            await self.call("StatusNotification", {
+                "connectorId": 1, "errorCode": "NoError", "status": status,
+                "timestamp": utc_iso(),
+            })
+            self._last_status = status  # only after the CSMS answered
+
+        if session is None:
+            return
         st["last_energy_wh"] = max(float(st["last_energy_wh"]), energy_wh)
         self.state.save()
         await self.call("MeterValues", {
@@ -426,7 +444,10 @@ class ChargePoint:
             "timestamp": utc_iso(), "reason": "Local", "idTag": self.cfg.id_tag,
         })
         log.info("%s: transaction %s stopped at %s Wh", self.cp_id, st["transaction_id"], meter_stop)
-        # Advance the register and drop the mapping only after the CSMS acked.
+        self._close_locally(st)  # only after the CSMS acked
+
+    def _close_locally(self, st: dict[str, Any]) -> None:
+        """Advance the register and drop the transaction mapping."""
         st.update(base_wh=float(st["base_wh"]) + float(st["last_energy_wh"]),
                   session_id=None, transaction_id=None, last_energy_wh=0.0)
         self.state.save()
