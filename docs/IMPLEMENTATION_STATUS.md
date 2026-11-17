@@ -165,6 +165,9 @@ CPO money and console:
   "today" and the daily revenue/energy series (`/analytics/revenue`,
   `/analytics/energy`) now use the tenant's `timezone` (same resolver as pricing,
   default `Asia/Kolkata`) instead of the UTC day, which rolled over at 05:30 IST.
+  Follow-up 2026-11-17 (not deployed): "today" energy and session count use
+  `ended_at` like the revenue, and the revenue series nets approved dispute
+  refunds on each refunded session's own day.
 - **Plug edit can reset to inherit (C13)** - `PUT /api/cpo/plugs/{id}` treats an
   explicit JSON `null` for `queued_charging_enabled` / `auto_start_delay_min` as
   "clear the override back to the tenant default"; an omitted key still leaves it

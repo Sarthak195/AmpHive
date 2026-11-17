@@ -1316,3 +1316,45 @@ async def test_backfill_claims_windowed_sessions_for_legacy_payouts(factory):
     async with factory() as db:
         unsettled = await payout_service.sum_unsettled_session_coins(db, tenant_id)
     assert unsettled == Decimal("15.00")  # 8.00 + 7.00, not the settled 25.00
+
+
+@requires_db
+@pytest.mark.asyncio
+async def test_revenue_chart_takes_a_late_refund_off_its_sessions_day(factory):
+    """A session ends 5 days ago for 100 coins; a 40-coin refund is approved
+    2 days ago, a day with no sessions. The 30-day chart shows 60 on the
+    session's day, nothing on the approval day, and its total matches
+    Earnings (sum_completed_session_coins)."""
+    from backend.database.models import DisputeStatus, SessionDispute
+    from backend.routers.cpo import _analytics
+
+    tenant_id, cpo_id = await _seed_tenant(factory, "ChartRefundCo")
+    driver_id = await _seed_driver(factory, "chart-driver")
+    now = datetime.now(timezone.utc)
+    # 05:00-06:00 UTC is the same calendar date in UTC and Asia/Kolkata.
+    ended_at = (now - timedelta(days=5)).replace(hour=6, minute=0, second=0, microsecond=0)
+    session_id = await _seed_session(
+        factory, tenant_id, "100.00", SessionStatus.COMPLETED, ended_at=ended_at
+    )
+    async with factory() as db:
+        db.add(SessionDispute(
+            session_id=session_id,
+            tenant_id=tenant_id,
+            driver_user_id=driver_id,
+            reason="Charger stopped early",
+            status=DisputeStatus.APPROVED,
+            refund_coins=Decimal("40.00"),
+            resolved_at=now - timedelta(days=2),
+        ))
+        await db.commit()
+
+    async with factory() as db:
+        series = await _analytics.cpo_analytics_revenue(
+            user=_cpo_user(tenant_id, cpo_id), db=db, days=30
+        )
+        earnings = await payout_service.sum_completed_session_coins(db, tenant_id)
+
+    assert series == [
+        {"date": str(ended_at.date()), "revenue_coins": 60.0, "session_count": 1}
+    ]
+    assert earnings == Decimal("60.00")
