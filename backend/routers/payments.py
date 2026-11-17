@@ -4,27 +4,37 @@ Payments routes — moved verbatim from main.py (2026-07-07, TD#7 split).
 import asyncio
 import json
 import logging
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database.db import get_db
 from backend.database.models import (
     LedgerTransaction,
+    PromoCode,
+    PromoRedemption,
+    Tenant,
     TransactionType,
     User,
+    UserRole,
 )
 from backend.schemas import (
     CreateOrderRequest,
     CreateOrderResponse,
     LedgerEntryResponse,
+    PromoRedeemRequest,
+    PromoRedeemResponse,
     VerifyPaymentRequest,
 )
 from backend.services import payments as payment_service
+from backend.services import payouts as payout_service
+from backend.services import promos as promo_service
+from backend.services.audit import try_record_audit
 from backend.services.auth import (
     get_current_user,
 )
@@ -32,6 +42,9 @@ from backend.services.money import to_money
 from backend.services.rate_limit import (
     account_rate_limit_dependency,
     payments_create_order_account_rate_limiter,
+    promo_redeem_account_rate_limiter,
+    promo_redeem_rate_limiter,
+    rate_limit_dependency,
 )
 from backend.services.wallet import available_balance, credit_wallet, debit_wallet_clamped
 
@@ -243,6 +256,149 @@ async def get_wallet_ledger(
         )
         for tx in rows
     ]
+
+
+# One answer for an unknown, malformed, expired, disabled, used-up or
+# already-redeemed-by-you code, so the endpoint is not an oracle for which
+# codes exist (same idea as the gateway claim route's generic 404).
+_PROMO_INVALID_DETAIL = "That code can't be redeemed. Check it and try again."
+
+
+def _promo_invalid() -> HTTPException:
+    return HTTPException(status_code=404, detail=_PROMO_INVALID_DETAIL)
+
+
+@router.post(
+    "/api/wallet/redeem",
+    response_model=PromoRedeemResponse,
+    dependencies=[
+        Depends(rate_limit_dependency(promo_redeem_rate_limiter, "promo code")),
+        Depends(account_rate_limit_dependency(promo_redeem_account_rate_limiter, "promo code")),
+    ],
+)
+async def redeem_promo_code(
+    req: PromoRedeemRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    [Promo codes] Redeem a CPO-issued promo code into the caller's charging
+    credit. The credit is an offline top-up funded from the issuing tenant's
+    pool (services/payouts.py issue_offline_topup, the same writer as POST
+    /api/cpo/topups), so payouts and the pool stay consistent.
+
+    Locks follow the offline top-up order: Tenant row, then the PromoCode row,
+    then the driver's User row. Every limit is re-checked under those locks,
+    so two concurrent redemptions of a one-use code cannot both succeed.
+    404 (one generic message) for any code that cannot be redeemed; 409
+    "issuer pool exhausted" when the tenant's pool does not cover it.
+    """
+    if user.role != UserRole.DRIVER:
+        raise HTTPException(status_code=403, detail="Only driver accounts can redeem promo codes.")
+    # Plain values: a failed audit write below rolls the session back and
+    # expires ORM objects, `user` included.
+    user_id, user_email = user.id, user.email
+
+    code = promo_service.normalize_code(req.code)
+    if code is None:
+        raise _promo_invalid()
+
+    # Unlocked probe for the id and tenant only (columns, not the entity, so
+    # the locked re-read below is a fresh load rather than a stale cached one).
+    found = (
+        await db.execute(
+            select(PromoCode.id, PromoCode.tenant_id).where(
+                PromoCode.code_hash == promo_service.hash_code(code)
+            )
+        )
+    ).one_or_none()
+    if found is None:
+        raise _promo_invalid()
+    promo_id, tenant_id = found
+
+    tenant_name = (
+        await db.execute(select(Tenant.name).where(Tenant.id == tenant_id).with_for_update())
+    ).scalar_one_or_none()
+    if tenant_name is None:
+        raise _promo_invalid()
+
+    promo = (
+        await db.execute(select(PromoCode).where(PromoCode.id == promo_id).with_for_update())
+    ).scalar_one_or_none()
+    now = datetime.now(timezone.utc)
+    if (
+        promo is None
+        or promo.disabled_at is not None
+        or (promo.expires_at is not None and promo.expires_at <= now)
+    ):
+        raise _promo_invalid()
+
+    used_total = (
+        await db.execute(
+            select(func.count(PromoRedemption.id)).where(PromoRedemption.code_id == promo_id)
+        )
+    ).scalar() or 0
+    used_by_me = (
+        await db.execute(
+            select(func.count(PromoRedemption.id)).where(
+                PromoRedemption.code_id == promo_id, PromoRedemption.user_id == user_id
+            )
+        )
+    ).scalar() or 0
+    if used_total >= promo.max_redemptions or used_by_me >= promo.per_user_limit:
+        raise _promo_invalid()
+
+    await db.execute(select(User.id).where(User.id == user_id).with_for_update())
+
+    amount = to_money(promo.amount_coins)
+    hint = promo.code_hint
+    summary = await payout_service.tenant_earnings_summary(db, tenant_id)
+    if amount > summary["available_pool_coins"]:
+        raise HTTPException(status_code=409, detail="issuer pool exhausted")
+
+    issued = await payout_service.issue_offline_topup(
+        db,
+        tenant_id=tenant_id,
+        actor_user_id=promo.created_by,
+        driver_id=user_id,
+        amount=amount,
+        watermark=summary["watermark"],
+        note=f"Promo code ...{hint}",
+        description=f"Promo code credit from {tenant_name}",
+        promo_code_id=promo_id,
+    )
+    if issued is None:
+        raise HTTPException(status_code=404, detail="Account not found.")
+    topup, new_balance = issued
+    await db.flush()
+    topup_id = topup.id
+    db.add(PromoRedemption(code_id=promo_id, user_id=user_id, offline_topup_id=topup_id))
+    await db.commit()
+
+    logger.info(
+        f"Promo code redeemed: tenant={tenant_id} promo={promo_id} topup={topup_id} "
+        f"user={user_id} amount={amount}"
+    )
+    await try_record_audit(
+        db,
+        tenant_id=tenant_id,
+        actor_user_id=user_id,
+        action="promo.redeem",
+        target_type="promo_code",
+        target_id=promo_id,
+        detail=f"hint={hint}, driver={user_email}, amount={amount}, topup={topup_id}",
+    )
+
+    from backend.services.notifications import notify
+    await notify(
+        user_id,
+        "promo_redeemed",
+        "Promo code redeemed",
+        f"{amount} coins from {tenant_name} were added to your charging credit.",
+        severity="info",
+    )
+
+    return PromoRedeemResponse(amount_coins=float(amount), new_balance=float(new_balance))
 
 
 @router.post(
