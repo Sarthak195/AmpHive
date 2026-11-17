@@ -301,6 +301,29 @@ def test_sessions_csv_masks_driver_email_for_viewer(as_user, role, expected):
         assert "driver@example.com" not in resp.text
 
 
+@pytest.mark.parametrize(
+    "role,email,note",
+    [
+        (UserRole.CPO_VIEWER, "o***@example.com", "for b***@example.com"),
+        (UserRole.CPO, "owner@example.com", "for buyer@example.com"),
+    ],
+)
+def test_promo_list_masks_issuer_email_and_note_for_viewer(as_user, role, email, note):
+    """Integration (F10 x F12): GET /api/cpo/promos redacts like other reads."""
+    now = datetime.now(timezone.utc)
+    promo = SimpleNamespace(
+        id=1, tenant_id=5, code_hint="PQRS", amount_coins=50, expires_at=None,
+        max_redemptions=1, per_user_limit=1, note="for buyer@example.com",
+        created_at=now, disabled_at=None,
+    )
+    client, _ = as_user(_viewer(role=role), rows=[(promo, 0, "owner@example.com")])
+    resp = client.get("/api/cpo/promos")
+    assert resp.status_code == 200, resp.text
+    item = resp.json()["items"][0]
+    assert item["created_by_email"] == email
+    assert item["note"] == note
+
+
 def test_mask_pii_handles_free_text_and_phones():
     from backend.routers.cpo._common import mask_pii
 
