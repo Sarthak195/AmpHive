@@ -49,7 +49,7 @@ describe('txTypeLabel', () => {
     expect(txTypeLabel('refund')).toBe('Refund');
     expect(txTypeLabel('hold')).toBe('Hold');
     expect(txTypeLabel('hold_release')).toBe('Hold released');
-    expect(txTypeLabel('cpo_topup')).toBe('Credit added by operator (cash)');
+    expect(txTypeLabel('cpo_topup')).toBe('Credit added by operator');
   });
 });
 
