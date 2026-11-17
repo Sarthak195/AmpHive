@@ -444,7 +444,8 @@ async def test_callback_link_evicts_a_verified_accounts_password_too(monkeypatch
     )
     req = _FakeRequest(cookies={"google_oauth_state": "abc"}, query_params={"state": "abc", "code": "x"})
 
-    resp = await google_callback(req, _db_returning(existing))
+    db = _db_returning(existing)
+    resp = await google_callback(req, db)
 
     assert "#code=" in resp.headers["location"]
     assert existing.google_sub == "google-sub-2"
@@ -452,6 +453,9 @@ async def test_callback_link_evicts_a_verified_accounts_password_too(monkeypatch
     assert existing.token_version == 1
     assert existing.auth_provider == "google"
     assert existing.email_verified is True
+    # [F7] A squatter's personal API tokens are revoked by the takeover too.
+    stmts = [str(c.args[0]) for c in db.execute.await_args_list]
+    assert any(s.startswith("UPDATE api_tokens") and "revoked_at IS NULL" in s for s in stmts)
 
 
 @pytest.mark.asyncio

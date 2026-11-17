@@ -208,11 +208,15 @@ async def test_reset_password_consumes_token_and_revokes_sessions():
     prt = _prt(user_id=7)
     consumed = MagicMock()
     consumed.rowcount = 1
-    db = _db([_scalar(prt), consumed, MagicMock()])
+    db = _db([_scalar(prt), consumed, MagicMock(), MagicMock()])
 
     res = await reset_password(ResetPasswordRequest(token="tok", password="newpassword1"), db)
 
     assert res == {"status": "password_reset"}
+    # [F7] Every personal API token is revoked in the same commit.
+    tokens_stmt = str(db.execute.await_args_list[3].args[0])
+    assert tokens_stmt.startswith("UPDATE api_tokens")
+    assert "revoked_at IS NULL" in tokens_stmt
     # Single-use + race-safe: consumption is a conditional UPDATE guarded on
     # used_at IS NULL — not a Python-side attribute write.
     consume_stmt = str(db.execute.await_args_list[1].args[0])

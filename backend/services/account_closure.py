@@ -17,7 +17,9 @@ So closure does two different things to two different classes of row:
 have no counterparty:
   push subscriptions, notifications, favourites, plug watches, group
   memberships, capacity requests, queued charges, upcoming reservations, and
-  any outstanding password-reset / email-verification tokens.
+  any outstanding password-reset / email-verification tokens. Personal API
+  tokens (F7) are revoked (revoked_at stamped) in the same commit, so none
+  outlives the account.
 
 **Retained but detached (anonymised)** — the `users` row itself is kept as a
 tombstone so the financial rows still resolve, with every identifier scrubbed:
@@ -75,6 +77,7 @@ from backend.database.models import (
     UserFavorite,
     UserRole,
 )
+from backend.services.api_tokens import revoke_user_api_tokens
 from backend.services.auth import hash_password
 from backend.services.money import ZERO_MONEY, to_money
 
@@ -228,6 +231,9 @@ async def close_account(db: AsyncSession, user: User) -> dict:
             delete(model).where(column == user_id).execution_options(synchronize_session=False)
         )
         purged[label] = result.rowcount or 0
+
+    # [F7] Revoke every personal read-only API token.
+    await revoke_user_api_tokens(db, user_id)
 
     # --- 4. Anonymise the account row itself ------------------------------
     # token_version is bumped DB-side so every outstanding JWT (this request's

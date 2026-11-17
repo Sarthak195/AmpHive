@@ -33,6 +33,7 @@ These are layered ON TOP of the per-IP limiters, not a replacement:
   CPO_SETUP_ACCOUNT_RATE_LIMIT             (default 5/300 — 5 workspace-setup attempts per 5 minutes per account)
   FORGOT_PASSWORD_EMAIL_RATE_LIMIT         (default 3/3600 — 3 reset emails per hour per SUBMITTED email, across all source IPs)
   RESEND_VERIFICATION_EMAIL_RATE_LIMIT     (default 3/3600 — 3 verification emails per hour per SUBMITTED email, across all source IPs)
+  API_TOKEN_RATE_LIMIT                     (default 60/60 - 60 meter reads per minute per personal API token, F7)
 """
 import logging
 import os
@@ -441,6 +442,13 @@ group_join_account_rate_limiter = SlidingWindowRateLimiter(
 # throttles using that oracle to probe for existing tenant names.
 cpo_setup_account_rate_limiter = SlidingWindowRateLimiter(
     *_rule_from_env("CPO_SETUP_ACCOUNT_RATE_LIMIT", "5/300")
+)
+
+# [F7] Per personal API token (keyed "token:<id>", services/api_tokens.py).
+# A Home Assistant or evcc poll every 30 s uses 2 a minute, so 60 leaves wide
+# headroom while bounding a leaked token's read rate.
+api_token_rate_limiter = SlidingWindowRateLimiter(
+    *_rule_from_env("API_TOKEN_RATE_LIMIT", "60/60")
 )
 
 # Blanket /api floor (api_rate_limit_middleware above). 300/60 ≈ 5 req/s
