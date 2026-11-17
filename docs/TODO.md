@@ -11,6 +11,23 @@ been fixed by the 2026-07-08…11 work — see the shipped sections below).*
 
 ---
 
+## 2026-11-17 features wave 1 (built 2026-11-17 on release/2026-11-17-w1, not deployed)
+
+- [x] F2 per-session power curve (`GET /api/sessions/{id}/telemetry`, SessionPowerCurve). (built 2026-11-17 on release/2026-11-17-w1, not deployed)
+- [x] F8 insights: 12-month series and estimated CO2/petrol impact on the driver Dashboard, CPO Dashboard and receipt. (built 2026-11-17 on release/2026-11-17-w1, not deployed)
+- [x] F3 operator alerts for an idle gateway going offline and for safety faults (bell, push, optional email). (built 2026-11-17 on release/2026-11-17-w1, not deployed)
+- [x] F4 diagnostics UI (gateway Logs drawer, admin Logs tab, CPO audit page). (built 2026-11-17 on release/2026-11-17-w1, not deployed)
+- [x] F5 memory-eviction visibility: admin health console (`/admin/health`) and host cron alerter. (built 2026-11-17 on release/2026-11-17-w1, not deployed)
+- [x] F6 one-tap cheapest-window scheduled start. (built 2026-11-17 on release/2026-11-17-w1, not deployed)
+- [x] F11 public network status (`GET /api/status`, Network status panel on `/map`). (built 2026-11-17 on release/2026-11-17-w1, not deployed)
+- [ ] Install the F5 host cron on the VM (`check_host_health.sh`, see docs/DEPLOYMENT.md "Features wave 1").
+- [ ] F3 known limits: cooldowns, the "offline notice was sent" memory and the pending "still offline" re-check are in process memory, so a restart during the cooldown loses the re-check and can re-alert once; an online racing the recipients query can send "back online" alongside the "offline" fan-out (ordering not guaranteed); a safety fault can give an owner who charges from an operator account both the driver cutoff notice and the `gateway_fault` bell (not deduplicated).
+- [ ] Deferred from F8: vehicle profile (per-driver km/kWh and petrol price) and a monthly insights email. Tenant-local months for CPO-side series if ever needed.
+- [ ] Deferred from F6: "ready by T" charge planner. It needs a new PAUSED session state and unattended re-energizing (a SAFETY.md concern), so it was dropped from F6. Only the one-tap cheapest-start shipped.
+- [ ] Optional F11 follow-up: a free Cloudflare Cache Rule for `/api/status` (Eligible for cache, edge TTL 60 s) and a QR to `/map`.
+
+---
+
 ## OPEN, 2026-11-15 known limits (fix batch follow-ups)
 
 *Low severity. U0-U6 are from the 2026-11-15 review and were NOT independently verified; F10 is a known false-alarm class.*
@@ -404,6 +421,10 @@ actions, and two deliberate deferrals.*
       across container recreation), stdout bounded via the compose
       `logging:` driver. Tests: `backend/tests/test_logging.py`. Still open:
       a firmware log topic for field diagnostics (serial-only today). (TD#28)
+      UI shipped 2026-11-17 (feat/f4-diagnostics-ui): CPO gateway Logs
+      drawer (CpoGateways), admin Logs tab (AdminGateways), CPO `/cpo/audit`
+      page (CpoAudit.jsx, TD#26 trail now visible). Diagnostics UI done
+      (built 2026-11-17 on release/2026-11-17-w1, not deployed).
 - [x] **[2026-07-06 audit] Registration validation.** Done 2026-07-11 —
       `EmailStr` + 8-72 char password rule; login left unvalidated for
       pre-rule accounts. (TD#30)

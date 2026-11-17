@@ -945,6 +945,26 @@ mint plus claim on 403), `frontend/src/pages/cpo/CpoGateways.test.jsx`.
   logout, logout everywhere and any 401. A snapshot is rendered dimmed and
   labelled "last saved" until fresh data replaces it.
 
+### 8.10 2026-11-17 features wave 1 (built on `release/2026-11-17-w1`, not deployed)
+
+- **Firmware log text in the UI (F4).** Forwarded firmware log text is
+  untrusted device output: the diagnostics UI renders it as React text only
+  (never HTML) and strips ANSI escapes. Firmware forwards only E/W lines
+  (`log_forward_vprintf` in `firmware/main/main.c`), so I-level lines,
+  including the `SETUP CODE` line (`ESP_LOGI`, `main.c:565`), never reach the
+  server.
+- **Admin health (F5).** `GET /api/admin/health` exposes host memory, disk and
+  DB size to platform admins only (`require_role("admin")`); it is never added
+  to the public `/api/health`.
+- **Public status (F11).** `GET /api/status` is public and exposes only data
+  already public via `/api/plugs/public` plus aggregate gateway counts (only
+  gateways hosting public, mappable plugs) and a minute-coarsened last-seen. No
+  firmware versions, backup age, IPs or gateway ids. It is limited by
+  `STATUS_RATE_LIMIT` (default 20/60 per IP) and the blanket API limiter, with
+  a 60 s in-process cache so request volume does not reach the DB.
+- **Power curve (F2).** `GET /api/sessions/{id}/telemetry` uses the same access
+  rule as session detail (404 for non-owners).
+
 ---
 
 ## Quick remediation checklist
