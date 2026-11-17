@@ -1,0 +1,322 @@
+"""
+F10: read-only CPO viewer (UserRole.CPO_VIEWER).
+
+The guard lives in the single auth path (services/auth.get_current_user):
+a cpo_viewer gets 403 "read_only_demo" on every request other than
+GET/HEAD/OPTIONS, except POST /api/auth/logout. The generated test below walks
+EVERY route the app serves, so a new write route is covered automatically,
+and a new unauthenticated write route must be added to PUBLIC_WRITES on
+purpose.
+
+DB-free: the real get_current_user runs against a mocked session that
+returns the viewer for the users lookup; tokens carry no sid, so the
+revoked-sessions probe never queries.
+"""
+import re
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+from fastapi import HTTPException
+from fastapi.routing import APIRoute
+from fastapi.testclient import TestClient
+
+from backend.database.models import SessionStatus, UserRole
+
+SAFE = {"GET", "HEAD", "OPTIONS"}
+
+# Write routes that take no bearer token at all (sign-in, sign-up, password
+# reset, the payment webhook): a viewer token is irrelevant to them.
+PUBLIC_WRITES = {
+    ("POST", "/api/auth/register"),
+    ("POST", "/api/auth/verify-email"),
+    ("POST", "/api/auth/resend-verification"),
+    ("POST", "/api/auth/login"),
+    ("POST", "/api/auth/google/exchange"),
+    ("POST", "/api/auth/forgot-password"),
+    ("POST", "/api/auth/reset-password"),
+    ("POST", "/api/payments/webhook"),
+}
+VIEWER_EXEMPT = {("POST", "/api/auth/logout")}
+
+
+def _viewer(role=UserRole.CPO_VIEWER, tenant_id=5):
+    return SimpleNamespace(
+        id=42, email="viewer@amphive.test", full_name="Demo Viewer", role=role,
+        tenant_id=tenant_id, token_version=0, is_disabled=False, is_active=True,
+        deleted_at=None, coin_balance=0, email_verified=True,
+    )
+
+
+def _api():
+    import backend.main as main
+
+    return main, main.app.other_asgi_app  # main.app is the socket.io wrapper
+
+
+def _walk(routes):
+    """Every APIRoute, including those behind (nested) include_router."""
+    for r in routes:
+        if isinstance(r, APIRoute):
+            yield r
+        elif hasattr(r, "original_router"):
+            yield from _walk(r.original_router.routes)
+
+
+def _uses(dependant, fn) -> bool:
+    return dependant.call is fn or any(_uses(d, fn) for d in dependant.dependencies)
+
+
+def _concrete(path: str) -> str:
+    return re.sub(r"\{[^}]+\}", "1", path)
+
+
+def _write_routes():
+    _, api = _api()
+    out = []
+    for r in _walk(api.routes):
+        for m in sorted(r.methods - SAFE):
+            out.append((m, r.path, r))
+    return out
+
+
+@pytest.fixture
+def viewer_client(monkeypatch):
+    """TestClient whose bearer token resolves (through the REAL
+    get_current_user) to the given user via a mocked DB session."""
+    from backend.database.db import get_db
+    from backend.services import rate_limit
+    from backend.services.auth import create_access_token
+
+    monkeypatch.setattr(rate_limit, "api_rate_limiter", None)
+    main, api = _api()
+
+    def _make(user):
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = user
+        db = MagicMock()
+        db.execute = AsyncMock(return_value=result)
+        db.commit = AsyncMock()
+        db.rollback = AsyncMock()
+
+        async def _db():
+            yield db
+
+        api.dependency_overrides[get_db] = _db
+        token = create_access_token(user.id, user.role.value, user.email, 0)
+        client = TestClient(main.app, raise_server_exceptions=False)
+        client.headers["Authorization"] = f"Bearer {token}"
+        return client, db
+
+    yield _make
+    api.dependency_overrides.pop(get_db, None)
+
+
+def test_every_write_route_is_authenticated_or_deliberately_public():
+    """A new write route that skips get_current_user must be listed here on
+    purpose, or the viewer guard would not cover it."""
+    from backend.services.auth import get_current_user, get_current_user_optional
+
+    routes = _write_routes()
+    assert len(routes) > 50, "route walk found too few routes"
+    unguarded = {
+        (m, p) for m, p, r in routes if not _uses(r.dependant, get_current_user)
+    }
+    assert unguarded == PUBLIC_WRITES
+    # Optional auth never raises, so it must not back any write route.
+    assert not [
+        (m, p) for m, p, r in routes if _uses(r.dependant, get_current_user_optional)
+    ]
+
+
+@pytest.mark.parametrize(
+    "method,path",
+    [(m, p) for m, p, _ in _write_routes() if (m, p) not in PUBLIC_WRITES | VIEWER_EXEMPT],
+)
+def test_viewer_gets_403_on_every_write_route(viewer_client, method, path):
+    client, db = viewer_client(_viewer())
+    resp = client.request(method, _concrete(path), json={})
+    assert resp.status_code == 403, (method, path, resp.status_code, resp.text)
+    assert resp.json()["detail"] == "read_only_demo"
+    db.commit.assert_not_awaited()
+
+
+def test_viewer_may_sign_out(viewer_client):
+    client, _ = viewer_client(_viewer())
+    resp = client.post("/api/auth/logout")
+    assert resp.status_code != 403, resp.text
+
+
+def test_cpo_write_is_not_blocked_by_the_viewer_guard(viewer_client):
+    """Control: the same write as a real CPO is not refused with read_only_demo."""
+    client, _ = viewer_client(_viewer(role=UserRole.CPO))
+    resp = client.post("/api/cpo/payouts/1/cancel")
+    assert resp.status_code != 403 or resp.json()["detail"] != "read_only_demo"
+
+
+@pytest.mark.parametrize(
+    "path",
+    sorted({
+        p for m, p, _ in [
+            (m, r.path, r) for r in _walk(_api()[1].routes) for m in r.methods
+        ]
+        if m == "GET" and p.startswith("/api/admin")
+    }),
+)
+def test_viewer_gets_403_on_admin_reads(viewer_client, path):
+    client, _ = viewer_client(_viewer())
+    resp = client.get(_concrete(path))
+    assert resp.status_code == 403, (path, resp.status_code, resp.text)
+
+
+def _cpo_get_paths():
+    from backend.routers import cpo
+
+    return sorted({
+        r.path for r in _walk(cpo.router.routes) if "GET" in r.methods
+    })
+
+
+@pytest.fixture
+def as_user():
+    """Like test_cpo_tenant_scope: get_current_user overridden, empty DB."""
+    import backend.main as main
+    from backend.database.db import get_db
+    from backend.services.auth import get_current_user
+
+    api = main.app.other_asgi_app
+
+    def _make(user, rows=None, first=None):
+        result = MagicMock()
+        result.scalars.return_value.all.return_value = []
+        result.scalar.return_value = 0
+        result.scalar_one_or_none.return_value = None
+        result.scalar_one.return_value = 0
+        result.all.return_value = rows or []
+        result.first.return_value = first
+        db = MagicMock()
+        db.execute = AsyncMock(return_value=result)
+        db.commit = AsyncMock()
+
+        async def _db():
+            yield db
+
+        api.dependency_overrides[get_db] = _db
+        api.dependency_overrides[get_current_user] = lambda: user
+        return TestClient(main.app, raise_server_exceptions=False), db
+
+    yield _make
+    api.dependency_overrides.pop(get_db, None)
+    api.dependency_overrides.pop(get_current_user, None)
+
+
+@pytest.mark.parametrize("path", _cpo_get_paths())
+def test_viewer_reaches_every_cpo_read_route(as_user, path):
+    client, _ = as_user(_viewer())
+    resp = client.get(_concrete(path))
+    assert resp.status_code not in (401, 403), (path, resp.status_code, resp.text)
+
+
+@pytest.mark.asyncio
+async def test_cpo_tenant_gate_refuses_viewer_writes_on_its_own():
+    """Second layer: require_cpo_tenant refuses a viewer write even if the
+    global guard were bypassed (e.g. get_current_user overridden)."""
+    from backend.routers.cpo._common import require_cpo_tenant
+
+    req = SimpleNamespace(method="POST", url=SimpleNamespace(path="/api/cpo/plugs"))
+    with pytest.raises(HTTPException) as exc:
+        await require_cpo_tenant(req, _viewer())
+    assert exc.value.status_code == 403
+    get = SimpleNamespace(method="GET", url=SimpleNamespace(path="/api/cpo/plugs"))
+    assert await require_cpo_tenant(get, _viewer()) is not None
+
+
+@pytest.mark.asyncio
+async def test_direct_call_without_request_fails_closed_for_viewer():
+    from backend.services.auth import create_access_token, get_current_user
+
+    user = _viewer()
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = user
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=result)
+    creds = SimpleNamespace(credentials=create_access_token(42, "cpo_viewer", user.email, 0))
+    with pytest.raises(HTTPException) as exc:
+        await get_current_user(creds, db)
+    assert exc.value.status_code == 403
+
+
+# --- Privacy: emails masked for the viewer -------------------------------
+
+def _session_row():
+    now = datetime.now(timezone.utc)
+    s = SimpleNamespace(
+        id=9, plug_id=3, user_id=11, started_at=now - timedelta(hours=1), ended_at=now,
+        energy_kwh=1.5, coins_spent=12.0, status=SessionStatus.COMPLETED,
+    )
+    return [(s, "Garage plug", "driver@example.com")]
+
+
+@pytest.mark.parametrize(
+    "role,expected",
+    [(UserRole.CPO_VIEWER, "d***@example.com"), (UserRole.CPO, "driver@example.com")],
+)
+def test_sessions_list_masks_driver_email_for_viewer(as_user, role, expected):
+    client, _ = as_user(_viewer(role=role), rows=_session_row(), first=(1, 1.5, 12.0))
+    resp = client.get("/api/cpo/analytics/sessions")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["items"][0]["user_email"] == expected
+
+
+@pytest.mark.parametrize(
+    "role,expected",
+    [(UserRole.CPO_VIEWER, "d***@example.com"), (UserRole.CPO, "driver@example.com")],
+)
+def test_sessions_csv_masks_driver_email_for_viewer(as_user, role, expected):
+    client, _ = as_user(_viewer(role=role), rows=_session_row())
+    resp = client.get("/api/cpo/analytics/sessions.csv")
+    assert resp.status_code == 200, resp.text
+    assert expected in resp.text
+    if role == UserRole.CPO_VIEWER:
+        assert "driver@example.com" not in resp.text
+
+
+def test_mask_pii_handles_free_text_and_phones():
+    from backend.routers.cpo._common import mask_pii
+
+    assert mask_pii("driver=ab@x.co, amount=5") == "driver=a***@x.co, amount=5"
+    assert mask_pii("call +91 98765 43210") == "call [phone hidden]"
+    assert mask_pii("9876543210") == "[phone hidden]"
+    assert mask_pii("2026-11-17T10:00:00 plug 12") == "2026-11-17T10:00:00 plug 12"
+    assert mask_pii(None) is None
+
+
+def test_viewer_never_sees_a_private_group_access_code(as_user):
+    group = SimpleNamespace(
+        id=1, name="Home", is_public=False, access_code="SECRET12",
+        max_current_a=None, tariff_id=None, created_at=None, tenant_id=5,
+    )
+    client, db = as_user(_viewer())
+    db.execute.return_value.scalars.return_value.all.return_value = [group]
+    resp = client.get("/api/cpo/groups")
+    assert resp.status_code == 200, resp.text
+    assert "SECRET12" not in resp.text
+
+
+@pytest.mark.asyncio
+async def test_socket_subscribe_refused_for_viewer(monkeypatch):
+    from backend.services import socketio_manager as sm
+
+    monkeypatch.setattr(sm, "_socket_user_still_valid", AsyncMock(return_value=True))
+    monkeypatch.setattr(sm.sio, "get_session", AsyncMock(
+        return_value={"user_id": 42, "tv": 0, "read_only": True}
+    ))
+    emit = AsyncMock()
+    monkeypatch.setattr(sm.sio, "emit", emit)
+    factory = MagicMock()
+    monkeypatch.setattr(sm, "async_session_factory", factory)
+    await sm.subscribe_session("sid1", {"session_id": 9})
+    emit.assert_awaited_once()
+    assert emit.await_args.args[1] == {"detail": "read_only_demo"}
+    factory.assert_not_called()
