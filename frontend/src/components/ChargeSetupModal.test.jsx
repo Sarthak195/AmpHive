@@ -286,3 +286,48 @@ describe('ChargeSetupModal: scheduled start', () => {
     expect(onConfirm).toHaveBeenCalledWith(7, null);
   });
 });
+
+describe('ChargeSetupModal: cheapest window', () => {
+  const SCHED_PLUG = { ...PLUG, schedule_available: true, tenant_timezone: 'Asia/Kolkata' };
+  const PREVIEW = {
+    price_now: 10,
+    cheapest_window: { start: '2026-11-17T22:00:00+05:30', start_hhmm: '22:00', price_per_kwh: 4 },
+  };
+
+  it('one tap fills the start time, switches to "At a time" and shows the per-kWh saving', async () => {
+    api.get.mockResolvedValue(PREVIEW);
+    renderModal({ plug: SCHED_PLUG });
+    const btn = await screen.findByRole('button', { name: /Cheapest: 22:00 at ₹4\.00\/kWh \(save ~₹6\.00\/kWh\)/ });
+    expect(api.get).toHaveBeenCalledWith('/api/plugs/7/tariff-preview');
+    await userEvent.click(btn);
+    expect(screen.getByLabelText('Start time')).toHaveValue('22:00');
+    // The rule stays: a scheduled charge still has a limit (8h preselected).
+    expect(screen.getByRole('button', { name: '8h' })).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('multiplies the saving by the energy limit when one is set', async () => {
+    api.get.mockResolvedValue(PREVIEW);
+    renderModal({ plug: SCHED_PLUG });
+    await screen.findByRole('button', { name: /Cheapest: 22:00/ });
+    fireEvent.change(screen.getByLabelText('Energy limit (kWh)'), { target: { value: '5' } });
+    expect(screen.getByRole('button', { name: /save ~₹30\.00\)/ })).toBeInTheDocument();
+  });
+
+  it('is hidden on a flat tariff, a failed fetch, or a non-schedulable plug', async () => {
+    api.get.mockResolvedValue({ price_now: 10, cheapest_window: null });
+    renderModal({ plug: SCHED_PLUG });
+    await waitFor(() => expect(api.get).toHaveBeenCalled());
+    expect(screen.queryByRole('button', { name: /Cheapest/ })).not.toBeInTheDocument();
+
+    api.get.mockReset();
+    api.get.mockRejectedValue(new Error('boom'));
+    renderModal({ plug: { ...SCHED_PLUG, id: 8 } });
+    await waitFor(() => expect(api.get).toHaveBeenCalled());
+    expect(screen.queryByRole('button', { name: /Cheapest/ })).not.toBeInTheDocument();
+
+    api.get.mockReset();
+    api.get.mockResolvedValue(PREVIEW);
+    renderModal({ plug: { ...PLUG, id: 9 } });
+    expect(api.get).not.toHaveBeenCalled();
+  });
+});
