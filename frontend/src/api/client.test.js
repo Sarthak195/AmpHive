@@ -203,7 +203,7 @@ describe('apiRequest: 401 handling', () => {
   });
 });
 
-describe('apiRequest — read-only demo viewer (F10)', () => {
+describe('apiRequest: read-only demo viewer (F10)', () => {
   it('turns the read_only_demo 403 into a readable sentence with a code', async () => {
     fetch.mockResolvedValue(jsonResponse({ detail: 'read_only_demo' }, { ok: false, status: 403 }));
 

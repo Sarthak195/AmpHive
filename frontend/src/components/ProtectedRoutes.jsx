@@ -2,7 +2,7 @@
  * Route guards (extracted from App.jsx so they can be unit-tested).
  *
  * ProtectedRoute      — requires a signed-in user; otherwise → /login.
- * CpoProtectedRoute   — requires the 'cpo', 'admin' or read-only 'cpo_viewer'
+ * CpoProtectedRoute   : requires the 'cpo', 'admin' or read-only 'cpo_viewer'
  *                       role (utils/roles.js hasCpoConsole); authenticated
  *                       non-CPOs → /cpo (setup/onboarding page); anonymous
  *                       users → /login.
