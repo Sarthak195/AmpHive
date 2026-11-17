@@ -292,16 +292,49 @@ def test_mask_pii_handles_free_text_and_phones():
     assert mask_pii(None) is None
 
 
-def test_viewer_never_sees_a_private_group_access_code(as_user):
+@pytest.mark.parametrize("role,shown", [(UserRole.CPO_VIEWER, False), (UserRole.CPO, True)])
+def test_viewer_never_sees_a_private_group_access_code(as_user, role, shown):
     group = SimpleNamespace(
         id=1, name="Home", is_public=False, access_code="SECRET12",
         max_current_a=None, tariff_id=None, created_at=None, tenant_id=5,
     )
-    client, db = as_user(_viewer())
+    client, db = as_user(_viewer(role=role))
     db.execute.return_value.scalars.return_value.all.return_value = [group]
     resp = client.get("/api/cpo/groups")
     assert resp.status_code == 200, resp.text
-    assert "SECRET12" not in resp.text
+    assert ("SECRET12" in resp.text) is shown
+
+
+@pytest.mark.parametrize(
+    "module,path",
+    [
+        ("backend.routers.cpo._reservations", "/api/cpo/reservations"),
+        ("backend.routers.reservations", "/api/reservations/my"),
+    ],
+)
+@pytest.mark.parametrize("role,persists", [(UserRole.CPO_VIEWER, False), (UserRole.CPO, True)])
+def test_viewer_get_never_persists_lazy_reservation_expiry(
+    as_user, monkeypatch, module, path, role, persists
+):
+    import importlib
+
+    monkeypatch.setattr(
+        importlib.import_module(module), "expire_lapsed_reservations", AsyncMock(return_value=1)
+    )
+    client, db = as_user(_viewer(role=role))
+    resp = client.get(path)
+    assert resp.status_code == 200, resp.text
+    assert db.commit.await_count == (1 if persists else 0)
+
+
+def test_session_detail_admits_a_viewer_of_the_owning_tenant_only():
+    from backend.routers.sessions import _assert_session_viewer
+
+    session = SimpleNamespace(user_id=11, tenant_id=5)
+    _assert_session_viewer(session, _viewer())  # same tenant: allowed
+    with pytest.raises(HTTPException) as exc:
+        _assert_session_viewer(session, _viewer(tenant_id=6))
+    assert exc.value.status_code == 404
 
 
 @pytest.mark.asyncio
@@ -365,3 +398,25 @@ async def test_seed_creates_a_viewer_and_resets_an_existing_one():
     pw2 = await upsert_viewer(db, 5, "viewer@amphive.test", "Demo")
     assert pw2 != pw and existing.hashed_password != "old"
     assert existing.token_version == 1
+
+
+@pytest.mark.asyncio
+async def test_socket_connect_marks_a_viewer_read_only(monkeypatch):
+    from backend.services import socketio_manager as sm
+
+    monkeypatch.setattr(sm.socketio_connect_rate_limiter, "check", lambda ip: None)
+    monkeypatch.setattr(sm, "decode_access_token", lambda t: {"sub": "42", "tv": 0})
+    monkeypatch.setattr(sm, "is_sid_revoked", AsyncMock(return_value=False))
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = _viewer()
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=result)
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=db)
+    cm.__aexit__ = AsyncMock(return_value=False)
+    monkeypatch.setattr(sm, "async_session_factory", lambda: cm)
+    save = AsyncMock()
+    monkeypatch.setattr(sm.sio, "save_session", save)
+    monkeypatch.setattr(sm.sio, "enter_room", AsyncMock())
+    assert await sm.connect("sid1", {}, {"token": "t"}) is True
+    assert save.await_args.args[1]["read_only"] is True
