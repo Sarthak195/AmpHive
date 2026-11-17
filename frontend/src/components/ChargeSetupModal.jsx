@@ -26,6 +26,11 @@
  * limit (nobody is at the plug when it switches on; 8h is preselected), and
  * calls `onConfirm(plugId, limits, notBeforeIso)`. "Now" keeps the two-arg call.
  *
+ * [Cheapest window] When schedulable, GET /api/plugs/{id}/tariff-preview's
+ * `cheapest_window` (computed on the backend with the billing slot logic, null
+ * on a flat tariff or when already cheapest) is offered as one tap that picks
+ * "At a time" and fills the start time. Best-effort: a failed fetch hides it.
+ *
  * `priceStale` marks the price as last saved (the plug row came from the
  * instant-open snapshot and the live list has not answered yet).
  */
@@ -96,6 +101,27 @@ export default function ChargeSetupModal({ open, onClose, plug, mode = 'start', 
   const [startAt, setStartAt] = useState('now');
   const [atTime, setAtTime] = useState('');
   const [autoLimit, setAutoLimit] = useState(false);
+  const [cheapest, setCheapest] = useState(null);
+
+  const schedulable = Boolean(open && mode === 'start' && plug?.schedule_available && plug?.tenant_timezone);
+  const plugId = plug?.id;
+  useEffect(() => {
+    setCheapest(null);
+    if (!schedulable || plugId == null) return undefined;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await api.get(`/api/plugs/${plugId}/tariff-preview`);
+        const w = res?.cheapest_window;
+        if (!cancelled && w && Number(w.price_per_kwh) < Number(res.price_now)) {
+          setCheapest({ hhmm: w.start_hhmm, price: Number(w.price_per_kwh), now: Number(res.price_now) });
+        }
+      } catch {
+        /* best-effort hint: hide on failure */
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [schedulable, plugId]);
 
   // Fresh form every time the modal opens (or for a different plug).
   useEffect(() => {
@@ -155,6 +181,13 @@ export default function ChargeSetupModal({ open, onClose, plug, mode = 'start', 
       setAutoLimit(false);
     }
   };
+
+  const pickCheapest = () => {
+    chooseStart('later');
+    setAtTime(cheapest.hhmm);
+  };
+  // Saving for the energy limit when one is set, else the per-kWh difference.
+  const saveKwh = kwhNum !== null && kwhNum > 0 && !kwhOutOfRange ? kwhNum : null;
 
   const handleConfirm = async () => {
     const limits = {};
@@ -231,6 +264,14 @@ export default function ChargeSetupModal({ open, onClose, plug, mode = 'start', 
         </div>
 
         <p className="text-2 text-sm">{copy.intro}</p>
+
+        {canSchedule && cheapest && (
+          <button type="button" className="btn btn-quiet btn-sm" onClick={pickCheapest}>
+            Cheapest: {cheapest.hhmm} at <Money coins={cheapest.price} rate={coin_inr_rate} />
+            /kWh (save ~<Money coins={(cheapest.now - cheapest.price) * (saveKwh ?? 1)} rate={coin_inr_rate} />
+            {saveKwh === null ? '/kWh' : ''})
+          </button>
+        )}
 
         {canSchedule && (
           <div className="field">

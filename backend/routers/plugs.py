@@ -893,6 +893,7 @@ async def get_plug_tariff_preview(
         _slot_rate_and_bound,
         _to_local,
         _zone,
+        cheapest_window,
         default_rate,
     )
 
@@ -907,7 +908,8 @@ async def get_plug_tariff_preview(
     if tariff is None:
         # Legacy env fallback — flat rate, no time-of-day structure.
         rate = float(default_rate())
-        return {"base_price_per_kwh": rate, "price_now": rate, "slots": []}
+        return {"base_price_per_kwh": rate, "price_now": rate, "slots": [],
+                "cheapest_window": None}
 
     slots = (
         await db.execute(select(TariffSlot).where(TariffSlot.tariff_id == tariff.id))
@@ -917,10 +919,18 @@ async def get_plug_tariff_preview(
     at_local = _to_local(datetime.now(timezone.utc), _zone(tz_name))
     slot_rate, _boundary = _slot_rate_and_bound(slots, at_local)
     price_now = slot_rate if slot_rate is not None else base
+    cheapest = cheapest_window(slots, base, at_local)
 
     return {
         "base_price_per_kwh": float(base),
         "price_now": float(price_now),
+        # Cheapest tariff window starting in the next 24 h (tenant-local
+        # wall clock), only when strictly cheaper than price_now; else null.
+        "cheapest_window": None if cheapest is None else {
+            "start": cheapest[0].isoformat(),
+            "start_hhmm": cheapest[0].strftime("%H:%M"),
+            "price_per_kwh": float(cheapest[1]),
+        },
         "slots": [
             {
                 "days": [d for d in range(7) if (int(s.days_mask) >> d) & 1],
