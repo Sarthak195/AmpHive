@@ -134,6 +134,51 @@ def test_promo_routes_are_registered():
     assert ("POST", "/api/cpo/promos/{promo_id}/disable") in paths
 
 
+def test_redeem_route_carries_the_per_ip_and_per_account_promo_limiters():
+    from backend.routers.payments import router
+    from backend.services.rate_limit import (
+        promo_redeem_account_rate_limiter,
+        promo_redeem_rate_limiter,
+    )
+
+    route = next(r for r in router.routes if getattr(r, "path", None) == "/api/wallet/redeem")
+    limiters = {
+        d.call.__qualname__: [c.cell_contents for c in (d.call.__closure__ or ())]
+        for d in route.dependant.dependencies
+    }
+    assert promo_redeem_rate_limiter in limiters["rate_limit_dependency.<locals>.dependency"]
+    assert promo_redeem_account_rate_limiter in limiters[
+        "account_rate_limit_dependency.<locals>.dependency"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_list_query_compiles_for_postgres():
+    """The list's count subquery plus two outer joins, compiled against the
+    Postgres dialect without a database."""
+    from unittest.mock import MagicMock
+
+    from sqlalchemy.dialects import postgresql
+
+    from backend.database.models import UserRole
+    from backend.routers.cpo import cpo_list_promos
+
+    compiled = []
+
+    async def execute(stmt):
+        compiled.append(str(stmt.compile(dialect=postgresql.dialect())))
+        result = MagicMock()
+        result.scalar.return_value = 0
+        result.all.return_value = []
+        return result
+
+    db = SimpleNamespace(execute=execute)
+    cpo = SimpleNamespace(id=1, tenant_id=3, role=UserRole.CPO, email="cpo@example.com")
+    assert await cpo_list_promos(cpo, db) == {"total": 0, "items": []}
+    assert len(compiled) == 2
+    assert "LEFT OUTER JOIN" in compiled[1] and "promo_redemptions" in compiled[1]
+
+
 # ===========================================================================
 # DB-gated
 # ===========================================================================
