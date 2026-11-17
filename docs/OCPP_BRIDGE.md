@@ -28,9 +28,23 @@ new dependency (it uses `websockets` from `backend/requirements.lock.txt` and
   `AMPHIVE`; `meterStart` = the virtual register in Wh; timestamp = the
   session's `started_at`). During the session: one `MeterValues` per poll.
   When the session is gone: `StopTransaction` with `meterStop` and reason `Local`.
-- Reconnects with exponential backoff (1 s doubling to 60 s, reset after a
-  successful boot). Any OCPP call left unanswered for 30 s drops the
-  connection, which then reconnects. Only one call is outstanding at a time.
+- Reconnects with exponential backoff (1 s doubling to 60 s). The delay goes
+  back to 1 s once a connection got as far as an accepted `BootNotification`,
+  so a CSMS that is healthy but drops the link now and then is retried quickly.
+  Any OCPP call left unanswered for 30 s drops the connection, which then
+  reconnects. Only one call is outstanding at a time.
+- A CallError from the CSMS never forces a reconnect. A refused `Heartbeat` is
+  logged and the next one is sent on schedule. A refused status, start or
+  meter message is logged and retried on the next poll. A refused
+  `StopTransaction` is retried on each poll too, but after 3 consecutive
+  CallErrors for the same stop the bridge gives up: it logs a warning, advances
+  the register and clears the transaction locally exactly as if the CSMS had
+  acked it, and carries on with the status and the next `StartTransaction` in
+  that same poll (this is what unwedges a state file carried over to a CSMS that
+  does not know the old transactionId). The count resets on any acked stop.
+- A session's `StartTransaction` is sent before the `StatusNotification` that
+  says Charging, so the CSMS never sees Charging without a transaction; the
+  status is remembered as sent only after the CSMS answered it.
 
 OCPP-J framing is hand-rolled: `[2,id,action,payload]`, `[3,id,payload]`,
 `[4,id,code,description,details]`, with a fresh UUID per call.
@@ -72,6 +86,10 @@ Checked in this order, first match wins:
 | `status` is `reserved` | Reserved |
 | anything else (for example `occupied` with no visible session) | Unavailable |
 | plug missing from the response (a driver token after its session) | Unavailable |
+
+AmpHive's PlugStatus has no `reserved` value (it is available, occupied,
+offline or maintenance), so the `reserved` row never matches in practice: a
+reserved plug is mirrored as Available, never as Reserved.
 
 The status never decides whether a transaction is open: that depends only on
 whether the plug has a session. A gateway that drops offline mid-session shows
@@ -163,7 +181,8 @@ Register or auto-commission the station as its docs describe.
 - A crash between the CSMS acknowledging a Start/StopTransaction and the
   state file being written can repeat that message after the restart.
 - A CallError from the CSMS for one message is logged and the message is
-  retried on the next poll (no reconnect).
+  retried on the next poll (no reconnect); a `StopTransaction` is dropped
+  locally after 3 consecutive CallErrors (see What it does).
 - The register is virtual and per state file: deleting the file restarts it at
   0, and two bridges on different machines each keep their own.
 - `StopTransaction` uses the time the bridge noticed the end, not the
