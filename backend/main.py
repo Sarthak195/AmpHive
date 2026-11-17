@@ -325,11 +325,14 @@ def public_config():
     rate (the top-up flow mints coins 1:1 with rupees).
     """
     from backend.routers.sessions import MIN_START_BALANCE_COINS
+    from backend.services.insights import co2_avoided_kg_per_kwh
     return {
         "coins_per_kwh": COINS_PER_KWH,
         "min_start_balance_coins": MIN_START_BALANCE_COINS,
         "coin_inr_rate": 1.0,
         "currency": "INR",
+        # F8: ESTIMATED net CO2 avoided per kWh delivered (receipt line).
+        "co2_avoided_kg_per_kwh": round(co2_avoided_kg_per_kwh(), 4),
         # [Google OAuth] Gates the frontend's "Continue with Google" button.
         # Mirrors GOOGLE_CLIENT_ID specifically (not the other two Google env
         # vars) — the authoritative full-config check lives in

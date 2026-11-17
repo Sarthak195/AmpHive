@@ -21,7 +21,7 @@ import {
   AreaChart, Area, BarChart, Bar, Line, ComposedChart,
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
 } from 'recharts';
-import { Banknote, Zap, BatteryCharging, Radio } from 'lucide-react';
+import { Banknote, Zap, BatteryCharging, Radio, Leaf } from 'lucide-react';
 
 import CpoLayout from '../../components/CpoLayout';
 import { PageHeader, DataTable, Skeleton, SkeletonTitle, ErrorState, EmptyState, Money } from '../../components/ui';
@@ -237,6 +237,20 @@ const CpoDashboard = () => {
             </span>
             <span className="kpi-sub">{ov?.plugs?.total ?? 0} chargers total</span>
           </Link>
+
+          {ov?.impact?.all_time && (
+            <div className="kpi">
+              <span className="kpi-label dash-kpi-label">
+                <Leaf size={14} aria-hidden="true" />
+                CO&#8322; avoided (estimate)
+              </span>
+              <span className="kpi-value">{ov.impact.all_time.co2_avoided_kg.toFixed(1)} kg</span>
+              <span className="kpi-sub">
+                Estimate: petrol CO&#8322; avoided minus grid CO&#8322; at{' '}
+                {ov.impact.assumptions.grid_emission_factor_kg_per_kwh} kg/kWh
+              </span>
+            </div>
+          )}
         </div>
       )}
 

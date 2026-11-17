@@ -49,6 +49,11 @@ async def test_dashboard_revenue_comes_from_the_shared_earnings_helper(monkeypat
 
     assert out["all_time"]["revenue_coins"] == 25.0
     assert out["today"]["revenue_coins"] == 4.0
+    # F8: the all-time energy (1.0 kWh) feeds a labelled estimate.
+    assert out["impact"]["assumptions"]["estimate"] is True
+    assert out["impact"]["all_time"]["co2_avoided_kg"] == round(
+        1.0 * _analytics.insights.co2_avoided_kg_per_kwh(), 2
+    )
     assert None in calls and any(c is not None for c in calls)
 
 

@@ -2,12 +2,13 @@
 Sessions routes — moved verbatim from main.py (2026-07-07, TD#7 split).
 """
 import logging
+import math
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import and_, func, select, update
+from sqlalchemy import and_, func, literal_column, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,6 +24,7 @@ from backend.database.models import (
     PlugStatus,
     SessionDispute,
     SessionStatus,
+    TelemetryReading,
     Tenant,
     User,
     UserRole,
@@ -1293,6 +1295,7 @@ async def get_session_invoice(
 import re  # noqa: E402
 
 from backend.database.models import LedgerTransaction, TransactionType  # noqa: E402
+from backend.services import insights  # noqa: E402
 from backend.services.pricing import default_rate  # noqa: E402
 
 
@@ -1304,13 +1307,22 @@ async def get_my_stats(
     """
     Current-calendar-month + lifetime charging aggregates for the caller,
     for the driver dashboard/account page:
-    ``{month: {energy_kwh, spend_coins, sessions}, lifetime: {...}}``.
+    ``{month: {energy_kwh, spend_coins, sessions}, lifetime: {...}}``, plus
+    ``series`` (the last 12 UTC calendar months, oldest first, zero-filled:
+    ``{month: "YYYY-MM", energy_kwh, spend_coins, sessions}``) and ``impact``
+    (ESTIMATED CO2 avoided / petrol-equivalent for the month and lifetime
+    energy, with the assumptions used).
 
     Only FINISHED sessions count (status != ACTIVE — completed/paid/
     cancelled): ``coins_spent`` is only written at finalize, so an ACTIVE
     session has no billed spend yet and would skew energy-vs-spend. Same
     stored-column semantics /api/sessions/history rows expose. "Month" is
     the current UTC calendar month (started_at >= the 1st, 00:00 UTC).
+
+    ``series`` follows the CPO side's definition instead: COMPLETED/PAID
+    sessions only, and spend is net of APPROVED dispute refunds (taken off the
+    refunded session's month), so it agrees with the CPO revenue figures.
+    ``month``/``lifetime`` keep the gross finished-session totals above.
     """
     now = datetime.now(timezone.utc)
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
@@ -1337,9 +1349,70 @@ async def get_my_stats(
             "sessions": int(count or 0),
         }
 
+    month = await _bucket(ChargingSession.started_at >= month_start)
+    lifetime = await _bucket()
+
+    # 12-month series. UTC months (a driver has no tenant zone). Refunds are a
+    # separate aggregate, never a join, so coins_spent is never fanned out.
+    keys = insights.month_keys(now)
+    first_year, first_month = (int(x) for x in keys[0].split("-"))
+    window_start = datetime(first_year, first_month, 1, tzinfo=timezone.utc)
+    bucket_month = func.date_trunc(
+        literal_column("'month'"),
+        func.timezone(literal_column("'UTC'"), ChargingSession.started_at),
+    )
+    in_series = and_(
+        ChargingSession.user_id == user.id,
+        ChargingSession.started_at >= window_start,
+        ChargingSession.status.in_([SessionStatus.COMPLETED, SessionStatus.PAID]),
+    )
+    gross_rows = (
+        await db.execute(
+            select(
+                bucket_month,
+                func.count(ChargingSession.id),
+                func.coalesce(func.sum(ChargingSession.energy_kwh), 0),
+                func.coalesce(func.sum(ChargingSession.coins_spent), 0),
+            )
+            .where(in_series)
+            .group_by(bucket_month)
+        )
+    ).all()
+    refund_rows = (
+        await db.execute(
+            select(bucket_month, func.coalesce(func.sum(SessionDispute.refund_coins), 0))
+            .select_from(SessionDispute)
+            .join(ChargingSession, ChargingSession.id == SessionDispute.session_id)
+            .where(in_series, SessionDispute.status == DisputeStatus.APPROVED)
+            .group_by(bucket_month)
+        )
+    ).all()
+
+    def _key(d):
+        return f"{d.year:04d}-{d.month:02d}"
+
+    refunds = {_key(d): float(r or 0) for d, r in refund_rows}
+    by_month = {_key(d): (int(c or 0), float(e or 0), float(s or 0)) for d, c, e, s in gross_rows}
+    series = []
+    for key in keys:
+        count, energy, coins = by_month.get(key, (0, 0.0, 0.0))
+        series.append({
+            "month": key,
+            "energy_kwh": round(energy, 3),
+            # Floored like the CPO revenue series, against bad data.
+            "spend_coins": round(max(coins - refunds.get(key, 0.0), 0.0), 2),
+            "sessions": count,
+        })
+
     return {
-        "month": await _bucket(ChargingSession.started_at >= month_start),
-        "lifetime": await _bucket(),
+        "month": month,
+        "lifetime": lifetime,
+        "series": series,
+        "impact": {
+            "assumptions": insights.assumptions(),
+            "month": insights.estimate_impact(month["energy_kwh"]),
+            "lifetime": insights.estimate_impact(lifetime["energy_kwh"]),
+        },
     }
 
 
@@ -1374,6 +1447,20 @@ async def get_my_disputes(
         }
         for d in result.scalars().all()
     ]
+
+
+def _assert_session_viewer(session: ChargingSession, user: User) -> None:
+    """Access rule shared by the session detail and telemetry reads: the
+    owning driver, or a cpo/admin of the owning tenant. Anyone else gets 404,
+    not 403, so existence isn't leaked."""
+    if user.role == UserRole.DRIVER:
+        if session.user_id != user.id:
+            raise HTTPException(status_code=404, detail="Session not found.")
+    elif user.role == UserRole.CPO:
+        if session.tenant_id != user.tenant_id:
+            raise HTTPException(status_code=404, detail="Session not found.")
+    elif user.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Access denied.")
 
 
 @router.get("/api/sessions/{session_id}")
@@ -1413,14 +1500,7 @@ async def get_session_detail(
         raise HTTPException(status_code=404, detail="Session not found.")
     session, plug_name = row
 
-    if user.role == UserRole.DRIVER:
-        if session.user_id != user.id:
-            raise HTTPException(status_code=404, detail="Session not found.")
-    elif user.role == UserRole.CPO:
-        if session.tenant_id != user.tenant_id:
-            raise HTTPException(status_code=404, detail="Session not found.")
-    elif user.role != UserRole.ADMIN:
-        raise HTTPException(status_code=403, detail="Access denied.")
+    _assert_session_viewer(session, user)
 
     energy = session.energy_kwh or 0.0
     rate = (
@@ -1498,3 +1578,85 @@ async def get_session_detail(
     }
 
 
+# Target upper bound on points returned by the session power curve.
+_TELEMETRY_MAX_POINTS = 120
+
+
+@router.get("/api/sessions/{session_id}/telemetry")
+async def get_session_telemetry(
+    session_id: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Power/current curve of ONE session, bucketed in SQL to at most ~120 points
+    (raw rows never reach Python). Same access rules as get_session_detail.
+
+    Rows are selected by plug_id and the session window, NOT by
+    telemetry_readings.session_id: that column is stamped at the 10 s batch
+    flush, so the last seconds of a session can carry a NULL session_id. The
+    (plug_id, recorded_at) index serves the range scan. A session with no
+    stored readings returns ``points: []``.
+    """
+    session = (
+        await db.execute(
+            select(ChargingSession).where(ChargingSession.id == session_id)
+        )
+    ).scalar_one_or_none()
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session not found.")
+    _assert_session_viewer(session, user)
+
+    started = session.started_at
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    ended = session.ended_at
+    if ended is not None and ended.tzinfo is None:
+        ended = ended.replace(tzinfo=timezone.utc)
+    window_end = ended or datetime.now(timezone.utc)
+    span = max((window_end - started).total_seconds(), 1.0)
+    bucket_sec = max(1, math.ceil(span / _TELEMETRY_MAX_POINTS))
+
+    rec = TelemetryReading.recorded_at
+    bucket = func.floor(
+        (func.extract("epoch", rec) - started.timestamp()) / bucket_sec
+    ).label("bucket")
+    rows = (
+        await db.execute(
+            select(
+                bucket,
+                func.avg(TelemetryReading.power_w),
+                func.max(TelemetryReading.power_w),
+                func.avg(TelemetryReading.current_a),
+                func.max(TelemetryReading.energy_kwh),
+            )
+            .where(
+                TelemetryReading.plug_id == session.plug_id,
+                rec >= started,
+                rec <= window_end,
+            )
+            # By output-column name: re-rendering the expression would repeat
+            # its bound parameters, which Postgres can't prove equal.
+            .group_by(literal_column("bucket"))
+            .order_by(literal_column("bucket"))
+        )
+    ).all()
+
+    return {
+        "session_id": session.id,
+        "status": session.status.value,
+        "started_at": started.isoformat(),
+        "ended_at": ended.isoformat() if ended else None,
+        "bucket_seconds": bucket_sec,
+        "max_kwh": session.max_kwh,
+        "points": [
+            {
+                "offset_sec": int(b) * bucket_sec,
+                "power_w": round(float(avg_p or 0.0), 1),
+                "peak_power_w": round(float(max_p or 0.0), 1),
+                "current_a": round(float(avg_a or 0.0), 2),
+                "energy_kwh": round(float(max_e or 0.0), 3),
+            }
+            for b, avg_p, max_p, avg_a, max_e in rows
+        ],
+    }

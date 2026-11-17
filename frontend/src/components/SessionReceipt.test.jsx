@@ -4,13 +4,14 @@
  * fetch (ok + failure), the DisputeModal hand-off and charge-again dismissal.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 
 import SessionReceipt from './SessionReceipt';
 import { useSession } from '../contexts/SessionContext';
 import { ToastProvider } from './ui';
+import api from '../api/client';
 
 const navigateSpy = vi.fn();
 vi.mock('react-router-dom', async (importOriginal) => {
@@ -19,8 +20,9 @@ vi.mock('react-router-dom', async (importOriginal) => {
 });
 vi.mock('../contexts/SessionContext', () => ({ useSession: vi.fn() }));
 vi.mock('../contexts/ConfigContext', () => ({
-  useConfig: () => ({ coins_per_kwh: 5, coin_inr_rate: 1 }),
+  useConfig: () => ({ coins_per_kwh: 5, coin_inr_rate: 1, co2_avoided_kg_per_kwh: 0.2 }),
 }));
+vi.mock('../api/client', () => ({ default: { get: vi.fn() } }));
 vi.mock('./DisputeModal', () => ({
   default: ({ open, sessionId }) =>
     open ? <div data-testid="dispute-modal">dispute for {sessionId}</div> : null,
@@ -60,6 +62,7 @@ const originalRevokeObjectURL = URL.revokeObjectURL;
 beforeEach(() => {
   vi.clearAllMocks();
   useSession.mockReturnValue({ receipt: RECEIPT, dismissReceipt: dismissSpy });
+  api.get.mockResolvedValue({ points: [] });
   localStorage.setItem('amphive_token', 'test-token');
   URL.createObjectURL = vi.fn(() => 'blob:mock');
   URL.revokeObjectURL = vi.fn();
@@ -74,6 +77,19 @@ afterEach(() => {
 });
 
 describe('SessionReceipt — summary', () => {
+  it('loads the power curve for the session and shows the empty state', async () => {
+    renderReceipt();
+    expect(api.get).toHaveBeenCalledWith('/api/sessions/42/telemetry');
+    await waitFor(() =>
+      expect(screen.getByText(/No power readings were recorded/)).toBeInTheDocument());
+  });
+
+  it('shows one CO2 line labelled as an estimate (energy x server factor)', () => {
+    renderReceipt();
+    expect(screen.getByText('CO₂ avoided (estimate)')).toBeInTheDocument();
+    expect(screen.getByText('≈ 0.25 kg')).toBeInTheDocument(); // 1.234 kWh x 0.2
+  });
+
   it('renders nothing when there is no receipt', () => {
     useSession.mockReturnValue({ receipt: null, dismissReceipt: dismissSpy });
     renderReceipt();

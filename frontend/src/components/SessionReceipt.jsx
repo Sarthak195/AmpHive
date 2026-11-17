@@ -16,6 +16,7 @@ import { useSession } from '../contexts/SessionContext';
 import { useConfig } from '../contexts/ConfigContext';
 import { Money, useToast } from './ui';
 import DisputeModal from './DisputeModal';
+import SessionPowerCurve from './SessionPowerCurve';
 import { stopReasonCopy, isAutoStopReason } from '../utils/statusCopy';
 import { formatINR, coinsToINR, formatKwh, formatKw, formatDuration } from '../utils/money';
 
@@ -28,7 +29,7 @@ const Row = ({ label, children, strong }) => (
 
 const SessionReceipt = () => {
   const { receipt, dismissReceipt } = useSession();
-  const { coin_inr_rate } = useConfig();
+  const { coin_inr_rate, co2_avoided_kg_per_kwh: co2PerKwh } = useConfig();
   const navigate = useNavigate();
   const toast = useToast();
 
@@ -40,12 +41,15 @@ const SessionReceipt = () => {
   const {
     session_id, plug_name, energy_kwh, peak_power_w, coins_spent,
     shortfall_coins, balance_before, balance_remaining, duration_sec,
-    ended_at, reason,
+    ended_at, reason, max_kwh,
   } = receipt;
 
   const chargedInr = coinsToINR(coins_spent ?? 0, coin_inr_rate);
   const shortfallInr = coinsToINR(shortfall_coins ?? 0, coin_inr_rate);
   const autoStopped = isAutoStopReason(reason);
+  // Estimate only: energy x the server's net per-kWh factor (petrol CO2 for the
+  // same distance minus grid CO2). Hidden until /api/config supplies it.
+  const co2Kg = co2PerKwh > 0 ? (energy_kwh ?? 0) * co2PerKwh : null;
   // The invoice endpoint 400s on a zero-cost session — only offer it when the
   // session actually billed something.
   const canInvoice = session_id != null && Number(coins_spent) > 0;
@@ -108,6 +112,11 @@ const SessionReceipt = () => {
             <span className="num">{formatKw(peak_power_w)}</span>
           </Row>
         )}
+        {co2Kg != null && co2Kg >= 0.005 && (
+          <Row label="CO₂ avoided (estimate)">
+            <span className="num">≈ {co2Kg.toFixed(2)} kg</span>
+          </Row>
+        )}
         <Row label="Charged" strong>
           <span className="receipt-debit num">−{formatINR(chargedInr)}</span>
         </Row>
@@ -121,6 +130,8 @@ const SessionReceipt = () => {
           </Row>
         )}
       </dl>
+
+      {session_id != null && <SessionPowerCurve sessionId={session_id} limitKwh={max_kwh} />}
 
       {shortfall_coins > 0 && (
         <p className="receipt-help text-3 text-sm">

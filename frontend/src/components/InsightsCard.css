@@ -1,0 +1,44 @@
+/* InsightsCard: inline-SVG monthly bars; colours come from tokens. */
+
+.insights {
+  display: grid;
+  gap: var(--sp-3);
+}
+
+.insights-title { margin: 0; }
+
+.insights-bars {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.insights-bar { fill: var(--brand); }
+
+.insights-tick {
+  fill: var(--ink-3);
+  font-size: 9px;
+  font-family: var(--font-data);
+}
+
+.insights-est {
+  margin: 0;
+  display: grid;
+  gap: var(--sp-3);
+  padding-top: var(--sp-3);
+  border-top: 1px solid var(--border);
+}
+
+.insights-est > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-3);
+}
+
+.insights-est dd {
+  margin: 0;
+  font-weight: 600;
+}
+
+.insights-note { margin: 0; }

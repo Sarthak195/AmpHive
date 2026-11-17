@@ -379,6 +379,31 @@ describe('Dashboard — sessions banner and rail', () => {
     expect(screen.getByText(/₹210\.00/)).toBeInTheDocument();
   });
 
+  it('lazy-loads the Insights card with labelled estimates when the series is present', async () => {
+    const series = Array.from({ length: 12 }, (_, i) => ({
+      month: `2026-${String(i + 1).padStart(2, '0')}`, energy_kwh: i, spend_coins: i * 5, sessions: i ? 1 : 0,
+    }));
+    setRoute('/api/me/stats', () =>
+      Promise.resolve({
+        month: { energy_kwh: 1, spend_coins: 5, sessions: 1 },
+        series,
+        impact: {
+          assumptions: {
+            estimate: true, grid_emission_factor_kg_per_kwh: 0.71, petrol_co2_kg_per_l: 2.31,
+            petrol_price_per_l: 100, ice_km_per_l: 15, ev_km_per_kwh: 6,
+          },
+          lifetime: { co2_avoided_kg: 12.3, petrol_litres: 4.5, petrol_equivalent_inr: 450 },
+        },
+      })
+    );
+    renderDash();
+
+    expect(await screen.findByText(/CO₂ avoided, all time \(estimate\)/)).toBeInTheDocument();
+    expect(screen.getByText('≈ 12.3 kg')).toBeInTheDocument();
+    expect(screen.getByText(/0\.71 kg\/kWh/)).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: /Energy charged per month/ })).toBeInTheDocument();
+  });
+
   it('hides the stats block when /api/me/stats errors (endpoint may not exist yet)', async () => {
     renderDash();
     await screen.findByText('Lobby Plug');

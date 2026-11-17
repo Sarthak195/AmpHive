@@ -26,6 +26,7 @@ import { useSearchParams } from 'react-router-dom';
 import { BatteryCharging, Download } from 'lucide-react';
 
 import CpoLayout from '../../components/CpoLayout';
+import SessionPowerCurve from '../../components/SessionPowerCurve';
 import { PageHeader, DataTable, Modal, Money, useToast } from '../../components/ui';
 import api from '../../api/client';
 import { useConfig } from '../../contexts/ConfigContext';
@@ -350,6 +351,7 @@ export default function CpoSessions() {
               </Row>
             )}
             {detail.reason && <p className="text-3 text-sm">{stopReasonCopy(detail.reason)}</p>}
+            <SessionPowerCurve sessionId={detail.session_id} limitKwh={detail.max_kwh} />
           </div>
         )}
       </Modal>

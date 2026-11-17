@@ -25,6 +25,7 @@ from backend.database.models import (
     Tenant,
     User,
 )
+from backend.services import insights
 from backend.services import payouts as payout_service
 from backend.services.csv_safe import sanitize_csv_cell
 from backend.services.pricing import _zone
@@ -162,6 +163,11 @@ async def cpo_analytics_overview(
             "sessions": alltime_sessions,
             "energy_kwh": round(alltime_energy, 3),
             "revenue_coins": round(alltime_revenue, 2),
+        },
+        # ESTIMATE from the all-time energy above; assumptions ship with it.
+        "impact": {
+            "assumptions": insights.assumptions(),
+            "all_time": insights.estimate_impact(alltime_energy),
         },
     }
 
