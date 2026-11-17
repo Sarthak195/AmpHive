@@ -21,14 +21,14 @@ from typing import Optional
 
 import bcrypt
 import jwt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import delete, exists, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database.db import get_db
-from backend.database.models import RevokedSession, User
+from backend.database.models import RevokedSession, User, UserRole
 
 logger = logging.getLogger("amphive.auth")
 
@@ -300,6 +300,36 @@ async def revoke_session(db: AsyncSession, user_id: int, payload: dict) -> None:
         )
 
 
+# --- Read-only CPO viewer (F10) ---
+
+# Methods a cpo_viewer may use. Everything else is a write and is refused.
+SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+# The only writes a cpo_viewer may make: signing this device out. Exact
+# (method, path) pairs, so a trailing-slash or prefix variant fails closed.
+VIEWER_WRITE_EXEMPT = frozenset({("POST", "/api/auth/logout")})
+
+VIEWER_READ_ONLY_DETAIL = "read_only_demo"
+
+
+def is_cpo_viewer(user: object) -> bool:
+    """True for the read-only CPO demo role."""
+    return getattr(user, "role", None) == UserRole.CPO_VIEWER
+
+
+def enforce_viewer_read_only(user: object, method: Optional[str], path: Optional[str]) -> None:
+    """Refuse any write by a cpo_viewer with 403 (F10). Called from
+    get_current_user, so every authenticated route inherits it, plus the
+    CPO tenant gate as a second layer. An unknown method (a direct call
+    with no request) counts as a write: fail closed."""
+    if not is_cpo_viewer(user):
+        return
+    m = (method or "").upper()
+    if m in SAFE_METHODS or (m, path) in VIEWER_WRITE_EXEMPT:
+        return
+    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=VIEWER_READ_ONLY_DETAIL)
+
+
 # --- FastAPI Authentication Dependency ---
 
 # HTTPBearer extracts the token from the "Authorization: Bearer <token>" header.
@@ -309,6 +339,9 @@ security_scheme = HTTPBearer()
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security_scheme),
     db: AsyncSession = Depends(get_db),
+    # FastAPI injects the live Request (the default is only for direct calls
+    # from tests, which then count as a write for a cpo_viewer).
+    request: Request = None,  # type: ignore[assignment]
 ) -> User:
     """
     FastAPI dependency that extracts and validates the JWT from the request,
@@ -385,6 +418,13 @@ async def get_current_user(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="account_disabled",
         )
+
+    # [F10] A read-only CPO viewer may only read (and sign out).
+    enforce_viewer_read_only(
+        user,
+        request.method if request is not None else None,
+        request.url.path if request is not None else None,
+    )
 
     return user
 

@@ -12,7 +12,7 @@ from backend.database.db import get_db
 from backend.database.models import AuditLog, Gateway, GatewayEvent, GatewayLog, User
 from backend.schemas import GatewayEventResponse, GatewayLogResponse
 
-from ._common import require_cpo_tenant
+from ._common import redact_for, require_cpo_tenant
 
 router = APIRouter()
 
@@ -187,11 +187,11 @@ async def cpo_list_audit_log(
         {
             "id": entry.id,
             "actor_user_id": entry.actor_user_id,
-            "actor_email": actor_email,
+            "actor_email": redact_for(user, actor_email),
             "action": entry.action,
             "target_type": entry.target_type,
             "target_id": entry.target_id,
-            "detail": entry.detail,
+            "detail": redact_for(user, entry.detail),
             "created_at": entry.created_at.isoformat() if entry.created_at else None,
         }
         for entry, actor_email in result.all()

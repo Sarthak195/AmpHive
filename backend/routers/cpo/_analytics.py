@@ -30,7 +30,7 @@ from backend.services import payouts as payout_service
 from backend.services.csv_safe import sanitize_csv_cell
 from backend.services.pricing import _zone
 
-from ._common import _require_tenant_id, clamp_days, require_cpo_tenant
+from ._common import _require_tenant_id, clamp_days, redact_for, require_cpo_tenant
 
 router = APIRouter()
 
@@ -256,7 +256,7 @@ async def cpo_analytics_sessions(
             "plug_id": s.plug_id,
             "plug_name": plug_name,
             "user_id": s.user_id,
-            "user_email": user_email,
+            "user_email": redact_for(user, user_email),
             "started_at": s.started_at.isoformat() if s.started_at else None,
             "ended_at": s.ended_at.isoformat() if s.ended_at else None,
             "duration_minutes": duration_minutes,
@@ -318,7 +318,7 @@ async def cpo_export_sessions_csv(
             s.id,
             s.plug_id,
             sanitize_csv_cell(plug_name if plug_name is not None else f"Plug #{s.plug_id}"),
-            sanitize_csv_cell(user_email if user_email is not None else "unknown"),
+            sanitize_csv_cell(redact_for(user, user_email if user_email is not None else "unknown")),
             s.started_at.isoformat() if s.started_at else "",
             s.ended_at.isoformat() if s.ended_at else "",
             duration_minutes,

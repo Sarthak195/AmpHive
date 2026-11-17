@@ -44,13 +44,17 @@ from backend.services.rate_limit import (
 )
 from backend.services.wallet import credit_wallet
 
-from ._common import _require_tenant_id, logger, require_cpo_tenant
+from ._common import _require_tenant_id, logger, redact_for, require_cpo_tenant
 
 router = APIRouter()
 
 
 def _topup_response(
-    topup: OfflineTopup, *, driver_email: Optional[str] = None, actor_email: Optional[str] = None
+    topup: OfflineTopup,
+    *,
+    driver_email: Optional[str] = None,
+    actor_email: Optional[str] = None,
+    note: Optional[str] = None,
 ) -> CpoTopupResponse:
     return CpoTopupResponse(
         id=topup.id,
@@ -60,7 +64,7 @@ def _topup_response(
         driver_user_id=topup.driver_user_id,
         driver_email=driver_email,
         amount_coins=float(topup.amount_coins),
-        note=topup.note,
+        note=note if note is not None else topup.note,
         created_at=topup.created_at.isoformat() if topup.created_at else None,
     )
 
@@ -246,7 +250,12 @@ async def cpo_list_topups(
     return {
         "total": int(total),
         "items": [
-            _topup_response(t, driver_email=driver_email, actor_email=actor_email)
+            _topup_response(
+                t,
+                driver_email=redact_for(user, driver_email),
+                actor_email=redact_for(user, actor_email),
+                note=redact_for(user, t.note),
+            )
             for t, driver_email, actor_email in result.all()
         ],
     }

@@ -1451,12 +1451,13 @@ async def get_my_disputes(
 
 def _assert_session_viewer(session: ChargingSession, user: User) -> None:
     """Access rule shared by the session detail and telemetry reads: the
-    owning driver, or a cpo/admin of the owning tenant. Anyone else gets 404,
-    not 403, so existence isn't leaked."""
+    owning driver, or a cpo/admin (or read-only cpo_viewer, F10: both routes
+    are pure reads) of the owning tenant. Anyone else gets 404, not 403, so
+    existence isn't leaked."""
     if user.role == UserRole.DRIVER:
         if session.user_id != user.id:
             raise HTTPException(status_code=404, detail="Session not found.")
-    elif user.role == UserRole.CPO:
+    elif user.role in (UserRole.CPO, UserRole.CPO_VIEWER):
         if session.tenant_id != user.tenant_id:
             raise HTTPException(status_code=404, detail="Session not found.")
     elif user.role != UserRole.ADMIN:

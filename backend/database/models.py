@@ -46,6 +46,11 @@ class UserRole(str, enum.Enum):
     ADMIN = "admin"
     CPO = "cpo"
     DRIVER = "driver"
+    # [F10] Read-only CPO demo login: sees its tenant's CPO console, cannot
+    # change anything. Every non-GET/HEAD/OPTIONS request is refused in
+    # services/auth.py (enforce_viewer_read_only). Added via ALTER TYPE in
+    # migration 0045_cpo_viewer_role.
+    CPO_VIEWER = "cpo_viewer"
 
 class GatewayStatus(str, enum.Enum):
     ONLINE = "online"
