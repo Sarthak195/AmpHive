@@ -70,6 +70,7 @@ const Probe = () => {
       <button onClick={() => startSession('7').catch(() => {})}>start</button>
       <button onClick={() => startSession('7', { max_kwh: 1.5 }).catch(() => {})}>start-kwh-limited</button>
       <button onClick={() => startSession('7', { max_duration_seconds: 1800 }).catch(() => {})}>start-time-limited</button>
+      <button onClick={() => startSession('7', { auto_stop_when_full: true }).catch(() => {})}>start-auto-stop-full</button>
       <button onClick={() => stopSession().catch(() => {})}>stop</button>
       <button onClick={() => switchSession(activeSessions[1])}>switch-to-older</button>
       <button onClick={() => updateLimits(2, { max_kwh: 2.5 }).catch(() => {})}>update-focused-limit</button>
@@ -213,6 +214,21 @@ describe('startSession', () => {
 
     expect(api.post).toHaveBeenCalledWith(
       '/api/sessions/start', { plug_id: 7, max_duration_seconds: 1800 }
+    );
+  });
+
+  it('sends auto_stop_when_full only when the driver opted in', async () => {
+    api.get.mockResolvedValue({ active: false, sessions: [] });
+    api.post.mockResolvedValue({
+      status: 'started', session_id: 9, plug_id: 7, plug_name: 'Plug X',
+    });
+    renderProbe();
+    await waitFor(() => expect(api.get).toHaveBeenCalled());
+
+    await userEvent.click(screen.getByText('start-auto-stop-full'));
+
+    expect(api.post).toHaveBeenCalledWith(
+      '/api/sessions/start', { plug_id: 7, auto_stop_when_full: true }
     );
   });
 });

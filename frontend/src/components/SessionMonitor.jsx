@@ -185,8 +185,10 @@ const SessionMonitor = () => {
   const recentAlarm = latestAlarm && latestAlarm.severity !== 'info' ? latestAlarm : null;
 
   // [Charge complete] The backend saw the car's draw stay near zero long
-  // enough to call it full (backend/services/mqtt/charge_full.py).
-  const chargeFull = isActive && sessionData?.charge_full === true;
+  // enough to call it full (backend/services/mqtt/charge_full.py). The flag is
+  // sticky for the session, so hide the banner if the car clearly resumed
+  // charging (200 W = the backend's default CHARGE_FULL_ACTIVE_W).
+  const chargeFull = isActive && sessionData?.charge_full === true && powerW < 200;
 
   // Ring progress toward the auto-stop target — the backend stops at whichever
   // limit trips first, so show the nearer of the two. No limit → indeterminate.

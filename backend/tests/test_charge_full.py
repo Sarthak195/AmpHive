@@ -31,6 +31,8 @@ def _knobs(monkeypatch):
     monkeypatch.setattr(mm, "CHARGE_FULL_GRACE_MIN", 5.0)
     monkeypatch.setattr(mm, "CHARGE_FULL_MINUTES", 10.0)
     monkeypatch.setattr(reaper, "STALE_TIMEOUT_SEC", 300.0)
+    yield
+    mm.MQTTManager._instance = None
 
 
 def _feed(det, samples, peak=1500.0, sid=SID, started=T0):
