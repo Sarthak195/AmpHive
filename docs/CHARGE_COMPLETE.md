@@ -44,7 +44,10 @@ The knobs live in `backend/services/mqtt_manager.py` and are read at call time.
    expected_user_id=<driver>, reason="auto-stopped: charge complete")`, the same
    call `POST /api/sessions/stop` makes (relay OFF, bill, free the plug, receipt
    notification and bill email). No new actuation path; nothing is ever
-   switched ON.
+   switched ON. The "looks full" notice only says auto-stop is on; the driver
+   is told the session stopped by finalize's own receipt notification. If the
+   stop raises, later idle live frames retry it, at most once per 60 s, while
+   the session is ACTIVE and opted in (retry state is in memory).
 
 ## Opt-in
 

@@ -43,6 +43,9 @@ would have failed open on any forgotten route.
    and detail), group members, reservations, top-ups, plug reports, promo
    codes (`created_by_email` and `note`, added at the wave 2 merge). A private
    group's `access_code` is never returned to a viewer (it is a credential).
+   Gateway log text (`GET /api/cpo/gateways/{id}/logs`) is replaced with
+   "(log text hidden in the read-only demo)" for a viewer, since firmware WARN
+   lines carry the home Wi-Fi SSID and the broker URL; id, level and time stay.
 
 `backend/tests/test_cpo_viewer_role.py` walks every route the app serves and
 asserts each write returns 403 for a viewer; a new unauthenticated write

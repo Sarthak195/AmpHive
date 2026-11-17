@@ -991,7 +991,9 @@ private group access codes are never returned to a viewer. On the merged tree
 write route is covered automatically; on `release/2026-11-17-w2` it asserts
 403 on 70 write routes, including the F1 (`/api/sessions/start`,
 `/api/sessions/queue`), F7 (`/api/me/tokens*`) and F12 (`/api/wallet/redeem`,
-`/api/cpo/promos*`) ones. Driver names are not masked; a viewer still sees
+`/api/cpo/promos*`) ones. Gateway log bodies (`GET /api/cpo/gateways/{id}/logs`) are replaced with a
+placeholder for a viewer, because firmware WARN lines carry the home Wi-Fi SSID
+and the broker URL. Driver names are not masked; a viewer still sees
 promo `code_hint` (4 of 16 symbols, the code itself is never shown again).
 
 **Personal read-only API tokens (F7).**
@@ -1014,9 +1016,12 @@ promo `code_hint` (4 of 16 symbols, the code itself is never shown again).
 - **Revocation.** Single revoke via `DELETE /api/me/tokens/{id}`. All tokens
   are revoked by log out everywhere, password reset, the Google first-link
   takeover and account closure. A disabled owner is refused at use time.
-- **Known gaps.** The legacy sid-less `/api/auth/logout` fallback and an admin
-  role change bump `token_version` but leave API tokens live. The meter scope
-  is recomputed from the current role on every request.
+- **Revocation gaps closed.** The admin role change or disable and the legacy
+  sid-less `/api/auth/logout` fallback now revoke API tokens in the same commit
+  as their `token_version` bump, so disable-then-re-enable no longer resurrects
+  a token. The email-verification bump does not (it is not a compromise
+  signal). The meter scope is recomputed from the current role on every
+  request.
 - **Caching.** Responses carry `Cache-Control: no-store` (global).
 
 **Promo code redemption (F12).**

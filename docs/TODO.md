@@ -20,8 +20,15 @@ been fixed by the 2026-07-08…11 work — see the shipped sections below).*
 - [x] OCPP 1.6J read-only virtual charge-point bridge (`tools/ocpp_bridge`). (built 2026-11-17 on release/2026-11-17-w2, not deployed)
 - [ ] Deploy wave 1 + wave 2 (migration deploy 0044 to 0047; tag the rollback image first, see docs/DEPLOYMENT.md "Features wave 2").
 - [ ] F1 known limits: detector state is in memory (a restart delays detection and can repeat one "looks full" notification); car-side scheduled charging or a long mid-charge pause can look full (why the stop is opt-in); firmware < 2.8.0 may publish a failed-poll frame that is indistinguishable from a real 0 W; a limit stop and a "looks full" notice can both fire on the same frame (rare).
-- [ ] F10 follow-ups: mask driver full names for `cpo_viewer`; let viewers load pending plug photos only if wanted (`routers/plugs.py` checks `role == 'cpo'`); show an existing invoice to viewers without issuing one. A viewer still sees promo `code_hint`.
-- [ ] F7 known gaps: the legacy sid-less `/api/auth/logout` fallback and an admin role change leave API tokens live. Add a screenshot to docs/HOME_ASSISTANT.md once it runs against prod.
+- [ ] F10 follow-ups: let viewers load pending plug photos only if wanted (`routers/plugs.py` checks `role == 'cpo'`); show an existing invoice to viewers without issuing one. A viewer still sees promo `code_hint`.
+- [x] F7 known gaps: the legacy sid-less `/api/auth/logout` fallback and an admin role change or disable left API tokens live. Fixed in the review fix round (both now call `revoke_user_api_tokens`; the email-verification bump deliberately does not).
+- [ ] F7: add a screenshot to docs/HOME_ASSISTANT.md once it runs against prod.
+- [x] F1 review fix: a failed opted-in auto-stop is now retried on later idle frames (at most once per 60 s, only while ACTIVE and opted in); the "looks full" notice no longer claims the session is stopping.
+- [x] F12 review fix: a sub-cent promo amount returns 400 (was a 500 after 5 retries); only a code-hash collision is retried.
+- [x] F10 review fix: gateway log text is hidden from a viewer (firmware WARN lines carry the home SSID and broker URL).
+- [x] DB-gated enum drift check in `backend/tests/test_migrations.py` (pg_enum labels equal the model enums after `alembic upgrade head`).
+- [ ] F10, before seeding a public viewer: `GET /api/sessions/{id}/invoice` answers a viewer 403 for another tenant's session but 404 for a missing one (existence oracle); apply the tenant check first.
+- [ ] F10, before seeding a public viewer: driver full names are shown unmasked to a viewer, and for a Google signup without a name claim `full_name` is the email's local part, which undoes the masked email (reservations `user_name`, group members `full_name`).
 - [ ] OCPP bridge: run it against the real `GET /api/me/meter` and a real CSMS once F7 is deployed.
 
 ## 2026-11-17 features wave 1 (built 2026-11-17 on release/2026-11-17-w1, not deployed)
