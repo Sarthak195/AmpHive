@@ -435,6 +435,7 @@ async def finalize_charging_session(
         or "reserved" in reason
         or "current cap exceeded" in reason
         or "exhausted" in reason
+        or "charge complete" in reason
     ):
         n_body += f" ({reason})"
     await notify(
