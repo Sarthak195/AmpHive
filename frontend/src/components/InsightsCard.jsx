@@ -75,10 +75,12 @@ const InsightsCard = ({ series, impact, rate = 1 }) => {
       {life && a && (
         <>
           <dl className="insights-est">
-            <div>
-              <dt className="text-3 text-xs">CO₂ avoided, all time (estimate)</dt>
-              <dd className="num">≈ {life.co2_avoided_kg.toFixed(1)} kg</dd>
-            </div>
+            {life.co2_avoided_kg > 0 && (
+              <div>
+                <dt className="text-3 text-xs">CO₂ avoided, all time (estimate)</dt>
+                <dd className="num">≈ {life.co2_avoided_kg.toFixed(1)} kg</dd>
+              </div>
+            )}
             <div>
               <dt className="text-3 text-xs">Petrol not burned (estimate)</dt>
               <dd className="num">

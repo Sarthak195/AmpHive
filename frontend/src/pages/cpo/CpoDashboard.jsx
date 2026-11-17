@@ -238,7 +238,7 @@ const CpoDashboard = () => {
             <span className="kpi-sub">{ov?.plugs?.total ?? 0} chargers total</span>
           </Link>
 
-          {ov?.impact?.all_time && (
+          {ov?.impact?.all_time?.co2_avoided_kg > 0 && (
             <div className="kpi">
               <span className="kpi-label dash-kpi-label">
                 <Leaf size={14} aria-hidden="true" />

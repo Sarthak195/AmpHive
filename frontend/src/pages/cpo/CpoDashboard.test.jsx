@@ -87,6 +87,14 @@ describe('CpoDashboard', () => {
     expect(screen.getByText(/0\.71 kg\/kWh/)).toBeInTheDocument();
   });
 
+  it('hides the CO2 tile when net CO2 avoided is not positive', async () => {
+    mockApi({ overview: { ...OVERVIEW, impact: { ...OVERVIEW.impact, all_time: { co2_avoided_kg: -3.2 } } } });
+    renderPage();
+
+    await screen.findByText("Today’s revenue");
+    expect(screen.queryByText(/CO₂ avoided \(estimate\)/)).toBeNull();
+  });
+
   it('renders KPI tiles from the overview stats, each linking to its console page', async () => {
     mockApi();
     renderPage();
