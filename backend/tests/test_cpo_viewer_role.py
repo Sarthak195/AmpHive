@@ -324,6 +324,40 @@ def test_promo_list_masks_issuer_email_and_note_for_viewer(as_user, role, email,
     assert item["note"] == note
 
 
+@pytest.mark.parametrize(
+    "role,shown",
+    [
+        (UserRole.CPO_VIEWER, "(log text hidden in the read-only demo)"),
+        (UserRole.CPO, 'WARN wifi "HomeNet-5G" broker mqtts://8.231.81.12:8883'),
+    ],
+)
+def test_gateway_logs_hide_message_text_from_a_viewer(as_user, role, shown):
+    """Firmware WARN lines carry the home SSID and broker URL (not covered by
+    mask_pii): a viewer gets a placeholder, id/level/created_at stay."""
+    client, db = as_user(_viewer(role=role))
+    gateway = MagicMock()
+    gateway.scalar_one_or_none.return_value = object()
+    count = MagicMock()
+    count.scalar.return_value = 1
+    log = SimpleNamespace(
+        id=9, gateway_id="gw1", level="warning", created_at=datetime.now(timezone.utc),
+        message='WARN wifi "HomeNet-5G" broker mqtts://8.231.81.12:8883',
+    )
+    rows = MagicMock()
+    rows.scalars.return_value.all.return_value = [log]
+    db.execute = AsyncMock(side_effect=[gateway, count, rows])
+
+    resp = client.get("/api/cpo/gateways/gw1/logs")
+
+    assert resp.status_code == 200, resp.text
+    item = resp.json()["items"][0]
+    assert item["message"] == shown
+    assert (item["id"], item["level"]) == (9, "warning")
+    assert item["created_at"]
+    if role == UserRole.CPO_VIEWER:
+        assert "HomeNet" not in resp.text and "8.231.81.12" not in resp.text
+
+
 def test_mask_pii_handles_free_text_and_phones():
     from backend.routers.cpo._common import mask_pii
 

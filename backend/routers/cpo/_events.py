@@ -11,8 +11,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.database.db import get_db
 from backend.database.models import AuditLog, Gateway, GatewayEvent, GatewayLog, User
 from backend.schemas import GatewayEventResponse, GatewayLogResponse
+from backend.services.auth import is_cpo_viewer
 
 from ._common import redact_for, require_cpo_tenant
+
+# [F10] Firmware WARN lines can carry the home Wi-Fi SSID and the broker URL,
+# which mask_pii does not cover, so a read-only viewer never sees log bodies.
+VIEWER_LOG_PLACEHOLDER = "(log text hidden in the read-only demo)"
 
 router = APIRouter()
 
@@ -140,6 +145,7 @@ async def cpo_gateway_logs(
         .offset(offset)
     )
     logs = list(result.scalars().all())
+    hide_text = is_cpo_viewer(user)
 
     return {
         "total": int(total),
@@ -148,7 +154,7 @@ async def cpo_gateway_logs(
                 id=log.id,
                 gateway_id=log.gateway_id,
                 level=log.level,
-                message=log.message,
+                message=VIEWER_LOG_PLACEHOLDER if hide_text else log.message,
                 created_at=log.created_at.isoformat() if log.created_at else None,
             )
             for log in logs
