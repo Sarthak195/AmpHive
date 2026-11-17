@@ -75,7 +75,7 @@ describe('GatewayLogsPanel', () => {
   it('empty state names the 14-day retention', async () => {
     api.get.mockResolvedValue({ total: 0, items: [] });
     render(<GatewayLogsPanel path={PATH} />);
-    expect(await screen.findByText(/kept for 14 days/)).toBeInTheDocument();
+    expect(await screen.findByText(/kept for a limited time, 14 days by default/)).toBeInTheDocument();
   });
 
   it('Load more fetches the next page at the per-level offset and appends', async () => {
@@ -99,6 +99,28 @@ describe('GatewayLogsPanel', () => {
     expect(await screen.findByText('E (9) old: oldest line')).toBeInTheDocument();
     expect(urlsCalled().some((u) => u.includes('level=error') && u.includes(`offset=${PAGE_SIZE}`))).toBe(true);
     expect(screen.queryByRole('button', { name: 'Load more' })).toBeNull();
+  });
+
+  it('de-duplicates rows that appear on two merged pages', async () => {
+    const page = Array.from({ length: PAGE_SIZE }, (_, i) =>
+      row(1000 - i, 'error', `E (${i}) tag: line ${i}`, `2026-11-17T09:${String(59 - (i % 60)).padStart(2, '0')}:00Z`),
+    );
+    api.get.mockImplementation((url) => {
+      if (!url.includes('level=error')) return Promise.resolve({ total: 0, items: [] });
+      return Promise.resolve(
+        url.includes('offset=0')
+          ? { total: PAGE_SIZE + 2, items: page }
+          // The window shifted: the last row of page 1 comes back again.
+          : { total: PAGE_SIZE + 2, items: [page[PAGE_SIZE - 1], row(1, 'error', 'E (9) old: oldest line', '2026-11-16T00:00:00Z')] },
+      );
+    });
+    const user = userEvent.setup();
+    render(<GatewayLogsPanel path={PATH} />);
+
+    await user.click(await screen.findByRole('button', { name: 'Load more' }));
+    await screen.findByText('E (9) old: oldest line');
+    expect(screen.getAllByRole('listitem')).toHaveLength(PAGE_SIZE + 1);
+    expect(screen.getAllByText(`E (${PAGE_SIZE - 1}) tag: line ${PAGE_SIZE - 1}`)).toHaveLength(1);
   });
 
   describe('auto-refresh', () => {
@@ -130,6 +152,36 @@ describe('GatewayLogsPanel', () => {
         await vi.advanceTimersByTimeAsync(REFRESH_MS * 2);
       });
       expect(api.get).not.toHaveBeenCalled();
+    });
+
+    it('stops refreshing once a second page is loaded (it would collapse the list)', async () => {
+      const page = Array.from({ length: PAGE_SIZE }, (_, i) =>
+        row(1000 - i, 'error', `E (${i}) tag: line ${i}`, '2026-11-17T09:00:00Z'),
+      );
+      api.get.mockImplementation((url) => {
+        if (!url.includes('level=error')) return Promise.resolve({ total: 0, items: [] });
+        return Promise.resolve(
+          url.includes('offset=0')
+            ? { total: PAGE_SIZE + 1, items: page }
+            : { total: PAGE_SIZE + 1, items: [row(1, 'error', 'E (9) old: oldest line', '2026-11-16T00:00:00Z')] },
+        );
+      });
+      render(<GatewayLogsPanel path={PATH} />);
+      const more = await screen.findByRole('button', { name: 'Load more' });
+      await act(async () => {
+        more.click();
+      });
+      await screen.findByText('E (9) old: oldest line');
+      await act(async () => {
+        screen.getByLabelText(/Auto-refresh/).click();
+      });
+      api.get.mockClear();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(REFRESH_MS * 2);
+      });
+      expect(api.get).not.toHaveBeenCalled();
+      expect(screen.getByText('E (9) old: oldest line')).toBeInTheDocument();
     });
   });
 });

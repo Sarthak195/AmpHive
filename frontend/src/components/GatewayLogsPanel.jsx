@@ -1,5 +1,5 @@
 /**
- * GatewayLogsPanel — forwarded firmware log lines (TD#28), shared by the CPO
+ * GatewayLogsPanel: forwarded firmware log lines (TD#28), shared by the CPO
  * gateway drawer and the admin Logs tab.
  *
  * `path` is the list endpoint (GET .../logs for one CPO gateway, or
@@ -8,7 +8,9 @@
  * and accept ONE `level` (error | warning | info), so the default "Warnings
  * and errors" view issues one request per level and merges them by time.
  * Paging keeps a per-level offset; auto-refresh (opt-in, 15 s, paused while
- * the tab is hidden) re-fetches the first page only.
+ * the tab is hidden) re-fetches the first page only, and is skipped while a
+ * Load more is in flight or once more than one page is loaded (a refresh would
+ * collapse the list back to page one). Merged pages are de-duplicated by id.
  *
  * Firmware forwards only WARN/ERROR lines (log_forward_vprintf), so the
  * Info filter mostly holds malformed or non-firmware lines.
@@ -65,6 +67,8 @@ export default function GatewayLogsPanel({ path, params = {}, showGateway = fals
   const offsetsRef = useRef({});
   const totalsRef = useRef({});
   const gen = useRef(0);
+  const loadingMoreRef = useRef(false);
+  const pagedRef = useRef(false);
   const paramsKey = JSON.stringify(params);
 
   const fetchLevel = useCallback(
@@ -85,7 +89,10 @@ export default function GatewayLogsPanel({ path, params = {}, showGateway = fals
     async ({ more = false, silent = false } = {}) => {
       const levels = LEVEL_SETS[levelKey].levels;
       const myGen = more ? gen.current : ++gen.current;
-      if (more) setLoadingMore(true);
+      if (more) {
+        loadingMoreRef.current = true;
+        setLoadingMore(true);
+      }
       else if (!silent) setLoading(true);
       try {
         const targets = levels.filter((lv) => {
@@ -98,6 +105,7 @@ export default function GatewayLogsPanel({ path, params = {}, showGateway = fals
         );
         if (myGen !== gen.current) return;
         if (!more) {
+          pagedRef.current = false;
           offsetsRef.current = {};
           totalsRef.current = {};
         }
@@ -108,7 +116,11 @@ export default function GatewayLogsPanel({ path, params = {}, showGateway = fals
           totalsRef.current[k] = pages[i].total;
           fresh.push(...pages[i].items);
         });
-        setItems((prev) => (more ? [...prev, ...fresh] : fresh).sort(byNewest));
+        if (more) pagedRef.current = true;
+        setItems((prev) => {
+          const merged = more ? [...prev, ...fresh] : fresh;
+          return [...new Map(merged.map((r) => [r.id, r])).values()].sort(byNewest);
+        });
         const keys = levels.map((lv) => lv || 'all');
         setTotal(keys.reduce((s, k) => s + (totalsRef.current[k] || 0), 0));
         setHasMore(keys.some((k) => (offsetsRef.current[k] || 0) < (totalsRef.current[k] || 0)));
@@ -116,6 +128,7 @@ export default function GatewayLogsPanel({ path, params = {}, showGateway = fals
       } catch (err) {
         if (myGen === gen.current && !silent) setError(err);
       } finally {
+        if (more) loadingMoreRef.current = false;
         if (myGen === gen.current) {
           setLoading(false);
           setLoadingMore(false);
@@ -133,7 +146,9 @@ export default function GatewayLogsPanel({ path, params = {}, showGateway = fals
   useEffect(() => {
     if (!autoRefresh) return undefined;
     const tick = () => {
-      if (!document.hidden) load({ silent: true });
+      if (!document.hidden && !loadingMoreRef.current && !pagedRef.current) {
+        load({ silent: true });
+      }
     };
     const id = setInterval(tick, REFRESH_MS);
     document.addEventListener('visibilitychange', tick);
@@ -184,7 +199,7 @@ export default function GatewayLogsPanel({ path, params = {}, showGateway = fals
       ) : items.length === 0 ? (
         <EmptyState
           title="No log lines"
-          body={`Nothing matches this filter. Firmware 2.1.0 and later forwards WARN and ERROR lines, and logs are kept for ${RETENTION_DAYS} days.`}
+          body={`Nothing matches this filter. Firmware 2.1.0 and later forwards WARN and ERROR lines, and logs are kept for a limited time, ${RETENTION_DAYS} days by default.`}
         />
       ) : (
         <>

@@ -54,6 +54,18 @@ describe('CpoAudit', () => {
     expect(screen.queryByRole('button', { name: 'Load more' })).toBeNull();
   });
 
+  it('drops rows already shown when pages overlap', async () => {
+    const full = Array.from({ length: 50 }, (_, i) => entry(i + 1, `act.${i + 1}`));
+    // A new audit row shifted the offset window: id 50 comes back again.
+    api.get.mockResolvedValueOnce(full).mockResolvedValueOnce([entry(50, 'act.50'), entry(99, 'group.delete')]);
+    const user = userEvent.setup();
+    render(<CpoAudit />);
+
+    await user.click(await screen.findByRole('button', { name: 'Load more' }));
+    await screen.findByText('group.delete');
+    expect(screen.getAllByText('act.50')).toHaveLength(1);
+  });
+
   it('shows an empty state, and an error state on failure', async () => {
     api.get.mockResolvedValueOnce([]);
     const { unmount } = render(<CpoAudit />);

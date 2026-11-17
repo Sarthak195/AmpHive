@@ -1,5 +1,5 @@
 /**
- * CpoAudit — the CPO's own admin-action audit trail (TD#26): gateway/plug/
+ * CpoAudit: the CPO's own admin-action audit trail (TD#26): gateway/plug/
  * group create-delete, status changes, access-code regeneration and payout
  * requests, newest first.
  *
@@ -41,7 +41,10 @@ export default function CpoAudit() {
     try {
       const res = await api.get(`/api/cpo/audit?limit=${PAGE_SIZE}&offset=${offset}`);
       const page = Array.isArray(res) ? res : res?.items || [];
-      setRows((prev) => (offset === 0 ? page : [...prev, ...page]));
+      setRows((prev) => {
+        const merged = offset === 0 ? page : [...prev, ...page];
+        return [...new Map(merged.map((r) => [r.id, r])).values()];
+      });
       setHasMore(page.length === PAGE_SIZE);
       setError(null);
     } catch (err) {
@@ -63,9 +66,9 @@ export default function CpoAudit() {
     {
       key: 'target',
       label: 'Target',
-      render: (r) => [r.target_type, r.target_id].filter(Boolean).join(' ') || '—',
+      render: (r) => [r.target_type, r.target_id].filter(Boolean).join(' ') || '-',
     },
-    { key: 'detail', label: 'Detail', render: (r) => r.detail || '—' },
+    { key: 'detail', label: 'Detail', render: (r) => r.detail || '-' },
   ];
 
   return (
