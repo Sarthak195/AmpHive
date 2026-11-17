@@ -136,7 +136,7 @@ export default function CpoPricingSimple({
       )}
 
       <div>
-        <button type="button" className="btn btn-primary" onClick={attemptSave} disabled={busy}>
+        <button data-write type="button" className="btn btn-primary" onClick={attemptSave} disabled={busy}>
           {busy ? 'Saving…' : 'Save price'}
         </button>
       </div>

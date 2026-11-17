@@ -236,10 +236,10 @@ export default function CpoDisputes() {
       render: (d) =>
         d.status === 'open' ? (
           <span className="row disputes-row-actions">
-            <button type="button" className="btn btn-primary btn-sm" onClick={() => openApprove(d)}>
+            <button data-write type="button" className="btn btn-primary btn-sm" onClick={() => openApprove(d)}>
               Approve
             </button>
-            <button type="button" className="btn btn-danger btn-sm" onClick={() => openReject(d)}>
+            <button data-write type="button" className="btn btn-danger btn-sm" onClick={() => openReject(d)}>
               Reject
             </button>
           </span>

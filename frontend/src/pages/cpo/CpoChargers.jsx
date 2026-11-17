@@ -501,7 +501,7 @@ export default function CpoChargers() {
       label: 'Actions',
       render: (row) => (
         <div className="cpo-chargers-row-actions">
-          <button type="button" className="btn btn-quiet btn-sm" onClick={() => openEdit(row)}>
+          <button data-write type="button" className="btn btn-quiet btn-sm" onClick={() => openEdit(row)}>
             <Pencil size={14} aria-hidden="true" />
             Edit
           </button>
@@ -509,7 +509,7 @@ export default function CpoChargers() {
             <QrCode size={14} aria-hidden="true" />
             QR
           </button>
-          <button
+          <button data-write
             type="button"
             className={`btn btn-sm ${row.status === 'maintenance' ? 'btn-quiet' : 'btn-danger'}`}
             onClick={() => setMaintenanceTarget(row)}
@@ -537,7 +537,7 @@ export default function CpoChargers() {
         title="Chargers"
         sub="Manage your smart chargers, their groups, and pricing."
         actions={
-          <button type="button" className="btn btn-primary" onClick={openAdd}>
+          <button data-write type="button" className="btn btn-primary" onClick={openAdd}>
             <Plus size={16} aria-hidden="true" />
             Add charger
           </button>
@@ -614,11 +614,11 @@ export default function CpoChargers() {
       {selectedIds.size > 0 && (
         <div className="banner banner-info cpo-chargers-bulkbar">
           <span>{selectedIds.size} selected</span>
-          <button type="button" className="btn btn-quiet btn-sm" onClick={() => setBulkGroupOpen(true)}>
+          <button data-write type="button" className="btn btn-quiet btn-sm" onClick={() => setBulkGroupOpen(true)}>
             <Users size={14} aria-hidden="true" />
             Assign to group
           </button>
-          <button
+          <button data-write
             type="button"
             className="btn btn-quiet btn-sm"
             onClick={() => setBulkMaintenanceOpen(true)}
@@ -647,7 +647,7 @@ export default function CpoChargers() {
         }
         emptyAction={
           !hasActiveFilters && (
-            <button type="button" className="btn btn-primary" onClick={openAdd}>
+            <button data-write type="button" className="btn btn-primary" onClick={openAdd}>
               Add charger
             </button>
           )

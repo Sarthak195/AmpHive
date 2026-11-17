@@ -46,6 +46,7 @@ from backend.services.account_closure import (
     AccountClosureRefused,
     close_account,
 )
+from backend.services.api_tokens import revoke_user_api_tokens
 from backend.services.audit import try_record_audit
 from backend.services.auth import (
     _DUMMY_PASSWORD_HASH,
@@ -564,10 +565,12 @@ async def logout_everywhere(
     Revoke every outstanding token for this user on every device (server-side
     "log out everywhere"): the token_version bump, exactly what
     POST /api/auth/logout did before per-device sessions. No revoked_sessions
-    row is needed, because the bump already kills every sid.
+    row is needed, because the bump already kills every sid. Personal API
+    tokens (F7) are revoked in the same commit.
     """
     user_id, email = user.id, user.email
     new_epoch = await _bump_token_version(db, user_id)
+    await revoke_user_api_tokens(db, user_id)
     await db.commit()
     logger.info(
         "User logged out everywhere (tokens revoked)",
@@ -1010,6 +1013,10 @@ async def google_callback(request: Request, db: AsyncSession = Depends(get_db)):
         user.auth_provider = "google"
         user.email_verified = True
         try:
+            # [F7] A squatter's personal API tokens must not survive the
+            # takeover. Inside the try: this UPDATE autoflushes the pending
+            # google_sub write, so a unique-index race can surface here.
+            await revoke_user_api_tokens(db, user.id)
             await db.commit()
         except IntegrityError:
             # This google_sub got linked to a DIFFERENT account in the
@@ -1264,6 +1271,8 @@ async def reset_password(req: ResetPasswordRequest, db: AsyncSession = Depends(g
         )
         .execution_options(synchronize_session=False)
     )
+    # [F7] A reset also kills every personal API token.
+    await revoke_user_api_tokens(db, prt.user_id)
     await db.commit()
     logger.info(
         "Password reset completed (all sessions revoked)",

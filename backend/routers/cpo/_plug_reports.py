@@ -15,7 +15,7 @@ from backend.database.db import get_db
 from backend.database.models import PlugReport, PlugReportStatus, User
 from backend.schemas import CpoPlugReportResolveRequest, PlugReportResponse
 
-from ._common import _plug_report_response, logger, require_cpo_tenant
+from ._common import _plug_report_response, logger, redact_for, require_cpo_tenant
 
 router = APIRouter()
 
@@ -52,7 +52,11 @@ async def cpo_list_plug_reports(
         .limit(limit)
     )
     reports = list(result.scalars().all())
-    return [_plug_report_response(r) for r in reports]
+    out = [_plug_report_response(r) for r in reports]
+    for resp in out:
+        # [F10] Driver free text: mask any email/phone for a read-only viewer.
+        resp.description = redact_for(user, resp.description) or ""
+    return out
 
 
 @router.post("/api/cpo/plug-reports/{report_id}/resolve", response_model=PlugReportResponse)

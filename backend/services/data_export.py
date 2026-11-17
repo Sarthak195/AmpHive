@@ -33,6 +33,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database.models import (
+    ApiToken,
     ChargerGroup,
     ChargingSession,
     Gateway,
@@ -290,6 +291,24 @@ async def build_export(db: AsyncSession, user: User) -> dict:
         for (p,) in push_rows
     ]
 
+    # --- personal API tokens (F7): metadata only, never the hash ----------
+    token_rows, truncated = await _collect(
+        db, select(ApiToken).where(ApiToken.user_id == user.id).order_by(ApiToken.created_at.desc())
+    )
+    note("api_tokens", truncated)
+    api_tokens = [
+        {
+            "id": t.id,
+            "name": t.name,
+            "prefix": t.token_prefix,
+            "scope": t.scope,
+            "created_at": _iso(t.created_at),
+            "last_used_at": _iso(t.last_used_at),
+            "revoked_at": _iso(t.revoked_at),
+        }
+        for (t,) in token_rows
+    ]
+
     return {
         "export_format": "amphive.user-data-export.v1",
         "generated_at": generated_at.isoformat(),
@@ -313,4 +332,5 @@ async def build_export(db: AsyncSession, user: User) -> dict:
         "charger_watches": charger_watches,
         "notifications": notifications,
         "push_devices": push_devices,
+        "api_tokens": api_tokens,
     }

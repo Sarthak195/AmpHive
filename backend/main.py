@@ -361,6 +361,7 @@ from backend.routers import (  # noqa: E402
     reservations,
     sessions,
     status,
+    tokens,
 )
 
 app.include_router(auth.router)
@@ -382,6 +383,8 @@ app.include_router(reservations.router)
 app.include_router(admin.router)
 # Public network status (feat/f11-status) - appended last, same OpenAPI-order rationale.
 app.include_router(status.router)
+# Personal read-only API tokens + GET /api/me/meter (F7) - appended last, same rationale.
+app.include_router(tokens.router)
 
 import socketio  # noqa: E402
 

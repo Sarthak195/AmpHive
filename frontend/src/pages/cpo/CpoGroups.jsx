@@ -336,7 +336,7 @@ export default function CpoGroups() {
         title="Groups"
         sub="Organize chargers into public lots or private, code-gated communities."
         actions={
-          <button type="button" className="btn btn-primary" onClick={openCreate}>
+          <button data-write type="button" className="btn btn-primary" onClick={openCreate}>
             <Plus size={18} aria-hidden="true" />
             Create group
           </button>
@@ -353,7 +353,7 @@ export default function CpoGroups() {
           title="No groups yet"
           body="Create a group to share an access code with a private community, or organize a public lot's chargers."
           action={
-            <button type="button" className="btn btn-primary" onClick={openCreate}>
+            <button data-write type="button" className="btn btn-primary" onClick={openCreate}>
               Create group
             </button>
           }
@@ -396,7 +396,7 @@ export default function CpoGroups() {
                   <span className={`badge ${selected.is_public ? 'badge-ok' : 'badge-info'}`}>
                     {selected.is_public ? 'Public' : 'Private'}
                   </span>
-                  <button
+                  <button data-write
                     type="button"
                     className="btn btn-quiet btn-sm groups-detail-edit"
                     onClick={openEdit}
@@ -415,7 +415,7 @@ export default function CpoGroups() {
                           <Copy size={15} aria-hidden="true" />
                           {copied ? 'Copied' : 'Copy'}
                         </button>
-                        <button
+                        <button data-write
                           type="button"
                           className="btn btn-quiet btn-sm"
                           onClick={() => setRegenOpen(true)}
@@ -447,7 +447,7 @@ export default function CpoGroups() {
                               {m.full_name || m.email}
                               {m.full_name && <span className="text-3 text-sm"> · {m.email}</span>}
                             </span>
-                            <button
+                            <button data-write
                               type="button"
                               className="btn btn-quiet btn-sm"
                               aria-label={`Remove ${m.full_name || m.email} from this group`}
@@ -501,7 +501,7 @@ export default function CpoGroups() {
                         onChange={(e) => setLimitInput(e.target.value)}
                       />
                     </div>
-                    <button
+                    <button data-write
                       type="button"
                       className="btn btn-primary btn-sm"
                       disabled={limitBusy}
@@ -522,7 +522,7 @@ export default function CpoGroups() {
                 <section className="groups-section groups-danger">
                   <h3>Danger zone</h3>
                   <p className="text-sm">{deleteBody}</p>
-                  <button type="button" className="btn btn-danger" onClick={() => setDeleteOpen(true)}>
+                  <button data-write type="button" className="btn btn-danger" onClick={() => setDeleteOpen(true)}>
                     <Trash2 size={16} aria-hidden="true" />
                     Delete group
                   </button>

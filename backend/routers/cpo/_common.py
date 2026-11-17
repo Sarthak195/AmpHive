@@ -7,13 +7,16 @@ cpo.py (2026-07-21 package split, TD#7 follow-up) so each domain submodule
 doesn't need to import from a sibling.
 """
 import logging
+import re
+from typing import Optional
 
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Request
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database.models import Payout, PlugReport, SessionDispute, Tariff, TariffSlot, User
 from backend.schemas import DisputeResponse, PlugReportResponse
+from backend.services.auth import enforce_viewer_read_only, is_cpo_viewer
 from backend.services.rbac import require_role
 
 logger = logging.getLogger("amphive.api")
@@ -63,15 +66,48 @@ def _require_tenant_id(user: User) -> int:
     return user.tenant_id
 
 
-async def require_cpo_tenant(user: User = Depends(require_role("cpo", "admin"))) -> User:
+async def require_cpo_tenant(
+    request: Request,
+    user: User = Depends(require_role("cpo", "admin", "cpo_viewer")),
+) -> User:
     """Role gate for every tenant-scoped /api/cpo route (U4). The routes filter
     with `X.tenant_id == user.tenant_id`, which SQLAlchemy compiles to
     `X.tenant_id IS NULL` when the caller has no tenant, so a bare admin or a
     CPO not yet attached to a tenant would match unclaimed inventory gateways,
     their plugs and platform-level audit rows. Refuse such a caller before any
-    query runs; platform admins manage unclaimed inventory via /api/admin/*."""
+    query runs; platform admins manage unclaimed inventory via /api/admin/*.
+
+    [F10] A read-only cpo_viewer is admitted for GET/HEAD/OPTIONS only. The
+    global guard in get_current_user already refuses its writes; this second
+    check keeps the CPO gate fail-closed on its own."""
+    enforce_viewer_read_only(user, request.method, request.url.path)
     _require_tenant_id(user)
     return user
+
+
+# [F10] PII patterns masked for a read-only cpo_viewer. Emails keep their
+# first character and domain ("d***@example.com") so a demo still reads
+# naturally. Phones: a run of 10-13 digits (optionally +country code and one
+# space/dash group split), e.g. "+91 98765 43210" or "9876543210". Dates and
+# ids in audit text never reach 10 contiguous digits, so they are left alone.
+_EMAIL_RE = re.compile(r"([A-Za-z0-9._%+-])[A-Za-z0-9._%+-]*@([A-Za-z0-9.-]+\.[A-Za-z]{2,})")
+_PHONE_RE = re.compile(r"(?<![\w+])\+?\d{0,3}[ -]?\d{5}[ -]?\d{5}(?!\w)")
+
+
+def mask_pii(text: Optional[str]) -> Optional[str]:
+    """Mask every email address and phone number inside `text`."""
+    if not text:
+        return text
+    text = _EMAIL_RE.sub(lambda m: f"{m.group(1)}***@{m.group(2)}", text)
+    return _PHONE_RE.sub("[phone hidden]", text)
+
+
+def redact_for(viewer: User, text: Optional[str]) -> Optional[str]:
+    """[F10] The one place /api/cpo/* responses and CSV exports decide whether
+    personal data is shown: emails and phone numbers (whole fields, or inside
+    free text such as audit details) are masked for a read-only cpo_viewer
+    and returned unchanged for a cpo/admin."""
+    return mask_pii(text) if is_cpo_viewer(viewer) else text
 
 
 async def _load_tenant_tariff(db: AsyncSession, tariff_id: int, tenant_id: int) -> Tariff:

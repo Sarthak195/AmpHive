@@ -239,7 +239,7 @@ async def cpo_claim_gateway(
 
 @router.get("/api/cpo/firmware-releases")
 async def cpo_list_firmware_releases(
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_role("cpo", "admin", "cpo_viewer")),
     db: AsyncSession = Depends(get_db),
 ):
     """

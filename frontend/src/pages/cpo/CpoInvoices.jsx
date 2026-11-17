@@ -140,7 +140,7 @@ export default function CpoInvoices() {
       key: 'actions',
       label: '',
       render: (inv) => (
-        <button
+        <button data-write
           type="button"
           className="btn btn-quiet btn-sm"
           disabled={viewingId === inv.session_id}

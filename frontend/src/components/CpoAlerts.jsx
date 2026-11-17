@@ -122,7 +122,7 @@ const CpoAlerts = () => {
                 {ev.created_at && ` · ${timeAgo(ev.created_at)}`}
               </span>
             </div>
-            <button
+            <button data-write
               type="button"
               className="btn btn-quiet btn-sm"
               disabled={ackBusy === ev.id}

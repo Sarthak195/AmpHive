@@ -49,7 +49,7 @@ from backend.schemas import (
     ReservationResponse,
 )
 from backend.services import reservations as reservation_policy
-from backend.services.auth import get_current_user
+from backend.services.auth import get_current_user, is_cpo_viewer
 from backend.services.notifications import notify
 from backend.services.reservations import (
     expire_lapsed_reservations,
@@ -272,7 +272,8 @@ async def my_reservations(
     """
     now = datetime.now(timezone.utc)
     expired = await expire_lapsed_reservations(db, user_id=user.id, now=now)
-    if expired:
+    # [F10] A read-only cpo_viewer's GET never persists the lazy flip.
+    if expired and not is_cpo_viewer(user):
         await db.commit()  # read path — persist the lazy flip
 
     upcoming_rows = await db.execute(
@@ -432,7 +433,8 @@ async def plug_reservations(
 
     now = datetime.now(timezone.utc)
     expired = await expire_lapsed_reservations(db, plug_id=plug.id, now=now)
-    if expired:
+    # [F10] A read-only cpo_viewer's GET never persists the lazy flip.
+    if expired and not is_cpo_viewer(user):
         await db.commit()  # read path — persist the lazy flip
 
     horizon = now + timedelta(days=reservation_policy.RESERVATION_MAX_ADVANCE_DAYS)

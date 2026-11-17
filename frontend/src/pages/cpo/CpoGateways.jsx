@@ -230,7 +230,7 @@ export default function CpoGateways() {
             <ScrollText size={15} aria-hidden="true" />
             Logs
           </button>
-          <button
+          <button data-write
             type="button"
             className="btn btn-quiet btn-sm"
             disabled={gw.status !== 'online' || gw.plug_count === 0}
@@ -257,7 +257,7 @@ export default function CpoGateways() {
         title="Gateways"
         sub="Your ESP32 gateways — status, firmware, and over-the-air updates."
         actions={
-          <button type="button" className="btn btn-primary" onClick={openClaim}>
+          <button data-write type="button" className="btn btn-primary" onClick={openClaim}>
             <Plus size={16} aria-hidden="true" />
             Add gateway
           </button>
@@ -274,7 +274,7 @@ export default function CpoGateways() {
         emptyTitle="No gateways yet"
         emptyBody="Add a gateway with the claim code printed on its label to see it here."
         emptyAction={
-          <button type="button" className="btn btn-primary btn-sm" onClick={openClaim}>
+          <button data-write type="button" className="btn btn-primary btn-sm" onClick={openClaim}>
             Add gateway
           </button>
         }

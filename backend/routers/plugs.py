@@ -45,6 +45,7 @@ from backend.schemas import (
 from backend.services.auth import (
     get_current_user,
     get_current_user_optional,
+    is_cpo_viewer,
 )
 from backend.services.photo_publish import (
     PhotoPublishError,
@@ -80,14 +81,14 @@ router = APIRouter()
 PLUG_LIST_HARD_CAP = 500
 
 
-async def _reservation_fields_for_plugs(db, plug_ids, user_id, now):
+async def _reservation_fields_for_plugs(db, plug_ids, user, now):
     """
     [Reservations] The PlugResponse reservation fields (reserved_now /
     reserved_now_by_me / reserved_until / next_reservation) for a batch of
     plugs in ONE grouped query — the list endpoint below is deliberately
     N+1-free and must stay that way. Lazily expires lapsed holds first
-    (services/reservations.py; committed by the caller's read path), so a
-    no-show never shows as "reserved". Returns {plug_id: field-dict};
+    (services/reservations.py; committed here unless the caller is a
+    read-only cpo_viewer), so a no-show never shows as "reserved". Returns {plug_id: field-dict};
     plugs absent from the map have no current/upcoming reservations.
     """
     from backend.database.models import Reservation, ReservationStatus
@@ -97,9 +98,11 @@ async def _reservation_fields_for_plugs(db, plug_ids, user_id, now):
     if not plug_ids:
         return {}
 
+    user_id = user.id
     expired = await expire_lapsed_reservations(db, plug_ids=plug_ids, now=now)
-    if expired:
-        await db.commit()  # read path — persist the lazy flip
+    # [F10] A read-only cpo_viewer's GET never persists the lazy flip.
+    if expired and not is_cpo_viewer(user):
+        await db.commit()  # read path: persist the lazy flip
 
     rows = await db.execute(
         select(Reservation)
@@ -370,7 +373,7 @@ async def get_available_plugs(
     # [Reservations] reserved_now / next_reservation etc. for every listed
     # plug in one grouped query — NOT per-plug (this endpoint stays N+1-free).
     reservation_fields = await _reservation_fields_for_plugs(
-        db, [plug.id for plug, *_ in all_rows], user.id, now
+        db, [plug.id for plug, *_ in all_rows], user, now
     )
 
     # Resolved effective rate + [Pricing v2] next TOD price for EVERY listed
@@ -583,7 +586,7 @@ async def get_plug(
     # [Reservations] Same grouped helper the list uses, over this one plug.
     now = datetime.now(timezone.utc)
     reservation_fields = await _reservation_fields_for_plugs(
-        db, [plug.id], user.id, now
+        db, [plug.id], user, now
     )
 
     # [Plug watches] Whether THIS user has an armed "notify me when free"
