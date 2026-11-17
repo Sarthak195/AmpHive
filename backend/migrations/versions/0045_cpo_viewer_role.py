@@ -17,13 +17,13 @@ cannot boot against an upgraded database, so tag a rollback image built from
 this revision before deploying it.
 
 Revision ID: 0045_cpo_viewer_role
-Revises: 0043_email_ci_unique
+Revises: 0044_session_auto_stop_full
 Create Date: 2026-11-17
 """
 from alembic import op
 
 revision = "0045_cpo_viewer_role"
-down_revision = "0043_email_ci_unique"
+down_revision = "0044_session_auto_stop_full"
 branch_labels = None
 depends_on = None
 

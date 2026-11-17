@@ -22,13 +22,13 @@ IF NOT EXISTS. Index names match the models because test_migrations.py diffs
 the migrated schema against them.
 
 Revision ID: 0047_promo_codes
-Revises: 0043_email_ci_unique
+Revises: 0046_api_tokens
 Create Date: 2026-11-17
 """
 from alembic import op
 
 revision = "0047_promo_codes"
-down_revision = "0043_email_ci_unique"
+down_revision = "0046_api_tokens"
 branch_labels = None
 depends_on = None
 

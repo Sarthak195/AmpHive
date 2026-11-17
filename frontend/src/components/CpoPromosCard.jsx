@@ -144,6 +144,7 @@ export default function CpoPromosCard({ rate = 1 }) {
       render: (p) =>
         p.status === 'disabled' ? null : (
           <button
+            data-write
             type="button"
             className="btn btn-quiet btn-sm"
             onClick={() => disable(p)}
@@ -167,7 +168,7 @@ export default function CpoPromosCard({ rate = 1 }) {
               cash top-up, and fails if the pool can't cover it at that moment.
             </p>
           </div>
-          <button type="button" className="btn btn-primary" onClick={openForm}>
+          <button data-write type="button" className="btn btn-primary" onClick={openForm}>
             <Ticket size={16} aria-hidden="true" />
             New code
           </button>
