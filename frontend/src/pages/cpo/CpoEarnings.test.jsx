@@ -81,6 +81,7 @@ const mockApiGet = ({ earnings = EARNINGS, payouts = PAYOUTS, topups = TOPUPS } 
     if (url === '/api/cpo/earnings') return Promise.resolve(earnings);
     if (url === '/api/cpo/payouts') return Promise.resolve(payouts);
     if (url.startsWith('/api/cpo/topups')) return Promise.resolve(topups);
+    if (url.startsWith('/api/cpo/promos')) return Promise.resolve({ total: 0, items: [] });
     return Promise.reject(new Error(`unhandled url ${url}`));
   });
 };
