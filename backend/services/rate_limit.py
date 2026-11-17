@@ -13,6 +13,7 @@ Rules are env-configurable as "<attempts>/<window seconds>":
   RESET_PASSWORD_RATE_LIMIT  (default 10/3600 — 10 token submissions per hour per IP)
   VERIFY_EMAIL_RATE_LIMIT    (default 10/3600 — 10 verify-email submissions per hour per IP)
   RESEND_VERIFICATION_RATE_LIMIT (default 5/3600 — 5 resend-verification requests per hour per IP)
+  PROMO_REDEEM_RATE_LIMIT    (default 20/3600: 20 promo-code redemption attempts per hour per IP)
 
 A blanket per-IP window additionally covers EVERY /api route (middleware, not a
 per-route dependency) as the defense-in-depth floor under the dedicated rules:
@@ -31,6 +32,7 @@ These are layered ON TOP of the per-IP limiters, not a replacement:
   CPO_GATEWAY_CLAIM_ACCOUNT_RATE_LIMIT     (default 10/60 — 10 gateway-claim attempts per minute per CPO actor)
   GROUP_JOIN_ACCOUNT_RATE_LIMIT            (default 10/60 — 10 group-join attempts per minute per account)
   CPO_SETUP_ACCOUNT_RATE_LIMIT             (default 5/300 — 5 workspace-setup attempts per 5 minutes per account)
+  PROMO_REDEEM_ACCOUNT_RATE_LIMIT          (default 10/3600: 10 promo-code redemption attempts per hour per account)
   FORGOT_PASSWORD_EMAIL_RATE_LIMIT         (default 3/3600 — 3 reset emails per hour per SUBMITTED email, across all source IPs)
   RESEND_VERIFICATION_EMAIL_RATE_LIMIT     (default 3/3600 — 3 verification emails per hour per SUBMITTED email, across all source IPs)
   API_TOKEN_RATE_LIMIT                     (default 60/60 - 60 meter reads per minute per personal API token, F7)
@@ -449,6 +451,17 @@ cpo_setup_account_rate_limiter = SlidingWindowRateLimiter(
 # headroom while bounding a leaked token's read rate.
 api_token_rate_limiter = SlidingWindowRateLimiter(
     *_rule_from_env("API_TOKEN_RATE_LIMIT", "60/60")
+)
+
+# [Promo codes] POST /api/wallet/redeem. Codes carry about 79 bits and every
+# invalid case returns one generic error, but these caps are the practical
+# brute-force control: per IP (a sign-up farm sharing one address) and per
+# account (one account hopping IPs). A real driver redeems a code rarely.
+promo_redeem_rate_limiter = SlidingWindowRateLimiter(
+    *_rule_from_env("PROMO_REDEEM_RATE_LIMIT", "20/3600")
+)
+promo_redeem_account_rate_limiter = SlidingWindowRateLimiter(
+    *_rule_from_env("PROMO_REDEEM_ACCOUNT_RATE_LIMIT", "10/3600")
 )
 
 # Blanket /api floor (api_rate_limit_middleware above). 300/60 ≈ 5 req/s

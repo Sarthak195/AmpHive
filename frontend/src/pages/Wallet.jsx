@@ -11,6 +11,9 @@
  * backend/routers/payments.py). A dismissed checkout is a neutral notice,
  * not an error; a verify failure keeps the order id on screen as a support
  * reference.
+ *
+ * [Promo codes] "Have a promo code?" posts to POST /api/wallet/redeem; the
+ * credit lands as an operator credit line in the ledger below.
  */
 
 import { useState, useEffect, useCallback } from 'react';
@@ -24,7 +27,7 @@ import api from '../api/client';
 import { useAuth } from '../contexts/AuthContext';
 import { useConfig } from '../contexts/ConfigContext';
 import { loadRazorpay } from '../utils/razorpay';
-import { formatINR } from '../utils/money';
+import { coinsToINR, formatINR } from '../utils/money';
 import { txTypeLabel, apiErrorCopy } from '../utils/statusCopy';
 import { isSafeInternalPath } from '../utils/safePath';
 import './Wallet.css';
@@ -32,6 +35,13 @@ import './Wallet.css';
 const QUICK_AMOUNTS_INR = [100, 200, 500, 1000];
 const MIN_AMOUNT_INR = 50;
 const MAX_AMOUNT_INR = 10000;
+
+// 409 from /api/wallet/redeem: the code is fine, the issuing operator's
+// pool is not. The raw detail ("issuer pool exhausted") is for logs.
+const promoErrorCopy = (err) =>
+  err?.status === 409
+    ? "This code's operator has no credit left to give right now. Try again later."
+    : apiErrorCopy(err);
 
 const formatDate = (isoString) => (isoString ? new Date(isoString).toLocaleString() : '—');
 
@@ -59,6 +69,10 @@ export default function Wallet() {
   const [amountError, setAmountError] = useState('');
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState(null); // { tone: 'info'|'ok'|'danger', body, orderRef? }
+
+  const [promoCode, setPromoCode] = useState('');
+  const [promoBusy, setPromoBusy] = useState(false);
+  const [promoError, setPromoError] = useState('');
 
   const [ledger, setLedger] = useState([]);
   const [ledgerLoading, setLedgerLoading] = useState(true);
@@ -177,6 +191,27 @@ export default function Wallet() {
     });
 
     rzp.open();
+  };
+
+  const handleRedeem = async (e) => {
+    e.preventDefault();
+    if (!promoCode.trim()) {
+      setPromoError('Enter a promo code.');
+      return;
+    }
+    setPromoError('');
+    setPromoBusy(true);
+    try {
+      const result = await api.post('/api/wallet/redeem', { code: promoCode.trim() });
+      setPromoCode('');
+      toast.ok(`${formatINR(coinsToINR(result.amount_coins, rate))} added to your charging credit.`);
+      await refreshUser();
+      await fetchLedger();
+    } catch (err) {
+      setPromoError(promoErrorCopy(err));
+    } finally {
+      setPromoBusy(false);
+    }
   };
 
   const ledgerColumns = [
@@ -306,6 +341,42 @@ export default function Wallet() {
                 terms moved to /charging-credit-terms. */}
             <Link to="/charging-credit-terms">charging credit terms</Link>.
           </p>
+        </section>
+
+        <section className="card wallet-promo-card">
+          <h2>Have a promo code?</h2>
+          <form className="wallet-promo-form" onSubmit={handleRedeem} noValidate>
+            <div className="field">
+              <label className="field-label" htmlFor="wallet-promo-code">
+                Promo code
+              </label>
+              <input
+                id="wallet-promo-code"
+                className="input mono"
+                type="text"
+                autoComplete="off"
+                autoCapitalize="characters"
+                spellCheck="false"
+                maxLength={64}
+                placeholder="XXXX-XXXX-XXXX-XXXX"
+                value={promoCode}
+                onChange={(e) => {
+                  setPromoCode(e.target.value);
+                  setPromoError('');
+                }}
+                aria-invalid={promoError ? 'true' : undefined}
+                aria-describedby={promoError ? 'wallet-promo-error' : undefined}
+              />
+              {promoError && (
+                <p className="field-error" id="wallet-promo-error" role="alert">
+                  {promoError}
+                </p>
+              )}
+            </div>
+            <button type="submit" className="btn btn-quiet" disabled={promoBusy}>
+              {promoBusy ? 'Redeeming…' : 'Redeem'}
+            </button>
+          </form>
         </section>
 
         <section>

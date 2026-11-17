@@ -19,6 +19,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { HandCoins, Wallet } from 'lucide-react';
 import CpoLayout from '../../components/CpoLayout';
+import CpoPromosCard from '../../components/CpoPromosCard';
 import Modal from '../../components/ui/Modal';
 import { PageHeader, DataTable, ConfirmDialog, Money, ErrorState, useToast } from '../../components/ui';
 import api from '../../api/client';
@@ -431,6 +432,8 @@ export default function CpoEarnings() {
             }}
             collapse
           />
+
+          <CpoPromosCard rate={rate} />
 
           <h2 className="earnings-section-title">Payout history</h2>
 

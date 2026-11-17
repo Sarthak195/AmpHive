@@ -116,7 +116,9 @@ export const TX_TYPE_LABELS = {
   refund: 'Refund',
   hold: 'Hold',
   hold_release: 'Hold released',
-  cpo_topup: 'Credit added by operator (cash)',
+  // Cash top-ups and redeemed promo codes share this type; the ledger
+  // description says which.
+  cpo_topup: 'Credit added by operator',
 };
 
 export function txTypeLabel(type) {

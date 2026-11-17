@@ -342,3 +342,57 @@ describe('checkout flow', () => {
     expect(rzpOpen).not.toHaveBeenCalled();
   });
 });
+
+describe('promo code redeem', () => {
+  const typeAndRedeem = async (code) => {
+    await userEvent.type(screen.getByLabelText('Promo code'), code);
+    await userEvent.click(screen.getByRole('button', { name: 'Redeem' }));
+  };
+
+  it('posts the code, then refreshes the balance and the ledger', async () => {
+    api.post.mockResolvedValue({ amount_coins: 25, new_balance: 665 });
+    renderWallet();
+    await waitForSettled();
+    api.get.mockClear();
+
+    await typeAndRedeem('abcd-efgh-jkmn-pqrs');
+
+    await waitFor(() => expect(toast.ok).toHaveBeenCalledWith('₹25.00 added to your charging credit.'));
+    expect(api.post).toHaveBeenCalledWith('/api/wallet/redeem', { code: 'abcd-efgh-jkmn-pqrs' });
+    expect(refreshUser).toHaveBeenCalled();
+    expect(api.get).toHaveBeenCalledWith('/api/wallet/ledger');
+    expect(screen.getByLabelText('Promo code')).toHaveValue('');
+  });
+
+  it('shows the generic error inline for a code that cannot be redeemed', async () => {
+    const err = Object.assign(new Error("That code can't be redeemed. Check it and try again."), { status: 404 });
+    api.post.mockRejectedValue(err);
+    renderWallet();
+    await waitForSettled();
+
+    await typeAndRedeem('NOPE');
+
+    expect(await screen.findByRole('alert')).toHaveTextContent("That code can't be redeemed.");
+    expect(refreshUser).not.toHaveBeenCalled();
+  });
+
+  it('explains an exhausted issuer pool in plain words', async () => {
+    api.post.mockRejectedValue(Object.assign(new Error('issuer pool exhausted'), { status: 409 }));
+    renderWallet();
+    await waitForSettled();
+
+    await typeAndRedeem('ABCD-EFGH-JKMN-PQRS');
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/no credit left to give/);
+  });
+
+  it('asks for a code instead of posting an empty one', async () => {
+    renderWallet();
+    await waitForSettled();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Redeem' }));
+
+    expect(screen.getByRole('alert')).toHaveTextContent('Enter a promo code.');
+    expect(api.post).not.toHaveBeenCalled();
+  });
+});

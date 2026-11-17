@@ -1097,12 +1097,78 @@ class OfflineTopup(Base):
     amount_coins: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     note: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+    # [Promo codes] Set when this top-up was a driver redeeming one of the
+    # tenant's promo codes (POST /api/wallet/redeem) rather than a cash
+    # top-up keyed in by an operator. The pool and payout math is identical
+    # for both, which is the point: a promo credit is just an offline top-up
+    # the driver triggered. Alembic revision 0047_promo_codes.
+    promo_code_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("promo_codes.id", ondelete="SET NULL"), nullable=True)
 
     # Leading tenant_id backs both the tenant-scoped listing and the
     # watermark-window SUM query (services.payouts.sum_offline_topups) —
     # same shape as Payout/GatewayEvent/AuditLog's tenant+created_at index.
     __table_args__ = (
         Index("idx_offline_topups_tenant_created", "tenant_id", "created_at"),
+    )
+
+
+class PromoCode(Base):
+    """[Promo codes] A CPO-issued code a driver redeems for charging credit,
+    funded from the issuing tenant's own offline top-up pool.
+
+    Only the SHA-256 hex digest of the code is stored (same scheme as
+    PasswordResetToken.token_hash): the plain code is returned once by
+    POST /api/cpo/promos and never again. Codes are 16 characters from an
+    unambiguous 31-symbol alphabet (about 79 bits), so an unsalted digest is
+    not practically reversible even with the last 4 characters kept as
+    `code_hint` for the CPO's list. Nothing is reserved at creation: the pool
+    is checked at redemption (routers/payments.py redeem_promo_code), which
+    then writes an ordinary OfflineTopup row, so payouts need no new math.
+
+    Redemption limits are counts of PromoRedemption rows, taken while the code
+    row is locked. Codes are never deleted, only disabled (disabled_at).
+    Alembic revision 0047_promo_codes.
+    """
+    __tablename__ = "promo_codes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    code_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    code_hint: Mapped[str] = mapped_column(String(4), nullable=False)
+    amount_coins: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    # NULL = never expires.
+    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    max_redemptions: Mapped[int] = mapped_column(Integer, nullable=False)
+    per_user_limit: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
+    note: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    created_by: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+    disabled_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint("amount_coins > 0", name="ck_promo_codes_amount_positive"),
+        CheckConstraint("max_redemptions >= 1", name="ck_promo_codes_max_redemptions"),
+        CheckConstraint("per_user_limit >= 1", name="ck_promo_codes_per_user_limit"),
+        Index("idx_promo_codes_tenant_created", "tenant_id", "created_at"),
+    )
+
+
+class PromoRedemption(Base):
+    """[Promo codes] One redemption of a PromoCode by a driver, pointing at the
+    OfflineTopup it created. user_id is SET NULL rather than CASCADE so a
+    removed account can never free up redemptions (closed accounts are
+    tombstoned anyway, so in practice it stays set)."""
+    __tablename__ = "promo_redemptions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    code_id: Mapped[int] = mapped_column(Integer, ForeignKey("promo_codes.id", ondelete="CASCADE"), nullable=False)
+    user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    offline_topup_id: Mapped[int] = mapped_column(Integer, ForeignKey("offline_topups.id", ondelete="CASCADE"), unique=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+
+    # Backs both limit counts (per code, and per code + user).
+    __table_args__ = (
+        Index("idx_promo_redemptions_code_user", "code_id", "user_id"),
     )
 
 
