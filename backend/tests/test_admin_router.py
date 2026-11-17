@@ -223,7 +223,7 @@ async def test_patch_user_unknown_404():
 async def test_patch_user_role_change_bumps_tokens_and_audits():
     admin = _admin(user_id=1)
     target = _target(user_id=7, role=UserRole.DRIVER, tenant_id=None)
-    db = _db(_scalar_one_or_none(target), MagicMock())  # select target, UPDATE
+    db = _db(_scalar_one_or_none(target), MagicMock(), MagicMock())  # select, UPDATE, api_tokens
 
     resp = await admin_update_user(7, AdminUserUpdateRequest(role="cpo"), admin, db)
 
@@ -234,6 +234,8 @@ async def test_patch_user_role_change_bumps_tokens_and_audits():
     # The UPDATE must carry the DB-side token_version increment.
     update_stmt = db.execute.call_args_list[1][0][0]
     assert "token_version" in str(update_stmt)
+    # [F7] and personal API tokens die in the same transaction.
+    assert str(db.execute.call_args_list[2][0][0]).startswith("UPDATE api_tokens")
     # Audit row: platform-level (target has no tenant → tenant_id None).
     added = db.add.call_args[0][0]
     assert added.action == "user.update"
@@ -248,7 +250,7 @@ async def test_patch_user_role_change_bumps_tokens_and_audits():
 @pytest.mark.asyncio
 async def test_patch_user_disable_bumps_tokens():
     target = _target(user_id=7, is_disabled=False)
-    db = _db(_scalar_one_or_none(target), MagicMock())
+    db = _db(_scalar_one_or_none(target), MagicMock(), MagicMock())
 
     resp = await admin_update_user(
         7, AdminUserUpdateRequest(is_disabled=True), _admin(), db)
@@ -256,6 +258,8 @@ async def test_patch_user_disable_bumps_tokens():
     assert resp["is_disabled"] is True
     assert resp["tokens_revoked"] is True
     assert "token_version" in str(db.execute.call_args_list[1][0][0])
+    # [F7] a re-enable must not resurrect an API token.
+    assert str(db.execute.call_args_list[2][0][0]).startswith("UPDATE api_tokens")
 
 
 @pytest.mark.asyncio
@@ -269,6 +273,7 @@ async def test_patch_user_reenable_does_not_bump_tokens():
     assert resp["is_disabled"] is False
     assert resp["tokens_revoked"] is False
     assert "token_version" not in str(db.execute.call_args_list[1][0][0])
+    assert db.execute.await_count == 2  # no api_tokens revoke on a re-enable
 
 
 # --- POST /api/admin/users/{id}/adjust-balance ------------------------------

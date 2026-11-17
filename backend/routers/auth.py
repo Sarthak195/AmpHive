@@ -539,6 +539,8 @@ async def logout(
     payload = decode_access_token(credentials.credentials) or {}
     if token_sid(payload) is None:
         new_epoch = await _bump_token_version(db, user_id)
+        # [F7] scope "all": personal API tokens go too.
+        await revoke_user_api_tokens(db, user_id)
         await db.commit()
         logger.info(
             "User logged out (legacy token without sid: all tokens revoked)",

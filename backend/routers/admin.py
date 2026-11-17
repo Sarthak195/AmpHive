@@ -58,6 +58,7 @@ from backend.schemas import (
     CpoGatewayOtaRequest,
 )
 from backend.services import sysinfo
+from backend.services.api_tokens import revoke_user_api_tokens
 from backend.services.audit import try_record_audit
 from backend.services.firmware_publish import (
     FirmwarePublishError,
@@ -604,6 +605,10 @@ async def admin_update_user(
             .values(**values)
             .execution_options(synchronize_session=False)
         )
+        if bump:
+            # [F7] Personal API tokens are a second credential: without this a
+            # disable then re-enable (or a role change) would resurrect one.
+            await revoke_user_api_tokens(db, user_id)
         await db.commit()
 
     final_role = (new_role or target.role).value
