@@ -84,6 +84,8 @@ Interactive docs: `http://<host>:8000/docs`.
 `user` object shape: `{id, email, full_name, role, coin_balance}` (where `coin_balance` is a float; the `/api/auth/register`/`/api/auth/login` `AuthResponse.user` dict predates `available_balance` and hasn't been extended to it — only `GET /api/auth/me` (`UserResponse`) carries the new field today).
 Token: HS256 JWT, claims `sub`/`role`/`email`/`tv`/`auth_time`/`sid`/`iat`/`exp` (`sid`, 2026-11-15: a random sign-in session id minted at every sign-in, i.e. password login, email verification and the Google callback, and carried unchanged across renewals like `auth_time`; absent on tokens minted before it existed, and renewal never adds one), **7-day** expiry (`JWT_EXPIRY_DAYS`), renewed on every `GET /api/auth/me`, so only a device idle for 7 days has to sign in again. Renewal stops `JWT_MAX_SESSION_DAYS` (default 90) after the original sign-in (`auth_time`); `/me` then returns `token: null`.
 
+**Role `cpo_viewer` (F10, 2026-11-17, `release/2026-11-17-w2`, not deployed).** A read-only CPO. It may call every GET under `/api/cpo/*`, `GET /api/sessions/{id}` and `GET /api/sessions/{id}/telemetry` for its tenant, plus the usual self-service GETs. Any other method returns 403 `{"detail": "read_only_demo"}`, except `POST /api/auth/logout`. `GET /api/sessions/{id}/invoice` returns 403 for this role (it issues an invoice on first call). For this role, `user_email`, `email`, `actor_email`, `driver_email` and `created_by_email` fields, audit detail, dispute reason, top-up note, promo note and plug-report description have emails masked as `d***@domain` and phone numbers replaced by `[phone hidden]`; `access_code` on `GET /api/cpo/groups` is always null. See [CPO_VIEWER.md](CPO_VIEWER.md).
+
 ## Charger groups
 
 | Method | Path | Auth | Body | Behaviour |
@@ -127,6 +129,15 @@ Token: HS256 JWT, claims `sub`/`role`/`email`/`tv`/`auth_time`/`sid`/`iat`/`exp`
 | GET | `/api/sessions/disputes/my` | JWT | — | **(redesign/ui-v3)** The caller's disputes, newest first — the driver-side mirror of the CPO's `GET /api/cpo/disputes` (which owns resolution) → `[{id, session_id, status, reason, resolution_note, refund_coins, created_at, resolved_at}]` |
 | POST | `/api/sessions/{session_id}/dispute` | JWT | path `session_id:int`; `{reason}` (10–1000 chars) | File a dispute against one of the caller's own **finished** sessions (404 if not owner, 409 if still ACTIVE). Coins-only remedy — no Razorpay money-out path (see `MARKET_GAP_ANALYSIS.md` §3 "Refunds"). At most one OPEN dispute per session (409, also DB partial-unique backstop). Reviewed by the owning CPO via `GET /api/cpo/disputes` / `POST /api/cpo/disputes/{id}/resolve`. → `DisputeResponse` `{id, session_id, tenant_id, driver_user_id, reason, status, resolution_note, refund_coins, created_at, resolved_at, resolved_by_user_id}` |
 | GET | `/api/sessions/{session_id}/invoice` | JWT | path `session_id:int`; query `format?` (`html`) | GST tax invoice for a finished, billed session — issued on first call, idempotent thereafter (`services/invoices.py issue_invoice_for_session`). Access: the owning driver, or a cpo/admin of the owning tenant — anyone else 404 (existence not leaked). 400 if the session isn't invoiceable yet. `?format=html` returns a minimal printable invoice (inline CSS) instead of JSON; otherwise the same row shape as `GET /api/cpo/invoices` items. |
+
+**Charge-complete detection (F1, 2026-11-17, `release/2026-11-17-w2`, not deployed).** See [CHARGE_COMPLETE.md](CHARGE_COMPLETE.md).
+
+- `POST /api/sessions/start` body: `auto_stop_when_full` (bool, optional, default false): stop the session automatically once the car looks fully charged. The response adds `auto_stop_when_full` (bool).
+- `POST /api/sessions/queue` body: `auto_stop_when_full` (bool, optional, default false): carried to the session the queued or scheduled start creates.
+- `GET /api/sessions/active`: each session entry adds `auto_stop_when_full` (bool).
+- Socket.io `telemetry` frame: adds `charge_full` (bool), true once the backend decided the car looks fully charged for this session (stays true until the session ends).
+- Notifications: new type `charge_full` (info), "Your car looks fully charged".
+- Stop reasons: new `auto-stopped: charge complete` (opt-in full-car auto-stop).
 
 ### Queued charges (`services/session_reaper.py`, queue-a-charge-during-an-outage)
 
@@ -217,6 +228,19 @@ order, same as session start).
 | POST | `/api/reservations/{id}/cancel` | JWT | path `id:int` | Owner, or cpo/admin **of the owning tenant** (anyone else → 404, existence not leaked). Only BOOKED cancels (409 otherwise). An operator cancel notifies the driver. → the cancelled reservation |
 | GET | `/api/plugs/{plug_id}/reservations` | JWT | path `plug_id:int` | The plug's schedule for anyone with plug access (403 otherwise): current + upcoming BOOKED windows within the booking horizon (`RESERVATION_MAX_ADVANCE_DAYS`), soonest first, each with the holder's `user_name` + `is_mine` — how group members book around each other. (Lives in `routers/reservations.py`, not `plugs.py`.) |
 
+## Personal API tokens and meter (F7, 2026-11-17, `release/2026-11-17-w2`, not deployed)
+
+`routers/tokens.py`, `services/api_tokens.py`. Home Assistant and evcc recipes in [HOME_ASSISTANT.md](HOME_ASSISTANT.md).
+
+| Method | Path | Auth | Body/Params | Behaviour |
+|--------|------|------|-------------|-----------|
+| POST | `/api/me/tokens` | JWT (a `cpo_viewer` gets 403) | `{"name": str}` (1-64 chars, trimmed) | 201 `{id, name, token, prefix, created_at}`. `token` is `amph_` + 43 url-safe chars and appears in this response only. 409 when 5 tokens are already active. 422 for a blank name. |
+| GET | `/api/me/tokens` | JWT | - | 200 `{tokens: [{id, name, prefix, scope: "read", created_at, last_used_at}], max_active: 5}`. Active tokens only, newest first; never the token or its hash. |
+| DELETE | `/api/me/tokens/{id}` | JWT | path `id:int` | 204 when revoked; 404 for an unknown id, another user's token or one already revoked. |
+| GET | `/api/me/meter` | JWT, or `Authorization: Bearer amph_<secret>` | - | 200 `{generated_at (ISO-8601 UTC), plugs: [{plug_id, name, status (available/occupied/offline/maintenance), online (gateway live), power_w, current_a, voltage_v (float or null), reading_at (ISO or null), session: null or {id, started_at, energy_kwh (billed, monotonic)}}]}`. Operators (cpo, admin, cpo_viewer with a tenant) get every tenant plug; drivers, and operators without a tenant, get only the plugs of their own ACTIVE sessions. Readings are null with no snapshot, on the session-start placeholder, or when older than `PLUG_POWER_STALE_SEC` (90 s); `reading_at` is kept for a stale reading. 401 for a missing, invalid or revoked token or a disabled owner. 429 over 60 requests/min per token (`Retry-After`). This is the only endpoint that accepts a token. |
+
+`GET /api/auth/me/export` gains an `api_tokens` array (`id, name, prefix, scope, created_at, last_used_at, revoked_at`), never the hash.
+
 ## Payments — Razorpay (`services/payments.py`)
 
 | Method | Path | Auth | Body | Behaviour |
@@ -225,6 +249,17 @@ order, same as session start).
 | POST | `/api/payments/verify` | JWT | `{razorpay_order_id, razorpay_payment_id, razorpay_signature}` (`amount_inr` is deprecated and **ignored**) | HMAC verify (400 if bad) → fetch the payment from Razorpay's API and credit the **Razorpay-confirmed amount**, never a client-sent one (502 if Razorpay unreachable; 409 if not yet captured — the webhook credits on capture; 403 if the payment's order was created for another user) → ledger `topup` → `{status:"success", coins_credited, new_balance}` |
 | POST | `/api/payments/webhook` | none (HMAC-gated) | raw body + `X-Razorpay-Signature` | HMAC verify (400 if bad) → on `payment.captured`, auto-credit coins from the payment's `notes`/`amount` (atomic, row-locked, supporting decimals) → ledger `topup`. Idempotent vs. `/verify` (dedupes on `razorpay_payment_id`). → `{status:"credited"\|"already_credited"\|"ignored"\|"user_not_found"}` |
 | GET | `/api/wallet/ledger` | JWT | `?limit` (default 100, max 500) | Unified wallet ledger for the user — top-up credits **and** session debits, newest first. Returns a list of `{id, amount(signed), transaction_type("topup"\|"session_debit"\|"refund"), direction("credit"\|"debit"), description, balance_after, session_id, razorpay_payment_id, created_at, available_balance}`. `available_balance` (added 2026-07-12, same figure as `/api/auth/me`) is the driver's CURRENT available balance, computed once and repeated on every row — unlike `balance_after` (a per-transaction historical snapshot), it is not tied to that row's point in time. Additive field; the endpoint's list shape is unchanged. |
+
+## Promo codes (F12, 2026-11-17, `release/2026-11-17-w2`, not deployed)
+
+`routers/payments.py` (redeem), `routers/cpo/_promos.py`, `services/promos.py`. A redemption writes an ordinary `offline_topups` row plus a `cpo_topup` ledger line; the wallet ledger label for `cpo_topup` is now "Credit added by operator" (cash and promo credits share the type).
+
+| Method | Path | Auth | Body/Params | Behaviour |
+|--------|------|------|-------------|-----------|
+| POST | `/api/wallet/redeem` | JWT, `driver` role only | `{"code": "ABCD-EFGH-JKMN-PQRS"}` (case, spaces and dashes ignored) | 200 `{amount_coins, new_balance}`. 404 "That code can't be redeemed. Check it and try again." for any unknown, malformed, expired, disabled, used-up or already-redeemed-by-you code. 409 "issuer pool exhausted" when the issuing tenant's offline top-up pool cannot cover the amount. 403 for non-driver accounts. 429 per IP (`PROMO_REDEEM_RATE_LIMIT`) or per account (`PROMO_REDEEM_ACCOUNT_RATE_LIMIT`). |
+| POST | `/api/cpo/promos` | CPO with tenant | `{amount_coins (>0, <=10000), max_redemptions (1..10000, default 1), per_user_limit (1..100, default 1), expires_in_days (1..365 or null for never, default 30), note (<=200)}` | The promo plus `code`, the plain code, shown in this response only. |
+| GET | `/api/cpo/promos` | CPO with tenant (also `cpo_viewer`, redacted) | `?limit&offset` | `{total, items}`; each item has `id, code_hint, amount_coins, expires_at, max_redemptions, per_user_limit, redemption_count, note, created_by_email, created_at, disabled_at, status` (`active`, `expired`, `used_up` or `disabled`). |
+| POST | `/api/cpo/promos/{promo_id}/disable` | CPO with tenant | path `promo_id:int` | Idempotent; 404 if the promo is not in the caller's tenant. |
 
 ## Driver notifications (`routers/notifications.py`, 2026-07-11)
 
@@ -254,6 +289,7 @@ Powers the operator dashboard (`frontend/src/pages/cpo/`). Except `setup`, every
 endpoint requires the caller's **DB role** to be `cpo` or `admin`, enforced by
 `require_role(...)` in `backend/services/rbac.py` (403 otherwise). All queries are
 scoped to the caller's `tenant_id`, so operators only ever see their own assets.
+**(F10, 2026-11-17-w2, not deployed)** A `cpo_viewer` also passes the GET routes, read-only and with personal data masked; see the role note under Authentication.
 
 | Method | Path | Auth | Body/Params | Behaviour |
 |--------|------|------|-------------|-----------|
@@ -425,3 +461,7 @@ access control. It lives in its **own** router (`firmware_images.py`), **not**
 | `OPERATOR_ALERT_EMAIL` | unset | **(F3)** Also send operator alerts as plain text to this address via `services/email.send_email` (needs the `SMTP_*` vars); unset = bell and push only |
 | `GATEWAY_OFFLINE_ALERT_COOLDOWN_SEC` / `OPERATOR_ALERT_COOLDOWN_SEC` | `10800` / `3600` | **(F3)** Per-gateway offline-alert cooldown / per (gateway, plug, event) safety-fault cooldown. In process memory: a backend restart resets them and can re-alert once |
 | `STATUS_RATE_LIMIT` | `20/60` | **(F11, 2026-11-17)** Per-IP limit on the public `GET /api/status`, `"<requests>/<window sec>"` |
+| `CHARGE_FULL_ACTIVE_W` / `CHARGE_FULL_IDLE_W` | `200` / `30` | **(F1, 2026-11-17-w2)** Charge-complete detection: the session must have drawn at least the active watts once, then stay below the idle watts. Empty values fall back to the defaults |
+| `CHARGE_FULL_GRACE_MIN` / `CHARGE_FULL_MINUTES` | `5` / `10` | **(F1)** Startup grace before detection starts, and how long power must stay below the idle threshold before the car "looks full" |
+| `API_TOKEN_RATE_LIMIT` | `60/60` | **(F7, 2026-11-17-w2)** Per personal API token limit on `GET /api/me/meter`, in process |
+| `PROMO_REDEEM_RATE_LIMIT` / `PROMO_REDEEM_ACCOUNT_RATE_LIMIT` | `20/3600` / `10/3600` | **(F12, 2026-11-17-w2)** `POST /api/wallet/redeem` limits per IP and per account |

@@ -24,6 +24,10 @@ This folder is the **technical reference** for the AmpHive platform, and the
 | [DATA_MODEL.md](DATA_MODEL.md) | PostgreSQL tables, SQLAlchemy models, enums, relationships, and the schema-vs-ORM drift. |
 | [DEPENDENCIES.md](DEPENDENCIES.md) | Backend/frontend/firmware import graphs, package dependencies, high-impact files, and known dead code. |
 | [MQTT_CONTRACT.md](MQTT_CONTRACT.md) | The exact MQTT topic/payload contract between the backend and the ESP32 gateway. |
+| [OCPP_BRIDGE.md](OCPP_BRIDGE.md) | Read-only OCPP 1.6J virtual charge-point bridge (tools/ocpp_bridge): presents AmpHive plugs to any OCPP central system for display, with the status mapping, virtual meter register and laptop demo. |
+| [CHARGE_COMPLETE.md](CHARGE_COMPLETE.md) | Charge-complete detection (F1): the "looks fully charged" rule, its tunables and the opt-in auto-stop. |
+| [CPO_VIEWER.md](CPO_VIEWER.md) | Read-only CPO viewer role (F10): what a demo login can see, how writes are refused and PII masked, and the seed command. |
+| [HOME_ASSISTANT.md](HOME_ASSISTANT.md) | Personal read-only API tokens and `GET /api/me/meter` (F7) for Home Assistant and evcc. |
 | [FIRMWARE.md](FIRMWARE.md) | ESP32-C3 firmware: boot flow, tasks, watchdogs, and the Tapo KLAP v2 driver (transport is direct MQTT/TLS; the retired `microlink` Tailscale-protocol client is documented as history only). |
 | [ESP32_CONNECTION.md](ESP32_CONNECTION.md) | Build, flash, and monitor guide for the ESP32 gateway firmware, including toolchain version pins and other-board notes. |
 | [PLUG_CONNECTIVITY_OPTIONS.md](PLUG_CONNECTIVITY_OPTIONS.md) | Survey of every viable plug-to-server connectivity path versus today's ESP32 gateway, and a recommendation for a plug-and-play client. |

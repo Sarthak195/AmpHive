@@ -18,6 +18,11 @@ This codebase contains known defects with potential safety implications, includi
 - Insufficient input validation and fault tolerance
 - No redundant safety cutoff mechanisms
 
+### SOFTWARE RELAY CONTROL
+
+- Charge-complete auto-stop (F1) is per-session opt-in and only ever switches the relay OFF, through the same `finalize_charging_session` path as a driver stop; it never switches anything ON.
+- Personal API tokens (F7), the Home Assistant/evcc recipes and the OCPP bridge are read-only: none of them can switch a relay. A third-party start/stop would bypass the wallet hold, circuit admission and reservations, so no write path exists by design.
+
 ### RISK ASSUMPTION & LIABILITY
 
 **IMPROPER USE OF THIS SOFTWARE CAN AND WILL CAUSE:**

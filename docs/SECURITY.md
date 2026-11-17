@@ -965,6 +965,83 @@ mint plus claim on 403), `frontend/src/pages/cpo/CpoGateways.test.jsx`.
 - **Power curve (F2).** `GET /api/sessions/{id}/telemetry` uses the same access
   rule as session detail (404 for non-owners).
 
+### 8.11 2026-11-17 features wave 2 (built on `release/2026-11-17-w2`, not deployed)
+
+**Read-only CPO viewer (F10).** A `cpo_viewer` is enforced fail-closed in four layers:
+
+1. `services/auth.get_current_user` refuses any non-GET/HEAD/OPTIONS request
+   with 403 `read_only_demo`, except the exact pair `POST /api/auth/logout`; a
+   call with no request counts as a write.
+2. `routers/cpo/_common.require_cpo_tenant` repeats the check, and admin
+   routes never admit the role.
+3. GETs that lazily persist reservation expiry (`/api/cpo/reservations`,
+   `/api/reservations/my`, `/api/plugs/{id}/reservations`, and
+   `/api/plugs/available` plus `/api/plugs/{id}` through `routers/plugs.py
+   _reservation_fields_for_plugs`) skip the commit for a `cpo_viewer`;
+   `GET /api/sessions/{id}/invoice` stays 403 for a viewer because it issues
+   an invoice on first call.
+4. Socket.io `subscribe_session` (raises the plug's telemetry rate over MQTT)
+   is refused.
+
+PII: `routers/cpo/_common.redact_for` masks emails (`d***@domain`) and phone
+numbers, in fields and in free text such as audit details, for a viewer;
+private group access codes are never returned to a viewer. On the merged tree
+`GET /api/cpo/promos` (F12) also masks `created_by_email` and `note`.
+`backend/tests/test_cpo_viewer_role.py` iterates every app route, so a new
+write route is covered automatically; on `release/2026-11-17-w2` it asserts
+403 on 70 write routes, including the F1 (`/api/sessions/start`,
+`/api/sessions/queue`), F7 (`/api/me/tokens*`) and F12 (`/api/wallet/redeem`,
+`/api/cpo/promos*`) ones. Driver names are not masked; a viewer still sees
+promo `code_hint` (4 of 16 symbols, the code itself is never shown again).
+
+**Personal read-only API tokens (F7).**
+
+- **Tokens and storage.** Tokens are `amph_` + `secrets.token_urlsafe(32)`.
+  Only the SHA-256 hex of the full token is stored (`api_tokens.token_hash`,
+  unique), plus an 11-char display prefix. The raw token is returned once by
+  `POST /api/me/tokens` and is never stored or logged; neither is the
+  Authorization header.
+- **Read-only by construction.** Only `services/api_tokens.get_meter_user`
+  accepts a token, and only `GET /api/me/meter` uses it. Every other route
+  goes through `get_current_user`, which only decodes JWTs, so a token gets
+  401 there. A test walks every route to assert this (still true on the merged
+  tree). There is no write scope, switch or MQTT path; a Home Assistant
+  start/stop would bypass the wallet hold, circuit admission and reservations
+  (SAFETY.md).
+- **Limits.** 5 active tokens per user (creation locks the user row). 60
+  requests/min per token (`API_TOKEN_RATE_LIMIT`, in process). `last_used_at`
+  is stamped at most once a minute.
+- **Revocation.** Single revoke via `DELETE /api/me/tokens/{id}`. All tokens
+  are revoked by log out everywhere, password reset, the Google first-link
+  takeover and account closure. A disabled owner is refused at use time.
+- **Known gaps.** The legacy sid-less `/api/auth/logout` fallback and an admin
+  role change bump `token_version` but leave API tokens live. The meter scope
+  is recomputed from the current role on every request.
+- **Caching.** Responses carry `Cache-Control: no-store` (global).
+
+**Promo code redemption (F12).**
+
+- Codes are 16 symbols from the unambiguous 31-symbol alphabet (about 79
+  bits). Only sha256(code) is stored, like password-reset tokens; the plain
+  code is shown once to the issuing CPO. The stored 4-character hint leaves
+  about 59 bits unknown.
+- Redeem is limited per IP (`PROMO_REDEEM_RATE_LIMIT`, default 20/3600) and
+  per account (`PROMO_REDEEM_ACCOUNT_RATE_LIMIT`, default 10/3600).
+- It returns one generic 404 for every invalid case, so it is not an
+  exists-versus-expired oracle. The 409 "issuer pool exhausted" is reached
+  only by a valid, redeemable code.
+- Redemption locks Tenant, then PromoCode, then User (same order as
+  `POST /api/cpo/topups`), and re-checks all limits under the lock.
+- DRIVER role only, so a CPO cannot redeem their own codes.
+
+**Charge-complete auto-stop (F1).** No security change; it only switches a
+relay OFF (SAFETY.md).
+
+**OCPP bridge (`tools/ocpp_bridge`).** Runs on a laptop, not the VM. It holds
+one read-only `amph_` token (env `AMPHIVE_METER_TOKEN`), so it can only read
+`GET /api/me/meter`, and it refuses every command a CSMS sends. Keep the token
+out of shell history and revoke it from Account when done.
+
 ---
 
 ## Quick remediation checklist
