@@ -392,6 +392,38 @@ def _price_display_from_slots(slots, at_local: datetime, flat: Decimal):
     return rate, boundary, next_rate
 
 
+def cheapest_window(slots, flat: Decimal, at_local: datetime, hours: int = 24):
+    """
+    PURE, DB-FREE: the cheapest rate that STARTS within the next ``hours`` of
+    the tz-aware LOCAL instant ``at_local``, as ``(start_local, rate)`` or
+    ``None`` when nothing later is strictly cheaper than the rate in effect at
+    ``at_local`` (a flat tariff, or already in the cheapest window).
+
+    Candidate starts are the slot start and end minutes of today and tomorrow
+    (an end can open a cheaper flat gap). Each candidate is priced with
+    :func:`_slot_rate_and_bound` itself, so weekday masks (Mon=bit0), midnight
+    wraps (two slots) and the flat fallback behave exactly as billing does. Ties
+    resolve to the earliest start.
+    """
+    now_slot, _ = _slot_rate_and_bound(slots, at_local)
+    now_rate = now_slot if now_slot is not None else flat
+    day_start = at_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    horizon = at_local + timedelta(hours=hours)
+    best = None
+    for delta in (0, 1):
+        base = day_start + timedelta(days=delta)
+        for s in slots:
+            for minute in (int(s.start_min), int(s.end_min)):
+                cand = base + timedelta(minutes=minute)
+                if not (at_local < cand <= horizon):
+                    continue
+                slot_rate, _ = _slot_rate_and_bound(slots, cand)
+                rate = slot_rate if slot_rate is not None else flat
+                if rate < now_rate and (best is None or (rate, cand) < (best[1], best[0])):
+                    best = (cand, rate)
+    return best
+
+
 def _pick_tariff(candidate_ids, tariffs_by_id):
     """
     PURE: the batched equivalent of :func:`_resolve_tariff_and_tz`'s chain —

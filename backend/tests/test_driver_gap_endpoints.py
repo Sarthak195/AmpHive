@@ -391,6 +391,7 @@ async def test_tariff_preview_env_fallback_when_chain_empty():
         resp = await get_plug_tariff_preview(3, _user(), db)
 
     assert resp["slots"] == []
+    assert resp["cheapest_window"] is None
     assert resp["base_price_per_kwh"] == resp["price_now"]
     assert resp["base_price_per_kwh"] > 0
 
@@ -417,6 +418,8 @@ async def test_tariff_preview_slots_and_price_now():
 
     assert resp["base_price_per_kwh"] == 8.0
     assert resp["price_now"] == 10.0  # the covering slot wins over the flat base
+    # The 12.00 evening slot is dearer than now, so no cheaper window exists.
+    assert resp["cheapest_window"] is None
     # Sorted by (start_minute, end_minute); days expands the mask, Mon=0.
     assert resp["slots"] == [
         {"days": [0, 1, 2, 3, 4, 5, 6], "start_minute": 0,
