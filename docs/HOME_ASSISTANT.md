@@ -170,7 +170,7 @@ Notes:
 
 evcc's `custom` meter reads each value through the `http` plugin. Put the token
 in the `Authorization` header and pick the plug with `jq`. Missing values read
-as 0. This fragment configures a charge meter for plug 2:
+as 0. This fragment configures a power meter for plug 2:
 
 ```yaml
 # evcc.yaml
@@ -185,19 +185,16 @@ meters:
       jq: '[.plugs[] | select(.plug_id == 2) | .power_w // 0] | first // 0'
       cache: 10s
       timeout: 10s
-    energy:
-      source: http
-      uri: https://amphive.app/api/me/meter
-      headers:
-        - Authorization: Bearer amph_<secret>
-      jq: '[.plugs[] | select(.plug_id == 2) | .session.energy_kwh // 0] | first // 0'
-      cache: 10s
-      timeout: 10s
 ```
+
+`energy` is deliberately left out. evcc expects a lifetime meter reading
+there, and `session.energy_kwh` drops back to 0 between AmpHive sessions, so
+it would corrupt evcc's own session-energy accounting. Only `power` is
+required.
 
 Reference it wherever evcc expects a meter, for example as the `meter:` of a
 charger, or under `site.meters.aux` / `ext` for monitoring only. Each value is
-its own request, so two values at evcc's default 30 s interval stay well under
+its own request, so one value at evcc's default 30 s interval stays well under
 the 60/min token limit. AmpHive is single-phase and reports one current and one
 voltage. evcc's `currents`/`voltages` need three phase entries, so they are
 left out here.

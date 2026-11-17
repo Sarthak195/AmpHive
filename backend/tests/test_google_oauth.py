@@ -612,6 +612,31 @@ async def test_callback_link_race_maps_to_400(monkeypatch):
     db.rollback.assert_awaited_once()
 
 
+@pytest.mark.asyncio
+async def test_callback_link_race_surfacing_at_the_token_revoke_flush_maps_to_400(monkeypatch):
+    """[F7] The api_tokens revoke autoflushes the pending google_sub write, so
+    the unique-index race can raise there instead of at commit."""
+    _set_google_env(monkeypatch)
+    _mock_token_exchange(monkeypatch)
+    _mock_verify_claims(monkeypatch, _claims(sub="google-sub-2"))
+    existing = _user(auth_provider="password", google_sub=None)
+    db = _db_returning(existing)
+    lookup = db.execute.return_value
+
+    async def _execute(stmt, *a, **kw):
+        if str(stmt).startswith("UPDATE api_tokens"):
+            raise IntegrityError("UPDATE ...", {}, Exception("duplicate key"))
+        return lookup
+
+    db.execute = AsyncMock(side_effect=_execute)
+    req = _FakeRequest(cookies={"google_oauth_state": "abc"}, query_params={"state": "abc", "code": "x"})
+
+    resp = await google_callback(req, db)
+
+    assert _login_error(resp) == "google_in_use"
+    db.rollback.assert_awaited_once()
+
+
 # --------------------------------------------------------------------------
 # google_callback: already-linked account
 # --------------------------------------------------------------------------

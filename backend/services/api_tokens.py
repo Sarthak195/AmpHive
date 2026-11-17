@@ -27,7 +27,6 @@ everywhere, a password reset, a Google first-link takeover and account
 closure. A disabled account's tokens are refused at use time.
 """
 import hashlib
-import logging
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -41,8 +40,6 @@ from backend.database.db import get_db
 from backend.database.models import ApiToken, User
 from backend.services.auth import get_current_user, optional_security_scheme
 from backend.services.rate_limit import api_token_rate_limiter
-
-logger = logging.getLogger("amphive.api_tokens")
 
 TOKEN_PREFIX = "amph_"
 TOKEN_SECRET_BYTES = 32
@@ -98,31 +95,26 @@ def _unauthorized(detail: str = INVALID_TOKEN_DETAIL) -> HTTPException:
 
 
 async def _stamp_last_used(db: AsyncSession, token: ApiToken, now: datetime) -> None:
-    """Best-effort last_used_at stamp, at most once per LAST_USED_RESOLUTION.
-    The WHERE repeats the age check so concurrent polls write once. A failure
-    must never cost the read it accompanies."""
+    """Stamp last_used_at at most once per LAST_USED_RESOLUTION. The WHERE
+    repeats the age check so concurrent polls write once. No try/except: a
+    rollback would expire the loaded user the meter still needs, so a DB
+    failure here fails the request like any other query would."""
     last = token.last_used_at
     if last is not None and now - last < LAST_USED_RESOLUTION:
         return
-    try:
-        await db.execute(
-            update(ApiToken)
-            .where(
-                ApiToken.id == token.id,
-                or_(
-                    ApiToken.last_used_at.is_(None),
-                    ApiToken.last_used_at < now - LAST_USED_RESOLUTION,
-                ),
-            )
-            .values(last_used_at=now)
-            .execution_options(synchronize_session=False)
+    await db.execute(
+        update(ApiToken)
+        .where(
+            ApiToken.id == token.id,
+            or_(
+                ApiToken.last_used_at.is_(None),
+                ApiToken.last_used_at < now - LAST_USED_RESOLUTION,
+            ),
         )
-        await db.commit()
-    except Exception:
-        await db.rollback()
-        logger.warning(
-            "api token last_used_at stamp failed", extra={"token_id": token.id}, exc_info=True
-        )
+        .values(last_used_at=now)
+        .execution_options(synchronize_session=False)
+    )
+    await db.commit()
 
 
 async def authenticate_api_token(db: AsyncSession, raw: str) -> User:

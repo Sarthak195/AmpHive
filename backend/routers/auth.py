@@ -1012,9 +1012,11 @@ async def google_callback(request: Request, db: AsyncSession = Depends(get_db)):
         user.token_version = user.token_version + 1
         user.auth_provider = "google"
         user.email_verified = True
-        # [F7] A squatter's personal API tokens must not survive the takeover.
-        await revoke_user_api_tokens(db, user.id)
         try:
+            # [F7] A squatter's personal API tokens must not survive the
+            # takeover. Inside the try: this UPDATE autoflushes the pending
+            # google_sub write, so a unique-index race can surface here.
+            await revoke_user_api_tokens(db, user.id)
             await db.commit()
         except IntegrityError:
             # This google_sub got linked to a DIFFERENT account in the
