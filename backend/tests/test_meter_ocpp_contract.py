@@ -13,7 +13,7 @@ from backend.database.models import GatewayStatus, PlugStatus
 from backend.routers.tokens import meter_plug
 from backend.services.telemetry import TelemetrySnapshot
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
+sys.path.append(str(Path(__file__).resolve().parents[2] / "tools"))  # last, so tools/ never shadows a real module
 bridge = importlib.import_module("ocpp_bridge.bridge")
 
 NOW = datetime(2026, 11, 18, 12, 0, tzinfo=timezone.utc)
