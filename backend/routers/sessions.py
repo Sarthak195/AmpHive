@@ -295,6 +295,7 @@ async def start_charging_session(
         max_kwh=req.max_kwh,
         max_duration_seconds=req.max_duration_seconds,
         covering_reservation=covering_reservation,
+        auto_stop_when_full=req.auto_stop_when_full,
     )
     if own_scheduled:
         # After success only: begin_active_session commits its claim before the
@@ -372,6 +373,7 @@ async def start_charging_session(
         # show progress toward them without a second fetch.
         "max_kwh": session.max_kwh,
         "max_duration_seconds": session.max_duration_seconds,
+        "auto_stop_when_full": bool(session.auto_stop_when_full),
         "message": f"Charging started on {plug.name}.",
     }
 
@@ -628,6 +630,7 @@ async def get_active_session(
             # progress toward them ("0.42 / 1.00 kWh · stops automatically").
             "max_kwh": session.max_kwh,
             "max_duration_seconds": session.max_duration_seconds,
+            "auto_stop_when_full": bool(session.auto_stop_when_full),
             # [Restore/switch preview] Without these, a client restoring or
             # switching between active sessions has no energy/cost to show and
             # fabricates 0 — understating the stop-confirmation preview and
@@ -974,6 +977,7 @@ async def queue_charge(
         plug_id=plug.id,
         max_kwh=req.max_kwh,
         max_duration_seconds=req.max_duration_seconds,
+        auto_stop_when_full=True if req.auto_stop_when_full else None,
         status=QueuedChargeStatus.WAITING,
         not_before=nb,
         expires_at=(
