@@ -1335,7 +1335,8 @@ async def get_plug_photo_image(
     for a day (``Cache-Control: public, max-age=86400``; setting the header here
     makes security_headers_middleware leave its ``no-store`` default off).
     PENDING or REJECTED: only a CPO of the plug's tenant or an admin, with
-    ``private, no-store``; everyone else gets the same 404 as a missing photo.
+    ``private, no-store``; everyone else (a read-only cpo_viewer included)
+    gets the same 404 as a missing photo.
     """
     photo = (await db.execute(
         select(PlugPhoto).where(PlugPhoto.id == photo_id, PlugPhoto.plug_id == plug_id)
@@ -1347,6 +1348,12 @@ async def get_plug_photo_image(
     if photo.status == PlugPhotoStatus.APPROVED:
         cache_control = "public, max-age=86400"
     else:
+        # [F10] Unmoderated photos can show anything (people, plates, a house
+        # number), so a read-only cpo_viewer never sees them, even for its own
+        # tenant: moderation is a cpo/admin job. Named here on purpose; the
+        # role check below would already exclude the viewer role.
+        if is_cpo_viewer(user):
+            raise not_found
         role = user.role.value if user is not None else None
         if not (role == "admin" or (role == "cpo" and user is not None and user.tenant_id == photo.tenant_id)):
             raise not_found
