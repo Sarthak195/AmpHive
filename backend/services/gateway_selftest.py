@@ -6,8 +6,9 @@ routers/cpo/_gateways.py loads the rows (bounded, indexed queries) and calls
 `build_selftest`.
 
 Nothing here probes hardware: no MQTT command, no relay actuation, no ping.
-The Wi-Fi signal is the value the gateway reported at its last boot (the
-firmware has no live RSSI report), and is labelled as such.
+The Wi-Fi signal is the live value from telemetry "wifi_rssi" (fw >= 2.10.0,
+at most every 5 min, held in memory by the MQTT manager) while it is fresh,
+else the value the gateway reported at its last boot; the label says which.
 
 Liveness reuses the existing rules (never a second threshold):
 gateway_is_live (GATEWAY_LIVENESS_WINDOW_SEC) and plug_is_powered
@@ -15,15 +16,19 @@ gateway_is_live (GATEWAY_LIVENESS_WINDOW_SEC) and plug_is_powered
 """
 import re
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from backend.database.models import Gateway, GatewayEvent, Plug
 from backend.services.session_lifecycle import gateway_is_live, plug_is_powered
 from backend.services.versioning import version_sort_key
 
-# Wi-Fi RSSI at boot, dBm. Below WARN is marginal, below FAIL is unreliable.
+# Wi-Fi RSSI, dBm. Below WARN is marginal, below FAIL is unreliable.
 RSSI_WARN_DBM = -70
 RSSI_FAIL_DBM = -80
+
+# A live reading counts while younger than this: two 5-minute report intervals
+# plus slack, so one lost QoS 0 frame does not flip the check back to boot.
+LIVE_RSSI_FRESH_SEC = 11 * 60
 
 # A plug with no telemetry for this long is a fail rather than a warn, and a
 # PLUG_UNREACHABLE only counts inside this lookback.
@@ -86,14 +91,25 @@ def check_online(gateway: Gateway, now: datetime) -> Dict[str, Any]:
     )
 
 
-def check_wifi(boot_event: Optional[GatewayEvent], now: datetime) -> Dict[str, Any]:
-    label = "Wi-Fi signal (at boot)"
-    rssi = parse_boot_rssi(boot_event.detail) if boot_event is not None else None
-    if rssi is None:
-        return _check("wifi", label, UNKNOWN,
-                      "No boot report with a signal reading yet (needs firmware 2.8.0 or newer).")
-    at = _aware(boot_event.created_at)
-    detail = f"{rssi} dBm at boot, {_ago(at, now)}."
+def check_wifi(boot_event: Optional[GatewayEvent], now: datetime,
+               live: Optional[Tuple[int, datetime]] = None) -> Dict[str, Any]:
+    """`live` is (rssi, received_at) from telemetry. It wins while it is
+    fresh and newer than the boot report; otherwise the boot value is used."""
+    boot_at = _aware(boot_event.created_at) if boot_event is not None else None
+    live_at = _aware(live[1]) if live is not None else None
+    if (live is not None and live_at is not None
+            and now - live_at <= timedelta(seconds=LIVE_RSSI_FRESH_SEC)
+            and (boot_at is None or live_at >= boot_at)):
+        label, rssi, at = "Wi-Fi signal (live)", live[0], live_at
+        detail = f"{rssi} dBm live, {_ago(at, now)}."
+    else:
+        label = "Wi-Fi signal (at boot)"
+        boot_rssi = parse_boot_rssi(boot_event.detail) if boot_event is not None else None
+        if boot_rssi is None or boot_at is None:
+            return _check("wifi", label, UNKNOWN,
+                          "No boot report with a signal reading yet (needs firmware 2.8.0 or newer).")
+        rssi, at = boot_rssi, boot_at
+        detail = f"{rssi} dBm at boot, {_ago(at, now)}."
     hint = "Move the gateway closer to the router or add an access point."
     if rssi < RSSI_FAIL_DBM:
         return _check("wifi", label, FAIL, detail, hint, at)
@@ -197,11 +213,12 @@ def build_selftest(
     plug_events: Sequence[GatewayEvent],
     active_versions: Iterable[str],
     now: Optional[datetime] = None,
+    live_rssi: Optional[Tuple[int, datetime]] = None,
 ) -> Dict[str, Any]:
     now = now or datetime.now(timezone.utc)
     checks: List[Dict[str, Any]] = [
         check_online(gateway, now),
-        check_wifi(boot_event, now),
+        check_wifi(boot_event, now, live_rssi),
         check_firmware(gateway.firmware_version, active_versions),
         check_roster(plugs, now),
         *(check_plug_telemetry(p, now) for p in plugs),

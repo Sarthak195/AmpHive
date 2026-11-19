@@ -387,8 +387,9 @@ async def cpo_gateway_selftest(
     Read-only commissioning checklist for one of the CPO's gateways (C10):
     pass/warn/fail per check with a fix hint, computed from rows and events
     the backend already has (services/gateway_selftest.py). No probe, no MQTT
-    command, no relay actuation. The Wi-Fi reading is the value reported at
-    the last boot, not live. Viewer-safe: the payload carries no address,
+    command, no relay actuation. The Wi-Fi reading is the live telemetry
+    value while fresh (fw >= 2.10.0), else the one reported at the last boot,
+    labelled as such. Viewer-safe: the payload carries no address,
     network name, broker URL or log text; free text still goes through
     redact_for.
     """
@@ -455,7 +456,8 @@ async def cpo_gateway_selftest(
         ).scalars().all()
     )
 
-    result = build_selftest(gateway, plugs, boot_event, plug_events, active_versions, now)
+    live_rssi = state.mqtt_manager.live_wifi_rssi(gateway_id) if state.mqtt_manager else None
+    result = build_selftest(gateway, plugs, boot_event, plug_events, active_versions, now, live_rssi)
     for check in result["checks"]:
         # A plug check's label carries the plug name (operator free text).
         check["label"] = redact_for(user, check["label"])
