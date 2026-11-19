@@ -17,8 +17,11 @@ Provisioning (plain JSON routes, same flag):
 - POST /api/cpo/ocpp/charge-points  (cpo/admin with a tenant): create the
   charge point, its backing gateway and one plug per connector; the Basic
   password is generated here and returned exactly once.
-- POST /api/ocpp/id-tags, DELETE /api/ocpp/id-tags/{id} (any signed-in
-  user): bind or unbind an idTag on the caller's own account.
+- GET /api/ocpp/id-tags, POST /api/ocpp/id-tags, DELETE
+  /api/ocpp/id-tags/{id} (any signed-in user): list, bind or unbind an idTag
+  on the caller's own account. A bind names a charge point and enables the
+  tag for that charge point's operator (tenant) only; at most
+  MAX_ID_TAGS_PER_USER per account.
 """
 import asyncio
 import base64
@@ -30,7 +33,7 @@ from typing import Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Response, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
-from sqlalchemy import and_, delete, select
+from sqlalchemy import and_, delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -164,6 +167,13 @@ class ChargePointCreateRequest(BaseModel):
 
 class IdTagCreateRequest(BaseModel):
     id_tag: str = Field(min_length=1, max_length=20)
+    # The charger the driver enables the tag at: the tag then works on every
+    # charge point of that charger's operator (tenant), and nowhere else.
+    charge_point_id: str = Field(pattern=adapter.CHARGE_POINT_ID_RE.pattern)
+
+
+# Bound idTags per account (one row per card per operator).
+MAX_ID_TAGS_PER_USER = 10
 
 
 @router.post("/api/cpo/ocpp/charge-points", status_code=201)
@@ -234,16 +244,48 @@ async def create_id_tag(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Bind an idTag (an RFID card UID) to the caller's own account. Only its
-    SHA-256 digest is stored."""
-    row = OcppIdTag(user_id=user.id, tag_hash=adapter.hash_id_tag(req.id_tag))
+    """Bind an idTag (an RFID card UID) to the caller's own account and
+    enable it for the operator (tenant) of the named charge point only. A
+    charge point of any other operator answers Invalid for it. Only the
+    tag's SHA-256 digest is stored."""
+    tenant_id = (await db.execute(
+        select(OcppChargePoint.tenant_id)
+        .where(OcppChargePoint.charge_point_id == req.charge_point_id)
+    )).scalar_one_or_none()
+    if tenant_id is None:
+        raise HTTPException(status_code=404, detail="Unknown charge point.")
+    count = (await db.execute(
+        select(func.count()).select_from(OcppIdTag).where(OcppIdTag.user_id == user.id)
+    )).scalar_one()
+    if count >= MAX_ID_TAGS_PER_USER:
+        raise HTTPException(status_code=409, detail="Tag limit reached; remove one first.")
+    row = OcppIdTag(user_id=user.id, tenant_id=tenant_id, tag_hash=adapter.hash_id_tag(req.id_tag))
     db.add(row)
     try:
         await db.commit()
     except IntegrityError:
         await db.rollback()
         raise HTTPException(status_code=409, detail="That tag is already registered.")
-    return {"id": row.id}
+    return {"id": row.id, "tenant_id": tenant_id}
+
+
+@router.get("/api/ocpp/id-tags")
+async def list_id_tags(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """The caller's own bound tags (ids to unbind with). The clear tag is
+    never stored, so there is nothing to show or mask beyond these fields."""
+    rows = (await db.execute(
+        select(OcppIdTag.id, OcppIdTag.tenant_id, OcppIdTag.created_at)
+        .where(OcppIdTag.user_id == user.id)
+        .order_by(OcppIdTag.created_at.desc(), OcppIdTag.id.desc())
+        .limit(MAX_ID_TAGS_PER_USER)
+    )).all()
+    return [
+        {"id": r.id, "tenant_id": r.tenant_id, "created_at": r.created_at.isoformat()}
+        for r in rows
+    ]
 
 
 @router.delete("/api/ocpp/id-tags/{tag_id}", status_code=204)

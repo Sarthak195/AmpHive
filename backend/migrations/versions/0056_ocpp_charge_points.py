@@ -6,8 +6,9 @@ OCPP_CSMS_ENABLED, off by default and off in production):
 - ocpp_charge_points: one row per registered charge point, its tenant, the
   ordinary gateways row that backs it (its connectors are ordinary plugs on
   that gateway) and a bcrypt hash of its HTTP Basic password.
-- ocpp_id_tags: idTags a driver bound to their account, stored only as a
-  SHA-256 hex digest (unique).
+- ocpp_id_tags: idTags a driver bound to their account and enabled for one
+  operator (tenant_id), stored only as a SHA-256 hex digest (unique per
+  tenant), so a charge point only resolves tags enabled for its own tenant.
 - ocpp_transactions: the OCPP side of a charging session (the OCPP
   transactionId is charging_sessions.id), with the charger's meterStart.
 
@@ -54,8 +55,10 @@ def upgrade() -> None:
         CREATE TABLE IF NOT EXISTS ocpp_id_tags (
             id          SERIAL PRIMARY KEY,
             user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-            tag_hash    VARCHAR(64) NOT NULL UNIQUE,
-            created_at  TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+            tenant_id   INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+            tag_hash    VARCHAR(64) NOT NULL,
+            created_at  TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            CONSTRAINT uq_ocpp_id_tags_tenant_tag UNIQUE (tenant_id, tag_hash)
         )
         """
     )

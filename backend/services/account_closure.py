@@ -17,7 +17,8 @@ So closure does two different things to two different classes of row:
 have no counterparty:
   push subscriptions, notifications, favourites, plug watches, group
   memberships, capacity requests, queued charges, upcoming reservations, and
-  any outstanding password-reset / email-verification tokens. Personal API
+  any outstanding password-reset / email-verification tokens, and bound OCPP
+  idTags (C2; that table stays empty while its flag is off). Personal API
   tokens (F7) are revoked (revoked_at stamped) in the same commit, so none
   outlives the account.
 
@@ -65,6 +66,7 @@ from backend.database.models import (
     GroupMembership,
     LedgerTransaction,
     Notification,
+    OcppIdTag,
     PasswordResetToken,
     PlugWatch,
     PushSubscription,
@@ -228,6 +230,7 @@ async def close_account(db: AsyncSession, user: User) -> dict:
         ("capacity_requests", CapacityRequest, CapacityRequest.user_id),
         ("password_reset_tokens", PasswordResetToken, PasswordResetToken.user_id),
         ("email_verification_tokens", EmailVerificationToken, EmailVerificationToken.user_id),
+        ("ocpp_id_tags", OcppIdTag, OcppIdTag.user_id),
     ):
         result = await db.execute(
             delete(model).where(column == user_id).execution_options(synchronize_session=False)

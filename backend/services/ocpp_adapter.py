@@ -30,9 +30,22 @@ Mapping onto the existing platform (docs/OCPP_CSMS.md):
 - StopTransaction finalizes through finalize_charging_session with
   actuate=False (ledger debit, receipt, plug freed, no MQTT OFF).
 
+- idTags resolve per tenant: a charge point only sees tags a driver enabled
+  for its own operator (ocpp_id_tags.tenant_id), so another operator's
+  charger that read the card gets Invalid. Session energy is bounded by
+  OCPP_MAX_CONNECTOR_KW x the time since the server-side start, and an
+  absolute register that goes backwards is ignored, so a charger cannot bill
+  more than its connector could have delivered.
+- While a charge point stays connected, any message it sends (throttled to
+  one UPDATE per KEEPALIVE_INTERVAL_SEC) refreshes last_telemetry_at on its
+  ACTIVE sessions, so the stale reaper does not close a live transaction on
+  a charger that sends meter values rarely or only in StopTransaction
+  (MeterValueSampleInterval=0).
+
 Every lookup is scoped to the authenticated charge point: connectors to its
-own backing gateway, transactions to its own ocpp_transactions rows. Nothing
-here logs a password, an Authorization header, a clear idTag or a raw frame.
+own backing gateway, transactions to its own ocpp_transactions rows, idTags
+to its own tenant. Nothing here logs a password, an Authorization header, a
+clear idTag or a raw frame.
 """
 import asyncio
 import hashlib
@@ -41,6 +54,7 @@ import logging
 import math
 import os
 import re
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Tuple, Type
@@ -86,6 +100,17 @@ CALL, CALLRESULT, CALLERROR = 2, 3, 4
 
 # Upper bound for any energy register (Wh): 1 TWh. Anything above is garbage.
 _MAX_REGISTER_WH = 10**12
+# Plausibility bound on a session's metered energy: the connector cannot have
+# delivered more than this power for the time since the server-side start,
+# plus a small slack. A charger reporting more is billed at the bound.
+MAX_CONNECTOR_KW = float(os.getenv("OCPP_MAX_CONNECTOR_KW") or "50")
+_ENERGY_SLACK_KWH = 0.1
+# At most one keep-alive UPDATE per charge point this often. It must stay well
+# under SESSION_STALE_TIMEOUT_SEC (300 s by default, services/session_reaper.py).
+KEEPALIVE_INTERVAL_SEC = 30.0
+# charge point pk -> time.monotonic() of its last keep-alive UPDATE (bounded
+# by the number of registered charge points).
+_last_keepalive: Dict[int, float] = {}
 
 
 def gateway_id_for(charge_point_id: str) -> str:
@@ -122,7 +147,8 @@ def parse_frame(raw: str) -> Optional[Tuple[str, str, Dict[str, Any]]]:
     for a malformed frame (frame_unique_id recovers the id for the reply)."""
     try:
         msg = json.loads(raw)
-    except ValueError:
+    except (ValueError, RecursionError):
+        # RecursionError: a deeply nested frame ("[[[[...") under the size cap.
         raise OcppError("FormationViolation", "Frame is not valid JSON.")
     if not isinstance(msg, list) or len(msg) < 3 or not isinstance(msg[0], int):
         raise OcppError("FormationViolation", "Frame is not an OCPP-J message array.")
@@ -144,7 +170,7 @@ def frame_unique_id(raw: str) -> str:
         msg = json.loads(raw)
         if isinstance(msg, list) and len(msg) > 1 and isinstance(msg[1], str):
             return msg[1][:36]
-    except ValueError:
+    except (ValueError, RecursionError):
         pass
     return ""
 
@@ -280,17 +306,28 @@ async def _connector_plug_id(db, cp: ChargePointCtx, connector_id: int) -> Optio
     )).scalar_one_or_none()
 
 
-async def _tag_user_id(db, tag_hash: str) -> Optional[int]:
+async def _tag_user_id(db, cp: ChargePointCtx, tag_hash: str) -> Optional[int]:
+    """The user who enabled this tag for THIS charge point's tenant. A tag
+    enabled only at another operator resolves to nothing (Invalid), exactly
+    like an unknown tag, so it is no oracle across tenants either."""
     return (await db.execute(
-        select(OcppIdTag.user_id).where(OcppIdTag.tag_hash == tag_hash)
+        select(OcppIdTag.user_id).where(and_(
+            OcppIdTag.tenant_id == cp.tenant_id,
+            OcppIdTag.tag_hash == tag_hash,
+        ))
     )).scalar_one_or_none()
 
 
 async def _own_transaction(db, cp: ChargePointCtx, transaction_id: int):
-    """(OcppTransaction, session status, plug id) for a transaction THIS
-    charge point started on its own backing gateway, else None."""
+    """(OcppTransaction, session status, plug id, started_at, energy_kwh,
+    energy_counter_last_raw_kwh) for a transaction THIS charge point started
+    on its own backing gateway, else None."""
     return (await db.execute(
-        select(OcppTransaction, ChargingSession.status, ChargingSession.plug_id)
+        select(
+            OcppTransaction, ChargingSession.status, ChargingSession.plug_id,
+            ChargingSession.started_at, ChargingSession.energy_kwh,
+            ChargingSession.energy_counter_last_raw_kwh,
+        )
         .join(ChargingSession, ChargingSession.id == OcppTransaction.session_id)
         .join(Plug, Plug.id == ChargingSession.plug_id)
         .where(and_(
@@ -323,7 +360,7 @@ async def handle_boot(cp: ChargePointCtx, req: BootNotificationReq) -> Dict[str,
 
 
 async def handle_heartbeat(cp: ChargePointCtx, req: HeartbeatReq) -> Dict[str, Any]:
-    # No DB write: connection liveness is tracked in memory by the router.
+    # Liveness: dispatch() runs keep_sessions_alive after every handled CALL.
     return {"currentTime": _now_iso()}
 
 
@@ -365,7 +402,7 @@ async def handle_authorize(cp: ChargePointCtx, req: AuthorizeReq) -> Dict[str, A
     from backend.services.wallet import available_balance
 
     async with _session_factory() as db:
-        user_id = await _tag_user_id(db, hash_id_tag(req.idTag))
+        user_id = await _tag_user_id(db, cp, hash_id_tag(req.idTag))
         if user_id is None:
             return _id_tag_info("Invalid")
         user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
@@ -498,7 +535,7 @@ async def handle_start(cp: ChargePointCtx, req: StartTransactionReq) -> Dict[str
         )).scalar_one_or_none()
         if existing is not None:
             return {"transactionId": existing, **_id_tag_info("Accepted")}
-        user_id = await _tag_user_id(db, tag_hash)
+        user_id = await _tag_user_id(db, cp, tag_hash)
         if user_id is None:
             return {"transactionId": 0, **_id_tag_info("Invalid")}
         try:
@@ -575,22 +612,58 @@ def latest_reading(meter_values: List[MeterValue]) -> Dict[str, Optional[float]]
     return out
 
 
+def plausible_session_kwh(energy_wh: float, meter_start_wh: int,
+                          last_raw_kwh: Optional[float], started_at: Optional[datetime],
+                          now: datetime) -> Tuple[float, bool]:
+    """Session-relative kWh to bill for an absolute register reading, and
+    whether it was clamped.
+
+    - An OCPP energy register only counts up, so a reading below the last
+      one fed is stale and the last value stands. This also keeps the
+      persist path's counter-reset banking (meant for a rebooting ESP32
+      meter) from ratcheting on a charger that alternates high and low.
+    - The total never exceeds MAX_CONNECTOR_KW for the time since the
+      server-side session start (charger timestamps are not trusted), plus
+      _ENERGY_SLACK_KWH."""
+    kwh = max(0.0, (energy_wh - meter_start_wh) / 1000.0, last_raw_kwh or 0.0)
+    elapsed = 0.0
+    if started_at is not None:
+        if started_at.tzinfo is None:
+            started_at = started_at.replace(tzinfo=timezone.utc)
+        elapsed = max(0.0, (now - started_at).total_seconds())
+    bound = MAX_CONNECTOR_KW * elapsed / 3600.0 + _ENERGY_SLACK_KWH
+    if kwh > bound:
+        return bound, True
+    return kwh, False
+
+
 async def _feed_meter(cp: ChargePointCtx, plug_id: int, session_id: int,
-                      meter_start_wh: int, reading: Dict[str, Optional[float]]) -> None:
+                      meter_start_wh: int, reading: Dict[str, Optional[float]],
+                      started_at: Optional[datetime], last_raw_kwh: Optional[float]) -> None:
     """Hand one reading to the existing telemetry persist path as a live
-    frame for this session (session-relative kWh)."""
+    frame for this session (session-relative kWh, plausibility-bounded)."""
     from backend.services.mqtt.telemetry import MAX_PLAUSIBLE_KWH
 
     energy_wh = reading["energy_wh"]
     if energy_wh is None:
         return
-    kwh = max(0.0, (energy_wh - meter_start_wh) / 1000.0)
-    if kwh > MAX_PLAUSIBLE_KWH:
+    if (energy_wh - meter_start_wh) / 1000.0 > MAX_PLAUSIBLE_KWH:
         logger.warning(
             "OCPP meter value outside plausible bounds, dropped",
             extra={"charge_point_id": cp.charge_point_id, "session_id": session_id},
         )
         return
+    kwh, clamped = plausible_session_kwh(
+        energy_wh, meter_start_wh, last_raw_kwh, started_at, datetime.now(timezone.utc),
+    )
+    if clamped:
+        logger.warning(
+            "OCPP energy above what the connector could deliver, billed at the bound",
+            extra={
+                "charge_point_id": cp.charge_point_id, "session_id": session_id,
+                "max_connector_kw": MAX_CONNECTOR_KW,
+            },
+        )
     watts = reading["power_w"]
     manager = state.mqtt_manager
     if manager is None:
@@ -622,10 +695,13 @@ async def handle_meter_values(cp: ChargePointCtx, req: MeterValuesReq) -> Dict[s
         row = await _own_transaction(db, cp, req.transactionId)
     if row is None:
         return {}
-    tx, status, plug_id = row
+    tx, status, plug_id, started_at, _energy, last_raw = row
     if status != SessionStatus.ACTIVE or (req.connectorId and req.connectorId != tx.connector_id):
         return {}
-    await _feed_meter(cp, plug_id, tx.session_id, tx.meter_start_wh, latest_reading(req.meterValue))
+    await _feed_meter(
+        cp, plug_id, tx.session_id, tx.meter_start_wh, latest_reading(req.meterValue),
+        started_at, last_raw,
+    )
     return {}
 
 
@@ -644,12 +720,24 @@ async def handle_stop(cp: ChargePointCtx, req: StopTransactionReq) -> Dict[str, 
             extra={"charge_point_id": cp.charge_point_id},
         )
         return _id_tag_info("Invalid") if req.idTag else {}
-    tx, status, plug_id = row
+    tx, status, plug_id, started_at, energy_kwh, last_raw = row
     if status != SessionStatus.ACTIVE:
+        # Already closed by the backend (balance or limit auto-stop, reaper,
+        # the driver's app Stop). Nothing more is billed; flag the energy the
+        # charger reports beyond the billed figure.
+        unbilled = (req.meterStop - tx.meter_start_wh) / 1000.0 - (energy_kwh or 0.0)
+        if unbilled > 0.001:
+            logger.warning(
+                "OCPP stop for a session the backend already closed; energy not billed",
+                extra={
+                    "charge_point_id": cp.charge_point_id, "session_id": tx.session_id,
+                    "unbilled_kwh": round(unbilled, 3),
+                },
+            )
         return reply
     final = latest_reading(req.transactionData or [])
     final["energy_wh"] = float(req.meterStop)
-    await _feed_meter(cp, plug_id, tx.session_id, tx.meter_start_wh, final)
+    await _feed_meter(cp, plug_id, tx.session_id, tx.meter_start_wh, final, started_at, last_raw)
     async with _session_factory() as db:
         await finalize_charging_session(
             db, tx.session_id, reason=f"ocpp: {req.reason or 'Local'}", actuate=False,
@@ -659,6 +747,42 @@ async def handle_stop(cp: ChargePointCtx, req: StopTransactionReq) -> Dict[str, 
         extra={"charge_point_id": cp.charge_point_id, "session_id": tx.session_id},
     )
     return reply
+
+
+async def keep_sessions_alive(cp: ChargePointCtx) -> None:
+    """Refresh last_telemetry_at on this charge point's ACTIVE sessions, at
+    most once per KEEPALIVE_INTERVAL_SEC. A connected charger that sends
+    meter values rarely, or only in StopTransaction, is still alive, so the
+    stale reaper must not close its transaction. One bounded UPDATE (this
+    charge point's own transactions on its own plugs) that changes no row
+    while the charger is idle."""
+    now_mono = time.monotonic()
+    last = _last_keepalive.get(cp.id)
+    if last is not None and now_mono - last < KEEPALIVE_INTERVAL_SEC:
+        return
+    _last_keepalive[cp.id] = now_mono
+    try:
+        async with _session_factory() as db:
+            await db.execute(
+                update(ChargingSession)
+                .where(and_(
+                    ChargingSession.status == SessionStatus.ACTIVE,
+                    ChargingSession.plug_id.in_(
+                        select(Plug.id).where(Plug.gateway_id == cp.gateway_id)
+                    ),
+                    ChargingSession.id.in_(
+                        select(OcppTransaction.session_id)
+                        .where(OcppTransaction.charge_point_id == cp.id)
+                    ),
+                ))
+                .values(last_telemetry_at=datetime.now(timezone.utc))
+                .execution_options(synchronize_session=False)
+            )
+            await db.commit()
+    except Exception:
+        logger.exception(
+            "OCPP keep-alive failed", extra={"charge_point_id": cp.charge_point_id},
+        )
 
 
 Handler = Callable[[ChargePointCtx, Any], Awaitable[Dict[str, Any]]]
@@ -692,7 +816,7 @@ async def dispatch(cp: ChargePointCtx, raw: str) -> Optional[str]:
         # Never echo the validation error: it embeds the input (an idTag).
         return call_error(unique_id, "FormationViolation", "Payload failed validation.")
     try:
-        return call_result(unique_id, await handler(cp, req))
+        result = await handler(cp, req)
     except OcppError as err:
         return call_error(unique_id, err.code, err.description)
     except Exception:
@@ -701,3 +825,6 @@ async def dispatch(cp: ChargePointCtx, raw: str) -> Optional[str]:
             extra={"charge_point_id": cp.charge_point_id, "action": action},
         )
         return call_error(unique_id, "InternalError", "Internal error.")
+    # Any handled CALL proves the charger is still connected and alive.
+    await keep_sessions_alive(cp)
+    return call_result(unique_id, result)

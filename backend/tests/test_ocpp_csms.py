@@ -97,6 +97,7 @@ def test_flag_off_imports_nothing_and_flag_on_mounts_the_route():
     ('[2, 5, "Heartbeat", {}]', "FormationViolation"),
     ('[2, "m1", "RemoteStartTransaction", {}]', "NotImplemented"),
     ('[2, "m1", "Authorize", {"idTag": "TOO-LONG-TAG-0123456789"}]', "FormationViolation"),
+    ("[" * 8000, "FormationViolation"),  # RecursionError in json.loads, under the size cap
 ])
 async def test_dispatch_errors(raw, code):
     reply = json.loads(await adapter.dispatch(CP, raw))
@@ -132,6 +133,22 @@ def test_id_tag_hash_is_case_insensitive_and_not_the_tag():
     assert "ABC123" not in adapter.hash_id_tag("ABC123")
 
 
+def test_plausible_session_kwh_bounds_energy_by_elapsed_time():
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime(2026, 11, 19, 12, 0, tzinfo=timezone.utc)
+    hour_ago = now - timedelta(hours=1)
+    # An honest reading well under the bound passes through unchanged.
+    assert adapter.plausible_session_kwh(11000, 1000, None, hour_ago, now) == (10.0, False)
+    # 999 kWh one minute in is billed at what the connector could deliver.
+    kwh, clamped = adapter.plausible_session_kwh(999_000, 0, None, now - timedelta(minutes=1), now)
+    assert clamped and kwh == pytest.approx(adapter.MAX_CONNECTOR_KW / 60 + 0.1)
+    # A register that went backwards keeps the last value fed (no reset banking).
+    assert adapter.plausible_session_kwh(2000, 1000, 5.0, hour_ago, now) == (5.0, False)
+    # Below meterStart is zero, and a naive started_at is read as UTC.
+    assert adapter.plausible_session_kwh(500, 1000, None, hour_ago.replace(tzinfo=None), now) == (0.0, False)
+
+
 # --- WebSocket layer --------------------------------------------------------
 
 class _FakeResult:
@@ -159,12 +176,38 @@ class _FakeDb:
         return False
 
 
+@pytest.mark.asyncio
+async def test_keep_alive_runs_one_bounded_update_per_interval(monkeypatch):
+    dbs = []
+
+    def factory():
+        dbs.append(_FakeDb([]))
+        return dbs[-1]
+
+    monkeypatch.setattr(adapter, "_session_factory", factory)
+    monkeypatch.setattr(adapter, "_last_keepalive", {})
+    other = adapter.ChargePointCtx(id=2, charge_point_id="CP2", tenant_id=2, gateway_id="ocpp-CP2")
+    await adapter.keep_sessions_alive(CP)
+    await adapter.keep_sessions_alive(CP)        # throttled
+    await adapter.keep_sessions_alive(other)     # its own throttle
+    assert len(dbs) == 2
+    assert all(db.commit.await_count == 1 for db in dbs)
+    # Any handled CALL keeps the sessions alive; a refused frame does not.
+    spy = AsyncMock()
+    monkeypatch.setattr(adapter, "keep_sessions_alive", spy)
+    await adapter.dispatch(CP, '[2, "m1", "Heartbeat", {}]')
+    await adapter.dispatch(CP, '[2, "m2", "Nope", {}]')
+    spy.assert_awaited_once_with(CP)
+
+
 @pytest.fixture
 def client(monkeypatch):
     async def fake_auth(cp_id, password):
         return CP if (cp_id, password) == ("CP1", PASSWORD) else None
 
     monkeypatch.setattr(adapter, "authenticate", fake_auth)
+    # The keep-alive UPDATE has its own test; keep it off the fake DB queue.
+    monkeypatch.setattr(adapter, "keep_sessions_alive", AsyncMock())
     monkeypatch.setattr(ocpp_router, "handshake_limiter", SlidingWindowRateLimiter(100, 60))
     monkeypatch.setattr(ocpp_router, "connections", {})
     app = FastAPI()

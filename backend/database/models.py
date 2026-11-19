@@ -2049,18 +2049,30 @@ class OcppChargePoint(Base):
 
 class OcppIdTag(Base):
     """[C2] An OCPP idTag (an RFID card UID or similar) a driver bound to
-    their own account. Only the SHA-256 hex digest is stored (tag_hash,
-    unique), so Authorize and StartTransaction resolve a tag with one indexed
-    equality and the clear tag is never stored or logged. A tag is not a
-    secret credential (the card broadcasts it), so the unsalted digest is a
-    lookup key, not a password hash. Alembic revision 0056_ocpp_charge_points.
+    their own account AND enabled for one operator (tenant_id). Only the
+    SHA-256 hex digest is stored (tag_hash), so Authorize and
+    StartTransaction resolve a tag with one indexed equality on
+    (tenant_id, tag_hash) and the clear tag is never stored or logged. A tag
+    is not a secret credential (the card broadcasts it), so the unsalted
+    digest is a lookup key, not a password hash.
+
+    tenant_id scopes every use: a charge point only ever resolves tags its
+    own tenant was enabled for, so another operator's charger that read the
+    card cannot open a billed session against it (it gets Invalid). One card
+    used at several operators is one row per operator. Alembic revision
+    0056_ocpp_charge_points.
     """
     __tablename__ = "ocpp_id_tags"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
-    tag_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    tenant_id: Mapped[int] = mapped_column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    tag_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "tag_hash", name="uq_ocpp_id_tags_tenant_tag"),
+    )
 
 
 class OcppTransaction(Base):

@@ -41,6 +41,7 @@ from backend.database.models import (
     Invoice,
     LedgerTransaction,
     Notification,
+    OcppIdTag,
     Plug,
     PlugReport,
     PlugWatch,
@@ -311,6 +312,16 @@ async def build_export(db: AsyncSession, user: User) -> dict:
         for (t,) in token_rows
     ]
 
+    # --- bound OCPP idTags (C2): only a digest is stored, never the tag ----
+    id_tag_rows, truncated = await _collect(
+        db, select(OcppIdTag).where(OcppIdTag.user_id == user.id).order_by(OcppIdTag.created_at.desc())
+    )
+    note("ocpp_id_tags", truncated)
+    ocpp_id_tags = [
+        {"id": t.id, "operator_tenant_id": t.tenant_id, "created_at": _iso(t.created_at)}
+        for (t,) in id_tag_rows
+    ]
+
     return {
         "export_format": "amphive.user-data-export.v1",
         "generated_at": generated_at.isoformat(),
@@ -335,4 +346,5 @@ async def build_export(db: AsyncSession, user: User) -> dict:
         "notifications": notifications,
         "push_devices": push_devices,
         "api_tokens": api_tokens,
+        "ocpp_id_tags": ocpp_id_tags,
     }
