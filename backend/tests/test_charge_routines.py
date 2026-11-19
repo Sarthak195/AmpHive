@@ -322,6 +322,34 @@ async def test_queued_gate_off_skips_and_tells_the_driver_once():
 
 
 @pytest.mark.asyncio
+async def test_second_gate_outage_is_noticed_even_when_nothing_queued_between():
+    """The gate coming back on re-arms the notice on the next materialize
+    pass, even when that occurrence is skipped for another reason (here the
+    driver's own WAITING row), so a second outage is noticed too."""
+    routine = _routine()
+    with _patched_zone(), patch("backend.services.notifications.notify", AsyncMock()) as notify:
+        # Day 0: gate off, the driver is told.
+        mdb = _db(*_head(routine, _tenant(enabled=False)), _one(_live_user()))
+        await svc.materialize_routines(_factory(_scan([routine]), mdb), now=_ist(MONDAY, 7, 31))
+        assert routine.gate_notified is True
+        # Day 1: gate on, but the occurrence is skipped (own WAITING row).
+        mdb = _db(*_head(routine), _one(_live_user()), _s1n(42))
+        assert await svc.materialize_routines(
+            _factory(_scan([routine]), mdb), now=_ist(MONDAY + timedelta(days=1), 7, 31)
+        ) == 0
+        mdb.add.assert_not_called()
+        assert routine.gate_notified is False
+        # Day 2: gate off again, a second notice.
+        mdb = _db(*_head(routine, _tenant(enabled=False)), _one(_live_user()))
+        await svc.materialize_routines(
+            _factory(_scan([routine]), mdb), now=_ist(MONDAY + timedelta(days=2), 7, 31)
+        )
+    assert notify.await_count == 2
+    assert [c.args[1] for c in notify.await_args_list] == ["routine_skipped", "routine_skipped"]
+    assert routine.gate_notified is True
+
+
+@pytest.mark.asyncio
 async def test_materialize_locks_the_plug_like_the_scheduled_path():
     """queue_charge's scheduled path takes the plug FOR UPDATE; the routine's
     other-driver check must run under the same lock."""
