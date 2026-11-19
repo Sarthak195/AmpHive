@@ -32,17 +32,32 @@ would have failed open on any forgotten route.
    `/api/plugs/{id}/reservations`, and `/api/plugs/available` plus
    `/api/plugs/{id}` through `_reservation_fields_for_plugs`) skip the commit
    for a viewer.
-   `GET /api/sessions/{id}/invoice` issues an invoice on first call, so it
-   stays closed to the viewer (403).
+   `GET /api/sessions/{id}/invoice` issues an invoice on first call and its
+   HTML prints the driver's name and email, so a viewer always gets the
+   missing-session 404 (same status and body for its own tenant's, another
+   tenant's or a missing session; decided before any lookup).
+   A private-group plug the viewer has not joined answers the route's own
+   missing-plug 404 (not 403) on `/api/plugs/{id}` and its sub-reads and on
+   `/api/plugs/{id}/reservations`, so a viewer cannot probe plug ids.
 4. **Socket.io.** A viewer may connect and receive pushes; `subscribe_session`
    (which raises the plug's telemetry rate over MQTT) is refused with
    `read_only_demo`.
-5. **Privacy.** `routers/cpo/_common.redact_for` is the one helper that masks
-   emails (`d***@example.com`) and phone numbers for a viewer, in whole fields
-   and inside free text: sessions list and CSV, disputes, audit log (actor
-   and detail), group members, reservations, top-ups, plug reports, promo
-   codes (`created_by_email` and `note`, added at the wave 2 merge). A private
-   group's `access_code` is never returned to a viewer (it is a credential).
+5. **Privacy.** `routers/cpo/_common.py` holds the three viewer helpers, each
+   a no-op for a cpo/admin:
+   - `redact_for` masks emails (`d***@example.com`), phone numbers, IPv4
+     addresses (`[ip hidden]`) and `hint=`/`claim_code_tail=` values, in whole
+     fields and inside free text: sessions list and CSV, disputes (reason and
+     resolution note), audit log (actor and detail), group members,
+     reservations, top-ups, plug reports (description and resolution note),
+     payout notes, promo codes (`created_by_email` and `note`).
+   - `redact_name_for` shows a driver's name as initials ("Sarthak Jain" to
+     "S. J.", a one-word name such as an email local part to "S."): group
+     members `full_name`, CPO reservations `user_name`.
+   - `hide_for` returns null for plug `local_ip`, `latitude` and `longitude`
+     (`/api/cpo/plugs`), gateway `vpn_ip` (`/api/cpo/gateways`) and promo
+     `code_hint` (the console shows "Hidden").
+   A private group's `access_code` is never returned to a viewer (it is a
+   credential).
    Gateway log text (`GET /api/cpo/gateways/{id}/logs`) is replaced with
    "(log text hidden in the read-only demo)" for a viewer, since firmware WARN
    lines carry the home Wi-Fi SSID and the broker URL; id, level and time stay.
@@ -73,7 +88,13 @@ random password once, and on re-run resets the password and bumps
 
 ## Limits
 
-- Driver names (not emails) still show where the CPO console shows them.
+- Still visible by design: gateway ids (the device MAC, also the route key;
+  claiming needs an admin-minted code), the tenant's own seller legal name and
+  GSTIN on invoices, firmware release URLs (public bucket), and names written
+  inside CPO free text. Public plug reviews show the first word of a driver's
+  name to everyone (not a viewer issue, see docs/TODO.md).
+- A new field with personal or network data must go through one of the three
+  helpers above; nothing masks it automatically.
 - Downgrade of 0045 is a no-op (Postgres cannot drop an enum value); tag a
   rollback image built from this revision before deploying.
 - An admin can set a user's role to `cpo_viewer` through the admin API; a

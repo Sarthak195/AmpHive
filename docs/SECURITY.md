@@ -978,23 +978,33 @@ mint plus claim on 403), `frontend/src/pages/cpo/CpoGateways.test.jsx`.
    `/api/reservations/my`, `/api/plugs/{id}/reservations`, and
    `/api/plugs/available` plus `/api/plugs/{id}` through `routers/plugs.py
    _reservation_fields_for_plugs`) skip the commit for a `cpo_viewer`;
-   `GET /api/sessions/{id}/invoice` stays 403 for a viewer because it issues
-   an invoice on first call.
+   `GET /api/sessions/{id}/invoice` answers a viewer the missing-session 404
+   before any lookup, because it issues an invoice on first call and the HTML
+   prints the driver's name and email (and a 403 would confirm the id exists).
+   A private-group plug read gives a viewer the route's missing-plug 404, not
+   403.
 4. Socket.io `subscribe_session` (raises the plug's telemetry rate over MQTT)
    is refused.
 
-PII: `routers/cpo/_common.redact_for` masks emails (`d***@domain`) and phone
-numbers, in fields and in free text such as audit details, for a viewer;
-private group access codes are never returned to a viewer. On the merged tree
-`GET /api/cpo/promos` (F12) also masks `created_by_email` and `note`.
+PII: `routers/cpo/_common.redact_for` masks emails (`d***@domain`), phone
+numbers, IPv4 addresses and `hint=`/`claim_code_tail=` values, in fields and in
+free text such as audit details, for a viewer; `redact_name_for` turns driver
+names into initials ("S. J.", reservations and group members); `hide_for`
+returns null for plug `local_ip` and coordinates, gateway `vpn_ip` and promo
+`code_hint`. Private group access codes are never returned to a viewer. On the
+merged tree `GET /api/cpo/promos` (F12) also masks `created_by_email` and
+`note`.
 `backend/tests/test_cpo_viewer_role.py` iterates every app route, so a new
 write route is covered automatically; on `release/2026-11-17-w2` it asserts
 403 on 70 write routes, including the F1 (`/api/sessions/start`,
 `/api/sessions/queue`), F7 (`/api/me/tokens*`) and F12 (`/api/wallet/redeem`,
 `/api/cpo/promos*`) ones. Gateway log bodies (`GET /api/cpo/gateways/{id}/logs`) are replaced with a
 placeholder for a viewer, because firmware WARN lines carry the home Wi-Fi SSID
-and the broker URL. Driver names are not masked; a viewer still sees
-promo `code_hint` (4 of 16 symbols, the code itself is never shown again).
+and the broker URL. Still visible to a viewer by design: gateway ids (the
+device MAC, also the route key; onboarding needs an admin-minted claim code),
+the tenant's own seller legal name and GSTIN on invoices (printed on every
+invoice a driver gets), firmware release URLs (public bucket) and names inside
+CPO-written free text.
 
 **Personal read-only API tokens (F7).**
 
