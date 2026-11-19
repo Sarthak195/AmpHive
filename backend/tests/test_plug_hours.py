@@ -77,6 +77,10 @@ def test_normalize_splits_a_window_crossing_midnight():
     assert normalize_hours([{"days": ALL, "start": 1320, "end": 0}]) == [
         {"days": ALL, "start": 1320, "end": 1440},
     ]
+    # 00:00 to 00:00 is the whole day (the CPO form's "all day" entry).
+    assert normalize_hours([{"days": 63, "start": 0, "end": 0}]) == [
+        {"days": 63, "start": 0, "end": 1440},
+    ]
 
 
 def test_normalize_rejects_overlap_and_zero_length_and_clears_empty():

@@ -1,0 +1,30 @@
+/* [Plug hours] PlugHours block: plug card, Home lookup preview, reviews modal. */
+.plug-hours {
+  display: grid;
+  gap: var(--sp-1);
+}
+
+.plug-hours p { margin: 0; }
+
+.plug-hours-status {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  flex-wrap: wrap;
+}
+
+.plug-hours-closed { color: var(--danger); }
+
+.plug-hours-amenities {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.plug-hours-note {
+  overflow-wrap: anywhere;
+  white-space: pre-line;
+}

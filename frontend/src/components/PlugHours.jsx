@@ -1,11 +1,12 @@
 /**
  * [Plug hours] Opening-hours line, max session length, amenity chips and the
- * operator's access note for a plug (PlugCard and the Home "charge now"
- * lookup). The note is operator free text: rendered as a React text node,
+ * operator's access note for a plug (PlugCard, the Home "charge now"
+ * lookup and the reviews modal). The note is operator free text: rendered as a React text node,
  * never as HTML. Renders nothing for a plug with none of these set.
  */
 import { Clock } from 'lucide-react';
 import { AMENITY_LABELS, hoursLabel } from '../utils/plugHours';
+import './PlugHours.css';
 
 export default function PlugHours({ plug }) {
   const status = hoursLabel(plug);

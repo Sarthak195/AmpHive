@@ -81,7 +81,10 @@ export function hoursPatch(form, plug) {
     const end = toMin(w.end);
     if (!w.days) throw new Error('Pick at least one day for each opening window.');
     if (start == null || end == null) throw new Error('Enter a start and end time for each window.');
-    if (start === end) throw new Error('An opening window cannot start and end at the same time.');
+    // 00:00 to 00:00 is a whole day (end 0 reads as midnight server-side).
+    if (start === end && start !== 0) {
+      throw new Error('An opening window cannot start and end at the same time.');
+    }
     return { days: w.days, start, end };
   });
   const before = JSON.stringify(plug?.opening_hours || []);

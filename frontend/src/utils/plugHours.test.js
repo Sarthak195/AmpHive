@@ -57,4 +57,14 @@ describe('CPO form helpers', () => {
     expect(() => hoursPatch({ ...base, windows: [{ days: 127, start: '08:00', end: '08:00' }] }, plug))
       .toThrow(/same time/);
   });
+
+  it('00:00 to 00:00 is a whole day, and a stored whole-day window saves unchanged', () => {
+    const plug = { opening_hours: [{ days: 63, start: 0, end: 1440 }] };
+    const form = hoursFormFromPlug(plug);
+    expect(form.windows[0]).toEqual({ days: 63, start: '00:00', end: '00:00' });
+    expect(hoursPatch(form, plug)).toEqual({});
+    const fresh = { opening_hours: null };
+    expect(hoursPatch({ ...hoursFormFromPlug(fresh), windows: [{ days: 63, start: '00:00', end: '00:00' }] }, fresh))
+      .toEqual({ opening_hours: [{ days: 63, start: 0, end: 0 }] });
+  });
 });

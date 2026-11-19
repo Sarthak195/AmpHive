@@ -76,7 +76,8 @@ export default function PlugHoursEditor({ value, onChange }) {
           </button>
         </div>
         <p className="field-help">
-          Local time. A closing time earlier than the opening time runs past midnight. A closed
+          Local time. A closing time earlier than the opening time runs past midnight, and
+          00:00 to 00:00 is the whole day. A closed
           charger refuses new starts and bookings; a charge already running is not stopped.
         </p>
       </div>
