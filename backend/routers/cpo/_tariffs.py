@@ -24,7 +24,8 @@ from backend.schemas import (
     CpoTariffSlotUpdateRequest,
     CpoTariffUpdateRequest,
 )
-from backend.services.money import to_money
+from backend.services.idle_fee import IDLE_GRACE_FLOOR_MIN
+from backend.services.money import ZERO_MONEY, to_money
 from backend.services.pricing import mark_tenant_sessions_for_reprice, slot_overlaps
 
 from ._common import (
@@ -37,6 +38,44 @@ from ._common import (
 )
 
 router = APIRouter()
+
+
+def _apply_idle_terms(tariff: Tariff, grace_min, per_min, cap) -> None:
+    """[Idle fee C1] Set the idle-fee terms (None keeps the stored value) and
+    validate the result: an enabled fee (per-minute above 0) needs a cap above
+    0 and a grace of at least IDLE_GRACE_FLOOR_MIN minutes, because a car-side
+    pause can look like a full battery. A grace never set defaults to that
+    floor; one set below it is refused, never silently rewritten."""
+    if per_min is not None:
+        tariff.idle_fee_per_min = to_money(per_min)
+    if cap is not None:
+        tariff.idle_fee_cap = to_money(cap)
+    if grace_min is not None:
+        tariff.idle_grace_min = grace_min
+    if to_money(tariff.idle_fee_per_min or 0) <= ZERO_MONEY:
+        return
+    if to_money(tariff.idle_fee_cap or 0) <= ZERO_MONEY:
+        raise HTTPException(
+            status_code=400, detail="Set a maximum idle fee above 0 to turn the idle fee on.",
+        )
+    if grace_min is None and not tariff.idle_grace_min:
+        tariff.idle_grace_min = IDLE_GRACE_FLOOR_MIN
+    if (tariff.idle_grace_min or 0) < IDLE_GRACE_FLOOR_MIN:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"The idle fee grace must be at least {IDLE_GRACE_FLOOR_MIN} minutes: "
+                "a car pausing its own charge can look full."
+            ),
+        )
+
+
+def _idle_dict(t: Tariff) -> dict:
+    return {
+        "idle_grace_min": int(t.idle_grace_min or 0),
+        "idle_fee_per_min": float(t.idle_fee_per_min or 0),
+        "idle_fee_cap": float(t.idle_fee_cap or 0),
+    }
 
 
 @router.get("/api/cpo/tariffs")
@@ -55,6 +94,7 @@ async def cpo_list_tariffs(
             "id": t.id,
             "name": t.name,
             "price_per_kwh": float(t.price_per_kwh),
+            **_idle_dict(t),
             "created_at": t.created_at.isoformat() if t.created_at else None,
             "updated_at": t.updated_at.isoformat() if t.updated_at else None,
         }
@@ -76,7 +116,11 @@ async def cpo_create_tariff(
         tenant_id=tenant_id,
         name=req.name,
         price_per_kwh=to_money(req.price_per_kwh),
+        idle_grace_min=0,
+        idle_fee_per_min=ZERO_MONEY,
+        idle_fee_cap=ZERO_MONEY,
     )
+    _apply_idle_terms(tariff, req.idle_grace_min, req.idle_fee_per_min, req.idle_fee_cap)
     db.add(tariff)
     await db.commit()
     await db.refresh(tariff)
@@ -91,6 +135,7 @@ async def cpo_create_tariff(
         "tariff_id": tariff.id,
         "name": tariff.name,
         "price_per_kwh": float(tariff.price_per_kwh),
+        **_idle_dict(tariff),
     }
 
 
@@ -109,6 +154,8 @@ async def cpo_update_tariff(
         tariff.name = req.name
     if req.price_per_kwh is not None:
         tariff.price_per_kwh = to_money(req.price_per_kwh)
+    # [Idle fee C1] Running sessions keep the terms snapshotted at their start.
+    _apply_idle_terms(tariff, req.idle_grace_min, req.idle_fee_per_min, req.idle_fee_cap)
 
     # [Pricing v2 Phase 3] Reprice in-flight sessions forward-only if the rate
     # moved (a rename alone is a no-op reprice, so this is safe to always call).
@@ -124,6 +171,7 @@ async def cpo_update_tariff(
         "tariff_id": tariff.id,
         "name": tariff.name,
         "price_per_kwh": float(tariff.price_per_kwh),
+        **_idle_dict(tariff),
     }
 
 

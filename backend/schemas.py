@@ -721,12 +721,21 @@ class CpoTariffCreateRequest(BaseModel):
     # (e.g. CreateOrderRequest.amount_inr) — the router normalizes it via
     # services/money.to_money before it ever touches the Numeric(12,2) column.
     price_per_kwh: float = Field(gt=0, le=1000)
+    # [Idle fee C1] Opt-in, 0 = off. The router requires a cap above 0 and a
+    # grace of at least services/idle_fee.IDLE_GRACE_FLOOR_MIN whenever the
+    # per-minute fee is above 0 (a grace left out then defaults to that floor).
+    idle_grace_min: Optional[int] = Field(default=None, ge=0, le=240)
+    idle_fee_per_min: float = Field(default=0, ge=0, le=100)
+    idle_fee_cap: float = Field(default=0, ge=0, le=10000)
 
 
 class CpoTariffUpdateRequest(BaseModel):
-    """Update an existing tariff's name and/or rate."""
+    """Update an existing tariff's name, rate and/or idle-fee terms."""
     name: Optional[str] = Field(default=None, min_length=1, max_length=100)
     price_per_kwh: Optional[float] = Field(default=None, gt=0, le=1000)
+    idle_grace_min: Optional[int] = Field(default=None, ge=0, le=240)
+    idle_fee_per_min: Optional[float] = Field(default=None, ge=0, le=100)
+    idle_fee_cap: Optional[float] = Field(default=None, ge=0, le=10000)
 
 
 class CpoTariffAssignRequest(BaseModel):

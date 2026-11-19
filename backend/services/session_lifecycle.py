@@ -29,6 +29,8 @@ from backend.database.models import (
     User,
 )
 from backend.services.billing import session_cost
+from backend.services.idle_fee import idle_fee_due, idle_total_seconds, session_terms
+from backend.services.money import ZERO_MONEY
 from backend.services.telemetry import COINS_PER_KWH
 from backend.services.wallet import debit_wallet_clamped
 
@@ -319,6 +321,47 @@ async def finalize_charging_session(
     )
     db.add(ledger_entry)
 
+    # [Idle fee C1] Settle the idle fee ONCE, as its own ledger line, in this
+    # same transaction under the session lock (a second finalize already
+    # returned None above; the existence check is defense in depth). Idle time
+    # ends at the plug's last LIVE frame, never at now, so a stop after lost
+    # telemetry bills nothing for the silence. Capped at the snapshot cap
+    # (idle_fee_due), at what the hold has left after the energy debit, and at
+    # the wallet (debit_wallet_clamped). Nothing is written for a 0.00 fee.
+    idle_debit = ZERO_MONEY
+    if session_terms(session) is not None:
+        idle_due = idle_fee_due(session, plug.last_telemetry_at)
+        if has_hold:
+            idle_due = min(idle_due, max(session.hold_coins - actual_debit, ZERO_MONEY))
+        if idle_due > ZERO_MONEY:
+            already = (await db.execute(
+                select(LedgerTransaction.id).where(
+                    LedgerTransaction.session_id == session.id,
+                    LedgerTransaction.transaction_type == TransactionType.IDLE_FEE,
+                ).limit(1)
+            )).first()
+            if already is None:
+                idle_debit, new_balance = await debit_wallet_clamped(
+                    db, session.user_id, idle_due
+                )
+        if idle_debit > ZERO_MONEY:
+            idle_min = idle_total_seconds(session, plug.last_telemetry_at) // 60
+            db.add(LedgerTransaction(
+                user_id=session.user_id,
+                session_id=session.id,
+                amount=-idle_debit,
+                transaction_type=TransactionType.IDLE_FEE,
+                description=(
+                    f"Idle fee on {plug.name}: plugged in {idle_min} min after "
+                    f"charging finished ({session.idle_grace_min} min free)"
+                ),
+                balance_after=new_balance,
+            ))
+        session.idle_fee_coins = idle_debit
+        # Part of what the session cost the driver: disputes refund up to
+        # coins_spent, and payouts and invoices total it.
+        session.coins_spent = actual_debit + idle_debit
+
     # 5. Free the plug, but only the OCCUPIED status this session set at
     #    start. Every PlugStatus a plug can hold here:
     #      OCCUPIED    -> AVAILABLE (the normal case)
@@ -383,7 +426,7 @@ async def finalize_charging_session(
         "Session stopped",
         extra={
             "session_id": session.id, "user_id": session.user_id, "plug_id": plug.id,
-            "energy_kwh": round(final_energy, 3), "coins_spent": float(actual_debit),
+            "energy_kwh": round(final_energy, 3), "coins_spent": float(actual_debit + idle_debit),
             "reason": reason,
         },
     )
@@ -427,8 +470,10 @@ async def finalize_charging_session(
     minutes = (duration_sec or 0) // 60
     n_body = (
         f"{plug.name}: {final_energy:.3f} kWh in {minutes} min — "
-        f"{actual_debit:.2f} coins charged, {new_balance:.2f} left."
+        f"{actual_debit + idle_debit:.2f} coins charged, {new_balance:.2f} left."
     )
+    if idle_debit > ZERO_MONEY:
+        n_body += f" Includes an idle fee of {idle_debit:.2f} coins."
     if reason and (
         n_severity == "critical"
         or "limit reached" in reason
@@ -468,10 +513,12 @@ async def finalize_charging_session(
             float(session.settled_cost_coins)
             if session.settled_cost_coins is not None else None
         ),
-        "coins_spent": round(actual_debit, 2),
+        "coins_spent": round(actual_debit + idle_debit, 2),
+        # [Idle fee C1] The idle-fee part of coins_spent (0 when none).
+        "idle_fee_coins": round(idle_debit, 2),
         "shortfall_coins": round(shortfall, 2),
-        # debit_wallet_clamped guarantees new_balance = prev_balance - actual_debit
-        "balance_before": round(new_balance + actual_debit, 2),
+        # debit_wallet_clamped guarantees new_balance = prev_balance - debits
+        "balance_before": round(new_balance + actual_debit + idle_debit, 2),
         "balance_remaining": round(new_balance, 2),
         "duration_sec": duration_sec,
         "started_at": session.started_at.isoformat() if session.started_at else None,

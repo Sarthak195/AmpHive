@@ -937,7 +937,7 @@ async def get_plug_tariff_preview(
         # Legacy env fallback — flat rate, no time-of-day structure.
         rate = float(default_rate())
         return {"base_price_per_kwh": rate, "price_now": rate, "slots": [],
-                "cheapest_window": None}
+                "cheapest_window": None, "idle_fee": None}
 
     slots = (
         await db.execute(select(TariffSlot).where(TariffSlot.tariff_id == tariff.id))
@@ -948,6 +948,8 @@ async def get_plug_tariff_preview(
     slot_rate, _boundary = _slot_rate_and_bound(slots, at_local)
     price_now = slot_rate if slot_rate is not None else base
     cheapest = cheapest_window(slots, base, at_local)
+    from backend.services.idle_fee import tariff_terms
+    idle = tariff_terms(tariff)
 
     return {
         "base_price_per_kwh": float(base),
@@ -958,6 +960,13 @@ async def get_plug_tariff_preview(
             "start": cheapest[0].isoformat(),
             "start_hhmm": cheapest[0].strftime("%H:%M"),
             "price_per_kwh": float(cheapest[1]),
+        },
+        # [Idle fee C1] The plug's idle-fee terms, or null when there is none
+        # (the same values a session starting now would snapshot).
+        "idle_fee": None if idle is None else {
+            "grace_min": idle[0],
+            "per_min": float(idle[1]),
+            "cap": float(idle[2]),
         },
         "slots": [
             {

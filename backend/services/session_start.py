@@ -37,6 +37,7 @@ from backend.database.models import (
     User,
 )
 from backend.services.caps import check_circuit_admission
+from backend.services.idle_fee import resolve_idle_terms
 from backend.services.money import ZERO_MONEY, energy_cost, to_money
 from backend.services.plug_hours import (
     clamp_start_duration,
@@ -235,10 +236,14 @@ async def begin_active_session(
     # "unlimited" session needs balance-exhaustion auto-stop to still work off
     # of (services/mqtt/telemetry.py _maybe_auto_stop_on_exhaustion treats
     # hold_coins as an opaque threshold either way).
+    # [Idle fee C1] The tariff's idle terms (None = no fee). A driver who opted
+    # into auto-stop when full never accrues one, so nothing is reserved for it.
+    idle_terms = None if auto_stop_when_full else await resolve_idle_terms(db, plug)
+    idle_fee_cap = idle_terms[2] if idle_terms is not None else ZERO_MONEY
     hold = (
         to_money(available)
         if max_kwh is None
-        else to_money(min(available, energy_cost(max_kwh, max_rate)))
+        else to_money(min(available, energy_cost(max_kwh, max_rate) + idle_fee_cap))
     )
 
     session = ChargingSession(
@@ -263,6 +268,10 @@ async def begin_active_session(
         # pre-0044 row and an opted-out row read the same.
         auto_stop_when_full=True if auto_stop_when_full else None,
     )
+    if idle_terms is not None:
+        # [Idle fee C1] Snapshot the terms, like the rate: a tariff edit never
+        # changes what this session can be charged for idling.
+        session.idle_grace_min, session.idle_fee_per_min, session.idle_fee_cap = idle_terms
     db.add(session)
     if covering_reservation is not None:
         # [Reservations] The holder is starting inside their own window:
