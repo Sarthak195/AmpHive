@@ -11,6 +11,7 @@
  *                      [Idle fee C1] The same preview's `idle_fee` terms, when
  *                      the plug's tariff has one (the plug's current terms; a
  *                      running session bills the terms snapshotted at start).
+ *                      Hidden for a session with auto-stop when full on.
  *   - notices        — .banner rows: stale telemetry, gateway alarms
  *                      (eventTypeCopy), low balance (with an Add credit link),
  *                      car looks full (telemetry frame charge_full, set by the
@@ -74,7 +75,7 @@ const StatusPill = ({ isActive, isStale, updating }) => {
 
 const SessionMonitor = () => {
   const {
-    sessionData, sessionId, isActive, stopSession, updateLimits,
+    sessionData, sessionId, isActive, stopSession, updateLimits, activeSessions,
     lastFrameAt, watchSince, focusedStartedAt, focusedLimits, focusedHoldCoins, alarms,
   } = useSession();
   const { coin_inr_rate } = useConfig();
@@ -192,7 +193,11 @@ const SessionMonitor = () => {
   // sticky for the session, so hide the banner if the car clearly resumed
   // charging (200 W = the backend's default CHARGE_FULL_ACTIVE_W).
   const chargeFull = isActive && sessionData?.charge_full === true && powerW < 200;
-  const idleFee = isActive ? tariff?.idle_fee ?? null : null;
+  // A session that stops itself when full never pays an idle fee.
+  const autoStopFull = Boolean(
+    activeSessions?.find((s) => s.session_id === sessionId)?.auto_stop_when_full
+  );
+  const idleFee = isActive && !autoStopFull ? tariff?.idle_fee ?? null : null;
 
   // Ring progress toward the auto-stop target — the backend stops at whichever
   // limit trips first, so show the nearer of the two. No limit → indeterminate.

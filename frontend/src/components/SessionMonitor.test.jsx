@@ -120,6 +120,23 @@ describe('SessionMonitor: idle fee terms', () => {
     expect(screen.getByText(/Stop and unplug within 15 min to avoid the idle fee/)).toBeInTheDocument();
   });
 
+  it('hides the terms and the unplug hint on an auto-stop session', async () => {
+    api.get.mockResolvedValue({
+      base_price_per_kwh: 6, price_now: 6, slots: [],
+      idle_fee: { grace_min: 15, per_min: 2, cap: 30 },
+    });
+    useSession.mockReturnValue(
+      baseSession({
+        sessionData: { ...baseData, is_stale: false, power_w: 0, charge_full: true },
+        activeSessions: [{ session_id: 7, auto_stop_when_full: true }],
+      })
+    );
+    await renderMonitor();
+    expect(screen.getByText(/Your car looks fully charged/)).toBeInTheDocument();
+    expect(screen.queryByTestId('session-idle-fee')).not.toBeInTheDocument();
+    expect(screen.queryByText(/avoid the idle fee/)).not.toBeInTheDocument();
+  });
+
   it('shows nothing when the tariff has no idle fee', async () => {
     useSession.mockReturnValue(baseSession());
     await renderMonitor();
