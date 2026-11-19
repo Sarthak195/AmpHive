@@ -18,6 +18,7 @@ import { useEffect, useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ImagePlus } from 'lucide-react';
 import Modal from './ui/Modal';
+import PlugHours from './PlugHours';
 import { StarRating, Skeleton, EmptyState, useToast } from './ui';
 import { useAuth } from '../contexts/AuthContext';
 import api from '../api/client';
@@ -176,6 +177,8 @@ export default function PlugReviewsModal({ open, onClose, plug, onSaved }) {
             <span className="text-2 text-sm">No reviews yet.</span>
           )}
         </div>
+
+        <PlugHours plug={plug} />
 
         {/* Photo gallery + upload */}
         {(photos.length > 0 || user) && (

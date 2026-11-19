@@ -401,6 +401,18 @@ class Plug(Base):
     # 0035_offline_consumption.
     last_today_energy_kwh: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     last_month_energy_kwh: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # [Plug hours] (0049_plug_hours, services/plug_hours.py). opening_hours is
+    # a list of {"days", "start", "end"} windows in the tenant's local
+    # wall-clock (TariffSlot semantics); NULL = open 24x7. A closed plug
+    # refuses new starts and bookings; a running session is never stopped.
+    # max_session_minutes clamps a start's duration limit (NULL = none).
+    # amenities: tags from plug_hours.AMENITY_TAGS. access_note: plain text
+    # for drivers, rendered as text, never HTML. none_as_null: clearing writes
+    # SQL NULL, not a JSON null.
+    opening_hours: Mapped[Optional[list]] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    max_session_minutes: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    amenities: Mapped[Optional[list]] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    access_note: Mapped[Optional[str]] = mapped_column(String(280), nullable=True)
 
     # Relationships
     gateway: Mapped[Gateway] = relationship("Gateway", back_populates="plugs")

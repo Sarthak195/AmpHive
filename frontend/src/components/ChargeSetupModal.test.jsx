@@ -280,6 +280,14 @@ describe('ChargeSetupModal: scheduled start', () => {
     expect(notBefore).toMatch(/T16:30:00\.000Z$/);
   });
 
+  it('a closed plug opens on "At a time" with the 8h preselect and offers no "Now"', () => {
+    renderModal({ plug: { ...SCHED_PLUG, open_now: false } });
+    expect(screen.queryByRole('button', { name: 'Now' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'At a time' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: '8h' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: 'Schedule charge' })).toBeDisabled();
+  });
+
   it('"Now" keeps the two-argument start call', async () => {
     const { onConfirm } = renderModal({ plug: SCHED_PLUG });
     await userEvent.click(screen.getByRole('button', { name: 'Start charging' }));

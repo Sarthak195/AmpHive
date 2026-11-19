@@ -23,8 +23,23 @@ from backend.schemas import (
     CpoPlugUpdateRequest,
 )
 from backend.services.audit import try_record_audit
+from backend.services.plug_hours import (
+    access_note_of,
+    amenities_of,
+    hours_of,
+    max_minutes_of,
+    normalize_amenities,
+    normalize_hours,
+)
 
-from ._common import DEFAULT_LIST_LIMIT, clamp_list_window, hide_for, logger, require_cpo_tenant
+from ._common import (
+    DEFAULT_LIST_LIMIT,
+    clamp_list_window,
+    hide_for,
+    logger,
+    redact_for,
+    require_cpo_tenant,
+)
 
 router = APIRouter()
 
@@ -80,6 +95,13 @@ async def cpo_list_plugs(
             # default) — pre-fill the edit form.
             "queued_charging_enabled": plug.queued_charging_enabled,
             "auto_start_delay_min": plug.auto_start_delay_min,
+            # [Plug hours] Pre-fill the edit form. The access note is free
+            # text (it may name a gate code or a phone number), so it is
+            # masked for a read-only cpo_viewer.
+            "opening_hours": hours_of(plug),
+            "max_session_minutes": max_minutes_of(plug),
+            "amenities": amenities_of(plug),
+            "access_note": redact_for(user, access_note_of(plug)),
             "last_seen_at": plug.last_seen_at.isoformat() if plug.last_seen_at else None,
             "created_at": plug.created_at.isoformat() if plug.created_at else None,
         }
@@ -255,6 +277,22 @@ async def cpo_update_plug(
         # [Discovery] Empty string clears it back to unset (NULL), the
         # string-field analogue of "0 clears" above.
         plug.connector_type = req.connector_type or None
+    # [Plug hours] An explicit null (or empty) clears; an omitted key leaves
+    # the field unchanged. Validation errors become a 400 before any write.
+    fields = req.model_fields_set
+    try:
+        if "opening_hours" in fields:
+            plug.opening_hours = normalize_hours(
+                [w.model_dump() for w in req.opening_hours] if req.opening_hours else None
+            )
+        if "amenities" in fields:
+            plug.amenities = normalize_amenities(req.amenities)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if "max_session_minutes" in fields:
+        plug.max_session_minutes = req.max_session_minutes or None
+    if "access_note" in fields:
+        plug.access_note = (req.access_note or "").strip() or None
 
     await db.commit()
     await db.refresh(plug)

@@ -559,9 +559,11 @@ class SessionReaperService:
         )
         from backend.services import pricing
         from backend.services.notifications import notify
+        from backend.services.plug_hours import clamp_start_duration
         from backend.services.reservations import expire_lapsed_reservations
         from backend.services.session_lifecycle import gateway_is_live, plug_is_powered
         from backend.services.session_start import (
+            PlugClosedError,
             auto_start_delay,
             begin_active_session,
             queued_charging_enabled,
@@ -841,6 +843,16 @@ class SessionReaperService:
                         await db.commit()
                         continue
 
+                    # [Plug hours] A closed plug leaves the row WAITING until it
+                    # opens or the row's TTL expires (step 1). Checked here, not
+                    # left to begin_active_session's own refusal, because the
+                    # except below would turn that 409 into FAILED.
+                    try:
+                        clamp_start_duration(plug, tenant.timezone, now, qc.max_duration_seconds)
+                    except ValueError:
+                        await db.commit()
+                        continue
+
                     # 7. Start via the shared helper (commits the session + plug
                     #    claim itself), passing the user row this transaction
                     #    already holds FOR UPDATE (step 2) — begin_active_session's
@@ -866,6 +878,14 @@ class SessionReaperService:
                             covering_reservation=covering,
                             auto_stop_when_full=bool(qc.auto_stop_when_full),
                         )
+                    except PlugClosedError:
+                        # [Plug hours] Closed between the check above (the
+                        # tick's `now`) and the helper's own fresh clock, e.g.
+                        # a long sweep near closing time: nothing was written
+                        # before that refusal, so leave the row WAITING.
+                        qc.status = QueuedChargeStatus.WAITING
+                        await db.commit()
+                        continue
                     except HTTPException as exc:
                         # 402 = balance floor no longer met -> EXPIRED (funds were
                         # never locked, the accepted trade-off); caps/publish
