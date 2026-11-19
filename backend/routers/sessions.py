@@ -1470,14 +1470,16 @@ async def get_my_stats(
             "sessions": count,
         })
 
+    # F8V: the driver's own vehicle figures when saved, else the defaults.
+    vehicle = insights.load_vehicle(user.vehicle_profile)
     return {
         "month": month,
         "lifetime": lifetime,
         "series": series,
         "impact": {
-            "assumptions": insights.assumptions(),
-            "month": insights.estimate_impact(month["energy_kwh"]),
-            "lifetime": insights.estimate_impact(lifetime["energy_kwh"]),
+            "assumptions": insights.assumptions(vehicle),
+            "month": insights.estimate_impact(month["energy_kwh"], vehicle),
+            "lifetime": insights.estimate_impact(lifetime["energy_kwh"], vehicle),
         },
     }
 

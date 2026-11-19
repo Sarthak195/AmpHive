@@ -34,6 +34,7 @@ import ApiTokens from '../components/ApiTokens';
 import ChargeRoutines from '../components/ChargeRoutines';
 import LogoutEverywhere from '../components/LogoutEverywhere';
 import NotificationPrefs from '../components/NotificationPrefs';
+import VehicleSettings from '../components/VehicleSettings';
 import PageHeader from '../components/ui/PageHeader';
 import Skeleton from '../components/ui/Skeleton';
 import Money from '../components/ui/Money';
@@ -401,6 +402,8 @@ export default function Account() {
         </section>
 
         <NotificationPrefs />
+
+        <VehicleSettings />
 
         <ChargeRoutines />
 

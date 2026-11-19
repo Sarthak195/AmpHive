@@ -84,6 +84,9 @@ SCHEDULE_LATE_NOTICE = timedelta(minutes=5)
 # PRUNE_EVERY_N_FLUSHES idiom.
 GATEWAY_LOGS_RETENTION_DAYS = int(os.getenv("GATEWAY_LOGS_RETENTION_DAYS", "14"))
 GATEWAY_LOGS_PRUNE_EVERY_N_TICKS = int(os.getenv("GATEWAY_LOGS_PRUNE_EVERY_N_TICKS", "60"))
+# [F8V] The monthly insights email pass runs every N ticks (about 15 minutes at
+# the default 60 s tick), so a failed send is retried a quarter hour later.
+INSIGHTS_EMAIL_EVERY_N_TICKS = max(1, int(os.getenv("INSIGHTS_EMAIL_EVERY_N_TICKS", "15")))
 
 
 class SessionReaperService:
@@ -124,6 +127,9 @@ class SessionReaperService:
         # start notice. In memory, event loop only; at most one entry per
         # routine, dropped once settled.
         self._routine_starts: dict = {}
+        # [F8V] The monthly insights email pass runs as its own task so slow
+        # SMTP sends never delay the safety sweeps; at most one at a time.
+        self._insights_task: Optional[asyncio.Task] = None
 
     def start(self, loop: asyncio.AbstractEventLoop) -> None:
         self._task = loop.create_task(self._run())
@@ -140,6 +146,20 @@ class SessionReaperService:
                 await self._task
             except asyncio.CancelledError:
                 pass
+        if self._insights_task:
+            self._insights_task.cancel()
+            try:
+                await self._insights_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    async def _insights_pass(self) -> None:
+        try:
+            await self.send_insights_emails_once()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Monthly insights email pass failed")
 
     async def _run(self) -> None:
         while not self._stop.is_set():
@@ -189,6 +209,11 @@ class SessionReaperService:
                     await self.reap_gateway_logs_once()
                 except Exception:
                     logger.exception("Gateway-logs prune failed")
+            if self._tick_count % INSIGHTS_EMAIL_EVERY_N_TICKS == 0:
+                if self._insights_task is None or self._insights_task.done():
+                    self._insights_task = asyncio.get_running_loop().create_task(
+                        self._insights_pass()
+                    )
 
     def _stale_session_ids_query(self, cutoff: datetime):
         from backend.database.models import ChargingSession, SessionStatus
@@ -512,6 +537,14 @@ class SessionReaperService:
         from backend.services.routines import materialize_routines
 
         return await materialize_routines(self.db_session_factory, now)
+
+    async def send_insights_emails_once(self, now: Optional[datetime] = None) -> int:
+        """[F8V] Send each opted-in driver last month's insights email, once
+        (services/insights_email.py). Returns 0 without a query before 09:00
+        local on the 1st or when SMTP is not configured."""
+        from backend.services.insights_email import send_monthly_insights
+
+        return await send_monthly_insights(self.db_session_factory, now)
 
     async def settle_routines_once(self) -> int:
         """[C5] After the queued-start sweep: reset or count each routine's

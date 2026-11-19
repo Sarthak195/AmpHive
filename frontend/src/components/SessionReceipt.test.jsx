@@ -90,6 +90,14 @@ describe('SessionReceipt — summary', () => {
     expect(screen.getByText('≈ 0.25 kg')).toBeInTheDocument(); // 1.234 kWh x 0.2
   });
 
+  it("uses the driver's own CO2 factor from their vehicle profile when saved", async () => {
+    api.get.mockImplementation(async (url) =>
+      url === '/api/me/vehicle' ? { co2_avoided_kg_per_kwh: 0.5 } : { points: [] });
+    renderReceipt();
+    expect(api.get).toHaveBeenCalledWith('/api/me/vehicle');
+    expect(await screen.findByText('≈ 0.62 kg')).toBeInTheDocument(); // 1.234 kWh x 0.5
+  });
+
   it('renders nothing when there is no receipt', () => {
     useSession.mockReturnValue({ receipt: null, dismissReceipt: dismissSpy });
     renderReceipt();
