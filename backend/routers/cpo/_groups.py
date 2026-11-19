@@ -4,16 +4,21 @@ cpo.py (2026-07-21 package split, TD#7 follow-up).
 """
 import secrets
 import string
+from datetime import datetime, timezone
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import and_, func, select
+from pydantic import BaseModel, Field
+from sqlalchemy import and_, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend import state
 from backend.database.db import get_db
-from backend.database.models import ChargerGroup, GroupMembership, Plug, User
+from backend.database.models import ChargerGroup, GroupInvite, GroupMembership, Plug, User
 from backend.schemas import CpoGroupCreateRequest, CpoGroupUpdateRequest
+from backend.services import group_invites
 from backend.services.audit import try_record_audit
+from backend.services.money import to_money
 
 from ._common import (
     DEFAULT_LIST_LIMIT,
@@ -331,6 +336,12 @@ async def cpo_list_group_members(
             "email": redact_for(user, email),
             "full_name": redact_name_for(user, full_name),
             "joined_at": m.joined_at.isoformat() if m.joined_at else None,
+            # [C9] The member's own flat price on this group's plugs (null =
+            # the normal tariff). A price, not personal data.
+            "price_per_kwh_override": (
+                float(m.price_per_kwh_override)
+                if m.price_per_kwh_override is not None else None
+            ),
         }
         for m, email, full_name in result.all()
     ]
@@ -387,3 +398,201 @@ async def cpo_remove_group_member(
     )
 
     return {"status": "removed", "group_id": group_id, "user_id": user_id}
+
+
+# --- [C9] Per-member price override + email invites ---
+
+class MemberPriceRequest(BaseModel):
+    """A member's flat coins-per-kWh price on this group's plugs; null
+    clears it. Same bounds as a tariff's price_per_kwh."""
+    price_per_kwh_override: Optional[float] = Field(default=None, gt=0, le=1000)
+
+
+class GroupInviteRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=255)
+
+
+async def _own_group(db: AsyncSession, group_id: int, user: User) -> ChargerGroup:
+    group = (
+        await db.execute(
+            select(ChargerGroup).where(
+                and_(ChargerGroup.id == group_id, ChargerGroup.tenant_id == user.tenant_id)
+            )
+        )
+    ).scalar_one_or_none()
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found or access denied.")
+    return group
+
+
+@router.put("/api/cpo/groups/{group_id}/members/{user_id}/price")
+async def cpo_set_member_price(
+    group_id: int,
+    user_id: int,
+    req: MemberPriceRequest,
+    user: User = Depends(require_cpo_tenant),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    [C9] Set or clear one member's flat price on this private group's plugs.
+    It beats the plug, group and tenant tariffs for that member only and is
+    frozen onto a session at its start, so a change here never moves a
+    session already running. Tenant-scoped (404 for another tenant's group or
+    a non-member). Audited (group.member_price).
+    """
+    group = await _own_group(db, group_id, user)
+    if group.is_public and req.price_per_kwh_override is not None:
+        raise HTTPException(
+            status_code=400, detail="Member prices apply to private groups only."
+        )
+    membership = (
+        await db.execute(
+            select(GroupMembership).where(
+                and_(GroupMembership.group_id == group_id, GroupMembership.user_id == user_id)
+            )
+        )
+    ).scalar_one_or_none()
+    if not membership:
+        raise HTTPException(status_code=404, detail="That user is not a member of this group.")
+
+    old = membership.price_per_kwh_override
+    new = to_money(req.price_per_kwh_override) if req.price_per_kwh_override is not None else None
+    membership.price_per_kwh_override = new
+    group_name = group.name
+    await db.commit()
+
+    await try_record_audit(
+        db,
+        tenant_id=user.tenant_id,
+        actor_user_id=user.id,
+        action="group.member_price",
+        target_type="group",
+        target_id=group_id,
+        detail=f"user_id={user_id}, group={group_name}, old={old}, new={new}",
+    )
+    return {
+        "status": "updated",
+        "group_id": group_id,
+        "user_id": user_id,
+        "price_per_kwh_override": float(new) if new is not None else None,
+    }
+
+
+@router.post("/api/cpo/groups/{group_id}/invites")
+async def cpo_invite_to_group(
+    group_id: int,
+    req: GroupInviteRequest,
+    user: User = Depends(require_cpo_tenant),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    [C9] Email an invite to this private group (services/group_invites.py):
+    digest-only, single-use, 7-day token bound to the address, capped at
+    GROUP_INVITES_PER_DAY per CPO (429 past it). The response is the same
+    whether or not the address has an account. Audited (group.invite).
+    """
+    group = await _own_group(db, group_id, user)
+    if group.is_public:
+        raise HTTPException(
+            status_code=400, detail="Public groups need no invite: every driver can use them."
+        )
+    email = group_invites.normalize_invite_email(req.email)
+    group_name = group.name
+    invite, token = await group_invites.create_invite(db, user, group, email)
+    invite_id, expires_at = invite.id, invite.expires_at
+    group_invites.schedule_invite_email(email, group_name, token)
+
+    await try_record_audit(
+        db,
+        tenant_id=user.tenant_id,
+        actor_user_id=user.id,
+        action="group.invite",
+        target_type="group",
+        target_id=group_id,
+        detail=f"email={email}, group={group_name}, invite_id={invite_id}",
+    )
+    return {
+        "status": "sent",
+        "invite_id": invite_id,
+        "group_id": group_id,
+        "email": email,
+        "expires_at": expires_at.isoformat(),
+    }
+
+
+@router.get("/api/cpo/groups/{group_id}/invites")
+async def cpo_list_group_invites(
+    group_id: int,
+    user: User = Depends(require_cpo_tenant),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    [C9] Pending (unaccepted, unrevoked, unexpired) invites for one of the
+    CPO's groups, newest first, at most 100. Emails pass through redact_for,
+    so a read-only cpo_viewer sees them masked.
+    """
+    await _own_group(db, group_id, user)
+    now = datetime.now(timezone.utc)
+    rows = (
+        await db.execute(
+            select(GroupInvite)
+            .where(
+                and_(
+                    GroupInvite.group_id == group_id,
+                    GroupInvite.accepted_at.is_(None),
+                    GroupInvite.revoked_at.is_(None),
+                    GroupInvite.expires_at > now,
+                )
+            )
+            .order_by(GroupInvite.created_at.desc(), GroupInvite.id.desc())
+            .limit(100)
+        )
+    ).scalars().all()
+    return [
+        {
+            "id": inv.id,
+            "email": redact_for(user, inv.email),
+            "created_at": inv.created_at.isoformat() if inv.created_at else None,
+            "expires_at": inv.expires_at.isoformat() if inv.expires_at else None,
+        }
+        for inv in rows
+    ]
+
+
+@router.delete("/api/cpo/groups/{group_id}/invites/{invite_id}")
+async def cpo_revoke_group_invite(
+    group_id: int,
+    invite_id: int,
+    user: User = Depends(require_cpo_tenant),
+    db: AsyncSession = Depends(get_db),
+):
+    """[C9] Revoke a pending invite (its link stops working). 404 when it is
+    not a pending invite of the caller's group. Audited (group.invite_revoke)."""
+    await _own_group(db, group_id, user)
+    revoked = await db.execute(
+        update(GroupInvite)
+        .where(
+            and_(
+                GroupInvite.id == invite_id,
+                GroupInvite.group_id == group_id,
+                GroupInvite.accepted_at.is_(None),
+                GroupInvite.revoked_at.is_(None),
+            )
+        )
+        .values(revoked_at=datetime.now(timezone.utc))
+        .execution_options(synchronize_session=False)
+    )
+    if not getattr(revoked, "rowcount", 0):
+        await db.rollback()
+        raise HTTPException(status_code=404, detail="Invite not found or no longer pending.")
+    await db.commit()
+    await try_record_audit(
+        db,
+        tenant_id=user.tenant_id,
+        actor_user_id=user.id,
+        action="group.invite_revoke",
+        target_type="group",
+        target_id=group_id,
+        detail=f"invite_id={invite_id}",
+    )
+    return {"status": "revoked", "invite_id": invite_id}
