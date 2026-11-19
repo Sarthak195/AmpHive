@@ -307,6 +307,69 @@ async def test_auto_stop_session_reserves_and_snapshots_no_idle_fee():
     assert session.idle_fee_per_min is None
 
 
+async def _patch_max_kwh(monkeypatch, *, auto_stop=None, available="500.00"):
+    """The real update_session_limits on a mocked db: a session at 5.00/kWh
+    with idle terms of 15 min, 2.00/min and a 30.00 cap, started with
+    max_kwh 4 and hold 50, PATCHed to max_kwh 6."""
+    import backend.routers.sessions as sessions_mod
+    from backend.database.models import SessionStatus
+    from backend.schemas import SessionLimitsUpdateRequest
+
+    session = SimpleNamespace(
+        id=11, user_id=3, plug_id=5, tenant_id=1, status=SessionStatus.ACTIVE,
+        energy_kwh=1.0, max_kwh=4.0, max_duration_seconds=None,
+        hold_coins=Decimal("50.00"), auto_stop_when_full=auto_stop, **TERMS,
+    )
+    plug = SimpleNamespace(id=5, gateway_id="gw-1", local_ip="10.0.0.2")
+
+    def _res(**kw):
+        r = MagicMock()
+        for k, v in kw.items():
+            getattr(r, k).return_value = v
+        return r
+
+    db = MagicMock()
+    db.execute = AsyncMock(side_effect=[
+        _res(scalar_one_or_none=SimpleNamespace(id=3)),
+        _res(scalar_one_or_none=session),
+        _res(scalar_one=plug),
+    ])
+    db.commit = AsyncMock()
+    db.refresh = AsyncMock()
+    monkeypatch.setattr(sessions_mod, "max_rate_over_window",
+                        AsyncMock(return_value=Decimal("5.00")))
+    monkeypatch.setattr(sessions_mod, "available_balance",
+                        AsyncMock(return_value=Decimal(available)))
+    monkeypatch.setattr(sessions_mod, "session_cost", lambda _s, _kwh: Decimal("5.00"))
+    monkeypatch.setattr(sessions_mod.state, "mqtt_manager", None)
+    resp = await sessions_mod.update_session_limits(
+        11, SessionLimitsUpdateRequest(max_kwh=6.0), SimpleNamespace(id=3), db,
+    )
+    return session, resp
+
+
+@pytest.mark.asyncio
+async def test_limits_edit_keeps_the_idle_cap_in_the_resized_hold(monkeypatch):
+    """hold = min(headroom, energy_cost(max_kwh, max_rate) + cap), as at start:
+    6 kWh x 5.00 + 30 = 60. Without the cap term it would be 30 and finalize
+    could collect no idle fee."""
+    session, resp = await _patch_max_kwh(monkeypatch)
+    assert session.hold_coins == Decimal("60.00")
+    assert resp["hold_coins"] == 60.0
+
+
+@pytest.mark.asyncio
+async def test_limits_edit_hold_with_the_cap_is_still_bounded_by_headroom(monkeypatch):
+    session, _ = await _patch_max_kwh(monkeypatch, available="5.00")   # headroom 55
+    assert session.hold_coins == Decimal("55.00")
+
+
+@pytest.mark.asyncio
+async def test_limits_edit_reserves_no_cap_for_an_auto_stop_session(monkeypatch):
+    session, _ = await _patch_max_kwh(monkeypatch, auto_stop=True)
+    assert session.hold_coins == Decimal("30.00")
+
+
 @pytest.mark.asyncio
 async def test_finalize_settles_once_capped_by_the_hold_left_db_free(monkeypatch):
     """The real finalize with mocked rows: the energy debit, then the idle fee
