@@ -45,9 +45,11 @@ would have failed open on any forgotten route.
 5. **Privacy.** `routers/cpo/_common.py` holds the three viewer helpers, each
    a no-op for a cpo/admin:
    - `redact_for` masks emails (`d***@example.com`), phone numbers, IPv4
-     addresses (`[ip hidden]`) and `hint=`/`claim_code_tail=` values, in whole
+     addresses (`[ip hidden]`), `hint=`/`claim_code_tail=` values and the
+     hint in a promo top-up note ("Promo code ...[hidden]"), in whole
      fields and inside free text: sessions list and CSV, disputes (reason and
-     resolution note), audit log (actor and detail), group members,
+     resolution note), audit log (actor and detail), event feed `detail`
+     (a driver problem report puts its description there), group members,
      reservations, top-ups, plug reports (description and resolution note),
      payout notes, promo codes (`created_by_email` and `note`).
    - `redact_name_for` shows a driver's name as initials ("Sarthak Jain" to

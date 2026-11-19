@@ -987,8 +987,9 @@ mint plus claim on 403), `frontend/src/pages/cpo/CpoGateways.test.jsx`.
    is refused.
 
 PII: `routers/cpo/_common.redact_for` masks emails (`d***@domain`), phone
-numbers, IPv4 addresses and `hint=`/`claim_code_tail=` values, in fields and in
-free text such as audit details, for a viewer; `redact_name_for` turns driver
+numbers, IPv4 addresses, `hint=`/`claim_code_tail=` values and the hint in a
+promo top-up note ("Promo code ...XXXX"), in fields and in free text such as
+audit details and the event feed `detail`, for a viewer; `redact_name_for` turns driver
 names into initials ("S. J.", reservations and group members); `hide_for`
 returns null for plug `local_ip` and coordinates, gateway `vpn_ip` and promo
 `code_hint`. Private group access codes are never returned to a viewer. On the
