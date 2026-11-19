@@ -563,6 +563,7 @@ class SessionReaperService:
         from backend.services.reservations import expire_lapsed_reservations
         from backend.services.session_lifecycle import gateway_is_live, plug_is_powered
         from backend.services.session_start import (
+            PlugClosedError,
             auto_start_delay,
             begin_active_session,
             queued_charging_enabled,
@@ -877,6 +878,14 @@ class SessionReaperService:
                             covering_reservation=covering,
                             auto_stop_when_full=bool(qc.auto_stop_when_full),
                         )
+                    except PlugClosedError:
+                        # [Plug hours] Closed between the check above (the
+                        # tick's `now`) and the helper's own fresh clock, e.g.
+                        # a long sweep near closing time: nothing was written
+                        # before that refusal, so leave the row WAITING.
+                        qc.status = QueuedChargeStatus.WAITING
+                        await db.commit()
+                        continue
                     except HTTPException as exc:
                         # 402 = balance floor no longer met -> EXPIRED (funds were
                         # never locked, the accepted trade-off); caps/publish

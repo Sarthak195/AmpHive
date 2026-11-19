@@ -276,6 +276,33 @@ async def test_sweep_leaves_a_closed_plugs_queued_row_waiting():
     notify.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_sweep_leaves_the_row_waiting_when_the_helper_finds_it_closed():
+    """The sweep's own check (the tick's clock) passed, but the plug closed
+    before begin_active_session's fresh clock: still WAITING, no notice."""
+    from backend.services.session_start import PlugClosedError
+
+    qc = _qc()
+    plug = _plug(powered=True)
+    plug.powered_since = datetime.now(timezone.utc) - timedelta(minutes=10)
+    plug.opening_hours = None
+    plug.max_session_minutes = None
+    row_db = _row_db(
+        _s1n(qc), _s1n(_user()), _s1(0), _s1n(plug), _s1(_tenant(delay=2)),
+        _upd(), _s1n(None), _s1n(None), _s1(_gateway()),
+    )
+    svc = SessionReaperService(_factory(_scan_db([1]), row_db), AsyncMock())
+
+    with patch("backend.services.session_start.begin_active_session",
+               AsyncMock(side_effect=PlugClosedError("Closed, opens 08:00"))) as begin,          patch("backend.services.notifications.notify", AsyncMock()) as notify:
+        started = await svc.reap_queued_starts_once()
+
+    assert started == 0
+    begin.assert_awaited_once()
+    assert qc.status == QueuedChargeStatus.WAITING
+    notify.assert_not_awaited()
+
+
 # --- CPO edit --------------------------------------------------------------------
 
 def _cpo_db(plug):

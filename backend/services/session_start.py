@@ -108,6 +108,15 @@ def schedule_ttl(tenant: Tenant, plug: Optional[Plug]) -> int:
     return min(queue_ttl(tenant, plug), SCHEDULE_START_GRACE_MIN)
 
 
+class PlugClosedError(HTTPException):
+    """[Plug hours] The 409 begin_active_session raises for a plug outside its
+    opening hours. Typed so the queued sweep can leave its row WAITING (no
+    write happens before this refusal) instead of failing it."""
+
+    def __init__(self, detail: str):
+        super().__init__(status_code=409, detail=detail)
+
+
 async def begin_active_session(
     db: AsyncSession,
     user: User,
@@ -139,7 +148,8 @@ async def begin_active_session(
     Raises the same typed failures the start path always did, so both entry
     points surface identically (the reaper maps them to EXPIRED/FAILED):
       - HTTPException(409) — circuit at capacity (check_circuit_admission).
-      - HTTPException(409): the plug is outside its opening hours.
+      - PlugClosedError (an HTTPException 409): the plug is outside its
+        opening hours.
       - HTTPException(402) — available balance below the start floor.
       - HTTPException(500) — the gateway ON publish failed (claim rolled back).
     """
@@ -162,7 +172,7 @@ async def begin_active_session(
                 plug, tz_name, now, max_duration_seconds
             )
         except ValueError:
-            raise HTTPException(status_code=409, detail=closed_detail(plug, tz_name, now))
+            raise PlugClosedError(closed_detail(plug, tz_name, now))
 
     # [Caps] Circuit admission: refuse the start if the plug's group is at its
     # shared current capacity (Σ active plug caps + this plug's cap > line max).
