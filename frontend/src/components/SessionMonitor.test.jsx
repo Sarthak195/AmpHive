@@ -104,7 +104,7 @@ describe('SessionMonitor — hero + meters', () => {
   });
 });
 
-describe('SessionMonitor — idle fee terms', () => {
+describe('SessionMonitor: idle fee terms', () => {
   it('shows the plug tariff idle fee and the unplug hint on the looks-full banner', async () => {
     api.get.mockResolvedValue({
       base_price_per_kwh: 6, price_now: 6, slots: [],
