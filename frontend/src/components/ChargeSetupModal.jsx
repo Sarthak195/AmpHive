@@ -36,6 +36,11 @@
  * onConfirm; the backend then stops the session once the car's draw has stayed
  * near zero (backend/services/mqtt/charge_full.py). Off sends nothing.
  *
+ * [Estimate] Under the limits, an "Estimate" line shows energy, duration, finish
+ * time and cost from GET /api/plugs/{id}/estimate (debounced as the limits or
+ * start time change; best-effort, hidden when it fails or no limit is set). It
+ * is display only: nothing it returns is sent back when starting.
+ *
  * `priceStale` marks the price as last saved (the plug row came from the
  * instant-open snapshot and the live list has not answered yet).
  */
@@ -48,7 +53,7 @@ import api from '../api/client';
 import { useConfig } from '../contexts/ConfigContext';
 import { useWallet } from '../contexts/WalletContext';
 import { apiErrorCopy } from '../utils/statusCopy';
-import { fmtTimeInZone, nextOccurrenceInZone } from '../utils/reservationTime';
+import { fmtTime, fmtTimeInZone, nextOccurrenceInZone } from '../utils/reservationTime';
 
 const TIME_PRESETS = [
   { id: 'none', label: 'No limit', minutes: null },
@@ -68,6 +73,14 @@ const parseCustomMinutes = (value) => {
   if (!m) return null;
   const minutes = Number(m[1]) * 60 + Number(m[2]);
   return minutes > 0 ? minutes : null;
+};
+
+const ESTIMATE_DEBOUNCE_MS = 400;
+
+const fmtDuration = (min) => {
+  const h = Math.floor(min / 60);
+  const m = min % 60;
+  return h ? `${h}h${m ? ` ${m}m` : ''}` : `${m}m`;
 };
 
 const COPY = {
@@ -128,6 +141,43 @@ export default function ChargeSetupModal({ open, onClose, plug, mode = 'start', 
     })();
     return () => { cancelled = true; };
   }, [schedulable, plugId]);
+
+  // [Estimate] Limits as the endpoint takes them. An out-of-range value is
+  // dropped so the fetch is only made for a request the backend accepts.
+  const estKwhNum = kwh !== '' ? parseFloat(kwh) : NaN;
+  const estKwh = estKwhNum > 0 && estKwhNum <= 100 ? estKwhNum : null;
+  const estMinutesRaw =
+    timePreset === 'custom'
+      ? parseCustomMinutes(customTime)
+      : TIME_PRESETS.find((p) => p.id === timePreset)?.minutes;
+  const estMinutes = estMinutesRaw && estMinutesRaw <= 1440 ? estMinutesRaw : null;
+  const estTz = plug?.tenant_timezone;
+  const estStartIso =
+    open && mode === 'start' && startAt === 'later' && atTime && estTz
+      ? nextOccurrenceInZone(atTime, estTz).iso
+      : null;
+  const [estimate, setEstimate] = useState(null);
+  useEffect(() => {
+    setEstimate(null);
+    if (!open || plugId == null || (estKwh == null && estMinutes == null)) return undefined;
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      const qs = new URLSearchParams();
+      if (estKwh != null) qs.set('max_kwh', String(estKwh));
+      if (estMinutes != null) qs.set('max_duration_min', String(estMinutes));
+      if (estStartIso) qs.set('start_at', estStartIso);
+      try {
+        const res = await api.get(`/api/plugs/${plugId}/estimate?${qs.toString()}`);
+        if (!cancelled && res && res.is_estimate) setEstimate(res);
+      } catch {
+        /* best-effort line: hide on failure */
+      }
+    }, ESTIMATE_DEBOUNCE_MS);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [open, plugId, estKwh, estMinutes, estStartIso]);
 
   // Fresh form every time the modal opens (or for a different plug).
   useEffect(() => {
@@ -391,6 +441,28 @@ export default function ChargeSetupModal({ open, onClose, plug, mode = 'start', 
             </p>
           )}
         </div>
+
+        {estimate && (
+          <p className="charge-setup-estimate text-sm" data-testid="charge-estimate">
+            <strong>Estimate:</strong> ≈ {Number(estimate.energy_kwh).toFixed(1)} kWh in{' '}
+            {fmtDuration(estimate.duration_min)}, finishing about{' '}
+            {estTz ? fmtTimeInZone(estimate.finish_at, estTz) : fmtTime(estimate.finish_at)}, costing about{' '}
+            <Money coins={Number(estimate.cost_coins)} rate={coin_inr_rate} />.
+            {estimate.rate_changes?.length > 0 && (
+              <>
+                {' '}The price changes during this charge (at{' '}
+                {estimate.rate_changes
+                  .map((c) => (estTz ? fmtTimeInZone(c.at, estTz) : fmtTime(c.at)))
+                  .join(', ')}
+                ).
+              </>
+            )}{' '}
+            <span className="text-3">
+              Based on {estimate.basis === 'recent_session' ? 'your last session here' : "this charger's rated power"};
+              your car may draw less.
+            </span>
+          </p>
+        )}
 
         <label className="checkbox-row text-sm">
           <input

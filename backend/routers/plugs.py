@@ -4,10 +4,10 @@ Plugs routes — moved verbatim from main.py (2026-07-07, TD#7 split).
 import asyncio
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -951,6 +951,47 @@ async def get_plug_tariff_preview(
             for s in sorted(slots, key=lambda s: (int(s.start_min), int(s.end_min)))
         ],
     }
+
+
+@router.get("/api/plugs/{plug_id}/estimate")
+async def get_plug_charge_estimate(
+    plug_id: int,
+    max_kwh: Optional[float] = Query(default=None, gt=0, le=100.0),
+    max_duration_min: Optional[int] = Query(default=None, gt=0, le=1440),
+    start_at: Optional[datetime] = None,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    [C3] DISPLAY-ONLY estimate of a charge before it starts: energy, duration,
+    finish time and cost across tariff windows (services/estimate.py). Needs
+    max_kwh and/or max_duration_min (the limit that binds first wins).
+    Visibility follows GET /api/plugs/{id} exactly (ensure_plug_group_access).
+    Never feeds the hold, admission, the frozen rate or billing. Returns only
+    numbers and timestamps, so there is nothing for a cpo_viewer to mask.
+    """
+    from backend.services.estimate import estimate_charge
+
+    if max_kwh is None and max_duration_min is None:
+        raise HTTPException(
+            status_code=422, detail="Provide max_kwh and/or max_duration_min."
+        )
+    plug = (await db.execute(select(Plug).where(Plug.id == plug_id))).scalar_one_or_none()
+    if not plug:
+        raise HTTPException(status_code=404, detail=f"Plug with ID {plug_id} not found.")
+    await ensure_plug_group_access(db, plug, user)
+    if start_at is not None:
+        start_utc = start_at if start_at.tzinfo else start_at.replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        if not (now - timedelta(days=1) <= start_utc <= now + timedelta(days=30)):
+            raise HTTPException(
+                status_code=422,
+                detail="start_at must be within 1 day in the past and 30 days ahead.",
+            )
+    try:
+        return await estimate_charge(db, plug, user.id, max_kwh, max_duration_min, start_at)
+    except OverflowError:
+        raise HTTPException(status_code=422, detail="Estimate window out of range.")
 
 
 # ===========================================================================

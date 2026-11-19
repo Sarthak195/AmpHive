@@ -10,3 +10,7 @@
   flex-wrap: wrap;
   gap: var(--sp-2);
 }
+
+.charge-setup-estimate {
+  margin: 0;
+}
