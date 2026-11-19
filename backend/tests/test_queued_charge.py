@@ -365,7 +365,7 @@ def _qc(status=QueuedChargeStatus.WAITING, expires_in_min=60, plug_id=1, user_id
 @pytest.mark.asyncio
 async def test_sweep_expires_ttl_lapsed_row():
     qc = _qc(expires_in_min=-1)   # already past its TTL
-    svc = SessionReaperService(_factory(_scan_db([1]), _row_db(_s1n(qc))), AsyncMock())
+    svc = SessionReaperService(_factory(_scan_db([1]), _row_db(_s1n(qc), _s1n(_plug()))), AsyncMock())
 
     with patch("backend.services.notifications.notify", AsyncMock()) as notify:
         started = await svc.reap_queued_starts_once()
@@ -373,6 +373,7 @@ async def test_sweep_expires_ttl_lapsed_row():
     assert started == 0
     assert qc.status == QueuedChargeStatus.EXPIRED
     assert notify.await_args.args[1] == "queued_charge_expired"
+    assert "Power didn't return" in notify.await_args.args[3]
 
 
 @pytest.mark.asyncio

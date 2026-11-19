@@ -583,7 +583,7 @@ class SessionReaperService:
         )
         from backend.services import pricing
         from backend.services.notifications import notify
-        from backend.services.plug_hours import clamp_start_duration
+        from backend.services.plug_hours import clamp_start_duration, hours_of, hours_status
         from backend.services.reservations import expire_lapsed_reservations
         from backend.services.session_lifecycle import gateway_is_live, plug_is_powered
         from backend.services.session_start import (
@@ -635,6 +635,19 @@ class SessionReaperService:
                         qc.status = QueuedChargeStatus.EXPIRED
                         plug_id = qc.plug_id
                         user_id = qc.user_id
+                        closed_at_expiry = False
+                        if not_before is None:
+                            # [Plug hours] An outage row held past its TTL while
+                            # the plug is closed was waiting on the opening
+                            # hours, not on power: name the right cause.
+                            exp_plug = (await db.execute(
+                                select(Plug).where(Plug.id == plug_id)
+                            )).scalar_one_or_none()
+                            if exp_plug is not None and hours_of(exp_plug) is not None:
+                                tz_name = (await db.execute(
+                                    select(Tenant.timezone).where(Tenant.id == qc.tenant_id)
+                                )).scalar_one_or_none()
+                                closed_at_expiry = hours_status(exp_plug, tz_name, now)[0] is False
                         await db.commit()
                         if not_before is not None:
                             # Any cause (no power, gateway, cap, booking): the
@@ -649,7 +662,9 @@ class SessionReaperService:
                         await notify(
                             user_id, "queued_charge_expired",
                             "Queued charge expired",
-                            "Power didn't return in time — your queued charge expired.",
+                            "The charger was closed until your request expired."
+                            if closed_at_expiry
+                            else "Power didn't return in time — your queued charge expired.",
                             severity="warning", plug_id=plug_id,
                         )
                         continue

@@ -53,6 +53,7 @@ from backend.database.models import (
     User,
 )
 from backend.services import pricing
+from backend.services.plug_hours import closed_weekdays
 from backend.services.session_start import queued_charging_enabled, schedule_ttl
 
 logger = logging.getLogger("amphive.routines")
@@ -153,6 +154,43 @@ async def _send(user_id: int, plug_id: int, notice: Optional[Notice], session_id
 
     type_, title, body, severity = notice
     await notify(user_id, type_, title, body, severity=severity, plug_id=plug_id, session_id=session_id)
+
+
+async def disable_closed_routines(db, plug: Plug) -> list:
+    """[Plug hours] After a CPO edits a plug's opening hours: turn off each
+    enabled routine on it whose start time is now closed on a selected day
+    (the rule routine create applies, closed_weekdays), withdrawing its
+    pending row. The caller commits, then passes the result to
+    send_disabled_notices so each owner hears once."""
+    routines = (await db.execute(
+        select(ChargeRoutine).where(and_(
+            ChargeRoutine.plug_id == plug.id, ChargeRoutine.enabled.is_(True),
+        ))
+    )).scalars().all()
+    out = []
+    for routine in routines:
+        closed = closed_weekdays(
+            plug, routine.weekdays, routine.start_time.hour * 60 + routine.start_time.minute
+        )
+        if not closed:
+            continue
+        routine.enabled = False
+        await cancel_pending(db, routine)
+        out.append((routine.user_id, (
+            "routine_disabled",
+            "Charge routine turned off",
+            f"Your routine on {plug.name} was turned off because the charger's opening "
+            f"hours changed: it is now closed at {routine.start_time:%H:%M} on "
+            f"{', '.join(closed)}. Pick a time within its opening hours and turn it "
+            "back on from Account.",
+            "warning",
+        )))
+    return out
+
+
+async def send_disabled_notices(plug_id: int, pending: list) -> None:
+    for user_id, notice in pending:
+        await _send(user_id, plug_id, notice)
 
 
 async def has_group_access(db, user_id: int, plug: Plug) -> bool:
