@@ -25,6 +25,7 @@ from backend.database.db import get_db
 from backend.database.models import ChargeRoutine, Gateway, Plug, Tenant, User
 from backend.services import pricing
 from backend.services.auth import get_current_user
+from backend.services.plug_hours import closed_weekdays
 from backend.services.routines import (
     MAX_ROUTINES_PER_USER,
     cancel_pending,
@@ -131,6 +132,20 @@ def _require_gate(tenant: Tenant, plug: Plug) -> None:
         raise _conflict("queue_disabled", "Scheduled charging isn't enabled for this charger.")
 
 
+def _require_open(plug: Plug, weekdays: int, start_time: time) -> None:
+    """[Plug hours] Refuse a routine whose start time falls outside the plug's
+    opening hours on any selected day: every such occurrence would sit
+    WAITING until its TTL lapsed, count a failure, and three in a row would
+    turn the routine off. Hours edited later still take that path."""
+    closed = closed_weekdays(plug, weekdays, start_time.hour * 60 + start_time.minute)
+    if closed:
+        raise _conflict(
+            "plug_closed",
+            f"This charger is closed at {start_time:%H:%M} on {', '.join(closed)}. "
+            "Pick a time within its opening hours.",
+        )
+
+
 @router.get("/api/me/routines")
 async def list_routines(
     user: User = Depends(get_current_user),
@@ -174,6 +189,7 @@ async def create_routine(
         )
     if req.enabled:
         _require_gate(tenant, plug)
+        _require_open(plug, req.weekdays, req.start_time)
     routine = ChargeRoutine(
         user_id=user.id,
         plug_id=plug.id,
@@ -228,6 +244,8 @@ async def update_routine(
         else:
             await cancel_pending(db, routine)
         routine.enabled = req.enabled
+    if routine.enabled and (reenabled or {"weekdays", "start_time"} & fields):
+        _require_open(plug, routine.weekdays, routine.start_time)
     if reenabled or {"weekdays", "start_time"} & fields:
         # Never fire for an occurrence that began before this save.
         skip_started_occurrence(routine, pricing._zone(tenant.timezone), datetime.now(timezone.utc))

@@ -21,12 +21,19 @@ email). The decision lives in `services/notification_prefs.py`:
      (carries OVERCURRENT_CUTOFF, THERMAL_CUTOFF, UNAUTHORIZED_ON, OTA_FAILED)
    - F1: `charge_full`
    - charging routines: `routine_started`, `routine_disabled`
+   - unattended auto-start: `queued_charge_started` (a one-off scheduled or
+     outage-queue start; like `routine_started`, the relay energizes with
+     nobody at the plug, so it always pushes once, fix round 2026-11-19)
 2. **Per-type toggle** (`SUPPRESSIBLE_TYPES`, default on): `session_started`,
    `nearly_done`, `power_dropped`.
 3. **Quiet hours**: any other push (the toggles above and every other info
-   notice, for example `rate_changed`, `plug_available`, `reservation_*`,
-   `queued*`) is dropped while inside the window. Suppressed pushes are not
-   queued for later.
+   notice, for example `rate_changed`, `plug_available`, `reservation_*`, and
+   the `queued` creation confirmation) is dropped while inside the window.
+   Suppressed pushes are not queued for later. `queued_charge_expired` and
+   `queued_charge_failed` are severity `warning`, so they always push.
+   `rate_changed` stays muted by quiet hours on purpose: it is a forward-only
+   info notice, a tariff boundary often sits at the quiet-hours edge, and the
+   `session_stopped` receipt (always pushed) carries the totals.
 
 If the prefs cannot be read, the push goes out (defaults).
 

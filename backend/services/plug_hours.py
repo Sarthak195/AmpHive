@@ -235,6 +235,42 @@ def closed_detail(plug, tz_name, now: datetime) -> str:
     return "This charger is closed right now."
 
 
+def schedule_closed_detail(plug, tz_name, at: datetime) -> str:
+    """[Scheduled start] The 409 detail for a schedule whose start time ``at``
+    (in the future) falls outside the opening hours."""
+    open_then, changes_at = hours_status(plug, tz_name, at)
+    if open_then:
+        return "This charger closes at that time. Pick a time within its opening hours."
+    if changes_at is not None:
+        at_local = _to_local(at, _zone(tz_name))
+        day = "" if changes_at.date() == at_local.date() else f" on {changes_at:%a}"
+        return f"This charger is closed at that time. It opens at {changes_at:%H:%M}{day}."
+    return "This charger is closed at that time."
+
+
+_WEEKDAY_NAMES = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+
+
+def closed_weekdays(plug, weekdays: int, start_minute: int) -> list:
+    """[Charge routines] Names of the selected weekdays (Mon=bit0..Sun=bit6)
+    on which the plug is closed at the local wall-clock ``start_minute``.
+    Empty for a 24x7 plug. Pure: windows and routine times are both tenant
+    wall-clock, so no timezone is needed."""
+    windows = hours_of(plug)
+    if windows is None:
+        return []
+    closed = []
+    for day in range(7):
+        if not (weekdays >> day) & 1:
+            continue
+        if not any(
+            (int(w["days"]) >> day) & 1 and int(w["start"]) <= start_minute < int(w["end"])
+            for w in windows
+        ):
+            closed.append(_WEEKDAY_NAMES[day])
+    return closed
+
+
 def driver_fields(plug, tz_name, now: datetime) -> dict:
     """The PlugResponse fields for the driver plug card and detail.
     hours_changes_at is the next close (open) or next open (closed) as an ISO

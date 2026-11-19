@@ -49,7 +49,7 @@ def _muted_everything() -> NotificationPrefs:
 def test_allowlist_names_the_safety_billing_and_routine_types():
     for t in ("session_stopped", "topup_credited", "topup_refunded", "orphan_off",
               "gateway_fault", "gateway_offline", "gateway_online", "charge_full",
-              "routine_started", "routine_disabled"):
+              "routine_started", "routine_disabled", "queued_charge_started"):
         assert t in ALWAYS_PUSH_TYPES
     assert not (ALWAYS_PUSH_TYPES & SUPPRESSIBLE_TYPES)
     assert SUPPRESSIBLE_TYPES == {"session_started", "nearly_done", "power_dropped"}
@@ -58,6 +58,18 @@ def test_allowlist_names_the_safety_billing_and_routine_types():
 @pytest.mark.parametrize("type_", sorted(ALWAYS_PUSH_TYPES))
 def test_allowlisted_info_types_push_through_quiet_hours(type_):
     assert push_allowed(type_, "info", _muted_everything(), NOON, UTC)
+
+
+def test_unattended_queued_start_pushes_in_quiet_hours_but_rate_change_does_not():
+    """A scheduled or outage-queue auto-start energizes the relay with nobody
+    watching, so it pushes like routine_started; the forward-only rate_changed
+    info notice stays muted by quiet hours."""
+    quiet = NotificationPrefs.model_validate(
+        {"quiet_hours": {"enabled": True, "start": "00:00", "end": "23:59"}}
+    )
+    assert push_allowed("queued_charge_started", "info", quiet, NOON, UTC)
+    assert not push_allowed("session_started", "info", quiet, NOON, UTC)
+    assert not push_allowed("rate_changed", "info", quiet, NOON, UTC)
 
 
 @pytest.mark.parametrize("severity", ["warning", "critical"])

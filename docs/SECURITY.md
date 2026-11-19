@@ -1091,7 +1091,9 @@ write routes, including the new `PUT /api/me/notification-prefs` (C7),
 **Notification preferences (C7).** Prefs can mute only routine pushes.
 Safety, fault and billing notices (severity critical or warning, plus
 `ALWAYS_PUSH_TYPES` in `services/notification_prefs.py`, which includes
-`routine_started` and `routine_disabled`) are decided before any prefs read
+`routine_started`, `routine_disabled` and `queued_charge_started`, so every
+unattended relay energization, routine or one-off scheduled or outage-queue,
+pushes once) are decided before any prefs read
 and always push, even in quiet hours; a test pins that no allowlisted type can
 be given a toggle. A prefs read failure fails open (push sent). The feed row
 is never suppressed.

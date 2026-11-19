@@ -51,6 +51,12 @@ ALWAYS_PUSH_TYPES = frozenset({
     # Charge routines (services/routines.py, C5).
     "routine_started",
     "routine_disabled",
+    # A one-off scheduled or outage-queue auto-start: like routine_started, the
+    # relay energizes with nobody at the plug, so it pushes once even in quiet
+    # hours. (session_started stays suppressible; rate_changed stays muted by
+    # quiet hours: it is forward-only and the session_stopped receipt, which
+    # always pushes, carries the totals.)
+    "queued_charge_started",
 })
 
 # Severities that always push, whatever the type.

@@ -822,6 +822,39 @@ async def test_schedule_rejects_out_of_range_time(offset):
     assert exc.value.detail["code"] == "schedule_out_of_range"
 
 
+def _hours_plug(nb, open_at_nb):
+    """A powered plug with opening hours that are open all day on every
+    weekday, or closed all day on not_before's local weekday only."""
+    from backend.services.pricing import _to_local, _zone
+
+    plug = _plug(powered=True)
+    days = 127
+    if not open_at_nb:
+        days &= ~(1 << _to_local(nb, _zone("Asia/Kolkata")).weekday())
+    plug.opening_hours = [{"days": days, "start": 0, "end": 1440}]
+    return plug
+
+
+@pytest.mark.asyncio
+async def test_schedule_rejects_a_start_time_outside_opening_hours():
+    """[Plug hours] A schedule for a closed slot would hold the socket against
+    other drivers and then expire; refuse it like a reservation."""
+    nb = _soon()
+    db = _db(*_sched_prefix(plug=_hours_plug(nb, open_at_nb=False)))
+    with pytest.raises(HTTPException) as exc:
+        await queue_charge(_sched_req(not_before=nb), _user(), db)
+    assert exc.value.status_code == 409
+    assert exc.value.detail["code"] == "plug_closed"
+    assert "closed at that time" in exc.value.detail["message"]
+    db.add.assert_not_called()
+
+    # Open at that time: admission goes on to the booking check.
+    db = _db(*_sched_prefix(plug=_hours_plug(nb, open_at_nb=True)), _s1n(11))
+    with pytest.raises(HTTPException) as exc:
+        await queue_charge(_sched_req(not_before=nb), _user(), db)
+    assert exc.value.detail["code"] == "plug_reserved"
+
+
 @pytest.mark.asyncio
 async def test_schedule_rejects_other_drivers_overlapping_booking():
     db = _db(*_sched_prefix(), _s1n(11))         # a BOOKED window overlaps

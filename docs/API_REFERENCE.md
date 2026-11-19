@@ -168,7 +168,9 @@ The client converts the tenant's wall-clock to an instant; the server never gues
 a zone.
 
 - Extra rejects (structured `detail.code`): 409 `plug_unpowered` (queue it instead),
-  409 `plug_in_use`, 409 `plug_out_of_service`, 422 `schedule_needs_limit` (a
+  409 `plug_in_use`, 409 `plug_out_of_service`, 409 `plug_closed` (the plug has
+  opening hours and is closed at `not_before`, or closes within 60 s of it; the
+  message names when it opens), 422 `schedule_needs_limit` (a
   schedule must carry `max_kwh` or `max_duration_seconds`: nobody is at the plug
   when it switches on), 400 `schedule_out_of_range`, 409 `plug_reserved` (another
   driver's booking overlaps `[now, not_before + max_duration]`, or the walk-up
@@ -345,8 +347,8 @@ only `routine_started`, never `session_started` or `queued_charge_started`.
 | Method | Path | Auth | Body/Params | Behaviour |
 |--------|------|------|-------------|-----------|
 | GET | `/api/me/routines` | JWT | - | `{routines: [{id, plug_id, plug_name, weekdays, start_time 'HH:MM', max_kwh, max_duration_seconds, auto_stop_when_full, enabled, consecutive_failures, last_materialized_date, tenant_timezone, created_at}], max_routines: 5}` |
-| POST | `/api/me/routines` | JWT (a `cpo_viewer` gets 403) | `{plug_id, weekdays (1..127, Mon=1..Sun=64), start_time ('HH:MM', tenant wall-clock, no offset), max_kwh? (0<x<=100), max_duration_seconds? (0<x<=86400), auto_stop_when_full=false, enabled=true}` | 201 row. 422 when no limit is given; 409 `{code: 'routine_limit'}`; 409 `{code: 'queue_disabled'}` while queued/scheduled charging is off for the plug; 404 for an unknown plug; 403 for a private group. |
-| PATCH | `/api/me/routines/{id}` | JWT (a `cpo_viewer` gets 403) | any field except `plug_id` | A limit may be cleared with null while another remains (otherwise 422 `{code: 'routine_needs_limit'}`). Re-enabling resets `consecutive_failures` and requires the queue gate (409 `queue_disabled`). Disabling cancels the routine's queued row if it has not started. |
+| POST | `/api/me/routines` | JWT (a `cpo_viewer` gets 403) | `{plug_id, weekdays (1..127, Mon=1..Sun=64), start_time ('HH:MM', tenant wall-clock, no offset), max_kwh? (0<x<=100), max_duration_seconds? (0<x<=86400), auto_stop_when_full=false, enabled=true}` | 201 row. 422 when no limit is given; 409 `{code: 'routine_limit'}`; 409 `{code: 'queue_disabled'}` while queued/scheduled charging is off for the plug; 409 `{code: 'plug_closed'}` when the plug has opening hours and is closed at `start_time` on any selected weekday (checked only for an enabled routine); 404 for an unknown plug; 403 for a private group. |
+| PATCH | `/api/me/routines/{id}` | JWT (a `cpo_viewer` gets 403) | any field except `plug_id` | A limit may be cleared with null while another remains (otherwise 422 `{code: 'routine_needs_limit'}`). Re-enabling resets `consecutive_failures` and requires the queue gate (409 `queue_disabled`). Changing `weekdays` or `start_time` on an enabled routine, or re-enabling it, answers 409 `plug_closed` when the plug is closed at that time on a selected day; a limits-only edit or turning it off is never refused for hours. Disabling cancels the routine's queued row if it has not started. |
 | DELETE | `/api/me/routines/{id}` | JWT (a `cpo_viewer` gets 403) | - | `{id, status: 'deleted'}` |
 
 Owner only: another driver's routine answers 404. When queued/scheduled

@@ -636,6 +636,64 @@ async def test_reenable_resets_failures_and_disable_withdraws_the_pending_row():
     assert cancel.startswith("UPDATE queued_charges")
 
 
+def _weekday_hours_plug():
+    """Open 08:00-20:00 Mon-Fri (tenant wall clock), closed at weekends."""
+    plug = _plug()
+    plug.opening_hours = [{"days": 31, "start": 480, "end": 1200}]
+    return plug
+
+
+@pytest.mark.asyncio
+async def test_create_refuses_a_start_time_the_plug_is_closed_at():
+    """[Plug hours] Every occurrence at a closed time would expire, count a
+    failure and, on the third, turn the routine off."""
+    db = _db(MagicMock(), _s1(0), _one((_weekday_hours_plug(), _tenant())))
+    with pytest.raises(HTTPException) as exc:
+        await create_routine(
+            RoutineCreateRequest(plug_id=1, weekdays=ALL_DAYS, start_time="09:00", max_kwh=5),
+            _driver(), db,
+        )
+    assert exc.value.status_code == 409
+    assert exc.value.detail["code"] == "plug_closed"
+    assert "Sat, Sun" in exc.value.detail["message"]
+    db.add.assert_not_called()
+
+    db = _db(MagicMock(), _s1(0), _one((_weekday_hours_plug(), _tenant())))
+    with _patched_zone():
+        await create_routine(
+            RoutineCreateRequest(plug_id=1, weekdays=31, start_time="09:00", max_kwh=5),
+            _driver(), db,
+        )
+    db.add.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_update_checks_hours_only_when_the_time_days_or_enabled_change():
+    routine = _routine(start=time(9, 0), weekdays=31)
+    db = _db(_s1n(routine), _one((_weekday_hours_plug(), _tenant())))
+    with pytest.raises(HTTPException) as exc:
+        await update_routine(3, RoutineUpdateRequest(start_time="21:00"), _driver(), db)
+    assert exc.value.detail["code"] == "plug_closed"
+    db.commit.assert_not_awaited()
+
+    # Hours edited since: a limits-only edit or turning it off still saves.
+    routine = _routine(start=time(21, 0), weekdays=31)
+    db = _db(_s1n(routine), _one((_weekday_hours_plug(), _tenant())))
+    await update_routine(3, RoutineUpdateRequest(max_kwh=6.0), _driver(), db)
+    db.commit.assert_awaited()
+    routine = _routine(start=time(21, 0), weekdays=31)
+    db = _db(_s1n(routine), _one((_weekday_hours_plug(), _tenant())), MagicMock())
+    await update_routine(3, RoutineUpdateRequest(enabled=False), _driver(), db)
+    assert routine.enabled is False
+
+    # Re-enabling it is checked.
+    routine = _routine(start=time(21, 0), weekdays=31, enabled=False)
+    db = _db(_s1n(routine), _one((_weekday_hours_plug(), _tenant())))
+    with pytest.raises(HTTPException) as exc:
+        await update_routine(3, RoutineUpdateRequest(enabled=True), _driver(), db)
+    assert exc.value.detail["code"] == "plug_closed"
+
+
 def test_routine_write_routes_are_in_the_viewer_walk():
     """The cpo_viewer route walk (test_cpo_viewer_role.py) asserts 403 on
     every write route it reaches; pin that it reaches these."""

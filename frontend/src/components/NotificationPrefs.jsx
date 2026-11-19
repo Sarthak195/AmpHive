@@ -5,7 +5,8 @@
  *   PUT /api/me/notification-prefs   same shape without timezone
  *
  * Only push is affected: every notice still lands in the bell feed. Safety,
- * fault and billing notices (and anything marked warning or critical) always
+ * fault and billing notices, unattended (scheduled, queued or routine) starts,
+ * and anything marked warning or critical always
  * push, even in quiet hours, so they have no toggle here. Times are in the
  * zone the server reports (the account's tenant zone; a driver has no
  * tenant, so it is the platform default, Asia/Kolkata). A read-only
@@ -83,7 +84,7 @@ export default function NotificationPrefs() {
       <form className="stack-sm" onSubmit={handleSave}>
         <p className="text-2 text-sm">
           These only change push alerts. Every notice still appears in your bell, and safety,
-          fault and billing alerts always push.
+          fault and billing alerts, and scheduled or routine starts, always push.
         </p>
         <fieldset className="stack-sm notif-prefs-group">
           <legend className="field-label">Push me when</legend>

@@ -50,6 +50,11 @@ hold, billing and the start, exactly as for a one-off scheduled charge.
    TTL lapses; that EXPIRED row counts as one failure. (Both integrated on
    `release/2026-11-17-w3`.)
 
+Creating a routine, re-enabling it, or editing its days or start time on a
+plug with opening hours (C4) is refused with 409 `plug_closed` when the plug
+is closed at the start time on any selected weekday. Hours a CPO edits later
+still take the WAITING-then-EXPIRED path above.
+
 Creating a routine, re-enabling it, or editing its days or start time stamps
 an occurrence whose start already passed (within the window), so a routine
 never queues a row whose `not_before` is in the past; it first runs at its

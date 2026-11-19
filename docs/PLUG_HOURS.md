@@ -36,7 +36,17 @@ Touching windows chain, so 22:00-24:00 plus 00:00-06:00 closes at 06:00.
   must fall inside the hours, else 409.
 - **Queued and scheduled starts** (`session_reaper.reap_queued_starts_once`):
   a closed plug leaves the row WAITING until it opens or the row's TTL
-  expires. The row is not failed early.
+  expires. The row is not failed early. (Hours edited after admission, or an
+  outage-queue row, still take this path.)
+- **Scheduled create** (`POST /api/sessions/queue` with `not_before`): refused
+  with 409 `plug_closed` when the plug is closed at `not_before` or closes
+  within 60 s of it (the same clamp as a start), so a closed slot never holds
+  the socket against other drivers. The outage queue has no start time and is
+  not checked.
+- **Charge routines** (`POST /api/me/routines`, and a `PATCH` that changes
+  the days or start time or turns the routine on): refused with 409
+  `plug_closed` when the plug is closed at the start time on any selected
+  weekday (`plug_hours.closed_weekdays`, pure wall-clock).
 - **Raising a running session's limit** (`PATCH /api/sessions/{id}/limits`):
   the new `max_duration_seconds` is capped to the same bounds, measured from
   the session's `started_at`, so the clamp cannot be bypassed.

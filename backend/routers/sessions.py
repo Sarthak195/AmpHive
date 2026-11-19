@@ -754,7 +754,9 @@ def _conflict(code: str, message: str, status_code: int = 409) -> HTTPException:
     return HTTPException(status_code=status_code, detail={"code": code, "message": message})
 
 
-async def _check_schedule(db: AsyncSession, req: QueueChargeRequest, user: User, plug: Plug) -> datetime:
+async def _check_schedule(
+    db: AsyncSession, req: QueueChargeRequest, user: User, plug: Plug, tz_name: Optional[str]
+) -> datetime:
     """[Scheduled start] Admission for POST /queue with not_before, on a plug
     row the caller holds FOR UPDATE (so two schedules on one socket serialize).
     Returns not_before as an aware UTC instant, or raises a structured reject."""
@@ -793,6 +795,17 @@ async def _check_schedule(db: AsyncSession, req: QueueChargeRequest, user: User,
         raise _conflict(
             "schedule_out_of_range", "Pick a start time within the next 24 hours.", status_code=400
         )
+    # [Plug hours] The start time must fall inside the opening hours (the same
+    # clamp the start applies, so a closing-within-60 s time is refused too).
+    # A row admitted for a closed slot would hold the socket against other
+    # drivers until its TTL lapsed and then expire. 24x7 skips this.
+    from backend.services import plug_hours
+
+    if plug_hours.hours_of(plug) is not None:
+        try:
+            plug_hours.clamp_start_duration(plug, tz_name, nb, req.max_duration_seconds)
+        except ValueError:
+            raise _conflict("plug_closed", plug_hours.schedule_closed_detail(plug, tz_name, nb))
     # Another driver's booking that overlaps [now, nb + expected run] would
     # force-stop this session when its window opens (or block it outright).
     # The window starts at now, not nb: the scheduled car holds the socket from
@@ -904,7 +917,7 @@ async def queue_charge(
     # [Scheduled start] not_before set = start at that time on a POWERED plug.
     nb: Optional[datetime] = None
     if req.not_before is not None:
-        nb = await _check_schedule(db, req, user, plug)
+        nb = await _check_schedule(db, req, user, plug, tenant.timezone)
     # The whole point is an UNpowered plug. A powered one should just be started.
     elif plug_is_powered(plug):
         raise HTTPException(
