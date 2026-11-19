@@ -20,9 +20,11 @@ the fee on defaults to 15. The terms resolve through the same chain as the rate
 start (`charging_sessions.idle_grace_min / idle_fee_per_min / idle_fee_cap`), so
 a tariff edit never changes a running session.
 
-Drivers see the terms in the start dialog and on the live session screen (both
-read `idle_fee` from `GET /api/plugs/{id}/tariff-preview`; the live screen shows
-the plug's current terms, while billing uses the start snapshot).
+Drivers see the terms in the start dialog, in the weekly routine form when a
+charger is chosen, and on the live session screen (all read `idle_fee` from
+`GET /api/plugs/{id}/tariff-preview`; the live screen shows the plug's current
+terms, while billing uses the start snapshot). The live screen hides the terms
+and the "unplug within N min" hint on a session with auto-stop when full on.
 
 ## What counts as idle
 
@@ -87,6 +89,13 @@ The receipt, the session detail route and the stop notification carry
   The 15-minute minimum grace and the void on renewed draw limit this, and the
   fee can be disputed, but a pause longer than the grace that ends with the
   driver stopping the session (no renewed draw seen) is billed as idle.
+- The void is measured: only a live frame can void the fee. A car that draws
+  again only while telemetry is stale (gateway offline) is not seen, so idle
+  resumes after the gap. One live frame at or above the threshold is enough to
+  void, which favours the driver.
+- The looks-full banner still shows the "unplug within N min" hint on a session
+  already voided by a renewed draw (the banner hides itself while the car draws,
+  but not after it stops again).
 - Once a session stops, the relay is OFF and the plug reads 0 W, so a car left
   on the bay after the session ends cannot be detected and is never charged.
 - The live session screen shows the plug's current terms; a CPO edit mid-session

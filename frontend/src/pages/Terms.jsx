@@ -104,8 +104,9 @@ export default function Terms() {
             you charging is done, counts only while the charger keeps reporting
             near-zero draw, pauses whenever the charger is not reporting, and is
             never charged if you chose to stop automatically when the car is
-            full. If your car starts drawing power again after we told you
-            charging is done, that session carries no idle fee at all. Some cars
+            full. If the charger reports your car drawing power again after we
+            told you charging is done, that session carries no idle fee at all.
+            Some cars
             pause charging on their own and can look full; the free period is
             there for that, and an idle fee can be disputed like
             any other charge. We cannot see a car left on the bay after the
