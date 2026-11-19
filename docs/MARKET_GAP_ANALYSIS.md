@@ -83,7 +83,7 @@ Legend: ✅ present · 🟡 partial · ❌ absent.
 |----------------|---------|:-------:|---------|
 | Map of chargers | all | 🟡 Leaflet/OSM markers of available public plugs | — |
 | Real-time availability on map | all | ✅ (2026-07-12) markers color-coded Available/In use/Offline with a legend + live counts | — |
-| Filter by power / price / connector / amenities | ChargePoint, PlugShare, Statiq | 🟡 (2026-07-12) availability + group-name filters shipped; power/price/connector remain absent — **there is no power-rating (or price) column anywhere in the plug data model**, so those specific filters aren't buildable without a schema change first | Should-do (power/price columns) |
+| Filter by power / price / connector / amenities | ChargePoint, PlugShare, Statiq | 🟡 (2026-07-12) availability + group-name filters shipped; power/price/connector/amenity filters remain absent. **Correction 2026-11-19:** the data exists now (`plugs.rated_power_w` and `connector_type`, the resolved price on every plug response, and from wave 3 (C4) `amenities` plus opening hours with an Any hours / Open now / Open 24x7 filter), so these filters need only UI work | Should-do (filters) |
 | Search / autocomplete by location or Plug ID | most; specs §4 | ❌ (type exact Plug ID) | Should-do |
 | "Find nearest" + hand-off to Google/Apple Maps nav | all | ❌ | Should-do |
 | Favorites / saved chargers | ChargePoint, Tesla, PlugShare | ❌ | Should-do |

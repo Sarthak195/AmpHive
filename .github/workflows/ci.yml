@@ -35,6 +35,9 @@ on:
 jobs:
   backend-tests:
     runs-on: ubuntu-latest
+    # The whole job normally takes about 6 min. A hung test once ran for an
+    # hour (2026-11-19, tools tests), and the default limit is 6 h.
+    timeout-minutes: 30
     # Postgres is provisioned for the Phase-1 integration tests planned in
     # docs/TESTING.md (session billing / payment concurrency); today's suite
     # is DB-free and ignores it.
@@ -91,7 +94,11 @@ jobs:
         # provisioning tool (tools/gateway_provision), whose --write path
         # flashes a real gateway. Pure Python, no IDF, serial port, broker or
         # DB; they need only pytest and paho-mqtt, both installed above.
-        run: pytest tools/tests -q
+        # They take about 5 s. faulthandler_timeout (built into pytest) dumps
+        # every thread's stack when one test runs past 60 s, so a hang names
+        # its test before the step limit fails it.
+        timeout-minutes: 5
+        run: pytest tools/tests -q -o faulthandler_timeout=60
 
   frontend-lint:
     runs-on: ubuntu-latest

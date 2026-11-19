@@ -60,6 +60,17 @@ const mockApiRoutes = ({ gateways = GATEWAYS, releases = RELEASES } = {}) => {
   api.get.mockImplementation((url) => {
     if (url === '/api/cpo/gateways') return Promise.resolve(gateways);
     if (url === '/api/cpo/firmware-releases') return Promise.resolve(releases);
+    if (url === '/api/cpo/gateways/aa11bb22cc33/selftest') {
+      return Promise.resolve({
+        gateway_id: 'aa11bb22cc33',
+        generated_at: '2026-11-18T10:00:00Z',
+        overall: 'warn',
+        checks: [
+          { key: 'online', label: 'Gateway online', status: 'pass', detail: 'Connected, last heard 5 s ago.', fix_hint: null, observed_at: null },
+          { key: 'wifi', label: 'Wi-Fi signal (at boot)', status: 'warn', detail: '-75 dBm at boot, 1 h ago.', fix_hint: 'Move the gateway closer to the router or add an access point.', observed_at: null },
+        ],
+      });
+    }
     if (url.startsWith('/api/cpo/gateways/aa11bb22cc33/logs')) {
       return Promise.resolve({
         total: 1,
@@ -91,6 +102,23 @@ describe('CpoGateways', () => {
     const logCalls = api.get.mock.calls.map((c) => c[0]).filter((u) => u.includes('/logs'));
     expect(logCalls.length).toBeGreaterThan(0);
     expect(logCalls.every((u) => u.startsWith('/api/cpo/gateways/aa11bb22cc33/logs?'))).toBe(true);
+  });
+
+  it('shows the commissioning checklist in the drawer and re-checks on demand', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText('Basement gateway');
+
+    await user.click(screen.getAllByRole('button', { name: 'Logs' })[0]);
+    expect(await screen.findByText('Commissioning checklist')).toBeInTheDocument();
+    expect(screen.getByText('Wi-Fi signal (at boot)')).toBeInTheDocument();
+    expect(screen.getByText(/Move the gateway closer/)).toBeInTheDocument();
+    const selftestCalls = () => api.get.mock.calls.filter((c) => c[0].endsWith('/selftest')).length;
+    expect(selftestCalls()).toBe(1);
+
+    await user.click(screen.getByRole('button', { name: /Re-check/ }));
+    await screen.findByText('Gateway online');
+    expect(selftestCalls()).toBe(2);
   });
 
   it('renders the fleet table with status, firmware (behind badge), and plug counts', async () => {

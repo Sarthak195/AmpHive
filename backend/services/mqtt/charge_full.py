@@ -104,6 +104,11 @@ class ChargeFullDetector:
             return True
         return False
 
+    def has_fired(self, plug_id: int, session_id: int) -> bool:
+        """Has this session already been judged fully charged (in memory)?"""
+        st = self._plugs.get(plug_id)
+        return st is not None and st.session_id == session_id and st.fired
+
     def note_stop_failed(self, plug_id: int, session_id: int) -> None:
         """The opted-in finalize raised: keep retrying. The first failure is
         timed from the frame that fired; a failed retry keeps its own claim."""

@@ -155,9 +155,17 @@ class SessionReaperService:
             except Exception:
                 logger.exception("Reservation-start sweep failed")
             try:
+                await self.reap_routines_once()
+            except Exception:
+                logger.exception("Charge-routine materialize sweep failed")
+            try:
                 await self.reap_queued_starts_once()
             except Exception:
                 logger.exception("Queued-charge start sweep failed")
+            try:
+                await self.settle_routines_once()
+            except Exception:
+                logger.exception("Charge-routine settle sweep failed")
             try:
                 await self.reap_reprice_once()
             except Exception:
@@ -489,6 +497,21 @@ class SessionReaperService:
             logger.info(f"Reservation-start sweep activated {activated} booking(s)")
         return activated
 
+    async def reap_routines_once(self, now: Optional[datetime] = None) -> int:
+        """[C5] Queue each due charge routine's occurrence as an ordinary
+        scheduled QueuedCharge (services/routines.py). Runs just before
+        reap_queued_starts_once, which alone admits, holds, bills and starts."""
+        from backend.services.routines import materialize_routines
+
+        return await materialize_routines(self.db_session_factory, now)
+
+    async def settle_routines_once(self) -> int:
+        """[C5] After the queued-start sweep: reset or count each routine's
+        failures from its last queued row's outcome (services/routines.py)."""
+        from backend.services.routines import settle_routines
+
+        return await settle_routines(self.db_session_factory)
+
     async def reap_queued_starts_once(self) -> int:
         """[Queued charge] Process each WAITING queued charge: expire the ones
         whose TTL lapsed, and auto-start the ones whose plug has been powered
@@ -545,6 +568,7 @@ class SessionReaperService:
         from fastapi import HTTPException
 
         from backend.database.models import (
+            ChargeRoutine,
             ChargingSession,
             Gateway,
             Plug,
@@ -559,9 +583,11 @@ class SessionReaperService:
         )
         from backend.services import pricing
         from backend.services.notifications import notify
+        from backend.services.plug_hours import clamp_start_duration
         from backend.services.reservations import expire_lapsed_reservations
         from backend.services.session_lifecycle import gateway_is_live, plug_is_powered
         from backend.services.session_start import (
+            PlugClosedError,
             auto_start_delay,
             begin_active_session,
             queued_charging_enabled,
@@ -841,6 +867,16 @@ class SessionReaperService:
                         await db.commit()
                         continue
 
+                    # [Plug hours] A closed plug leaves the row WAITING until it
+                    # opens or the row's TTL expires (step 1). Checked here, not
+                    # left to begin_active_session's own refusal, because the
+                    # except below would turn that 409 into FAILED.
+                    try:
+                        clamp_start_duration(plug, tenant.timezone, now, qc.max_duration_seconds)
+                    except ValueError:
+                        await db.commit()
+                        continue
+
                     # 7. Start via the shared helper (commits the session + plug
                     #    claim itself), passing the user row this transaction
                     #    already holds FOR UPDATE (step 2) — begin_active_session's
@@ -854,6 +890,16 @@ class SessionReaperService:
                     # between it and a later write would otherwise return
                     # "cancelled" while the socket goes live. The except below
                     # overwrites it on failure.
+                    # [C5 + C7] A charge routine's occurrence gets exactly one
+                    # start notice, the mandatory routine_started that
+                    # settle_routines sends; neither session_started nor
+                    # queued_charge_started fires for it. A plain read (the
+                    # reaper never locks charge_routines).
+                    from_routine = (await db.execute(
+                        select(ChargeRoutine.id)
+                        .where(ChargeRoutine.last_queued_charge_id == qc.id)
+                        .limit(1)
+                    )).scalar_one_or_none() is not None
                     qc.status = QueuedChargeStatus.STARTED
                     try:
                         session = await begin_active_session(
@@ -865,7 +911,16 @@ class SessionReaperService:
                             # exactly as the manual start route does.
                             covering_reservation=covering,
                             auto_stop_when_full=bool(qc.auto_stop_when_full),
+                            announce_start=not from_routine,
                         )
+                    except PlugClosedError:
+                        # [Plug hours] Closed between the check above (the
+                        # tick's `now`) and the helper's own fresh clock, e.g.
+                        # a long sweep near closing time: nothing was written
+                        # before that refusal, so leave the row WAITING.
+                        qc.status = QueuedChargeStatus.WAITING
+                        await db.commit()
+                        continue
                     except HTTPException as exc:
                         # 402 = balance floor no longer met -> EXPIRED (funds were
                         # never locked, the accepted trade-off); caps/publish
@@ -914,10 +969,11 @@ class SessionReaperService:
                     else:
                         title = "Your scheduled charge started"
                         body = f"Your scheduled charge on {plug_name} started."
-                    await notify(
-                        user_id, "queued_charge_started", title, body,
-                        severity="info", plug_id=plug.id, session_id=session.id,
-                    )
+                    if not from_routine:
+                        await notify(
+                            user_id, "queued_charge_started", title, body,
+                            severity="info", plug_id=plug.id, session_id=session.id,
+                        )
                     logger.info(
                         f"Auto-started queued charge {qc_id} on plug {plug.id} "
                         f"(session {session.id})"

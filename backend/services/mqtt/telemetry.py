@@ -801,6 +801,9 @@ class MQTTTelemetryMixin:
         # Synchronous, before any await, so concurrent frames can't both fire.
         charge_full_fired = False
         charge_stop_retry = False
+        # [Notification prefs C7] Same real-live-sample feed, same timing.
+        nearly_done_fired = False
+        power_dropped_fired = False
         at = (sample or {}).get("recorded_at") or datetime.now(timezone.utc)
         if charge_sample is not None:
             charge_full_fired = self._charge_full.observe(
@@ -810,8 +813,19 @@ class MQTTTelemetryMixin:
                 charge_stop_retry = self._charge_full.stop_retry_due(
                     plug_id, charge_sample[0], at, watts,
                 )
+            # [C7 + F1] Once the car looks fully charged (this frame or an
+            # earlier one), "almost done" and "slowing down" would only
+            # contradict that notice, so neither detector is fed again.
+            if not self._charge_full.has_fired(plug_id, charge_sample[0]):
+                nearly_done_fired = self._session_events.observe_energy(
+                    plug_id, charge_sample[0], updated_energy_kwh, updated_max_kwh,
+                )
+                power_dropped_fired = self._session_events.observe_power(
+                    plug_id, charge_sample[0], at, watts, charge_sample[1],
+                )
         elif charge_relay_off_session is not None:
             self._charge_full.interrupt(plug_id, charge_relay_off_session)
+            self._session_events.interrupt(plug_id, charge_relay_off_session)
             if updated_auto_stop_full:
                 charge_stop_retry = self._charge_full.stop_retry_due(
                     plug_id, charge_relay_off_session, at, watts,
@@ -857,7 +871,7 @@ class MQTTTelemetryMixin:
                     rate_changed_body(new_rate), severity="info",
                     plug_id=plug_id, session_id=updated_session_id,
                 )
-            await self._maybe_auto_stop_on_exhaustion(
+            stopped = await self._maybe_auto_stop_on_exhaustion(
                 updated_session_id, updated_user_id, updated_energy_kwh, updated_rate,
                 updated_hold_coins, updated_settled, updated_segment_start,
                 max_kwh=updated_max_kwh,
@@ -870,16 +884,42 @@ class MQTTTelemetryMixin:
             # a limit fires here instead, the earlier exhaustion call was a
             # covered no-op (at most a low-balance warning) — either way the
             # session settles exactly once via the shared finalize row lock.
-            await self._maybe_auto_stop_on_limits(
+            stopped = await self._maybe_auto_stop_on_limits(
                 updated_session_id, updated_user_id, updated_energy_kwh,
                 updated_max_kwh, updated_max_duration, updated_started_at,
-            )
+            ) or stopped
+            if stopped:
+                # This frame ended the session: the driver already has the
+                # session_stopped receipt, so no "looks full" handling and no
+                # nearly_done / power_dropped notice for a session that is over.
+                return
             if charge_full_fired:
                 await self._on_charge_full(
                     updated_session_id, updated_user_id, plug_id, updated_auto_stop_full,
                 )
             elif charge_stop_retry:
                 await self._charge_full_stop(updated_session_id, updated_user_id, plug_id)
+            # [Notification prefs C7] Suppressible notices (notify() applies the
+            # driver's push prefs and quiet hours; the feed row is always kept).
+            if nearly_done_fired or power_dropped_fired:
+                from backend.services.notifications import notify
+                if nearly_done_fired:
+                    await notify(
+                        updated_user_id, "nearly_done", "Almost done charging",
+                        f"{(updated_energy_kwh or 0.0):.2f} of {updated_max_kwh:g} kWh delivered. "
+                        "The session stops at your energy limit.",
+                        severity="info", plug_id=plug_id, session_id=updated_session_id,
+                    )
+                if power_dropped_fired and charge_sample is not None:
+                    from backend.services.mqtt.session_events import POWER_DROP_MINUTES
+                    await notify(
+                        updated_user_id, "power_dropped", "Charging has slowed down",
+                        f"Power has stayed below half of this session's "
+                        f"{(charge_sample[1] or 0.0) / 1000:.1f} kW peak for "
+                        f"{POWER_DROP_MINUTES:g} minutes (now {watts:.0f} W). "
+                        "Cars often taper like this near the end of a charge.",
+                        severity="info", plug_id=plug_id, session_id=updated_session_id,
+                    )
 
     async def _on_charge_full(self, session_id: int, user_id: int, plug_id: int,
                               auto_stop: bool):
@@ -952,11 +992,12 @@ class MQTTTelemetryMixin:
                                               hold_coins: Optional[Decimal] = None,
                                               settled_cost_coins: Optional[Decimal] = None,
                                               rate_segment_start_kwh: Optional[float] = None,
-                                              max_kwh: Optional[float] = None):
+                                              max_kwh: Optional[float] = None) -> bool:
         """Finalize an ACTIVE session once its accrued cost meets/exceeds its
         exhaustion threshold. No-op when disabled, when the threshold still
         covers the energy, or when the session is already gone (finalize
-        re-checks ACTIVE under a row lock, so this is race-safe).
+        re-checks ACTIVE under a row lock, so this is race-safe). Returns True
+        when it ran the finalize (the session is no longer ACTIVE after it).
 
         `rate_coins_per_kwh` is the session's SNAPSHOTTED rate (see
         services/pricing.py resolve_rate_for_plug / models.py
@@ -982,7 +1023,7 @@ class MQTTTelemetryMixin:
         )
 
         if not AUTO_STOP_ON_BALANCE_EXHAUSTED or not self.db_session_factory:
-            return
+            return False
         from types import SimpleNamespace
 
         from backend.services.billing import session_cost
@@ -1002,7 +1043,7 @@ class MQTTTelemetryMixin:
             )
             accrued_cost = session_cost(segments, energy_kwh)
             if accrued_cost <= 0:
-                return
+                return False
             if hold_coins is not None:
                 threshold = hold_coins
             else:
@@ -1014,7 +1055,7 @@ class MQTTTelemetryMixin:
                         select(User).where(User.id == user_id)
                     )).scalar_one_or_none()
                     if user is None:
-                        return
+                        return False
                     threshold = user.coin_balance
             # Is the driver's own kWh limit (not the wallet) what stops this
             # session? With a kWh limit the hold is sized to that limit's cost
@@ -1055,7 +1096,7 @@ class MQTTTelemetryMixin:
                         severity="warning",
                         session_id=session_id,
                     )
-                return
+                return False
             # Threshold exhausted — stop through the shared finalize path
             # (own txn; row-locks + re-checks ACTIVE so a concurrent user stop
             # or the reaper settles this exactly once).
@@ -1085,16 +1126,18 @@ class MQTTTelemetryMixin:
                         "reason": reason,
                     },
                 )
+            return True
         except Exception:
             logger.exception(
                 "Balance-exhaustion auto-stop failed",
                 extra={"session_id": session_id, "user_id": user_id},
             )
+        return False
 
     async def _maybe_auto_stop_on_limits(self, session_id: int, user_id: int, energy_kwh: float,
                                           max_kwh: Optional[float] = None,
                                           max_duration_seconds: Optional[int] = None,
-                                          started_at: Optional[datetime] = None):
+                                          started_at: Optional[datetime] = None) -> bool:
         """[Session limits] Finalize an ACTIVE session once it reaches ITS OWN
         stop conditions (ChargingSession.max_kwh / max_duration_seconds,
         snapshotted from the start request — routers/sessions.py
@@ -1122,7 +1165,7 @@ class MQTTTelemetryMixin:
         from backend.services.mqtt_manager import AUTO_STOP_ON_LIMITS
 
         if not AUTO_STOP_ON_LIMITS or not self.db_session_factory:
-            return
+            return False
 
         reason: Optional[str] = None
         if max_kwh is not None and energy_kwh >= max_kwh:
@@ -1135,7 +1178,7 @@ class MQTTTelemetryMixin:
             if elapsed_sec >= max_duration_seconds:
                 reason = "auto-stopped: time limit reached"
         if reason is None:
-            return
+            return False
 
         try:
             from backend.services.session_lifecycle import finalize_charging_session
@@ -1154,8 +1197,10 @@ class MQTTTelemetryMixin:
                         "reason": reason,
                     },
                 )
+            return True
         except Exception:
             logger.exception(
                 "Charging-limit auto-stop failed",
                 extra={"session_id": session_id, "user_id": user_id},
             )
+        return False

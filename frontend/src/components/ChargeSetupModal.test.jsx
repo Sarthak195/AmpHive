@@ -280,6 +280,14 @@ describe('ChargeSetupModal: scheduled start', () => {
     expect(notBefore).toMatch(/T16:30:00\.000Z$/);
   });
 
+  it('a closed plug opens on "At a time" with the 8h preselect and offers no "Now"', () => {
+    renderModal({ plug: { ...SCHED_PLUG, open_now: false } });
+    expect(screen.queryByRole('button', { name: 'Now' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'At a time' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: '8h' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: 'Schedule charge' })).toBeDisabled();
+  });
+
   it('"Now" keeps the two-argument start call', async () => {
     const { onConfirm } = renderModal({ plug: SCHED_PLUG });
     await userEvent.click(screen.getByRole('button', { name: 'Start charging' }));
@@ -338,5 +346,42 @@ describe('ChargeSetupModal: cheapest window', () => {
     api.get.mockResolvedValue(PREVIEW);
     renderModal({ plug: { ...PLUG, id: 9 } });
     expect(api.get).not.toHaveBeenCalled();
+  });
+});
+
+describe('ChargeSetupModal: estimate line', () => {
+  const EST = {
+    energy_kwh: 3.68,
+    duration_min: 60,
+    finish_at: '2026-11-17T08:30:00+00:00',
+    cost_coins: '36.80',
+    rate_changes: [],
+    basis: 'rated_power',
+    is_estimate: true,
+  };
+
+  it('shows nothing until a limit is set, then a labelled estimate from the endpoint', async () => {
+    api.get.mockResolvedValue(EST);
+    renderModal();
+    expect(screen.queryByTestId('charge-estimate')).not.toBeInTheDocument();
+    expect(api.get).not.toHaveBeenCalled();
+
+    await userEvent.click(screen.getByRole('button', { name: '1h' }));
+    const line = await screen.findByTestId('charge-estimate');
+    expect(api.get).toHaveBeenCalledWith('/api/plugs/7/estimate?max_duration_min=60');
+    expect(line).toHaveTextContent(/Estimate/);
+    expect(line).toHaveTextContent(/3\.7 kWh in 1h/);
+    expect(line).toHaveTextContent(/₹36\.80/);
+    expect(line).toHaveTextContent(/rated power/);
+  });
+
+  it('sends the energy limit and survives a failed fetch', async () => {
+    api.get.mockRejectedValue(new Error('boom'));
+    renderModal();
+    fireEvent.change(screen.getByLabelText('Energy limit (kWh)'), { target: { value: '5' } });
+    await waitFor(() =>
+      expect(api.get).toHaveBeenCalledWith('/api/plugs/7/estimate?max_kwh=5'),
+    );
+    expect(screen.queryByTestId('charge-estimate')).not.toBeInTheDocument();
   });
 });

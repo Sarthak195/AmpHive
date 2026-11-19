@@ -51,6 +51,7 @@ import Modal from '../../components/ui/Modal';
 import ConfirmDialog from '../../components/ui/ConfirmDialog';
 import StatusDot from '../../components/ui/StatusDot';
 import Money from '../../components/ui/Money';
+import PlugHoursEditor from '../../components/PlugHoursEditor';
 import { useToast } from '../../components/ui';
 import api from '../../api/client';
 import { useConfig } from '../../contexts/ConfigContext';
@@ -58,6 +59,7 @@ import { useSession } from '../../contexts/SessionContext';
 import usePoll from '../../hooks/usePoll';
 import { getPlugAvailability, AVAILABILITY_STATES, AVAILABILITY_LABELS } from '../../utils/plugAvailability';
 import { apiErrorCopy } from '../../utils/statusCopy';
+import { hoursFormFromPlug, hoursPatch } from '../../utils/plugHours';
 import './CpoChargers.css';
 
 const QUEUED_OPTIONS = [
@@ -337,6 +339,8 @@ export default function CpoChargers() {
     rated_power_w: '',
     connector_type: '',
   });
+  // [Plug hours] Opening hours, max session length, amenities, access note.
+  const [hoursForm, setHoursForm] = useState(() => hoursFormFromPlug(null));
   const [editError, setEditError] = useState('');
   const [editBusy, setEditBusy] = useState(false);
 
@@ -353,6 +357,7 @@ export default function CpoChargers() {
       rated_power_w: plug.rated_power_w ?? '',
       connector_type: plug.connector_type ?? '',
     });
+    setHoursForm(hoursFormFromPlug(plug));
     setEditError('');
     setEditOpen(true);
   };
@@ -398,6 +403,7 @@ export default function CpoChargers() {
       if (editForm.connector_type !== (editingPlug.connector_type ?? '')) {
         body.connector_type = editForm.connector_type;
       }
+      Object.assign(body, hoursPatch(hoursForm, editingPlug));
 
       if (Object.keys(body).length > 0) {
         await api.put(`/api/cpo/plugs/${editingPlug.id}`, body);
@@ -965,6 +971,10 @@ export default function CpoChargers() {
                   How long power must stay on before a queued charge auto-starts.
                 </p>
               </div>
+            </Section>
+
+            <Section title="Hours and access">
+              <PlugHoursEditor value={hoursForm} onChange={setHoursForm} />
             </Section>
 
             {editError && <p className="field-error">{editError}</p>}

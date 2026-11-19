@@ -279,7 +279,11 @@ class ChargePoint:
             self._pending[msg_id] = fut
             try:
                 await ws.send(json.dumps([CALL, msg_id, action, payload]))
-                result: dict[str, Any] = await asyncio.wait_for(fut, CALL_TIMEOUT)
+                # asyncio.timeout, not wait_for: on Python 3.11 wait_for can
+                # swallow a task cancel that lands as the reply arrives
+                # (cpython gh-86296), and the charge point then never stops.
+                async with asyncio.timeout(CALL_TIMEOUT):
+                    result: dict[str, Any] = await fut
                 return result
             except asyncio.TimeoutError:
                 await ws.close()  # an unanswered call means a broken link: reconnect

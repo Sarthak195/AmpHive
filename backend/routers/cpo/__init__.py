@@ -67,6 +67,7 @@ from ._gateways import (
     cpo_claim_gateway,
     cpo_create_gateway,
     cpo_gateway_ota,
+    cpo_gateway_selftest,
     cpo_list_firmware_releases,
     cpo_list_gateways,
 )
@@ -132,7 +133,7 @@ __all__ = [
     "cpo_list_plug_reports", "cpo_resolve_plug_report",
     "cpo_list_plug_photos", "cpo_approve_plug_photo", "cpo_reject_plug_photo",
     "cpo_acknowledge_event", "cpo_gateway_logs", "cpo_list_audit_log", "cpo_list_events",
-    "cpo_claim_gateway", "cpo_create_gateway", "cpo_gateway_ota",
+    "cpo_claim_gateway", "cpo_create_gateway", "cpo_gateway_ota", "cpo_gateway_selftest",
     "cpo_list_firmware_releases", "cpo_list_gateways",
     "cpo_create_group", "cpo_delete_group", "cpo_list_group_members", "cpo_list_groups",
     "cpo_remove_group_member", "cpo_update_group", "generate_unique_access_code",

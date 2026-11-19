@@ -49,6 +49,11 @@ to the tenant whose console it can read (read-only, see SECURITY.md §8.11).
 CHECK `ck_users_coin_balance_non_negative` (`coin_balance >= 0`, revision
 `0002_wallet_non_negative`, 2026-07-07) — the DB-level backstop behind the
 row-locked, clamped wallet debits.
+`notification_prefs` JSONB NULL (`0048_notification_prefs`, C7, wave 3, not
+deployed): per-type push toggles and quiet hours
+(`services/notification_prefs.NotificationPrefs` dumped as JSON). NULL means
+the defaults (all pushes on, no quiet hours). Included in the personal data
+export as `account.notification_prefs`.
 
 **Account closure ANONYMISES this row; it does not delete it.** Every
 `user_id` foreign key in this document is `ON DELETE CASCADE`, so
@@ -105,6 +110,14 @@ freshly seen.
 for ESP-gateway / manually-provisioned plugs — the `(gateway_id, unique_id)`
 discovery-upsert key) · `status` (default `offline`) · `current_power_w` float ·
 `last_seen_at` · `created_at` · `group_id` → charger_groups (SET NULL, nullable).
+
+Plug hours (`0049_plug_hours`, C4, wave 3, not deployed; down_revision
+`0048_notification_prefs`):
+`opening_hours` JSONB NULL: a list of `{days, start, end}` windows in tenant
+local time with TariffSlot semantics; NULL means open 24x7 (cleared values
+are SQL NULL). `max_session_minutes` INTEGER NULL. `amenities` JSONB NULL:
+tags from a fixed server-side allowlist. `access_note` VARCHAR(280) NULL:
+plain text for drivers.
 
 The backend's **retained plug roster** (`amphive/gateways/{gw}/config`, see
 [MQTT_CONTRACT.md](MQTT_CONTRACT.md)) is derived from these rows — one
@@ -396,9 +409,29 @@ full column list of each:
   `idx_promo_redemptions_code_user` (`code_id`, `user_id`). Limits are
   COUNT(*) of these rows, taken under the `promo_codes` row lock.
 
-The ORM declares **35 tables** as of `0047_promo_codes` (`__tablename__`
-count, rechecked 2026-11-17; the earlier "26" had drifted). Prod, at
-`0047_promo_codes` since 2026-11-19, has 35 (it had 32 at `0043_email_ci_unique`). All are applied via Alembic per §4 below.
+- **`charge_routines`** (`0050_charge_routines.py`, C5, wave 3, not
+  deployed; down_revision `0049_plug_hours`) - a driver's recurring weekly
+  charge. Columns: `id` SERIAL PK; `user_id` FK users CASCADE (indexed
+  `ix_charge_routines_user_id`); `plug_id` FK plugs CASCADE; `tenant_id` FK
+  tenants CASCADE, denormalized from plug -> gateway -> tenant like
+  `queued_charges`; `weekdays` SMALLINT, bitmask Mon=1..Sun=64, CHECK
+  `ck_charge_routines_weekdays` 1..127; `start_time` TIME, local wall-clock in
+  the tenant timezone; `max_kwh` DOUBLE PRECISION NULL; `max_duration_seconds`
+  INTEGER NULL, with CHECK `ck_charge_routines_has_limit` requiring at least
+  one of the two limits; `auto_stop_when_full` BOOLEAN default false;
+  `enabled` BOOLEAN default true; `last_materialized_date` DATE, the local
+  date of the last handled occurrence, stamped under a row lock in the same
+  transaction as the insert; `consecutive_failures` INTEGER default 0;
+  `gate_notified` BOOLEAN NOT NULL DEFAULT false (the driver was told the
+  routine is paused because queued charging is off for the plug; sent once,
+  cleared by the next queued row); `last_queued_charge_id` FK queued_charges
+  SET NULL, the occurrence's row until its outcome is settled; `created_at`.
+  Account closure deletes the user's routines.
+
+The ORM declares **36 tables** as of `0050_charge_routines` (`__tablename__`
+count, rechecked 2026-11-19). Prod, at `0047_promo_codes` since 2026-11-19, has
+35 (32 at `0043_email_ci_unique`); it reaches 36 once wave 3 is applied. All
+are applied via Alembic per §4 below.
 
 ## 3. Relationships
 
@@ -432,7 +465,7 @@ joined via `access_code`.
   arrived via `0005_gateway_events` (2026-07-10), `audit_logs` via
   `0007_audit_log` (2026-07-12), and `notifications` + `push_subscriptions`
   via `0008_notifications` (2026-07-11, renumbered from 0007 at merge); it's
-  **35 tables** once `0047_promo_codes` is applied (32 at `0043`); see "Tables added since" in §2 above for the rest.)
+  **36 tables** once `0050_charge_routines` is applied (35 at `0047`, deployed 2026-11-19; 32 at `0043`); see "Tables added since" in §2 above for the rest.)
 - **Wave 2 chain (2026-11-17, `release/2026-11-17-w2`, deployed 2026-11-19).**
   `0043_email_ci_unique` -> `0044_session_auto_stop_full` (two nullable
   booleans, IF NOT EXISTS) -> `0045_cpo_viewer_role` (enum value, downgrade is
@@ -441,6 +474,15 @@ joined via `access_code`.
   downgrade drops them). One head. `env.py` runs all pending revisions in one
   transaction; `ALTER TYPE ... ADD VALUE` is allowed there on PG 12+ (prod is
   15) because no later revision uses the new value.
+- **Wave 3 chain (2026-11-19, `release/2026-11-17-w3`, not deployed).**
+  `0047_promo_codes` -> `0048_notification_prefs` (`users.notification_prefs`
+  JSONB, ADD COLUMN IF NOT EXISTS, no backfill, no GRANT) ->
+  `0049_plug_hours` (four nullable `plugs` columns, ADD COLUMN IF NOT EXISTS,
+  metadata-only; downgrade drops them) -> `0050_charge_routines` (CREATE
+  TABLE IF NOT EXISTS plus `ix_charge_routines_user_id`; downgrade drops the
+  table). One head, no branch point (checked offline with `ScriptDirectory`).
+  All three were written against `0047` on their branches and rechained at
+  integration. The owner role's default privileges cover the new table.
 - **New schema change** = new revision: `alembic -c backend/alembic.ini
   revision --autogenerate -m "..."` (autogenerate needs a reachable database —
   use the CI postgres or the VM; dev boxes run no DB by policy).

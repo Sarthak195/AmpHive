@@ -1,0 +1,34 @@
+/* ChargeRoutines: layout only (identity comes from tokens/primitives). */
+
+.routine-list {
+  display: grid;
+  gap: var(--sp-3);
+  margin-top: var(--sp-2);
+}
+
+.routine-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-shrink: 0;
+}
+
+/* Seven day toggles wrap on a phone instead of widening the card. */
+.routine-days {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2) var(--sp-3);
+  border: 0;
+  padding: 0;
+  margin: 0;
+}
+
+.routine-days legend {
+  width: 100%;
+}
+
+.routine-limits {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: var(--sp-3);
+}

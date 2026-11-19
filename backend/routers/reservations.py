@@ -40,6 +40,7 @@ from backend.database.models import (
     PlugStatus,
     Reservation,
     ReservationStatus,
+    Tenant,
     User,
     UserRole,
 )
@@ -51,6 +52,7 @@ from backend.schemas import (
 from backend.services import reservations as reservation_policy
 from backend.services.auth import get_current_user, is_cpo_viewer
 from backend.services.notifications import notify
+from backend.services.plug_hours import hours_of, window_is_open
 from backend.services.reservations import (
     expire_lapsed_reservations,
     format_window,
@@ -193,6 +195,21 @@ async def create_reservation(
             status_code=409,
             detail="This plug is under maintenance and cannot be reserved.",
         )
+
+    # [Plug hours] The whole booked window must fall inside the plug's opening
+    # hours (tenant local time). Under the plug lock, like the checks around
+    # it. A 24x7 plug (NULL hours) skips this, with no extra query.
+    if hours_of(plug) is not None:
+        tz_name = (await db.execute(
+            select(Tenant.timezone)
+            .join(Gateway, Gateway.tenant_id == Tenant.id)
+            .where(Gateway.id == plug.gateway_id)
+        )).scalar_one_or_none()
+        if not window_is_open(plug, tz_name, start_at, end_at):
+            raise HTTPException(
+                status_code=409,
+                detail="This charger is closed during part of that slot. Pick a time within its opening hours.",
+            )
 
     # 4. Overlap check against BOOKED windows, under the plug lock.
     await expire_lapsed_reservations(db, plug_id=plug.id, now=now)

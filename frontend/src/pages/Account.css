@@ -53,3 +53,12 @@
   padding-left: var(--sp-5);
   list-style: disc;
 }
+
+/* Push preferences (components/NotificationPrefs.jsx): drop the default
+   fieldset frame so the toggles line up with the rest of the card. */
+.notif-prefs-group {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}

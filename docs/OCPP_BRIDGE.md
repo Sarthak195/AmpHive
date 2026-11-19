@@ -135,7 +135,7 @@ timeout, 5xx or connection error leaves everything as it was.
 | `OCPP_BASIC_USER` | the charge point id | Basic auth user name |
 | `OCPP_STATE_FILE` | `~/.amphive-ocpp-bridge.json` | register and transaction state |
 
-Run from the repo root: `python -m tools.ocpp_bridge` (add `-v` for debug
+Run from the repo root with Python 3.11 or newer: `python -m tools.ocpp_bridge` (add `-v` for debug
 logs). Exit codes: 2 bad configuration, 3 token rejected.
 
 ## Demo on a laptop

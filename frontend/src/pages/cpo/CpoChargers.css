@@ -112,3 +112,29 @@
   text-align: center;
   margin-top: var(--sp-3);
 }
+
+/* [Plug hours] Opening-hours rows in the edit modal (PlugHoursEditor). */
+.plug-hours-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-2);
+}
+
+.plug-hours-row .input[type='time'] {
+  width: auto;
+  min-width: 0;
+}
+
+.plug-hours-days {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1);
+}
+
+.plug-hours-amenity-set {
+  border: none;
+  margin: 0;
+  padding: 0;
+}

@@ -58,6 +58,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database.models import (
     CapacityRequest,
+    ChargeRoutine,
     ChargingSession,
     EmailVerificationToken,
     Gateway,
@@ -222,6 +223,7 @@ async def close_account(db: AsyncSession, user: User) -> dict:
         ("notifications", Notification, Notification.user_id),
         ("favorites", UserFavorite, UserFavorite.user_id),
         ("plug_watches", PlugWatch, PlugWatch.user_id),
+        ("charge_routines", ChargeRoutine, ChargeRoutine.user_id),
         ("group_memberships", GroupMembership, GroupMembership.user_id),
         ("capacity_requests", CapacityRequest, CapacityRequest.user_id),
         ("password_reset_tokens", PasswordResetToken, PasswordResetToken.user_id),

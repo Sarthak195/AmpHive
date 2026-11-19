@@ -23,8 +23,10 @@
  * CpoLayout/TenantContext already own the org name and nav badges — this
  * page fetches only its own gateway list.
  *
- * Diagnostics: the per-row "Logs" button opens a drawer of the gateway's
- * forwarded firmware log lines (GatewayLogsPanel, GET .../gateways/{id}/logs).
+ * Diagnostics: the per-row "Logs" button opens a drawer with the read-only
+ * commissioning checklist (GatewayChecklist, GET .../gateways/{id}/selftest)
+ * above the gateway's forwarded firmware log lines (GatewayLogsPanel,
+ * GET .../gateways/{id}/logs).
  *
  * Data: GET /api/cpo/gateways, POST /api/cpo/gateways/claim (add),
  * GET /api/cpo/firmware-releases
@@ -34,6 +36,7 @@
 import { useCallback, useState } from 'react';
 import { Plus, Radio, ScrollText, UploadCloud } from 'lucide-react';
 import CpoLayout from '../../components/CpoLayout';
+import GatewayChecklist from '../../components/GatewayChecklist';
 import GatewayLogsPanel from '../../components/GatewayLogsPanel';
 import { PageHeader, DataTable, Modal, ConfirmDialog, StatusDot, useToast } from '../../components/ui';
 import api from '../../api/client';
@@ -285,9 +288,10 @@ export default function CpoGateways() {
       <Modal
         open={Boolean(logsTarget)}
         onClose={() => setLogsTarget(null)}
-        title={logsTarget ? `Logs: ${logsTarget.name}` : 'Logs'}
+        title={logsTarget ? `Diagnostics: ${logsTarget.name}` : 'Diagnostics'}
         size="lg"
       >
+        {logsTarget && <GatewayChecklist gatewayId={logsTarget.id} />}
         {logsTarget && <GatewayLogsPanel path={`/api/cpo/gateways/${logsTarget.id}/logs`} />}
       </Modal>
 
