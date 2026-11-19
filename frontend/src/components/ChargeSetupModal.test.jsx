@@ -345,7 +345,27 @@ describe('ChargeSetupModal: cheapest window', () => {
     api.get.mockReset();
     api.get.mockResolvedValue(PREVIEW);
     renderModal({ plug: { ...PLUG, id: 9 } });
-    expect(api.get).not.toHaveBeenCalled();
+    await waitFor(() => expect(api.get).toHaveBeenCalledWith('/api/plugs/9/tariff-preview'));
+    expect(screen.queryByRole('button', { name: /Cheapest/ })).not.toBeInTheDocument();
+  });
+});
+
+describe('ChargeSetupModal: idle fee terms', () => {
+  it('shows the plug tariff idle fee terms, and says auto-stop avoids it', async () => {
+    api.get.mockResolvedValue({ price_now: 10, idle_fee: { grace_min: 15, per_min: 2, cap: 30 } });
+    renderModal();
+    const terms = await screen.findByTestId('idle-fee-terms');
+    expect(terms).toHaveTextContent(/more than 15 min after it looks full/);
+    expect(terms).toHaveTextContent(/Stop and unplug in time/);
+    await userEvent.click(screen.getByLabelText('Stop automatically when the car is full'));
+    expect(terms).toHaveTextContent(/Not charged: this session stops itself/);
+  });
+
+  it('shows nothing when the tariff has no idle fee', async () => {
+    api.get.mockResolvedValue({ price_now: 10, idle_fee: null });
+    renderModal();
+    await waitFor(() => expect(api.get).toHaveBeenCalledWith('/api/plugs/7/tariff-preview'));
+    expect(screen.queryByTestId('idle-fee-terms')).not.toBeInTheDocument();
   });
 });
 
@@ -364,7 +384,7 @@ describe('ChargeSetupModal: estimate line', () => {
     api.get.mockResolvedValue(EST);
     renderModal();
     expect(screen.queryByTestId('charge-estimate')).not.toBeInTheDocument();
-    expect(api.get).not.toHaveBeenCalled();
+    expect(api.get).not.toHaveBeenCalledWith(expect.stringContaining('/estimate'));
 
     await userEvent.click(screen.getByRole('button', { name: '1h' }));
     const line = await screen.findByTestId('charge-estimate');

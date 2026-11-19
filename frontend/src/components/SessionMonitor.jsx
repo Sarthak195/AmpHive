@@ -8,6 +8,9 @@
  *   - meter row      — kW now · elapsed · plug name, plus a "₹x/kWh now"
  *                      rate line from /api/plugs/{id}/tariff-preview (hidden
  *                      on fetch failure — never the global config rate).
+ *                      [Idle fee C1] The same preview's `idle_fee` terms, when
+ *                      the plug's tariff has one (the plug's current terms; a
+ *                      running session bills the terms snapshotted at start).
  *   - notices        — .banner rows: stale telemetry, gateway alarms
  *                      (eventTypeCopy), low balance (with an Add credit link),
  *                      car looks full (telemetry frame charge_full, set by the
@@ -189,6 +192,7 @@ const SessionMonitor = () => {
   // sticky for the session, so hide the banner if the car clearly resumed
   // charging (200 W = the backend's default CHARGE_FULL_ACTIVE_W).
   const chargeFull = isActive && sessionData?.charge_full === true && powerW < 200;
+  const idleFee = isActive ? tariff?.idle_fee ?? null : null;
 
   // Ring progress toward the auto-stop target — the backend stops at whichever
   // limit trips first, so show the nearer of the two. No limit → indeterminate.
@@ -323,6 +327,14 @@ const SessionMonitor = () => {
           <span className="num">{formatINR(coinsToINR(priceNow, coin_inr_rate))}</span>/kWh now
         </p>
       )}
+      {idleFee && (
+        <p className="session-rate text-3 text-sm" data-testid="session-idle-fee">
+          Idle fee once the car is full:{' '}
+          <span className="num">{formatINR(coinsToINR(Number(idleFee.per_min), coin_inr_rate))}</span>/min
+          after {idleFee.grace_min} min, at most{' '}
+          <span className="num">{formatINR(coinsToINR(Number(idleFee.cap), coin_inr_rate))}</span>.
+        </p>
+      )}
 
       {/* Notices — only what's currently true. */}
       {(isStale || recentAlarm || lowBalance || chargeFull) && (
@@ -332,6 +344,7 @@ const SessionMonitor = () => {
               <p>
                 <strong>Your car looks fully charged.</strong> Its power draw has stayed near
                 zero. Stop charging to free the plug.
+                {idleFee && ` Stop and unplug within ${idleFee.grace_min} min to avoid the idle fee.`}
               </p>
             </div>
           )}
