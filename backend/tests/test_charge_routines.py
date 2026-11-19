@@ -417,6 +417,54 @@ async def test_start_resets_failures_and_sends_routine_started():
 
 
 @pytest.mark.asyncio
+async def test_closed_plug_occurrence_waits_then_expiry_counts_one_failure():
+    """[C5 + C4] A routine row on a plug outside its opening hours stays
+    WAITING (no start, no notice, no failure counted); if it is still closed
+    when the row's TTL lapses, the sweep expires it and settle counts exactly
+    one failed occurrence. The sweep's closed branch commits and moves on, so
+    the row is only looked at once per reaper tick."""
+    from backend.tests import test_plug_hours as ph
+
+    qc = ph._qc(not_before=datetime.now(timezone.utc) - timedelta(seconds=30))
+    plug = ph._plug(powered=True)
+    plug.powered_since = datetime.now(timezone.utc) - timedelta(minutes=10)
+    plug.opening_hours = ph._closed_today_hours()
+    plug.max_session_minutes = None
+    row_db = ph._row_db(
+        ph._s1n(qc), ph._s1n(ph._user()), ph._s1(0), ph._s1n(plug),
+        ph._s1(ph._tenant(enabled=True, delay=2)),
+        ph._upd(), ph._s1n(None), ph._s1(ph._gateway()),
+    )
+    with patch("backend.services.session_start.begin_active_session", AsyncMock()) as begin,          patch("backend.services.notifications.notify", AsyncMock()) as notify:
+        await SessionReaperService(
+            ph._factory(ph._scan_db([1]), row_db), AsyncMock()
+        ).reap_queued_starts_once()
+    assert qc.status == QueuedChargeStatus.WAITING
+    begin.assert_not_awaited()
+    notify.assert_not_awaited()
+
+    routine = _routine(failures=0, last_qc=11)
+    scan, db = _settle_dbs(routine, qc, with_name=False)
+    await svc.settle_routines(_factory(scan, db))
+    assert routine.consecutive_failures == 0
+    assert routine.last_queued_charge_id == 11          # still undecided
+
+    qc.expires_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+    with patch("backend.services.notifications.notify", AsyncMock()):
+        await SessionReaperService(
+            ph._factory(ph._scan_db([1]), ph._row_db(ph._s1n(qc))), AsyncMock()
+        ).reap_queued_starts_once()
+    assert qc.status == QueuedChargeStatus.EXPIRED
+
+    scan, db = _settle_dbs(routine, qc)
+    with patch("backend.services.notifications.notify", AsyncMock()):
+        await svc.settle_routines(_factory(scan, db))
+    assert routine.consecutive_failures == 1
+    assert routine.enabled is True
+    assert routine.last_queued_charge_id is None
+
+
+@pytest.mark.asyncio
 async def test_waiting_and_cancelled_rows_do_not_count():
     routine = _routine(failures=1, last_qc=11)
     scan, db = _settle_dbs(routine, _qc(QueuedChargeStatus.WAITING), with_name=False)
