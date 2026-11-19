@@ -2039,7 +2039,8 @@ class GroupInvite(Base):
     (stored lowercased): accepting needs a signed-in account whose VERIFIED
     email equals it, and creates the GroupMembership. A newer invite for the
     same group and email supersedes the older one (revoked_at). invited_by +
-    created_at back the per-CPO daily send cap. Alembic revision
+    created_at back the per-CPO daily send cap, created_at alone the
+    platform-wide one. Alembic revision
     0054_member_price_invites.
     """
     __tablename__ = "group_invites"
@@ -2058,4 +2059,5 @@ class GroupInvite(Base):
 
     __table_args__ = (
         Index("ix_group_invites_inviter_created", "invited_by_user_id", "created_at"),
+        Index("ix_group_invites_created_at", "created_at"),
     )

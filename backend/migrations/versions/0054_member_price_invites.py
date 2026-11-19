@@ -62,6 +62,10 @@ def upgrade() -> None:
         "CREATE INDEX IF NOT EXISTS ix_group_invites_inviter_created "
         "ON group_invites (invited_by_user_id, created_at)"
     )
+    op.execute(
+        "CREATE INDEX IF NOT EXISTS ix_group_invites_created_at "
+        "ON group_invites (created_at)"
+    )
 
 
 def downgrade() -> None:

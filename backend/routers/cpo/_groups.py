@@ -488,8 +488,12 @@ async def cpo_invite_to_group(
     """
     [C9] Email an invite to this private group (services/group_invites.py):
     digest-only, single-use, 7-day token bound to the address, capped at
-    GROUP_INVITES_PER_DAY per CPO (429 past it). The response is the same
-    whether or not the address has an account. Audited (group.invite).
+    GROUP_INVITES_PER_DAY per CPO and GROUP_INVITES_GLOBAL_PER_DAY overall
+    (429 past either), and only for a tenant that owns a claimed gateway (409
+    otherwise). The response is the same whether or not the address has an
+    account. Audited (group.invite) without the address: the invite row holds
+    it, and account closure scrubs that row, which a retained audit line
+    would not get.
     """
     group = await _own_group(db, group_id, user)
     if group.is_public:
@@ -509,7 +513,7 @@ async def cpo_invite_to_group(
         action="group.invite",
         target_type="group",
         target_id=group_id,
-        detail=f"email={email}, group={group_name}, invite_id={invite_id}",
+        detail=f"group={group_name}, invite_id={invite_id}",
     )
     return {
         "status": "sent",

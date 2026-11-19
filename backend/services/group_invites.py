@@ -14,9 +14,16 @@ mail path (services/email.py send_email, the self-hosted relay in prod).
   accepting needs a signed-in account whose VERIFIED email equals it. A wrong
   account or an unverified one is refused without consuming the invite.
 - A newer invite for the same group and email supersedes the older one.
-- Rate-limited per CPO (GROUP_INVITES_PER_DAY, default 20 in any 24 h) to
-  protect the mail server's reputation. Counted from the table itself (an
-  indexed range count), so the cap survives a backend restart.
+- Rate-limited to protect the mail server's reputation: per CPO
+  (GROUP_INVITES_PER_DAY, default 20 in any 24 h) and platform-wide
+  (GROUP_INVITES_GLOBAL_PER_DAY, default 50), both counted from the table
+  itself (indexed range counts), so the caps survive a backend restart. Only a
+  tenant that owns at least one claimed gateway may send invites: becoming a
+  CPO is self-serve, claiming hardware is not, so throwaway accounts cannot
+  turn the relay into a mailer. The group name stays out of the Subject line.
+- The address must be one mask_pii (routers/cpo/_common.py) masks in full:
+  an ASCII local part from [A-Za-z0-9._%+-] and an alphabetic TLD of two or
+  more letters, so a cpo_viewer never sees it unmasked.
 - The create response never depends on whether the address has an account
   (no user lookup happens), so it is not an enumeration oracle.
 """
@@ -33,7 +40,7 @@ from fastapi import HTTPException
 from sqlalchemy import and_, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.database.models import ChargerGroup, GroupInvite, GroupMembership, User
+from backend.database.models import ChargerGroup, Gateway, GroupInvite, GroupMembership, User
 from backend.services.billing_emails import _sanitize_operator_note
 from backend.services.email import frontend_origin, send_email
 
@@ -42,11 +49,13 @@ logger = logging.getLogger("amphive.api")
 INVITE_TTL_DAYS = 7
 # `or "20"` (not a getenv default): an unset compose ${VAR} arrives as "".
 GROUP_INVITES_PER_DAY = int(os.getenv("GROUP_INVITES_PER_DAY") or "20")
+GROUP_INVITES_GLOBAL_PER_DAY = int(os.getenv("GROUP_INVITES_GLOBAL_PER_DAY") or "50")
 
-# One "@", no whitespace, a dot in the domain. Deliberately loose (not
-# EmailStr: it rejects reserved TLDs such as .test that real seeded accounts
-# use); the binding check at accept time is exact equality anyway.
-_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+# The anchored form of mask_pii's email pattern (routers/cpo/_common.py), so
+# every accepted address is one the viewer masker fully masks. Not EmailStr:
+# it rejects reserved TLDs such as .test that real seeded accounts use; the
+# binding check at accept time is exact equality anyway.
+_EMAIL_RE = re.compile(r"^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$")
 
 INVALID_INVITE = "Invalid or expired invite link."
 
@@ -62,7 +71,7 @@ def hash_invite_token(token: str) -> str:
 def normalize_invite_email(raw: str) -> str:
     """Trimmed, lowercased address; 422 when it does not look like one."""
     email = (raw or "").strip().lower()
-    if len(email) > 255 or not _EMAIL_RE.match(email):
+    if len(email) > 255 or not _EMAIL_RE.fullmatch(email):
         raise HTTPException(status_code=422, detail="Enter a valid email address.")
     return email
 
@@ -82,6 +91,24 @@ async def invites_sent_last_day(db: AsyncSession, cpo_user_id: int, now: datetim
     ).scalar() or 0
 
 
+async def invites_sent_last_day_global(db: AsyncSession, now: datetime) -> int:
+    """How many invites anyone created in the last 24 h (indexed on
+    created_at)."""
+    return (
+        await db.execute(
+            select(func.count(GroupInvite.id)).where(
+                GroupInvite.created_at > now - timedelta(days=1)
+            )
+        )
+    ).scalar() or 0
+
+
+async def tenant_has_gateway(db: AsyncSession, tenant_id: int) -> bool:
+    return (
+        await db.execute(select(Gateway.id).where(Gateway.tenant_id == tenant_id).limit(1))
+    ).scalar() is not None
+
+
 async def create_invite(
     db: AsyncSession, cpo_user: User, group: ChargerGroup, email: str
 ) -> Tuple[GroupInvite, str]:
@@ -89,11 +116,24 @@ async def create_invite(
     insert the new digest row and commit. Returns (invite, raw_token); the
     caller mails the token and never logs it."""
     now = datetime.now(timezone.utc)
+    if not await tenant_has_gateway(db, group.tenant_id):
+        raise HTTPException(
+            status_code=409,
+            detail="Claim a charger first: email invites open once your organisation has one.",
+        )
     if await invites_sent_last_day(db, cpo_user.id, now) >= GROUP_INVITES_PER_DAY:
         raise HTTPException(
             status_code=429,
             detail=(
                 f"Invite limit reached ({GROUP_INVITES_PER_DAY} a day). "
+                "Try again tomorrow, or share the access code instead."
+            ),
+        )
+    if await invites_sent_last_day_global(db, now) >= GROUP_INVITES_GLOBAL_PER_DAY:
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                "Email invites are paused for today. "
                 "Try again tomorrow, or share the access code instead."
             ),
         )
@@ -131,9 +171,10 @@ def invite_link(token: str) -> str:
 
 def invite_email_body(group_name: str, link: str) -> Tuple[str, str]:
     """(subject, body). The group name is operator-typed text mailed to a
-    third party, so it is flattened and capped like an operator note."""
+    third party, so it is flattened and capped like an operator note, and kept
+    out of the Subject line (the first thing a phishing lure would use)."""
     name = _sanitize_operator_note(group_name) or "a private charger group"
-    subject = f"You're invited to charge at {name} on AmpHive"
+    subject = "You're invited to a private charger group on AmpHive"
     body = "\n".join([
         "Hi,",
         "",

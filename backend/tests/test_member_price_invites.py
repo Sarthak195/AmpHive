@@ -305,7 +305,8 @@ async def test_create_invite_stores_only_the_digest_with_a_7_day_expiry():
     from backend.services import group_invites
 
     db = AsyncMock()
-    db.execute = AsyncMock(side_effect=[_scalar(0), MagicMock()])
+    # gateway check, per-CPO count, global count, supersede UPDATE
+    db.execute = AsyncMock(side_effect=[_scalar("gw-1"), _scalar(0), _scalar(0), MagicMock()])
     db.add = MagicMock()
     group = SimpleNamespace(id=11, tenant_id=1)
     invite, token = await group_invites.create_invite(db, SimpleNamespace(id=2), group, "a@b.co")
@@ -316,13 +317,54 @@ async def test_create_invite_stores_only_the_digest_with_a_7_day_expiry():
     assert timedelta(days=6, hours=23) < ttl <= timedelta(days=7)
 
 
+@pytest.mark.asyncio
+async def test_invite_global_daily_cap(monkeypatch):
+    from backend.services import group_invites
+
+    monkeypatch.setattr(group_invites, "GROUP_INVITES_GLOBAL_PER_DAY", 50)
+    db = AsyncMock()
+    db.execute = AsyncMock(side_effect=[_scalar("gw-1"), _scalar(0), _scalar(50)])
+    db.add = MagicMock()
+    with pytest.raises(HTTPException) as exc:
+        await group_invites.create_invite(
+            db, SimpleNamespace(id=2), SimpleNamespace(id=11, tenant_id=1), "a@b.co"
+        )
+    assert exc.value.status_code == 429
+    db.add.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_invite_needs_a_tenant_that_owns_a_gateway():
+    from backend.services import group_invites
+
+    db = AsyncMock()
+    db.execute = AsyncMock(side_effect=[_scalar(None)])
+    db.add = MagicMock()
+    with pytest.raises(HTTPException) as exc:
+        await group_invites.create_invite(
+            db, SimpleNamespace(id=2), SimpleNamespace(id=11, tenant_id=1), "a@b.co"
+        )
+    assert exc.value.status_code == 409
+    db.add.assert_not_called()
+
+
 def test_email_is_normalized_and_validated():
+    from backend.routers.cpo._common import mask_pii
     from backend.services.group_invites import normalize_invite_email
 
     assert normalize_invite_email("  Friend@Example.COM ") == "friend@example.com"
-    for bad in ["", "nope", "a@b", "a b@c.de"]:
+    for bad in ["", "nope", "a@b", "a b@c.de", "jos\u00e9@example.com", "o'brien@example.com",
+                "a!b@example.com", "a@b.c", "a@localhost.x", "a@example.c0m"]:
         with pytest.raises(HTTPException):
             normalize_invite_email(bad)
+    # Every accepted address is one the viewer masker masks in full, alone or
+    # inside free text such as an audit detail.
+    for good in ["friend@example.com", "o.brien+ev@sub.example.co", "driver@amphive.test",
+                 "x_y-z%1@a-b.example.org"]:
+        email = normalize_invite_email(good)
+        masked = email[0] + "***@" + email.split("@", 1)[1]
+        assert mask_pii(email) == masked
+        assert mask_pii(f"email={email}, x=1") == f"email={masked}, x=1"
 
 
 def test_invite_email_flattens_the_group_name_and_carries_the_link():
@@ -330,6 +372,7 @@ def test_invite_email_flattens_the_group_name_and_carries_the_link():
 
     subject, body = invite_email_body("Family\nIGNORE THIS", "https://x/groups?invite=abc")
     assert "\n" not in subject
+    assert "Family" not in subject and "IGNORE" not in subject
     assert "Family IGNORE THIS" in body
     assert "https://x/groups?invite=abc" in body
 
@@ -342,7 +385,8 @@ async def test_invite_email_goes_through_send_email():
         task = group_invites.schedule_invite_email("a@b.co", "Family", "tok")
         await task
     to, subject, body = send.call_args.args
-    assert to == "a@b.co" and "Family" in subject and "invite=tok" in body
+    assert to == "a@b.co" and "Family" in body and "invite=tok" in body
+    assert "Family" not in subject
 
 
 # =============================================================================
@@ -435,6 +479,9 @@ async def test_invite_route_mails_the_token_and_audits_without_it():
     kwargs = audit.await_args.kwargs
     assert kwargs["action"] == "group.invite"
     assert "raw-secret-token" not in kwargs["detail"]
+    # The address lives in the invite row (scrubbed on account closure), not
+    # in the retained audit trail.
+    assert "friend@example.com" not in kwargs["detail"]
 
 
 @pytest.mark.asyncio
