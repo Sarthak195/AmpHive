@@ -6,7 +6,7 @@
  * the Wi-Fi line is the signal the gateway reported at its last boot.
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { RefreshCw } from 'lucide-react';
 import api from '../api/client';
 import { ErrorState, Skeleton } from './ui';
@@ -20,21 +20,31 @@ export default function GatewayChecklist({ gatewayId }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
+  // Sequence guard: only the newest request may write state, so a slow earlier
+  // response never overwrites a newer one (gateway switched, Re-check pressed
+  // mid-request) or lands after unmount.
+  const seq = useRef(0);
+
   const run = useCallback(async () => {
+    const mine = ++seq.current;
     setLoading(true);
     setError(null);
     try {
-      setData(await api.get(`/api/cpo/gateways/${gatewayId}/selftest`));
+      const res = await api.get(`/api/cpo/gateways/${gatewayId}/selftest`);
+      if (mine === seq.current) setData(res);
     } catch (err) {
-      setError(err);
+      if (mine === seq.current) setError(err);
     } finally {
-      setLoading(false);
+      if (mine === seq.current) setLoading(false);
     }
   }, [gatewayId]);
 
   useEffect(() => {
     setData(null);
     run();
+    return () => {
+      seq.current += 1;
+    };
   }, [run]);
 
   return (
