@@ -126,6 +126,54 @@ async def test_tariff_edit_mark_skips_override_sessions(monkeypatch):
     assert "member_price_override IS NOT true" in str(stmt.compile()).replace("\n", " ")
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("revoke", ["remove_member", "clear_price"])
+async def test_revoke_during_a_session_leaves_it_running_at_the_frozen_rate(revoke, monkeypatch):
+    import backend.services.pricing as pricing
+    from backend.routers.cpo import _groups
+    from backend.services.billing import session_cost
+
+    session, _, _, _ = await _begin(Decimal("3.00"))
+    hold = session.hold_coins
+
+    # The CPO revokes the member (or clears their price) mid-session.
+    membership = SimpleNamespace(price_per_kwh_override=Decimal("3.00"))
+    db = AsyncMock()
+    db.delete = AsyncMock()
+    cpo = SimpleNamespace(id=2, tenant_id=1, email="cpo@example.com", role=UserRole.CPO)
+    with patch.object(_groups, "try_record_audit", AsyncMock()):
+        if revoke == "remove_member":
+            db.execute = AsyncMock(side_effect=[_scalar(PRIVATE_GROUP), _scalar(membership)])
+            await _groups.cpo_remove_group_member(11, 3, user=cpo, db=db)
+            db.delete.assert_awaited_once_with(membership)
+        else:
+            db.execute = AsyncMock(side_effect=[_scalar(membership)])
+            with patch.object(_groups, "_own_group", AsyncMock(return_value=PRIVATE_GROUP)):
+                await _groups.cpo_set_member_price(
+                    11, 3, _groups.MemberPriceRequest(price_per_kwh_override=None),
+                    user=cpo, db=db,
+                )
+            assert membership.price_per_kwh_override is None
+
+    # Anything that re-resolved the override or the tariff now would see "no
+    # override" (or blow up): a running session must not ask either.
+    gone = AsyncMock(return_value=None)
+    tariff = AsyncMock(side_effect=AssertionError("reprice re-resolved the tariff"))
+    monkeypatch.setattr(pricing, "member_price_override", gone)
+    monkeypatch.setattr(pricing, "resolve_rate_window", tariff)
+    session.rate_valid_until = NOW - timedelta(minutes=1)
+    session.energy_kwh = 4.0
+    assert await pricing.reprice_session_if_due(MagicMock(), session, MagicMock(), at=NOW) is None
+    gone.assert_not_awaited()
+    tariff.assert_not_awaited()
+
+    assert session.rate_coins_per_kwh == Decimal("3.00")
+    assert session.member_price_override is True
+    assert session.hold_coins == hold
+    # Finalize prices the later reading at the frozen override (8 kWh x 3).
+    assert session_cost(session, 8.0) == Decimal("24.00")
+
+
 # =============================================================================
 # 1c. Display, preview and estimate use the member's override
 # =============================================================================
@@ -735,3 +783,35 @@ async def test_db_limits_patch_resizes_the_hold_at_the_frozen_override(factory, 
         )).scalar_one()
     # 10 kWh at the frozen 3.00, not at the plug tariff's 9.00.
     assert hold == Decimal("30.00")
+
+
+@db_gated
+@pytest.mark.asyncio
+async def test_db_account_closure_scrubs_invite_addresses(factory):
+    from sqlalchemy import select
+
+    from backend.database.models import GroupInvite, User
+    from backend.services import group_invites
+    from backend.services.account_closure import close_account, tombstone_email
+
+    s = await _seed(factory, email="Friend@Example.com")
+    async with factory() as db:
+        group = await db.get(type(s.group), s.group.id)
+        cpo = await db.get(type(s.cpo), s.cpo.id)
+        _, accepted_token = await group_invites.create_invite(db, cpo, group, "friend@example.com")
+    async with factory() as db:
+        driver = await db.get(User, s.driver.id)
+        await group_invites.accept_invite(db, driver, accepted_token)
+    async with factory() as db:
+        group = await db.get(type(s.group), s.group.id)
+        cpo = await db.get(type(s.cpo), s.cpo.id)
+        # A second, still-pending invite to the same address.
+        await group_invites.create_invite(db, cpo, group, "friend@example.com")
+    async with factory() as db:
+        driver = await db.get(User, s.driver.id)
+        await close_account(db, driver)
+    async with factory() as db:
+        rows = (await db.execute(select(GroupInvite))).scalars().all()
+    assert len(rows) == 2
+    assert {r.email for r in rows} == {tombstone_email(s.driver.id)}
+    assert all(r.accepted_at is not None or r.revoked_at is not None for r in rows)
