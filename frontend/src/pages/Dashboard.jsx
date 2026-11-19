@@ -54,6 +54,7 @@ import {
   useToast,
 } from '../components/ui';
 import PlugCard from '../components/PlugCard';
+import PlugHours from '../components/PlugHours';
 import ChargeSetupModal from '../components/ChargeSetupModal';
 import ReserveModal from '../components/ReserveModal';
 import ReportProblemModal from '../components/ReportProblemModal';
@@ -66,6 +67,7 @@ import {
   matchesPriceBucket,
   matchesQuery,
 } from '../utils/plugSearch';
+import { matchesHours } from '../utils/plugHours';
 import { apiErrorCopy, plugStateHint, plugStateLabel } from '../utils/statusCopy';
 import { coinsToINR, formatKw, formatKwh } from '../utils/money';
 import { fmtTime, fmtTimeInZone, fmtWindow } from '../utils/reservationTime';
@@ -273,6 +275,8 @@ const Dashboard = () => {
   const [priceFilter, setPriceFilter] = useState('');
   const [connectorFilter, setConnectorFilter] = useState('');
   const [favoritesOnly, setFavoritesOnly] = useState(false);
+  // [Plug hours] '' any, 'open' open now (24x7 plugs count), '24x7'.
+  const [hoursFilter, setHoursFilter] = useState('');
 
   /* ---- charge-now lookup ------------------------------------------------- */
   const [query, setQuery] = useState('');
@@ -366,9 +370,10 @@ const Dashboard = () => {
         if (!matchesPriceBucket(p, priceFilter)) return false;
         if (connectorFilter && p.connector_type !== connectorFilter) return false;
         if (favoritesOnly && p.is_favorite !== true) return false;
+        if (!matchesHours(p, hoursFilter)) return false;
         return true;
       }),
-    [loadedPlugs, stateFilter, groupFilter, searchText, powerFilter, priceFilter, connectorFilter, favoritesOnly]
+    [loadedPlugs, stateFilter, groupFilter, searchText, powerFilter, priceFilter, connectorFilter, favoritesOnly, hoursFilter]
   );
 
   const privatePlugs = useMemo(() => filteredPlugs.filter((p) => p.is_private), [filteredPlugs]);
@@ -376,7 +381,7 @@ const Dashboard = () => {
   const segPlugs = effectiveSeg === 'yours' ? privatePlugs : publicPlugs;
   const filtersActive = Boolean(
     stateFilter || groupFilter || searchText.trim() || powerFilter || priceFilter
-    || connectorFilter || favoritesOnly
+    || connectorFilter || favoritesOnly || hoursFilter
   );
 
   /* ---- charge / queue / reserve actions ---------------------------------- */
@@ -511,7 +516,7 @@ const Dashboard = () => {
     const plug = lookup.plug;
     const state = getPlugAvailability(plug);
     const reservedByOther = plug.reserved_now === true && plug.reserved_now_by_me !== true;
-    const startable = state === 'available' && !reservedByOther;
+    const startable = state === 'available' && !reservedByOther && plug.open_now !== false;
     const queueable = state === 'unpowered' && plug.queue_available === true;
     // Guard against stale closure: only allow actions if this lookup is current
     const isCurrentLookup = lookup.query === query;
@@ -528,6 +533,7 @@ const Dashboard = () => {
             </span>
           )}
         </div>
+        <PlugHours plug={plug} />
         <div className="dash-lookup-action">
           {startable && isCurrentLookup && (
             <button type="button" className="btn btn-primary btn-sm" onClick={() => openCharge(plug)}>
@@ -849,6 +855,16 @@ const Dashboard = () => {
                       ))}
                     </select>
                   )}
+                  <select
+                    className="select"
+                    value={hoursFilter}
+                    onChange={(e) => setHoursFilter(e.target.value)}
+                    aria-label="Filter by opening hours"
+                  >
+                    <option value="">Any hours</option>
+                    <option value="open">Open now</option>
+                    <option value="24x7">Open 24x7</option>
+                  </select>
                   <button
                     type="button"
                     className={`btn btn-sm ${favoritesOnly ? 'btn-primary' : 'btn-ghost'}`}

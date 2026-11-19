@@ -24,6 +24,10 @@
  * onToggleFavorite): a bookmark, so it stays available even for offline /
  * maintenance chargers.
  *
+ * [Plug hours] PlugHours shows "Open now, closes HH:MM" / "Closed, opens
+ * HH:MM", amenities and the access note; a closed plug offers no Charge (the
+ * start would 409), Reserve stays for a later slot inside the hours.
+ *
  * No whole-card click — every action is a real button. Copy comes from
  * utils/statusCopy; colors from the --state-* tokens via StatusDot.
  */
@@ -32,6 +36,7 @@ import { Bell, CalendarClock, Flag, Hourglass, Star, Zap } from 'lucide-react';
 import './PlugCard.css';
 import StatusDot from './ui/StatusDot';
 import Money from './ui/Money';
+import PlugHours from './PlugHours';
 import { useConfig } from '../contexts/ConfigContext';
 import { getPlugAvailability } from '../utils/plugAvailability';
 import { plugStateHint } from '../utils/statusCopy';
@@ -54,7 +59,7 @@ export default function PlugCard({ plug, onCharge, onReserve, onQueue, onToggleW
   const reservedForYou = plug.reserved_now === true && plug.reserved_now_by_me === true;
   const reservedByOther = plug.reserved_now === true && plug.reserved_now_by_me !== true;
   const queueable = state === 'unpowered' && plug.queue_available === true;
-  const canCharge = state === 'available' && !reservedByOther;
+  const canCharge = state === 'available' && !reservedByOther && plug.open_now !== false;
   const canReserve = state === 'available' || state === 'in_use';
   const showBell =
     state === 'in_use' || (state === 'unpowered' && !queueable);
@@ -111,6 +116,8 @@ export default function PlugCard({ plug, onCharge, onReserve, onQueue, onToggleW
         {plug.rated_power_w != null && <span className="chip num">{formatKw(plug.rated_power_w)}</span>}
         {plug.connector_type && <span className="chip">{plug.connector_type}</span>}
       </div>
+
+      <PlugHours plug={plug} />
 
       {(reservedForYou || reservedByOther || state === 'maintenance') && (
         <div className="plug-card-badges">

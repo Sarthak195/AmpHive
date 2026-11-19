@@ -184,3 +184,30 @@ describe('PlugCard — favorite star', () => {
     expect(screen.getByText('Type 2')).toBeInTheDocument();
   });
 });
+
+describe('PlugCard: opening hours', () => {
+  it('a closed plug shows when it opens, its amenities and note as text, and no Charge', () => {
+    renderCard({
+      ...BASE,
+      open_now: false,
+      opening_hours: [{ days: 127, start: 480, end: 1320 }],
+      hours_changes_at: new Date(Date.now() + 3600 * 1000).toISOString(),
+      tenant_timezone: 'UTC',
+      amenities: ['cafe', 'wifi'],
+      access_note: '<b>Gate B</b>',
+      max_session_minutes: 90,
+    });
+    expect(screen.getByText(/Closed, opens [0-9]{2}:[0-9]{2}/)).toBeInTheDocument();
+    expect(screen.getByText(/Max 90 min per session/)).toBeInTheDocument();
+    expect(screen.getByText('Wi-Fi')).toBeInTheDocument();
+    expect(screen.getByText('<b>Gate B</b>')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^charge/i })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /reserve/i })).toBeInTheDocument();
+  });
+
+  it('a 24x7 plug with nothing set renders no hours line', () => {
+    renderCard({ ...BASE, open_now: null });
+    expect(screen.queryByText(/Open now|Closed,/)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^charge/i })).toBeInTheDocument();
+  });
+});
