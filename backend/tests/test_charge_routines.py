@@ -21,6 +21,7 @@ import pytest
 import pytest_asyncio
 from fastapi import HTTPException
 from pydantic import ValidationError
+from sqlalchemy.dialects import postgresql
 
 from backend.database.models import PlugStatus, QueuedChargeStatus
 from backend.routers.routines import (
@@ -28,6 +29,7 @@ from backend.routers.routines import (
     RoutineUpdateRequest,
     create_routine,
     delete_routine,
+    list_routines,
     update_routine,
 )
 from backend.routers.sessions import queue_charge
@@ -113,9 +115,20 @@ def _one(v):
     return r
 
 
+def _compiling(results):
+    """execute() side effect that compiles each statement for Postgres first,
+    so a malformed query fails here and not only in production."""
+    it = iter(results)
+
+    async def _execute(stmt, *args, **kwargs):
+        stmt.compile(dialect=postgresql.dialect())
+        return next(it)
+    return _execute
+
+
 def _db(*results):
     db = AsyncMock()
-    db.execute = AsyncMock(side_effect=list(results))
+    db.execute = AsyncMock(side_effect=_compiling(results))
     db.add = MagicMock()
     db.begin_nested = MagicMock(return_value=_cm(None))
     return db
@@ -228,6 +241,13 @@ async def test_materialized_row_equals_what_queue_charge_creates():
         assert getattr(got, field) == getattr(expected, field), field
     assert routine.last_materialized_date == nb.astimezone(IST).date()
 
+    # A second tick sees the stamp in its scan and queues nothing.
+    with _patched_zone():
+        again = await svc.materialize_routines(
+            _factory(_scan([routine])), now=nb + timedelta(minutes=2)
+        )
+    assert again == 0
+
 
 def _scan(routines):
     rows = []
@@ -242,7 +262,7 @@ def _scan(routines):
     res = MagicMock()
     res.all.return_value = rows
     db = AsyncMock()
-    db.execute = AsyncMock(return_value=res)
+    db.execute = AsyncMock(side_effect=_compiling([res]))
     return db
 
 
@@ -328,7 +348,7 @@ def _settle_dbs(routine, qc, with_name=True):
     ids = MagicMock()
     ids.scalars.return_value.all.return_value = [routine.id]
     scan = AsyncMock()
-    scan.execute = AsyncMock(return_value=ids)
+    scan.execute = AsyncMock(side_effect=_compiling([ids]))
     results = [_s1n(routine), _s1n(qc)]
     if with_name:
         results.append(_s1("Bay 1"))
@@ -394,6 +414,19 @@ def _driver():
     return u
 
 
+@pytest.mark.asyncio
+async def test_list_returns_own_rows_with_the_tenant_zone():
+    res = MagicMock()
+    res.all.return_value = [(_routine(), "Bay 1", "Asia/Kolkata")]
+    with patch("backend.services.pricing.zone_name", lambda tz: tz):
+        body = await list_routines(_driver(), _db(res))
+    assert body["max_routines"] == svc.MAX_ROUTINES_PER_USER
+    row = body["routines"][0]
+    assert row["plug_name"] == "Bay 1" and row["start_time"] == "07:30"
+    assert row["tenant_timezone"] == "Asia/Kolkata"
+    assert not {"local_ip", "gateway_id", "email"} & set(row)
+
+
 def test_create_requires_a_limit_and_valid_days():
     with pytest.raises(ValidationError):
         RoutineCreateRequest(plug_id=1, weekdays=ALL_DAYS, start_time="07:30")
@@ -421,7 +454,13 @@ async def test_create_refuses_a_sixth_routine():
 
 @pytest.mark.asyncio
 async def test_create_refused_while_scheduled_charging_is_off():
-    db = _db(MagicMock(), _s1(0), _one((_plug(), _tenant(enabled=False))))
+    grouped = _plug()
+    grouped.group_id = 9
+    private = MagicMock()
+    private.id, private.is_public = 9, False
+    member = MagicMock()
+    db = _db(MagicMock(), _s1(0), _one((grouped, _tenant(enabled=False))),
+             _s1n(private), _s1n(member))
     with pytest.raises(HTTPException) as exc:
         await create_routine(
             RoutineCreateRequest(plug_id=1, weekdays=1, start_time="07:30", max_kwh=5),
