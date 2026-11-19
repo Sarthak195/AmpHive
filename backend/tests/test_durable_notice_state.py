@@ -421,17 +421,77 @@ async def test_startup_scan_rearms_only_a_pending_recheck(factory, monkeypatch):
     now = datetime.now(timezone.utc)
     pending, _s, _c, _a = await _seed(factory, GatewayStatus.OFFLINE)
     outstanding, _s, _c, _a = await _seed(factory, GatewayStatus.OFFLINE)
+    healed, _s, _c, _a = await _seed(factory, GatewayStatus.OFFLINE)
     never, _s, _c, _a = await _seed(factory, GatewayStatus.OFFLINE)
     back, _s, _c, _a = await _seed(factory, GatewayStatus.ONLINE)
     async with factory() as db:
-        for gid in (pending, outstanding, back):
+        for gid in (pending, outstanding, healed, back):
             (await db.get(Gateway, gid)).last_operator_alert_at = now - timedelta(hours=1)
-        (await db.get(Gateway, outstanding)).offline_notified_at = now - timedelta(hours=1)
+        for gid, seen in ((outstanding, now - timedelta(hours=2)),
+                          (healed, now - timedelta(minutes=30))):
+            row = await db.get(Gateway, gid)
+            row.offline_notified_at = now - timedelta(hours=1)
+            row.last_seen_at = seen          # healed: seen after the alert (stale flag)
         await db.commit()
 
     armed = []
     monkeypatch.setattr(oa, "_arm_recheck", lambda _f, gid, wait: armed.append((gid, wait)))
-    assert await oa.rearm_offline_rechecks(factory) == 1
-    assert [gid for gid, _w in armed] == [pending]
-    assert 7000 < armed[0][1] <= 7200
+    assert await oa.rearm_offline_rechecks(factory) == 2
+    assert sorted(gid for gid, _w in armed) == sorted([pending, healed])
+    assert all(7000 < w <= 7200 for _g, w in armed)
     assert never not in [gid for gid, _w in armed]
+
+
+@requires_db
+@pytest.mark.asyncio
+async def test_a_stale_offline_flag_does_not_swallow_the_next_outage(factory, monkeypatch):
+    """Telemetry healed the gateway after the alert (last_seen_at later than
+    offline_notified_at) without a back-online follow-up: the next outage
+    still alerts."""
+    from backend.database.models import Gateway, GatewayStatus
+
+    oa._reset_state()
+    notify = AsyncMock()
+    monkeypatch.setattr(oa, "notify", notify)
+    gid, _sid, cpo, admin = await _seed(factory, GatewayStatus.OFFLINE)
+    now = datetime.now(timezone.utc)
+    async with factory() as db:
+        row = await db.get(Gateway, gid)
+        row.offline_notified_at = row.last_operator_alert_at = now - timedelta(hours=4)
+        row.last_seen_at = now - timedelta(hours=3)
+        await db.commit()
+    await oa.alert_gateway_offline(factory, gid)
+    assert sorted(c.args[0] for c in notify.await_args_list) == sorted([cpo, admin])
+    gw = await _gateway(factory, gid)
+    assert gw.offline_notified_at > now - timedelta(minutes=1)
+
+
+@requires_db
+@pytest.mark.asyncio
+async def test_fault_cooldown_survives_a_restart_through_the_event_rows(factory, monkeypatch):
+    from backend.database.models import GatewayEvent, GatewayStatus
+
+    oa._reset_state()
+    notify = AsyncMock()
+    monkeypatch.setattr(oa, "notify", notify)
+    gid, _sid, cpo, _admin = await _seed(factory, GatewayStatus.ONLINE)
+    now = datetime.now(timezone.utc)
+    async with factory() as db:
+        gw = await _gateway(factory, gid)
+        rows = [
+            GatewayEvent(tenant_id=gw.tenant_id, gateway_id=gid, event_type=kind,
+                         severity="warning", created_at=now - timedelta(minutes=age))
+            for kind, age in (("OTA_FAILED", 120), ("OTA_FAILED", 10),
+                              ("OTA_STARTED", 5), ("OTA_FAILED", 0))
+        ]
+        db.add_all(rows)
+        await db.commit()
+        ids = [r.id for r in rows]
+
+    # Restart, then the fault re-reported 10 min after the last alerted one.
+    await oa.alert_safety_fault(factory, gid, None, "OTA_FAILED", "warning", "x", event_id=ids[3])
+    notify.assert_not_awaited()
+    # Only the 2 h old row (outside the 1 h cooldown) precedes this one.
+    oa._reset_state()
+    await oa.alert_safety_fault(factory, gid, None, "OTA_FAILED", "warning", "x", event_id=ids[1])
+    assert [c.args[0] for c in notify.await_args_list] == [cpo]

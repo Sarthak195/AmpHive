@@ -423,6 +423,7 @@ class MQTTAlarmMixin:
         await operator_alerts.alert_safety_fault(
             self.db_session_factory, gateway_id, plug_id, event_type, severity, detail,
             exclude_user_ids=(cutoff_driver,) if cutoff_driver is not None else (),
+            event_id=event_id,
         )
 
     # Alarms after which the firmware has already stopped charging locally, so the

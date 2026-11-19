@@ -23,6 +23,10 @@ Env (read at call time, so tests and a restart pick up changes):
 Durable state (gateways columns, migration 0051): offline_notified_at marks
 an outstanding "Gateway offline" alert (cleared by the "back online"
 follow-up) and last_operator_alert_at times the per-gateway offline cooldown.
+The flag only counts while the gateway has not been seen since: telemetry
+heals a gateway to ONLINE (stamping last_seen_at) without running the
+back-online follow-up, so a flag older than last_seen_at is a stale answer
+and the next real outage is still reported.
 Both are decided and written under the gateway row lock, together with the
 status check and the recipient query, so a backend restart neither repeats
 nor loses the offline / back-online pair, and an `online` that committed
@@ -30,7 +34,10 @@ first means neither goes out. Delivery for one gateway is also serialized in
 process (a per-gateway asyncio.Lock held across decide and fan-out, never the
 DB row lock), so a "back online" is never delivered ahead of, or interleaved
 with, the "offline" fan-out it answers. The per-(gateway, plug, event) fault
-cooldown stays in process memory (a restart can re-page one fault once).
+cooldown is kept in process memory and rebuilt from the gateway_events
+audit rows after a restart: an earlier row for the same (gateway, plug,
+event) inside the cooldown suppresses the alert, so a restart does not
+re-page a fault.
 This cannot alert on the app itself being down or evicted.
 
 A CPO or admin account can also charge (POST /api/sessions/start has no role
@@ -53,7 +60,7 @@ rearm_offline_rechecks() re-arms it at backend startup.
 import asyncio
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 from sqlalchemy import or_, select
@@ -117,6 +124,20 @@ def _float_env(name: str, default: float) -> float:
         return float(os.getenv(name, str(default)))
     except ValueError:
         return default
+
+
+def _aware(dt: datetime) -> datetime:
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
+def _offline_alert_outstanding(gw) -> bool:
+    """An offline alert is unanswered: flagged, and the gateway has not been
+    seen since (a telemetry heal stamps last_seen_at but runs no follow-up)."""
+    flagged = gw.offline_notified_at
+    if flagged is None:
+        return False
+    seen = gw.last_seen_at
+    return seen is None or _aware(seen) <= _aware(flagged)
 
 
 def _cooled_down(last: Optional[datetime], cooldown: float) -> bool:
@@ -220,10 +241,15 @@ async def _decide_offline(
 
     async with session_factory() as session:
         gw = await _locked_gateway(session, gateway_id)
-        if gw is None or gw.status != GatewayStatus.OFFLINE or gw.offline_notified_at is not None:
+        if gw is None or gw.status != GatewayStatus.OFFLINE or _offline_alert_outstanding(gw):
             return None, None
         last = gw.last_operator_alert_at
         if not recheck and last is not None and not _cooled_down(last, cooldown):
+            if gw.offline_notified_at is not None:
+                # A stale flag (seen since): clear it so the startup scan
+                # re-arms the re-check this suppression schedules.
+                gw.offline_notified_at = None
+                await session.commit()
             return None, cooldown - _age_sec(last, _now())
         now = _now()
         gw.offline_notified_at = now
@@ -329,7 +355,8 @@ async def _recheck_offline(session_factory: Callable, gateway_id: str, wait: flo
 async def rearm_offline_rechecks(session_factory: Callable) -> int:
     """Backend startup: re-arm the "still offline" re-checks a restart
     dropped. One is pending exactly when a gateway is stored OFFLINE with no
-    outstanding offline alert but an earlier alert on record (an alert
+    outstanding offline alert (none flagged, or a flag the gateway was seen
+    after) but an earlier alert on record (an alert
     suppressed after a flap). It fires at that alert's cooldown expiry, never
     sooner than the offline debounce, so the retained `online` a reconnected
     gateway replays after the restart lands first. Gateways never alerted are
@@ -346,7 +373,8 @@ async def rearm_offline_rechecks(session_factory: Callable) -> int:
                 select(Gateway.id, Gateway.last_operator_alert_at)
                 .where(
                     Gateway.status == GatewayStatus.OFFLINE,
-                    Gateway.offline_notified_at.is_(None),
+                    or_(Gateway.offline_notified_at.is_(None),
+                        Gateway.last_seen_at > Gateway.offline_notified_at),
                     Gateway.last_operator_alert_at.is_not(None),
                 )
                 .limit(_REARM_LIMIT)
@@ -376,23 +404,66 @@ async def alert_gateway_online(session_factory: Callable, gateway_id: str) -> No
             logger.exception(f"Gateway online follow-up failed for {gateway_id}")
 
 
+async def _earlier_fault_at(
+    session_factory: Callable, gateway_id: str, plug_id: Optional[int],
+    event_type: str, before_id: int, since: datetime,
+) -> Optional[datetime]:
+    """created_at of the newest gateway_events row for the same (gateway,
+    plug, event) written before row `before_id` and since `since`, or None.
+    One indexed (gateway_id, created_at) lookup, LIMIT 1."""
+    from backend.database.models import GatewayEvent
+
+    plug_match = (GatewayEvent.plug_id.is_(None) if plug_id is None
+                  else GatewayEvent.plug_id == plug_id)
+    async with session_factory() as session:
+        return (await session.execute(
+            select(GatewayEvent.created_at)
+            .where(GatewayEvent.gateway_id == gateway_id,
+                   GatewayEvent.created_at >= since,
+                   GatewayEvent.event_type == event_type,
+                   plug_match,
+                   GatewayEvent.id < before_id)
+            .order_by(GatewayEvent.created_at.desc())
+            .limit(1)
+        )).scalar_one_or_none()
+
+
 async def alert_safety_fault(
     session_factory: Callable, gateway_id: str, plug_id: Optional[int],
     event_type: str, severity: str, detail: Optional[str],
     exclude_user_ids: Iterable[int] = (),
+    event_id: Optional[int] = None,
 ) -> None:
     """Bell + push (+ email) the tenant's CPOs about a safety fault or failed
     OTA, deduplicated per (gateway, plug, event) within the cooldown.
     exclude_user_ids: users who already got a notice for this same fault
-    (the driver of the session the cutoff finalized)."""
+    (the driver of the session the cutoff finalized). event_id: the
+    gateway_events row just stored for this fault; when the in-memory
+    cooldown has no entry (first fault, or after a restart), an earlier row
+    for the same fault inside the cooldown suppresses the alert."""
     if event_type not in FAULT_TITLES or not enabled():
         return
     key = (gateway_id, plug_id, event_type)
     cooldown = _float_env("OPERATOR_ALERT_COOLDOWN_SEC", 3600.0)
+    known = key in _last_fault_alert
     if not _cooled_down(_last_fault_alert.get(key), cooldown):
         logger.info("Operator fault alert suppressed by cooldown", extra={"event_type": event_type})
         return
-    _last_fault_alert[key] = _now()
+    now = _last_fault_alert[key] = _now()
+    if not known and event_id is not None and cooldown > 0:
+        try:
+            earlier = await _earlier_fault_at(
+                session_factory, gateway_id, plug_id, event_type, event_id,
+                now - timedelta(seconds=cooldown),
+            )
+        except Exception:
+            logger.exception(f"Fault cooldown lookup failed for {gateway_id} ({event_type})")
+            earlier = None
+        if earlier is not None:
+            # Restart inside the cooldown: this fault was already reported.
+            _last_fault_alert[key] = _aware(earlier)
+            logger.info("Operator fault alert suppressed by cooldown", extra={"event_type": event_type})
+            return
     try:
         skip = set(exclude_user_ids)
         user_ids = [

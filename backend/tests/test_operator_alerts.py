@@ -45,6 +45,7 @@ class _GwDB:
         if row is None:
             row = self.rows[gateway_id] = SimpleNamespace(
                 status=status, tenant_id=1, offline_notified_at=None, last_operator_alert_at=None,
+                last_seen_at=None,
             )
         row.status = status
         return row
@@ -310,6 +311,87 @@ async def test_db_failure_never_raises(mocks, monkeypatch):
     notify_mock.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_a_flag_the_gateway_was_seen_after_does_not_swallow_the_next_outage(mocks, db, clock):
+    """Telemetry healed the gateway to ONLINE (stamping last_seen_at) without
+    the back-online follow-up, so offline_notified_at stayed set. The next
+    real outage is still reported."""
+    notify_mock, _, _ = mocks
+    row = db.gw("gw-1")
+    row.offline_notified_at = row.last_operator_alert_at = T0
+    row.last_seen_at = T0 - timedelta(minutes=1)     # not seen since: outstanding
+    clock[0] = T0 + timedelta(hours=5)
+    await oa.alert_gateway_offline(db, "gw-1")
+    notify_mock.assert_not_awaited()
+
+    row.last_seen_at = T0 + timedelta(minutes=10)    # telemetry heal after the alert
+    await oa.alert_gateway_offline(db, "gw-1")
+    assert _titles(notify_mock) == ["Gateway offline"] * 2
+    assert row.offline_notified_at == clock[0]
+
+
+@pytest.mark.asyncio
+async def test_a_stale_flag_inside_the_cooldown_is_cleared_and_the_recheck_armed(mocks, db, clock, monkeypatch):
+    notify_mock, _, _ = mocks
+    armed = []
+    monkeypatch.setattr(oa, "_arm_recheck", lambda _f, gid, wait: armed.append((gid, wait)))
+    row = db.gw("gw-1")
+    row.offline_notified_at = row.last_operator_alert_at = T0
+    row.last_seen_at = T0 + timedelta(minutes=10)
+    clock[0] = T0 + timedelta(hours=1)
+    await oa.alert_gateway_offline(db, "gw-1")
+    notify_mock.assert_not_awaited()
+    assert row.offline_notified_at is None           # the startup scan now sees it
+    assert armed == [("gw-1", 7200.0)]
+
+
+@pytest.mark.asyncio
+async def test_fault_cooldown_survives_a_restart_through_the_event_rows(mocks, clock, monkeypatch):
+    """After a restart the in-memory fault cooldown is empty; an earlier
+    gateway_events row for the same fault inside the cooldown suppresses the
+    alert, and is consulted once per key, not per fault."""
+    notify_mock, _, _ = mocks
+    earlier = AsyncMock(return_value=T0 - timedelta(minutes=15))
+    monkeypatch.setattr(oa, "_earlier_fault_at", earlier)
+    f = oa.alert_safety_fault
+    await f(MagicMock(), "gw-1", 1, "THERMAL_CUTOFF", "critical", "hot", event_id=9)
+    notify_mock.assert_not_awaited()
+    args = earlier.await_args.args
+    assert args[1:5] == ("gw-1", 1, "THERMAL_CUTOFF", 9) and args[5] == T0 - timedelta(hours=1)
+
+    clock[0] = T0 + timedelta(minutes=50)           # 65 min after the earlier fault
+    await f(MagicMock(), "gw-1", 1, "THERMAL_CUTOFF", "critical", "hot", event_id=10)
+    assert notify_mock.await_count == 2
+    assert earlier.await_count == 1
+
+    earlier.return_value = None                     # no earlier row: a new fault
+    await f(MagicMock(), "gw-1", 2, "THERMAL_CUTOFF", "critical", "hot", event_id=11)
+    assert notify_mock.await_count == 4
+    earlier.side_effect = RuntimeError("db down")   # lookup failure still alerts
+    await f(MagicMock(), "gw-1", 3, "THERMAL_CUTOFF", "critical", "hot", event_id=12)
+    assert notify_mock.await_count == 6
+
+
+@pytest.mark.asyncio
+async def test_earlier_fault_lookup_is_one_bounded_indexed_query():
+    from sqlalchemy.dialects import postgresql
+
+    captured = []
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = None
+
+    class _S(_Session):
+        async def execute(self, stmt, *_a, **_k):
+            captured.append(stmt)
+            return result
+
+    await oa._earlier_fault_at(lambda: _S(result), "gw-1", None, "OTA_FAILED", 9, T0)
+    sql = str(captured[0].compile(dialect=postgresql.dialect())).lower()
+    for part in ("gateway_events.gateway_id =", "gateway_events.created_at >=",
+                 "gateway_events.plug_id is null", "gateway_events.id <", "limit"):
+        assert part in sql
+
+
 # ------------------------------------------------------------------ wiring --
 
 class _Session:
@@ -373,7 +455,7 @@ async def test_persist_gateway_event_alerts_operators():
         await mgr._persist_gateway_event("gw-1", None, "UNAUTHORIZED_ON", "critical", "x")
     alert.assert_awaited_once_with(
         mgr.db_session_factory, "gw-1", None, "UNAUTHORIZED_ON", "critical", "x",
-        exclude_user_ids=(),
+        exclude_user_ids=(), event_id=5,
     )
     MQTTManager._instance = None
 
@@ -518,6 +600,7 @@ async def test_startup_rearms_a_recheck_a_restart_dropped(mocks, clock, monkeypa
     assert armed == [("gw-1", 7200.0), ("gw-2", 120.0)]
     sql = str(scan.stmts[0].compile(compile_kwargs={"literal_binds": True})).lower()
     assert "offline_notified_at is null" in sql
+    assert "gateways.last_seen_at > gateways.offline_notified_at" in sql
     assert "last_operator_alert_at is not null" in sql
     assert "limit" in sql
 
