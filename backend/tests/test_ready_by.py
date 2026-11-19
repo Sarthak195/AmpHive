@@ -194,6 +194,15 @@ async def test_plan_rejects_a_deadline_outside_the_next_24_hours(offset):
 
 
 @pytest.mark.asyncio
+async def test_plan_maps_an_unrepresentable_deadline_to_out_of_range():
+    ready_by = datetime(1, 1, 1, tzinfo=timezone(timedelta(hours=5)))
+    with pytest.raises(HTTPException) as exc:
+        await plan_ready_by(AsyncMock(), _plug(powered=True), 5, ready_by, 1.0, None)
+    assert exc.value.status_code == 400
+    assert exc.value.detail["code"] == "ready_by_out_of_range"
+
+
+@pytest.mark.asyncio
 async def test_plan_caps_the_duration_at_the_deadline():
     ready_by = datetime.now(timezone.utc) + timedelta(hours=6)
     p1, p2 = _glue_patches()

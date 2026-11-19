@@ -421,7 +421,7 @@ describe('ChargeSetupModal: ready by', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Schedule charge' }));
     const [plugId, limits, notBefore, readyBy] = onConfirm.mock.calls[0];
     expect(plugId).toBe(7);
-    expect(limits).toEqual({ max_kwh: 4, max_duration_seconds: 28800 });
+    expect(limits).toEqual({ max_kwh: 4 });
     expect(notBefore).toBeNull();
     // 08:00 IST is 02:30 UTC.
     expect(readyBy).toMatch(/T02:30:00\.000Z$/);
@@ -445,6 +445,13 @@ describe('ChargeSetupModal: ready by', () => {
   it('needs a ready-by time and a limit', async () => {
     renderModal({ plug: SCHED_PLUG });
     await userEvent.click(screen.getByRole('button', { name: 'Ready by' }));
+    expect(screen.getByRole('button', { name: 'Schedule charge' })).toBeDisabled();
+  });
+
+  it('does not preselect an 8 h limit, so a time alone is not enough', async () => {
+    renderModal({ plug: SCHED_PLUG });
+    await userEvent.click(screen.getByRole('button', { name: 'Ready by' }));
+    fireEvent.change(screen.getByLabelText('Ready-by time'), { target: { value: '07:00' } });
     expect(screen.getByRole('button', { name: 'Schedule charge' })).toBeDisabled();
   });
 });

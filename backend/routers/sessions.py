@@ -871,7 +871,9 @@ async def queue_charge(
     # claim one socket (see _check_schedule). The outage path stays lock-free.
     plug_stmt = select(Plug).where(Plug.id == req.plug_id)
     if req.not_before is not None:
-        plug_stmt = plug_stmt.with_for_update()
+        # populate_existing: a caller (ready-by) may already hold this plug in
+        # the session; the admission checks must see it as it is under the lock.
+        plug_stmt = plug_stmt.with_for_update().execution_options(populate_existing=True)
     result = await db.execute(plug_stmt)
     plug = result.scalar_one_or_none()
     if not plug:

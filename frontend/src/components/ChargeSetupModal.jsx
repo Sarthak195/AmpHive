@@ -264,12 +264,13 @@ export default function ChargeSetupModal({ open, onClose, plug, mode = 'start', 
 
   const chooseStart = (value) => {
     setStartAt(value);
-    // A scheduled charge must stop on its own: move off "No limit", and undo
-    // that preselect if the driver goes back to "Now" without touching it.
-    if (value !== 'now' && timePreset === 'none' && kwh === '') {
+    // A "Later" charge must stop on its own: move off "No limit", and undo
+    // that preselect if the driver goes back to "Now" or on to "Ready by"
+    // (where the limit sizes the window, so they must choose it) untouched.
+    if (value === 'later' && timePreset === 'none' && kwh === '') {
       setTimePreset('8h');
       setAutoLimit(true);
-    } else if (value === 'now' && autoLimit && timePreset === '8h') {
+    } else if (value !== 'later' && autoLimit && timePreset === '8h') {
       setTimePreset('none');
       setAutoLimit(false);
     }

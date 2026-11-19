@@ -147,7 +147,12 @@ async def plan_ready_by(
     """Plan a ready-by-T charge. Returns the plan dict the routes serialize;
     ``max_duration_seconds`` is the duration limit the scheduled row must carry
     (the driver's own, tightened to the deadline so the run ends by T even if
-    the car draws less than the estimate)."""
+    the car draws less than the estimate).
+
+    Known limit: the firmware counts that limit from the ACTUAL start, which the
+    reaper may delay up to SCHEDULE_START_GRACE_MIN (a gateway reconnect, the
+    per-user active cap, a briefly unpowered plug), so the finish can slip past
+    T by up to that grace plus one reaper tick."""
     if max_kwh is None and max_duration_s is None:
         raise _refuse(
             "ready_by_needs_limit",
@@ -155,8 +160,11 @@ async def plan_ready_by(
             status_code=422,
         )
     now = datetime.now(timezone.utc)
-    ready_by = ready_by.astimezone(timezone.utc)
-    if not (now < ready_by <= now + timedelta(hours=SCHEDULE_MAX_AHEAD_HOURS)):
+    try:
+        ready_by = ready_by.astimezone(timezone.utc)
+    except (OverflowError, ValueError):
+        ready_by = None
+    if ready_by is None or not (now < ready_by <= now + timedelta(hours=SCHEDULE_MAX_AHEAD_HOURS)):
         raise _refuse(
             "ready_by_out_of_range",
             "Pick a ready-by time within the next 24 hours.",
