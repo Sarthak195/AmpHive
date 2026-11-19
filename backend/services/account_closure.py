@@ -71,6 +71,7 @@ from backend.database.models import (
     Notification,
     PasswordResetToken,
     PlugPhoto,
+    PlugPhotoStatus,
     PlugReview,
     PlugWatch,
     PushSubscription,
@@ -96,6 +97,22 @@ logger = logging.getLogger("amphive.api")
 # person, and is unmistakably not a real address to anyone reading the table.
 TOMBSTONE_EMAIL_DOMAIN = "deleted.amphive.invalid"
 TOMBSTONE_NAME = "Deleted user"
+
+
+# Strong refs for in-flight background deletions; discarded on completion.
+_pending: set[asyncio.Task] = set()
+
+
+async def _delete_photo_objects(user_id: int, object_names: list[str]) -> None:
+    for object_name in object_names:
+        try:
+            await asyncio.to_thread(delete_object, object_name)
+        except Exception:
+            logger.warning(
+                "Could not delete a closed account's plug photo object",
+                extra={"user_id": user_id, "object_name": object_name},
+                exc_info=True,
+            )
 
 
 class AccountClosureRefused(Exception):
@@ -229,7 +246,11 @@ async def close_account(db: AsyncSession, user: User) -> dict:
     photo_objects = list(
         (
             await db.execute(
-                select(PlugPhoto.object_name).where(PlugPhoto.uploaded_by_user_id == user_id)
+                select(PlugPhoto.object_name).where(
+                    PlugPhoto.uploaded_by_user_id == user_id,
+                    # A rejected photo's object was already deleted at rejection.
+                    PlugPhoto.status != PlugPhotoStatus.REJECTED,
+                )
             )
         ).scalars()
     )
@@ -279,17 +300,16 @@ async def close_account(db: AsyncSession, user: User) -> dict:
 
     await db.commit()
 
-    # Best-effort and AFTER the commit: a storage hiccup must never undo or
-    # block an erasure. An object that survives is only reachable through the
-    # (now deleted) photo row's id, so it cannot be served.
-    for object_name in photo_objects:
-        try:
-            await asyncio.to_thread(delete_object, object_name)
-        except Exception:
-            logger.warning(
-                "Could not delete a closed account's plug photo object",
-                extra={"user_id": user_id, "object_name": object_name},
-            )
+    # Best-effort, AFTER the commit and AFTER the response: a slow or hung
+    # storage call (120 s timeout each) must never hold a closure that has
+    # already been committed. An object that survives is only reachable through
+    # the (now deleted) photo row's id, so it cannot be served.
+    if photo_objects:
+        task = asyncio.get_running_loop().create_task(
+            _delete_photo_objects(user_id, photo_objects)
+        )
+        _pending.add(task)
+        task.add_done_callback(_pending.discard)
 
     summary = {
         "user_id": user_id,

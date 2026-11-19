@@ -9,6 +9,7 @@ tombstone. A closure that cascaded away a driver's charging sessions would take
 the operator's tax records and earnings history with it, which is precisely why
 this is an anonymise and not a DELETE.
 """
+import asyncio
 import os
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -467,6 +468,7 @@ async def _seed_wave_rows(factory, seeded):
         OfflineTopup,
         Plug,
         PlugPhoto,
+        PlugPhotoStatus,
         PlugReview,
         PromoCode,
         PromoRedemption,
@@ -492,6 +494,9 @@ async def _seed_wave_rows(factory, seeded):
                           rating=4, body="Fast and tidy"))
         db.add(PlugPhoto(plug_id=plug.id, tenant_id=tenant_id, uploaded_by_user_id=uid,
                          url="gs://secret-bucket/p1.jpg", object_name="plug-1/p1.jpg"))
+        db.add(PlugPhoto(plug_id=plug.id, tenant_id=tenant_id, uploaded_by_user_id=uid,
+                         url="gs://secret-bucket/r1.jpg", object_name="plug-1/r1.jpg",
+                         status=PlugPhotoStatus.REJECTED))
         db.add(ApiToken(user_id=uid, name="Home Assistant", token_prefix="amph_ab12",
                         token_hash="f" * 64))
         code = PromoCode(tenant_id=tenant_id, code_hash="e" * 64, code_hint="WXYZ",
@@ -533,7 +538,7 @@ async def test_export_lists_routines_reviews_photos_promos_and_tokens_without_se
     assert routine["consecutive_failures"] == 0
     assert doc["charger_reviews"][0]["rating"] == 4
     assert doc["charger_reviews"][0]["body"] == "Fast and tidy"
-    assert doc["charger_photos"][0]["status"] == "pending"
+    assert sorted(p["status"] for p in doc["charger_photos"]) == ["pending", "rejected"]
     assert doc["promo_redemptions"][0]["amount_coins"] == 25.0
     assert doc["promo_redemptions"][0]["operator"] == "Volt Co"
     assert doc["api_tokens"][0]["name"] == "Home Assistant"
@@ -571,7 +576,9 @@ async def test_closure_purges_routines_reviews_photos_and_keeps_promo_redemption
 
     assert summary["purged"]["charge_routines"] == 1
     assert summary["purged"]["plug_reviews"] == 1
-    assert summary["purged"]["plug_photos"] == 1
+    assert summary["purged"]["plug_photos"] == 2
+    await asyncio.gather(*closure._pending)
+    # the rejected photo's object was deleted at rejection, so it is not retried
     assert deleted == ["plug-1/p1.jpg"]
 
     async with factory() as db:
@@ -609,4 +616,25 @@ async def test_closure_survives_a_failing_photo_object_delete(factory, monkeypat
     async with factory() as db:
         user = (await db.execute(select(User).where(User.id == seeded["driver_id"]))).scalar_one()
         summary = await closure.close_account(db, user)
-    assert summary["purged"]["plug_photos"] == 1
+    await asyncio.gather(*closure._pending)
+    assert summary["purged"]["plug_photos"] == 2
+
+
+# --- photo object deletion runs after the closure, off the response ---
+
+@pytest.mark.asyncio
+async def test_delete_photo_objects_logs_and_continues_after_a_failure(monkeypatch, caplog):
+    import backend.services.account_closure as closure
+
+    seen = []
+
+    def fake(name):
+        seen.append(name)
+        if name == "a.jpg":
+            raise RuntimeError("bucket unreachable")
+
+    monkeypatch.setattr(closure, "delete_object", fake)
+    with caplog.at_level("WARNING", logger="amphive.api"):
+        await closure._delete_photo_objects(7, ["a.jpg", "b.jpg"])
+    assert seen == ["a.jpg", "b.jpg"]
+    assert any(r.exc_info for r in caplog.records)
