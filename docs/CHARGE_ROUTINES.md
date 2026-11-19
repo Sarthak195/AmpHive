@@ -56,8 +56,11 @@ hold, billing and the start, exactly as for a one-off scheduled charge.
 
 Creating a routine, re-enabling it, or editing its days or start time on a
 plug with opening hours (C4) is refused with 409 `plug_closed` when the plug
-is closed at the start time on any selected weekday. Hours a CPO edits later
-still take the WAITING-then-EXPIRED path above.
+is closed at the start time on any selected weekday. When a CPO later edits a
+plug's opening hours, every enabled routine whose start time is now closed on
+a selected weekday is turned off in the same request (its WAITING row
+cancelled) and its owner gets one `routine_disabled` notice. An occurrence
+that already started keeps its one `routine_started`.
 
 Creating a routine, re-enabling it, or editing its days or start time stamps
 an occurrence whose start already passed (within the window), so a routine
