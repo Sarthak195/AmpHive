@@ -8,13 +8,14 @@
  * not a download), report an issue (DisputeModal) and charge again.
  */
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { CheckCircle2 } from 'lucide-react';
 
 import { useSession } from '../contexts/SessionContext';
 import { useConfig } from '../contexts/ConfigContext';
 import { Money, useToast } from './ui';
+import api from '../api/client';
 import DisputeModal from './DisputeModal';
 import SessionPowerCurve from './SessionPowerCurve';
 import { stopReasonCopy, isAutoStopReason } from '../utils/statusCopy';
@@ -35,6 +36,24 @@ const SessionReceipt = () => {
 
   const [disputeOpen, setDisputeOpen] = useState(false);
   const [invoiceBusy, setInvoiceBusy] = useState(false);
+  // F8V: the driver's own net CO2 factor (their vehicle figures), else the
+  // standard one from /api/config. A failed fetch keeps the standard factor.
+  const [ownCo2PerKwh, setOwnCo2PerKwh] = useState(null);
+  const hasReceipt = receipt != null;
+  useEffect(() => {
+    if (!hasReceipt) return undefined;
+    let cancelled = false;
+    api.get('/api/me/vehicle')
+      .then((res) => {
+        if (!cancelled && Number.isFinite(res?.co2_avoided_kg_per_kwh)) {
+          setOwnCo2PerKwh(res.co2_avoided_kg_per_kwh);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [hasReceipt]);
 
   if (!receipt) return null;
 
@@ -49,7 +68,8 @@ const SessionReceipt = () => {
   const autoStopped = isAutoStopReason(reason);
   // Estimate only: energy x the server's net per-kWh factor (petrol CO2 for the
   // same distance minus grid CO2). Hidden until /api/config supplies it.
-  const co2Kg = co2PerKwh > 0 ? (energy_kwh ?? 0) * co2PerKwh : null;
+  const factor = ownCo2PerKwh ?? co2PerKwh;
+  const co2Kg = factor > 0 ? (energy_kwh ?? 0) * factor : null;
   // The invoice endpoint 400s on a zero-cost session — only offer it when the
   // session actually billed something.
   const canInvoice = session_id != null && Number(coins_spent) > 0;
