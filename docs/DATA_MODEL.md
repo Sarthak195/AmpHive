@@ -35,7 +35,8 @@ Owns users, gateways, sessions, charger_groups (cascade delete-orphan).
 
 ### `users`
 `id` PK · `tenant_id` → tenants (SET NULL, nullable) · `email` unique ·
-`hashed_password` · `full_name` · `role` (default `driver`) ·
+`hashed_password` · `full_name` (NOT NULL; may be the empty string for a
+Google signup without a name claim, since wave 4) · `role` (default `driver`) ·
 `coin_balance` **NUMERIC(12,2)** (Decimal, default 0.00) ·
 `token_version` INTEGER (default 0; JWT-revocation epoch, embedded as the
 `tv` claim and re-checked per request — revision `0003_token_version`,
@@ -72,6 +73,11 @@ user`, an unusable random `hashed_password`, `google_sub` NULL,
 `auth_provider` `deleted`, `is_disabled` true, `email_verified` false,
 `token_version` bumped (every outstanding JWT dies on its next request).
 The financial rows survive, pointing at a row that identifies nobody.
+Since wave 4 (not deployed) closure also deletes the user's `plug_reviews`
+and `plug_photos` (stored image objects deleted in a background task after
+the response, best-effort; rejected photos skipped, their object is deleted
+at rejection; a failed deletion leaves an unreachable orphan object) and
+clears `notification_prefs`; `promo_redemptions` stay against the tombstone.
 
 ### `gateways`
 `id` **VARCHAR(50) PK** (caller-supplied MAC/UUID) · `tenant_id` → tenants
@@ -424,7 +430,8 @@ full column list of each:
   transaction as the insert; `consecutive_failures` INTEGER default 0;
   `gate_notified` BOOLEAN NOT NULL DEFAULT false (the driver was told the
   routine is paused because queued charging is off for the plug; sent once,
-  cleared by the next queued row); `last_queued_charge_id` FK queued_charges
+  re-armed by the next materialize pass that finds the queued-charging gate
+  on); `last_queued_charge_id` FK queued_charges
   SET NULL, the occurrence's row until its outcome is settled; `created_at`.
   Account closure deletes the user's routines.
 

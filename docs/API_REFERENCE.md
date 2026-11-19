@@ -133,7 +133,7 @@ Token: HS256 JWT, claims `sub`/`role`/`email`/`tv`/`auth_time`/`sid`/`iat`/`exp`
 | GET | `/api/me/stats` | JWT | - | **(redesign/ui-v3)** Current-UTC-calendar-month + lifetime charging aggregates for the caller → `{month:{energy_kwh, spend_coins, sessions}, lifetime:{…}}`. Only finished sessions count (status ≠ ACTIVE: `coins_spent` is only written at finalize). Lives in `routers/sessions.py`. **Response additions (F8, 2026-11-17, deployed 2026-11-19):** `series`: array of 12 `{month: 'YYYY-MM' (UTC calendar month), energy_kwh, spend_coins, sessions}`, oldest first, zero-filled. The series counts COMPLETED/PAID sessions only (same as the CPO analytics) and `spend_coins` is net of APPROVED dispute refunds, each taken off its own session's month and floored at 0. `month` and `lifetime` are unchanged: they use status != ACTIVE and gross `coins_spent`, so the series sum can differ slightly from `lifetime` (cancelled sessions with energy, refunds). `impact`: `{assumptions, month, lifetime}`, where each of `month` and `lifetime` is `{distance_km, grid_co2_kg, petrol_co2_kg, co2_avoided_kg, petrol_litres, petrol_equivalent_inr}`. These are ESTIMATES derived from the delivered kWh, never measured. |
 | GET | `/api/sessions/disputes/my` | JWT | — | **(redesign/ui-v3)** The caller's disputes, newest first — the driver-side mirror of the CPO's `GET /api/cpo/disputes` (which owns resolution) → `[{id, session_id, status, reason, resolution_note, refund_coins, created_at, resolved_at}]` |
 | POST | `/api/sessions/{session_id}/dispute` | JWT | path `session_id:int`; `{reason}` (10–1000 chars) | File a dispute against one of the caller's own **finished** sessions (404 if not owner, 409 if still ACTIVE). Coins-only remedy — no Razorpay money-out path (see `MARKET_GAP_ANALYSIS.md` §3 "Refunds"). At most one OPEN dispute per session (409, also DB partial-unique backstop). Reviewed by the owning CPO via `GET /api/cpo/disputes` / `POST /api/cpo/disputes/{id}/resolve`. → `DisputeResponse` `{id, session_id, tenant_id, driver_user_id, reason, status, resolution_note, refund_coins, created_at, resolved_at, resolved_by_user_id}` |
-| GET | `/api/sessions/{session_id}/invoice` | JWT | path `session_id:int`; query `format?` (`html`) | GST tax invoice for a finished, billed session — issued on first call, idempotent thereafter (`services/invoices.py issue_invoice_for_session`). Access: the owning driver, or a cpo/admin of the owning tenant — anyone else 404 (existence not leaked). 400 if the session isn't invoiceable yet. `?format=html` returns a minimal printable invoice (inline CSS) instead of JSON; otherwise the same row shape as `GET /api/cpo/invoices` items. |
+| GET | `/api/sessions/{session_id}/invoice` | JWT | path `session_id:int`; query `format?` (`html`) | GST tax invoice for a finished, billed session: issued on first call, idempotent thereafter (`services/invoices.py issue_invoice_for_session`). Access: the owning driver, or a cpo/admin of the owning tenant; anyone else 404 (existence not leaked). 400 if the session isn't invoiceable yet. `?format=html` returns a minimal printable invoice (inline CSS) instead of JSON; otherwise the same row shape as `GET /api/cpo/invoices` items. **cpo_viewer (wave 4, not deployed):** returns the existing invoice of a session in the viewer's own tenant (JSON, or `?format=html` with the Bill To name reduced to initials and the email masked); never issues an invoice. A missing session, another tenant's session and a session with no issued invoice all return 404 'Session not found.' |
 
 **Charge-complete detection (F1, 2026-11-17, `release/2026-11-17-w2`, deployed 2026-11-19).** See [CHARGE_COMPLETE.md](CHARGE_COMPLETE.md).
 
@@ -303,14 +303,17 @@ frozen rate or billing.
 
 | Method | Path | Auth | Body/Params | Behaviour |
 |--------|------|------|-------------|-----------|
-| GET | `/api/me/notification-prefs` | JWT (any role) | - | `{"push": {"session_started": bool, "nearly_done": bool, "power_dropped": bool}, "quiet_hours": {"enabled": bool, "start": "HH:MM", "end": "HH:MM"}, "timezone": "<IANA zone quiet hours are read in>"}`. Defaults when never saved: every push true, quiet hours disabled 22:00 to 07:00. A driver has no tenant, so `timezone` is the default zone (Asia/Kolkata). |
-| PUT | `/api/me/notification-prefs` | JWT (a `cpo_viewer` gets 403) | the GET shape without `timezone` | Returns the GET shape. 422 on an unknown key (including any allowlisted type, which has no toggle), a time that is not 24-hour HH:MM, or an enabled window whose start equals its end. |
+| GET | `/api/me/notification-prefs` | JWT (any role) | - | `{"push": {"session_started": bool, "nearly_done": bool, "power_dropped": bool, "rate_changed": bool, "plug_available": bool, "reservation_booked": bool, "reservation_started": bool, "queued": bool}, "quiet_hours": {"enabled": bool, "start": "HH:MM", "end": "HH:MM"}, "timezone": "<IANA zone quiet hours are read in>"}`. Defaults when never saved: every push true, quiet hours disabled 22:00 to 07:00. A driver has no tenant, so `timezone` is the default zone (Asia/Kolkata). |
+| PUT | `/api/me/notification-prefs` | JWT (a `cpo_viewer` gets 403) | the GET shape without `timezone` | Returns the GET shape. 422 on an unknown key (including any allowlisted type, which has no toggle), a time that is not 24-hour HH:MM, or an enabled window whose start equals its end. A key left out is stored as its default (on). |
 
 The prefs gate Web Push only; the feed (`GET /api/notifications`) always gets
 the row. New notification types: `session_started`, `nearly_done`,
 `power_dropped` (C7); `routine_started` (with `session_id`),
-`routine_disabled`, `routine_skipped` (C5). A charge-routine occurrence gets
-only `routine_started`, never `session_started` or `queued_charge_started`.
+`routine_disabled`, `routine_skipped` (C5). Each start sends exactly one start notice: a direct start `session_started`, a queued or
+scheduled auto-start `queued_charge_started`, a routine occurrence `routine_started`
+(or `queued_charge_started` if the routine was deleted before settle). The last five
+toggles (`rate_changed`, `plug_available`, `reservation_booked`,
+`reservation_started`, `queued`) were added in wave 4 (not deployed).
 
 ### Plug hours, max session length, amenities and access note (C4)
 
@@ -320,7 +323,12 @@ only `routine_started`, never `session_started` or `queued_charge_started`.
   400), `max_session_minutes` (0..1440, 0/null clears), `amenities` (list
   from restroom, cafe, wifi, covered, lit, cctv, accessible; unknown 400),
   `access_note` (max 280, plain text). An omitted key is unchanged; an
-  explicit null/[]/0/"" clears it.
+  explicit null/[]/0/"" clears it. When `opening_hours` is part of the
+  body, every enabled charge routine on the plug whose local start time is
+  closed on any selected weekday under the new hours is turned off in the
+  same request (its pending queued row is cancelled), and its owner gets
+  one `routine_disabled` notification naming the opening hours (wave 4,
+  not deployed).
 - `GET /api/cpo/plugs`: rows add `opening_hours`, `max_session_minutes`,
   `amenities`, `access_note` (`access_note` masked by `redact_for` for a
   `cpo_viewer`).
@@ -359,6 +367,17 @@ gate is back on. `routine_disabled` means only three consecutive failed
 occurrences. Creating a routine, re-enabling it, or editing its weekdays or
 start time skips an occurrence whose start already passed, so the routine
 first runs at its next occurrence.
+
+## Wave 4 R1 fixes (2026-11-19, `release/2026-11-19-r1`, not deployed)
+
+No new routes and no migration. Changed behaviour (the invoice, notification-prefs and `PUT /api/cpo/plugs/{id}` rows above carry their parts):
+
+- `GET /api/auth/me/export`: adds the keys `charge_routines`, `promo_redemptions`, `charger_reviews`, `charger_photos`, `queued_charges`, `capacity_requests` (`export_format` stays `amphive.user-data-export.v1`, additive). Never a code hash or hint, API token digest, or photo object name / bucket URI.
+- `GET /api/plugs/{id}/reviews`: `author_display` is the first word of the driver's real name, else "AmpHive driver" (never derived from an email).
+- `GET /api/plugs/{id}/photos/{photo_id}/image`: pending or rejected photos: cpo of the tenant or admin only; a `cpo_viewer` gets 404.
+- `GET /api/cpo/plug-photos`: a `cpo_viewer` only ever receives APPROVED photos; a pending or rejected `status_filter` returns an empty list for that role.
+- `GET /api/sessions/{id}/invoice`: see its row (viewer read of an existing invoice).
+- `PUT /api/me/notification-prefs`: five new push toggles, see the C7 table.
 
 ## Payments — Razorpay (`services/payments.py`)
 

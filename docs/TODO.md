@@ -11,6 +11,23 @@ been fixed by the 2026-07-08…11 work — see the shipped sections below).*
 
 ---
 
+## 2026-11-19 wave 4 R1 fixes (built 2026-11-19 on release/2026-11-19-r1, not deployed)
+
+Fix release, no migration (alembic head stays `0050_charge_routines`). The items it closes are ticked in place below (wave 3 and wave 2 lists) with "(fixed 2026-11-19 on release/2026-11-19-r1, not deployed)". Open items it leaves:
+
+- [ ] Deploy R1 (thin backend and frontend layers, backend first; no migration, no env vars, no VM steps). See docs/IMPLEMENTATION_STATUS.md "2026-11-19 wave 4 R1 fixes".
+- [ ] R1: the first CI run is the real check for the DB-gated tests the lanes added (export and closure collections, the routine row lock and unique-index savepoint test, the estimate history query); none ran locally (no database allowed).
+- [ ] FX1 known limit: existing accounts that already hold an email-local-part `full_name` (earlier Google signups) are not rewritten (no backfill without a migration). Reviews hide it via the display rule, but CPO screens (initials for a viewer) and the invoice Bill To still show that stored value.
+- [ ] FX1 known limit: closure deletes stored photo objects in a background task after the response; a failed deletion is logged and leaves an unreachable orphan object (the row is gone, so it is never served). `_author_display` also hides a genuine one-word name equal to the email local part or its first segment (for example "Ada" with ada@x.com), by design.
+- [ ] FX1 note: the viewer invoice JSON still carries `driver_user_id` (an integer, as `GET /api/cpo/invoices` already gives viewers).
+- [ ] FX2 known limit: `disable_closed_routines` filters `charge_routines` by `plug_id`, which has no index (tiny table, runs only on a CPO hours edit; an index needs a migration).
+- [ ] FX2 known limit (found at integration): a CPO hours edit flushes the plug UPDATE, then updates routine rows, while a materialize tick locks the routine row and then the plug row FOR UPDATE. If both hit the same routine in the same instant, Postgres aborts one as a deadlock (a 500 on the edit, or a tick that retries next minute). Rare (the tick holds the routine lock for milliseconds, only around an occurrence); fix by locking routines before touching the plug if it is ever seen.
+- [ ] FX2 nit: the outage-expiry copy "Power didn't return in time" still contains an em-dash (existing copy that tests assert); replace it and the tests together.
+- [ ] FX3 known limit (accepted): the routine-deleted start-notice fallback is in memory (`SessionReaperService._routine_starts`); a backend restart inside that one-tick window, with the routine deleted in it, still loses the notice.
+- [ ] FX3 rollback caveat: an older backend reading prefs saved with the new toggle keys fails validation and falls back to defaults (quiet hours off) until the user saves again. No data loss.
+- [ ] Flakes seen once under parallel lane load, passed on rerun: `tools/tests/test_ocpp_bridge.py::test_restart_closes_orphaned_transaction`, and one unidentified frontend test.
+- [x] FX2 x FX3: a routine an hours edit turned off sends nothing after its one start notice (`test_hours_edit_disabled_routine_sends_nothing_after_its_one_start_notice`); FX3 nit (a collapsed `with` statement in `test_queued_charge.py`) fixed at integration. (fixed 2026-11-19 on release/2026-11-19-r1, not deployed)
+
 ## 2026-11-19 features wave 3 (built 2026-11-19 on release/2026-11-17-w3, deployed 2026-11-19)
 
 - [x] C10 gateway commissioning checklist (`GET /api/cpo/gateways/{id}/selftest`, CPO gateway Diagnostics drawer). (built 2026-11-19 on release/2026-11-17-w3, deployed 2026-11-19)
@@ -21,20 +38,21 @@ been fixed by the 2026-07-08…11 work — see the shipped sections below).*
 - [x] Integration: a routine start sends only `routine_started`; the estimate applies the plug-hours clamp; no nearly_done / power_dropped after F1 judged the car full; the plugs/cpo import cycle; selftest labels masked for a viewer. (built 2026-11-19 on release/2026-11-17-w3, deployed 2026-11-19)
 - [x] Deploy wave 3 (migration deploy 0048 to 0050). Done 2026-11-19: PR #153, merge 0047a2b, prod alembic 0050_charge_routines; see docs/DEPLOYMENT.md "Features wave 3".
 - [ ] C10: add `wifi_rssi` to the firmware periodic status message so the checklist can show a live signal reading instead of the boot-time value.
-- [ ] C10 nit: `check_firmware` reports "Running X, the newest release" even when the gateway is ahead of every active release (a dev build).
-- [ ] C10 nit: the checklist's `run()` has no cancellation or sequence guard, so a slow earlier response can overwrite a newer one if the gateway changes or Re-check is pressed mid-request.
-- [ ] C3 nit: the estimate route's own validation is untested, and the history query is exercised only through mocks.
+- [x] C10 nit: `check_firmware` reported "Running X, the newest release" even when the gateway is ahead of every active release (a dev build). It now passes with "newer than the newest release (X)". (fixed 2026-11-19 on release/2026-11-19-r1, not deployed)
+- [x] C10 nit: the checklist's `run()` had no cancellation or sequence guard. The component now ignores any response that is not from the latest request. (fixed 2026-11-19 on release/2026-11-19-r1, not deployed)
+- [x] C3 nit: the estimate route's own validation was untested. Route validation is now tested over HTTP, plus a DB-gated history query test (runs only in CI). (fixed 2026-11-19 on release/2026-11-19-r1, not deployed)
 - [x] C7 x scheduled start: a one-off scheduled or outage-queue auto-start sent no push in quiet hours (`queued_charge_started` was info and not allowlisted, unlike `routine_started`). Added to `ALWAYS_PUSH_TYPES`; `rate_changed` deliberately stays muted by quiet hours (forward-only info; the always-pushed `session_stopped` receipt carries the totals). (fix round 2026-11-19 on release/2026-11-17-w3, deployed 2026-11-19)
 - [x] C4 x scheduled create: `POST /api/sessions/queue` with `not_before` now refuses a closed slot with 409 `plug_closed` (same clamp as a start); routine create and a PATCH that changes days, start time or turns it on refuse a start time that is closed on any selected day. (fix round 2026-11-19 on release/2026-11-17-w3, deployed 2026-11-19)
-- [ ] C4 nit: an outage-queue row held WAITING past its TTL only because the plug was closed expires with "Power didn't return in time", which names the wrong cause. A routine whose plug hours a CPO edits after creation still fails its closed occurrences (three warnings, then disabled); no re-check runs on an hours edit.
-- [ ] C7: consider toggles for other info types (rate_changed, plug_available, reservation_*, the `queued` creation confirmation), which today are muted only by quiet hours; consider persisting the nearly_done / power_dropped dedupe if restart repeats become noticeable.
-- [ ] C7: a plain queued (non-routine) auto-start still sends both `queued_charge_started` and `session_started` (by the builder's design); merge them if it reads as a duplicate.
+- [x] C4 nit: an outage row that expires while the plug is closed now says "The charger was closed until your request expired."; a CPO opening_hours edit disables enabled routines whose start is now closed on a selected day (pending queued row cancelled) and notifies each owner once with `routine_disabled`. (fixed 2026-11-19 on release/2026-11-19-r1, not deployed)
+- [x] C7: push toggles (default on) for `rate_changed`, `plug_available`, `reservation_booked`, `reservation_started` and the `queued` creation confirmation; `reservation_cancelled` and `reservation_ahead` are warnings and always push. (fixed 2026-11-19 on release/2026-11-19-r1, not deployed)
+- [ ] C7: consider persisting the nearly_done / power_dropped dedupe if restart repeats become noticeable.
+- [x] C7: a plain queued (non-routine) auto-start sent both `queued_charge_started` and `session_started`. The queued-start sweep now always passes `announce_start=False`, so each start path sends exactly one start notice: direct `session_started`, queued or scheduled `queued_charge_started`, routine `routine_started`. (fixed 2026-11-19 on release/2026-11-19-r1, not deployed)
 - [x] C7 nit: the docs said quiet hours use "the charger owner's" / "the user's tenant" zone, which is wrong for drivers (created with `tenant_id` NULL, so always `pricing.DEFAULT_TZ`). Docs and the component comment corrected at integration; the behaviour is unchanged. (built 2026-11-19 on release/2026-11-17-w3, deployed 2026-11-19)
-- [ ] C4 nit: `hoursPatch` (CpoChargers) compares `JSON.stringify(plug.opening_hours)` with the form windows in key order days,start,end, but Postgres JSONB returns keys sorted by length ({end, days, start}), so every save of a plug that has hours re-sends `opening_hours` (harmless, the value is equal). The vitest round-trip case passes only because its fixture uses insertion order.
-- [ ] C5 known limit (accepted): `gate_notified` clears only when a row is actually queued. If the gate comes back on, the next occurrences are skipped for another reason (the driver's own WAITING row, or a counted failure), and the gate then goes off again, the driver gets no notice for that second outage.
-- [ ] C5 test gap: no local test covers the routine row lock or the IntegrityError savepoint branch; removing `with_for_update(skip_locked=True)` from `_materialize_one`, or the `except IntegrityError` path, leaves every non-DB test green. Only the CI-only `test_db_tick_across_midnight_and_double_tick_queue_one_row` covers concurrency, and nothing covers the savepoint branch.
-- [ ] C5 + C7 edge: a routine deleted (or its pending row link cleared) between the reaper's start and the settle pass gets zero start notices, because the sweep suppressed the generic ones and settle no longer finds the routine.
-- [ ] C5: the personal data export does not list charge routines (account closure deletes them).
+- [x] C4 nit: `hoursPatch` (CpoChargers) re-sent `opening_hours` on every save because JSONB returns keys in a different order. It now compares windows field by field. (fixed 2026-11-19 on release/2026-11-19-r1, not deployed)
+- [x] C5 known limit: `gate_notified` cleared only when a row was actually queued. It now re-arms on the next materialize pass that finds the queued-charging gate on, whether or not that occurrence is queued, so a second outage is noticed. (fixed 2026-11-19 on release/2026-11-19-r1, not deployed)
+- [x] C5 test gap: a local test now pins FOR UPDATE SKIP LOCKED on the routine select of both per-routine passes, and DB-gated tests cover the routine row lock and the unique-index savepoint branch (the DB-gated ones run only in CI). (fixed 2026-11-19 on release/2026-11-19-r1, not deployed)
+- [x] C5 + C7 edge: a routine deleted (or its pending row link cleared) between the reaper's start and the settle pass got zero start notices. The reaper now remembers routine-owned starts in memory and, when settle finds no routine linking the row, sends the held-back `queued_charge_started`. A backend restart inside that one-tick window still loses it (accepted). (fixed 2026-11-19 on release/2026-11-19-r1, not deployed)
+- [x] C5: the personal data export did not list charge routines. The export now also lists charge routines, promo redemptions, plug reviews and photos the user wrote, queued charges and capacity requests; closure also deletes plug reviews and plug photos (rows, and bucket objects best-effort) and clears `notification_prefs`. No migration. (fixed 2026-11-19 on release/2026-11-19-r1, not deployed)
 
 ## 2026-11-17 features wave 2 (built 2026-11-17 on release/2026-11-17-w2, deployed 2026-11-19)
 
@@ -45,8 +63,8 @@ been fixed by the 2026-07-08…11 work — see the shipped sections below).*
 - [x] OCPP 1.6J read-only virtual charge-point bridge (`tools/ocpp_bridge`). (built 2026-11-17 on release/2026-11-17-w2, deployed 2026-11-19)
 - [x] Deploy wave 1 + wave 2 (migration deploy 0044 to 0047). Done 2026-11-19: wave 1 (63f41b7) then wave 2 (3e7d26c), prod alembic 0047_promo_codes; see docs/DEPLOYMENT.md "Features wave 2".
 - [ ] F1 known limits: detector state is in memory (a restart delays detection and can repeat one "looks full" notification); car-side scheduled charging or a long mid-charge pause can look full (why the stop is opt-in); firmware < 2.8.0 may publish a failed-poll frame that is indistinguishable from a real 0 W; a limit stop and a "looks full" notice can both fire on the same frame (rare).
-- [ ] F10 follow-ups: let viewers load pending plug photos only if wanted (`routers/plugs.py` checks `role == 'cpo'`); show an existing invoice to viewers without issuing one (with the HTML's "Bill To" name and email masked). Promo `code_hint` is now hidden from a viewer.
-- [ ] Public plug reviews: `_author_display` (`routers/plugs.py`) shows the first word of `full_name`, which for a Google signup without a name claim is the whole email local part. The read is unauthenticated, so this is not a viewer issue; changing it changes what every reader sees.
+- [x] F10 follow-ups: pending plug photos stay hidden from a viewer (explicit `is_cpo_viewer` check in `get_plug_photo_image`, decision kept; `GET /api/cpo/plug-photos` gives a viewer approved photos only); `GET /api/sessions/{id}/invoice` gives a `cpo_viewer` an existing invoice of its own tenant (never issues; Bill To masked via `redact_name_for` / `redact_for`); missing, foreign-tenant and not-yet-issued all answer the same 404. Promo `code_hint` is hidden from a viewer. (fixed 2026-11-19 on release/2026-11-19-r1, not deployed)
+- [x] Public plug reviews: `_author_display` shows the first word of `full_name` only when it is a real name, else "AmpHive driver"; a Google signup without a name claim now stores an empty `full_name` instead of the email local part. (fixed 2026-11-19 on release/2026-11-19-r1, not deployed)
 - [x] F7 known gaps: the legacy sid-less `/api/auth/logout` fallback and an admin role change or disable left API tokens live. Fixed in the review fix round (both now call `revoke_user_api_tokens`; the email-verification bump deliberately does not).
 - [ ] F7: add a screenshot to docs/HOME_ASSISTANT.md once it runs against prod.
 - [x] F1 review fix: a failed opted-in auto-stop is now retried on later idle frames (at most once per 60 s, only while ACTIVE and opted in); the "looks full" notice no longer claims the session is stopping.
@@ -74,7 +92,8 @@ been fixed by the 2026-07-08…11 work — see the shipped sections below).*
 - [ ] F3 known limits: cooldowns, the "offline notice was sent" memory and the pending "still offline" re-check are in process memory, so a restart during the cooldown loses the re-check and can re-alert once; an online racing the recipients query can send "back online" alongside the "offline" fan-out (ordering not guaranteed); a safety fault can give an owner who charges from an operator account both the driver cutoff notice and the `gateway_fault` bell (not deduplicated).
 - [ ] Deferred from F8: vehicle profile (per-driver km/kWh and petrol price) and a monthly insights email. Tenant-local months for CPO-side series if ever needed.
 - [ ] Deferred from F6: "ready by T" charge planner. It needs a new PAUSED session state and unattended re-energizing (a SAFETY.md concern), so it was dropped from F6. Only the one-tap cheapest-start shipped.
-- [ ] Optional F11 follow-up: a free Cloudflare Cache Rule for `/api/status` (Eligible for cache, edge TTL 60 s) and a QR to `/map`.
+- [ ] Optional F11 follow-up: a free Cloudflare Cache Rule for `/api/status` (Eligible for cache, edge TTL 60 s). A dashboard setting, not done.
+- [x] F11 "Share network status" printable QR on the CPO Chargers page (opens the driver origin's `/map`). (fixed 2026-11-19 on release/2026-11-19-r1, not deployed)
 
 ---
 
@@ -292,9 +311,9 @@ actions, and two deliberate deferrals.*
       2026-08-04 sweep).
 
 - [ ] **On-hardware verification backlog (operator, no code).** **(Reality-
-      check.)** fw 2.5.0-direct's WiFi-reconnect fix is built + on GCS but has
-      never run on the gateway — verify by power-cycling the router after it
-      installs and confirming it reconnects unaided. Also the standing
+      check.)** fw 2.5.0-direct's WiFi-reconnect fix was OTA'd and hardware-verified
+      on 2026-08-04 (the gateway reconnected unaided), and the gateway now
+      runs 2.9.0-direct, so that check is closed. Still open: the standing
       "on-device verify pending" cluster that only rides to the field via manual
       OTA: crash-recovery duration watchdog (fw 2.1.0), offline-resync per-entry
       `session_id` billing attribution (fw 2.1.0), energy-integrator NVS restore

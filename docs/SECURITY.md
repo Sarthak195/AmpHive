@@ -1098,12 +1098,50 @@ and always push, even in quiet hours; a test pins that no allowlisted type can
 be given a toggle. A prefs read failure fails open (push sent). The feed row
 is never suppressed.
 
+Wave 4 added toggles only for informational types (`rate_changed`,
+`plug_available`, `reservation_booked`, `reservation_started`, `queued`).
+Booking changes made against the driver (`reservation_cancelled`,
+`reservation_ahead`) are severity warning and have no toggle, and
+`test_allowlist_names_the_safety_billing_and_routine_types` still asserts the
+allowlist and the toggles are disjoint.
+
 **Charge routines (C5).** Owner-only routes; another driver's routine is a 404
 (no existence oracle). A routine re-checks private-group access at every
 occurrence and never queues for a disabled or closed account. The materialize
 pass locks the routine row and then the plug row FOR UPDATE, so its check for
 another driver's WAITING row is serialized with the queue endpoint's
 scheduled path. Safety posture: SAFETY.md.
+
+### 8.13 2026-11-19 wave 4 R1 fixes (built on `release/2026-11-19-r1`, not deployed)
+
+**Data rights.** Account closure additionally deletes the user's `plug_reviews`
+and `plug_photos` and clears `users.notification_prefs`. Closure deletes the
+stored photo objects in a background task after the response; rejected photos
+are skipped because their object is deleted at rejection. A deletion that fails
+is logged and the object is left as an unreachable orphan (its row is gone, so
+it is never served). `promo_redemptions` are retained against the tombstone
+(usage count, linked to an offline top-up). The export now also lists charge
+routines, promo redemptions, the user's plug reviews and photos, queued charges
+and capacity requests; it never contains a promo code hash or hint, an API token
+digest, or a photo object name or bucket URI.
+
+**Review authors.** Public reviews never display anything derived from an
+email: `author_display` is the first word of a real `full_name`, else "AmpHive
+driver", and a Google signup without a name claim stores an empty `full_name`.
+Known limit: existing accounts whose `full_name` is an email local part (earlier
+Google signups) are not rewritten (no migration); the review rule hides it, but
+CPO screens (initials for a viewer) and the invoice Bill To still show it.
+
+**cpo_viewer.** `GET /api/sessions/{id}/invoice` gives a viewer an existing
+invoice of its own tenant only, and never issues one (issuing assigns the next
+invoice number, a write). The HTML Bill To name goes through `redact_name_for`
+(initials) and the email through `redact_for`; the JSON carries no name or email
+(it has `driver_user_id`, an integer, as `GET /api/cpo/invoices` already gives
+viewers). A missing session, another tenant's session and a session with no
+issued invoice all answer the same 404, so there is no existence oracle.
+Pending and rejected plug photos stay hidden from a viewer (image 404, and the
+CPO photo list returns approved photos only). The every-write-route walk on the
+merged tree asserts 403 `read_only_demo` on 75 write routes.
 
 ---
 
