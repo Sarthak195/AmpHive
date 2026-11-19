@@ -106,6 +106,8 @@ async def build_export(db: AsyncSession, user: User) -> dict:
         "charging_credit_balance": float(user.coin_balance),
         "created_at": _iso(user.created_at),
         "organisation_id": user.tenant_id,
+        # [C7] Push toggles and quiet hours; null = never changed (defaults).
+        "notification_prefs": user.notification_prefs,
     }
 
     # --- charging sessions (with the charger they ran on) -----------------
