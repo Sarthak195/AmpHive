@@ -6,8 +6,9 @@
  *
  * Only push is affected: every notice still lands in the bell feed. Safety,
  * fault and billing notices, unattended (scheduled, queued or routine) starts,
- * and anything marked warning or critical always
- * push, even in quiet hours, so they have no toggle here. Times are in the
+ * and anything marked warning or critical (an operator cancelling a booking,
+ * a reservation that will stop a session) always push, even in quiet hours,
+ * so they have no toggle here. A toggle missing from a saved row reads as on. Times are in the
  * zone the server reports (the account's tenant zone; a driver has no
  * tenant, so it is the platform default, Asia/Kolkata). A read-only
  * cpo_viewer cannot save, so the panel is not shown to one.
@@ -24,6 +25,11 @@ const TOGGLES = [
   ['session_started', 'Charging started'],
   ['nearly_done', 'Almost done (90% of your energy limit)'],
   ['power_dropped', 'Charging slowed down'],
+  ['rate_changed', 'My charging rate changes mid-session'],
+  ['plug_available', 'A charger I am watching is free'],
+  ['queued', 'A charge I queue or schedule is confirmed'],
+  ['reservation_booked', 'A reservation is confirmed'],
+  ['reservation_started', 'My reservation starts'],
 ];
 
 export default function NotificationPrefs() {
@@ -84,7 +90,8 @@ export default function NotificationPrefs() {
       <form className="stack-sm" onSubmit={handleSave}>
         <p className="text-2 text-sm">
           These only change push alerts. Every notice still appears in your bell, and safety,
-          fault and billing alerts, and scheduled or routine starts, always push.
+          fault and billing alerts, operator changes to your bookings, and scheduled or routine
+          starts always push.
         </p>
         <fieldset className="stack-sm notif-prefs-group">
           <legend className="field-label">Push me when</legend>
