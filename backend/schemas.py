@@ -341,6 +341,16 @@ class PlugResponse(BaseModel):
     # /api/plugs/{id}/photos/{photo_id}/image) to use as the plug's thumbnail on
     # the map/list. None when the plug has no approved photo yet.
     thumbnail_url: Optional[str] = None
+    # [Plug hours] services/plug_hours.py driver_fields. All None for a 24x7
+    # plug with nothing set. open_now + hours_changes_at (next close when open,
+    # next open when closed) drive "Open now, closes HH:MM" / "Closed, opens
+    # HH:MM" in tenant_timezone. access_note is plain text (render as text).
+    opening_hours: Optional[list[dict]] = None
+    open_now: Optional[bool] = None
+    hours_changes_at: Optional[str] = None
+    max_session_minutes: Optional[int] = None
+    amenities: Optional[list[str]] = None
+    access_note: Optional[str] = None
 
 
 class PublicPlugResponse(BaseModel):
@@ -602,6 +612,17 @@ class CpoPlugCreateRequest(BaseModel):
     connector_type: Optional[str] = Field(default=None, max_length=32)
 
 
+class PlugHoursWindow(BaseModel):
+    """[Plug hours] One opening-hours window in the tenant's local time:
+    minute-of-day [start, end) on the weekdays in ``days`` (Mon=bit0..Sun=bit6,
+    TariffSlot semantics). ``end`` before ``start`` crosses midnight and is
+    split server-side (services/plug_hours.py normalize_hours); ``end`` 0 means
+    midnight."""
+    days: int = Field(ge=1, le=127)
+    start: int = Field(ge=0, le=1439)
+    end: int = Field(ge=0, le=1440)
+
+
 class CpoPlugUpdateRequest(BaseModel):
     """Update an existing plug's details."""
     name: Optional[str] = Field(default=None, min_length=1, max_length=100)
@@ -629,6 +650,14 @@ class CpoPlugUpdateRequest(BaseModel):
     # max_current_a above.
     rated_power_w: Optional[int] = Field(default=None, ge=0)
     connector_type: Optional[str] = Field(default=None, max_length=32)
+    # [Plug hours] Omit a key to leave it unchanged; an explicit null (or [],
+    # 0, "") clears it: null hours = open 24x7, null max_session_minutes = no
+    # cap. Overlap and the amenity allowlist are checked in the router
+    # (services/plug_hours.py), 400 on failure.
+    opening_hours: Optional[list[PlugHoursWindow]] = Field(default=None, max_length=28)
+    max_session_minutes: Optional[int] = Field(default=None, ge=0, le=1440)
+    amenities: Optional[list[str]] = Field(default=None, max_length=16)
+    access_note: Optional[str] = Field(default=None, max_length=280)
 
     @field_validator("local_ip")
     @classmethod

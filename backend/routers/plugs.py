@@ -42,6 +42,7 @@ from backend.schemas import (
     PlugReviewResponse,
     PublicPlugResponse,
 )
+from backend.services import plug_hours
 from backend.services.auth import (
     get_current_user,
     get_current_user_optional,
@@ -446,6 +447,7 @@ async def get_available_plugs(
                 review_count=review_count,
                 thumbnail_url=photo_thumbs.get(plug.id),
                 **reservation_fields.get(plug.id, {}),
+                **plug_hours.driver_fields(plug, tenant.timezone, now),
             )
         )
     return responses
@@ -655,6 +657,9 @@ async def get_plug(
         review_count=review_count,
         thumbnail_url=thumbnail_url,
         **reservation_fields.get(plug.id, {}),
+        **plug_hours.driver_fields(
+            plug, tenant.timezone if tenant is not None else None, now
+        ),
     )
 
 

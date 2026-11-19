@@ -233,3 +233,18 @@ def closed_detail(plug, tz_name, now: datetime) -> str:
     if changes_at is not None:
         return f"This charger is closed right now. It opens at {changes_at:%H:%M}."
     return "This charger is closed right now."
+
+
+def driver_fields(plug, tz_name, now: datetime) -> dict:
+    """The PlugResponse fields for the driver plug card and detail.
+    hours_changes_at is the next close (open) or next open (closed) as an ISO
+    instant, rendered by the client in tenant_timezone."""
+    open_now, changes_at = hours_status(plug, tz_name, now)
+    return {
+        "opening_hours": hours_of(plug),
+        "open_now": open_now,
+        "hours_changes_at": changes_at.isoformat() if changes_at is not None else None,
+        "max_session_minutes": max_minutes_of(plug),
+        "amenities": amenities_of(plug),
+        "access_note": access_note_of(plug),
+    }
