@@ -88,6 +88,8 @@ export const RESERVATION_STATUS_LABELS = {
   fulfilled: 'Fulfilled',
   cancelled: 'Cancelled',
   expired: 'Expired',
+  pending: 'Awaiting approval',
+  declined: 'Declined',
 };
 
 export function reservationStatusLabel(status) {

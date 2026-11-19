@@ -18,6 +18,12 @@ booking overlap check, every list endpoint), so a no-show hold never blocks
 anyone even if the process never runs a janitor. Piggybacking a sweep (+ a
 "your reservation just started" nudge) onto SessionReaperService is a noted
 follow-up, not a correctness requirement.
+
+[C8 approval mode] A plug whose reservation_mode is "approval" takes
+bookings as PENDING requests. HOLD_STATUSES (BOOKED + PENDING) is what blocks
+an overlapping booking and counts toward the per-user cap; only BOOKED gates a
+session start. A request still PENDING at start_at lazily flips to EXPIRED
+here, so an unanswered request never outlives its own window.
 """
 import os
 from datetime import datetime, timedelta, timezone
@@ -59,6 +65,18 @@ RESERVATION_WALKUP_WARN_LOOKAHEAD_MIN = float(
 RESERVATION_MIN_MINUTES = 15
 RESERVATION_START_GRACE_MIN = 2
 
+# [C8] Plug.reservation_mode values, and the statuses that hold a slot
+# against other bookings (a PENDING request does; it never gates a start).
+RESERVATION_MODES = ("instant", "approval")
+HOLD_STATUSES = (ReservationStatus.BOOKED, ReservationStatus.PENDING)
+
+
+def reservation_mode_of(plug) -> str:
+    """The plug's booking mode, "instant" for anything unrecognized (the
+    services/plug_hours.py accessor convention)."""
+    value = getattr(plug, "reservation_mode", None)
+    return value if value in RESERVATION_MODES else "instant"
+
 
 async def expire_lapsed_reservations(
     db: AsyncSession,
@@ -86,10 +104,19 @@ async def expire_lapsed_reservations(
     """
     now = now or datetime.now(timezone.utc)
     conditions = [
-        Reservation.status == ReservationStatus.BOOKED,
         or_(
-            Reservation.start_at <= now - timedelta(minutes=RESERVATION_NO_SHOW_GRACE_MIN),
-            Reservation.end_at <= now,
+            and_(
+                Reservation.status == ReservationStatus.BOOKED,
+                or_(
+                    Reservation.start_at <= now - timedelta(minutes=RESERVATION_NO_SHOW_GRACE_MIN),
+                    Reservation.end_at <= now,
+                ),
+            ),
+            # [C8] An unanswered approval request expires at its start.
+            and_(
+                Reservation.status == ReservationStatus.PENDING,
+                Reservation.start_at <= now,
+            ),
         ),
     ]
     if plug_id is not None:

@@ -62,6 +62,12 @@ import { apiErrorCopy } from '../../utils/statusCopy';
 import { hoursFormFromPlug, hoursPatch } from '../../utils/plugHours';
 import './CpoChargers.css';
 
+// [C8] How a booking on this charger is confirmed.
+const RESERVATION_MODE_OPTIONS = [
+  { value: 'instant', label: 'Instant (booked at once)' },
+  { value: 'approval', label: 'Needs my approval' },
+];
+
 const QUEUED_OPTIONS = [
   { value: '', label: 'Inherit tenant default' },
   { value: 'true', label: 'Enabled' },
@@ -338,6 +344,7 @@ export default function CpoChargers() {
     tariff_id: '',
     rated_power_w: '',
     connector_type: '',
+    reservation_mode: 'instant',
   });
   // [Plug hours] Opening hours, max session length, amenities, access note.
   const [hoursForm, setHoursForm] = useState(() => hoursFormFromPlug(null));
@@ -356,6 +363,7 @@ export default function CpoChargers() {
       tariff_id: plug.tariff_id != null ? String(plug.tariff_id) : '',
       rated_power_w: plug.rated_power_w ?? '',
       connector_type: plug.connector_type ?? '',
+      reservation_mode: plug.reservation_mode || 'instant',
     });
     setHoursForm(hoursFormFromPlug(plug));
     setEditError('');
@@ -402,6 +410,9 @@ export default function CpoChargers() {
       }
       if (editForm.connector_type !== (editingPlug.connector_type ?? '')) {
         body.connector_type = editForm.connector_type;
+      }
+      if (editForm.reservation_mode !== (editingPlug.reservation_mode || 'instant')) {
+        body.reservation_mode = editForm.reservation_mode;
       }
       Object.assign(body, hoursPatch(hoursForm, editingPlug));
 
@@ -969,6 +980,27 @@ export default function CpoChargers() {
                 />
                 <p className="field-help">
                   How long power must stay on before a queued charge auto-starts.
+                </p>
+              </div>
+              <div className="field">
+                <label className="field-label" htmlFor="cpo-chargers-edit-resv-mode">
+                  Reservations
+                </label>
+                <select
+                  id="cpo-chargers-edit-resv-mode"
+                  className="select"
+                  value={editForm.reservation_mode}
+                  onChange={(e) => setEditForm({ ...editForm, reservation_mode: e.target.value })}
+                >
+                  {RESERVATION_MODE_OPTIONS.map((o) => (
+                    <option key={o.value} value={o.value}>
+                      {o.label}
+                    </option>
+                  ))}
+                </select>
+                <p className="field-help">
+                  With approval, a booking waits in Reservations until you approve or decline it.
+                  An unanswered request expires at its start time.
                 </p>
               </div>
             </Section>

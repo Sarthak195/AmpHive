@@ -120,3 +120,25 @@ describe('ReserveModal — submit', () => {
     expect(onReserved).not.toHaveBeenCalled();
   });
 });
+
+describe('ReserveModal [C8] approval mode', () => {
+  it('says the host approves, labels the button Request, and marks pending windows', async () => {
+    api.get.mockResolvedValue([{ ...WINDOWS[0], status: 'pending' }]);
+    api.post.mockResolvedValue({ id: 2, status: 'pending' });
+    const onReserved = vi.fn();
+    render(
+      <ReserveModal
+        open
+        onClose={vi.fn()}
+        plug={{ ...PLUG, reservation_mode: 'approval' }}
+        onReserved={onReserved}
+      />
+    );
+    expect(await screen.findByText(/awaiting approval/)).toBeInTheDocument();
+    expect(screen.getByText(/The host approves bookings on this charger/)).toBeInTheDocument();
+
+    pickWhen('2030-06-01', '14:00');
+    await userEvent.click(screen.getByRole('button', { name: 'Request' }));
+    await waitFor(() => expect(onReserved).toHaveBeenCalled());
+  });
+});

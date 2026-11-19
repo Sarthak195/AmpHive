@@ -8,7 +8,7 @@ driver and CPO plug routes).
 import ipaddress
 import re
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
 
@@ -351,6 +351,9 @@ class PlugResponse(BaseModel):
     max_session_minutes: Optional[int] = None
     amenities: Optional[list[str]] = None
     access_note: Optional[str] = None
+    # [C8] "instant" or "approval": in approval mode a booking is a request the
+    # host approves or declines; the reserve dialog says so up front.
+    reservation_mode: str = "instant"
 
 
 class PublicPlugResponse(BaseModel):
@@ -658,6 +661,8 @@ class CpoPlugUpdateRequest(BaseModel):
     max_session_minutes: Optional[int] = Field(default=None, ge=0, le=1440)
     amenities: Optional[list[str]] = Field(default=None, max_length=16)
     access_note: Optional[str] = Field(default=None, max_length=280)
+    # [C8] Booking mode; omit to leave unchanged.
+    reservation_mode: Optional[Literal["instant", "approval"]] = None
 
     @field_validator("local_ip")
     @classmethod

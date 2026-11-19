@@ -415,6 +415,11 @@ class Plug(Base):
     max_session_minutes: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     amenities: Mapped[Optional[list]] = mapped_column(JSONB(none_as_null=True), nullable=True)
     access_note: Mapped[Optional[str]] = mapped_column(String(280), nullable=True)
+    # [C8 approval mode] "instant" (a booking is BOOKED at once) or "approval"
+    # (it starts PENDING until the tenant's CPO approves it). VARCHAR, not a
+    # native enum, like plug_model / connector_type; validated by the schema.
+    # Alembic revision 0055_reservation_approval.
+    reservation_mode: Mapped[str] = mapped_column(String(16), default="instant", server_default=text("'instant'"), nullable=False)
 
     # Relationships
     gateway: Mapped[Gateway] = relationship("Gateway", back_populates="plugs")
@@ -1595,6 +1600,14 @@ class ReservationStatus(str, enum.Enum):
     CANCELLED = "cancelled"    # withdrawn by the owner or the tenant's cpo/admin
     FULFILLED = "fulfilled"    # the holder started a session inside the window
     EXPIRED = "expired"        # no-show: grace after start_at lapsed unfulfilled
+    # [C8 approval mode] A request on a plug whose reservation_mode is
+    # "approval": blocks overlapping bookings (and counts toward the per-user
+    # cap) but never authorizes or blocks a session start. The tenant's CPO
+    # approves (-> BOOKED) or declines (-> DECLINED); one still PENDING at
+    # start_at lazily flips to EXPIRED. Added via ALTER TYPE in migration
+    # 0055_reservation_approval (the 0026/0038 pattern).
+    PENDING = "pending"
+    DECLINED = "declined"
 
 
 class Reservation(Base):
@@ -1615,6 +1628,11 @@ class Reservation(Base):
     or past end_at) wherever reservations are read (the session-start gate,
     the booking overlap check, every list endpoint), so a stale hold never
     blocks anyone.
+
+    [C8] On a plug in "approval" mode a booking starts PENDING ->
+    BOOKED (CPO approves) | DECLINED (CPO declines) | CANCELLED (driver
+    withdraws) | EXPIRED (still pending at start_at). PENDING blocks
+    overlapping bookings but never authorizes or blocks a session start.
 
     Design notes:
     - tenant_id is denormalized from plug -> gateway -> tenant (mirrors

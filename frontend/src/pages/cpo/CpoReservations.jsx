@@ -9,6 +9,9 @@
  *   as the operator DOES notify the driver (services/notifications.notify,
  *   verified against backend/routers/reservations.py — not the no-notify
  *   case the old copy implied), so the confirm dialog says so.
+ *   [C8] A request on an approval-mode charger arrives "pending" and gets
+ *   Approve / Decline buttons (POST /api/cpo/reservations/{id}/approve or
+ *   /decline); the driver is notified either way.
  * - Day: a pure-CSS-grid timeline, one row per charger, 24 hourly columns
  *   (96 15-minute grid tracks under the hood so blocks land on their real
  *   start/end). Fetches a single generous page of reservations + the plug
@@ -34,10 +37,12 @@ const DAY_COLUMNS = 96; // 24h * 4 (15-minute resolution)
 
 const STATUS_OPTIONS = [
   { value: '', label: 'All statuses' },
+  { value: 'pending', label: 'Awaiting approval' },
   { value: 'booked', label: 'Booked' },
   { value: 'fulfilled', label: 'Fulfilled' },
   { value: 'cancelled', label: 'Cancelled' },
   { value: 'expired', label: 'Expired' },
+  { value: 'declined', label: 'Declined' },
 ];
 
 const STATUS_TONE = {
@@ -45,6 +50,8 @@ const STATUS_TONE = {
   fulfilled: 'badge-info',
   cancelled: 'badge-danger',
   expired: 'badge-warn',
+  pending: 'badge-warn',
+  declined: 'badge-danger',
 };
 
 // Render a booking window in the viewer's local timezone. Collapses the end
@@ -129,6 +136,22 @@ export default function CpoReservations() {
       toast.error(apiErrorCopy(err));
     } finally {
       setCancelling(false);
+    }
+  };
+
+  // ---- Approve / decline a pending request (list view) -----------------------
+  const [answering, setAnswering] = useState(null);
+
+  const answerRequest = async (r, action) => {
+    setAnswering(r.id);
+    try {
+      await api.post(`/api/cpo/reservations/${r.id}/${action}`, {});
+      toast.ok(action === 'approve' ? 'Request approved.' : 'Request declined.');
+      fetchList(offset);
+    } catch (err) {
+      toast.error(apiErrorCopy(err));
+    } finally {
+      setAnswering(null);
     }
   };
 
@@ -222,7 +245,28 @@ export default function CpoReservations() {
       key: 'actions',
       label: '',
       render: (r) =>
-        r.status === 'booked' ? (
+        r.status === 'pending' ? (
+          <div className="row">
+            <button
+              data-write
+              type="button"
+              className="btn btn-primary btn-sm"
+              disabled={answering === r.id}
+              onClick={() => answerRequest(r, 'approve')}
+            >
+              Approve
+            </button>
+            <button
+              data-write
+              type="button"
+              className="btn btn-quiet btn-sm"
+              disabled={answering === r.id}
+              onClick={() => answerRequest(r, 'decline')}
+            >
+              Decline
+            </button>
+          </div>
+        ) : r.status === 'booked' ? (
           <button data-write type="button" className="btn btn-quiet btn-sm" onClick={() => setCancelTarget(r)}>
             Cancel
           </button>
@@ -351,6 +395,8 @@ export default function CpoReservations() {
                 <span className="badge badge-info">Fulfilled</span>
                 <span className="badge badge-danger">Cancelled</span>
                 <span className="badge badge-warn">Expired</span>
+                <span className="badge badge-warn">Awaiting approval</span>
+                <span className="badge badge-danger">Declined</span>
               </div>
 
               <div className="resv-day-grid">

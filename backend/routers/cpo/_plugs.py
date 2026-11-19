@@ -31,6 +31,7 @@ from backend.services.plug_hours import (
     normalize_amenities,
     normalize_hours,
 )
+from backend.services.reservations import reservation_mode_of
 
 from ._common import (
     DEFAULT_LIST_LIMIT,
@@ -102,6 +103,8 @@ async def cpo_list_plugs(
             "max_session_minutes": max_minutes_of(plug),
             "amenities": amenities_of(plug),
             "access_note": redact_for(user, access_note_of(plug)),
+            # [C8] Booking mode: instant or approval.
+            "reservation_mode": reservation_mode_of(plug),
             "last_seen_at": plug.last_seen_at.isoformat() if plug.last_seen_at else None,
             "created_at": plug.created_at.isoformat() if plug.created_at else None,
         }
@@ -293,6 +296,9 @@ async def cpo_update_plug(
         plug.max_session_minutes = req.max_session_minutes or None
     if "access_note" in fields:
         plug.access_note = (req.access_note or "").strip() or None
+    if req.reservation_mode is not None:
+        # [C8] Requests already PENDING stay pending until answered or expired.
+        plug.reservation_mode = req.reservation_mode
 
     await db.commit()
     await db.refresh(plug)
