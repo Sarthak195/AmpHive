@@ -246,6 +246,118 @@ order, same as session start).
 
 `GET /api/auth/me/export` gains an `api_tokens` array (`id, name, prefix, scope, created_at, last_used_at, revoked_at`), never the hash.
 
+## Features wave 3 (2026-11-19, `release/2026-11-17-w3`, not deployed)
+
+New and changed routes from C10, C3, C7, C4 and C5. No new environment
+variable; `services/routines.py` also reads the existing
+`MAX_QUEUED_CHARGES_PER_USER` (default 2). Every write route below answers a
+`cpo_viewer` 403 `read_only_demo` (global guard, pinned by the route walk).
+
+### Gateway commissioning checklist (C10)
+
+`GET /api/cpo/gateways/{gateway_id}/selftest`: read-only commissioning
+checklist. Roles: cpo, admin, cpo_viewer (tenant-scoped; 404 for a missing or
+another tenant's gateway). Response: `{gateway_id, generated_at, overall:
+pass|warn|fail, checks: [{key, label, status: pass|warn|fail|unknown, detail,
+fix_hint, observed_at}]}`. Checks:
+
+- `online`: by `GATEWAY_LIVENESS_WINDOW_SEC`.
+- `wifi`: the RSSI from the newest `GATEWAY_BOOT` event, with no age limit
+  (warn below -70 dBm, fail below -80; unknown without a fw >= 2.8.0 boot
+  report). It is the reading at the last boot, not live.
+- `firmware`: compared with the newest active release of the same `-suffix`
+  variant.
+- `roster`.
+- One check per plug: telemetry fresh by `PLUG_POWER_STALE_SEC`, warn when
+  stale, fail when there is none in 24 h.
+- `plug_faults`: judged from the newest `PLUG_UNREACHABLE` /
+  `PLUG_RECOVERED` event per plug within 24 h (a `PLUG_UNREACHABLE` without a
+  later `PLUG_RECOVERED`).
+
+No MQTT command, no probe, no relay actuation. For a `cpo_viewer`, `label`,
+`detail` and `fix_hint` pass through `redact_for`.
+
+### Pre-start charge estimate (C3)
+
+`GET /api/plugs/{plug_id}/estimate?max_kwh=&max_duration_min=&start_at=`:
+display-only pre-start estimate. Any authenticated role; visibility follows
+`GET /api/plugs/{id}` exactly (403 for a private group the caller has not
+joined, 404 for the read-only `cpo_viewer`). Needs `max_kwh` (0 < x <= 100)
+and/or `max_duration_min` (1..1440), otherwise 422; the limit that binds
+first wins. `start_at` is an optional ISO datetime (default now) that lets a
+scheduled start be priced in its own tariff window; it must be within 1 day
+in the past and 30 days ahead (else 422). The estimate never spans more than
+24 h: `duration_min` is capped at 1440 and `energy_kwh` is what is delivered
+within that cap. When the plug has opening hours or a max session length
+(C4), the same clamp the start applies is used at `start_at`: the estimate
+ends by the closing time and by `max_session_minutes`, and a plug closed at
+`start_at` answers 409 with the start's "This charger is closed right now"
+detail. Response: `{energy_kwh, duration_min, finish_at, cost_coins (2dp
+string), rate_changes: [{at, rate}], basis: 'recent_session'|'rated_power',
+power_w, is_estimate: true}`. It never feeds the wallet hold, admission, the
+frozen rate or billing.
+
+### Notification preferences (C7)
+
+| Method | Path | Auth | Body/Params | Behaviour |
+|--------|------|------|-------------|-----------|
+| GET | `/api/me/notification-prefs` | JWT (any role) | - | `{"push": {"session_started": bool, "nearly_done": bool, "power_dropped": bool}, "quiet_hours": {"enabled": bool, "start": "HH:MM", "end": "HH:MM"}, "timezone": "<IANA zone quiet hours are read in>"}`. Defaults when never saved: every push true, quiet hours disabled 22:00 to 07:00. A driver has no tenant, so `timezone` is the default zone (Asia/Kolkata). |
+| PUT | `/api/me/notification-prefs` | JWT (a `cpo_viewer` gets 403) | the GET shape without `timezone` | Returns the GET shape. 422 on an unknown key (including any allowlisted type, which has no toggle), a time that is not 24-hour HH:MM, or an enabled window whose start equals its end. |
+
+The prefs gate Web Push only; the feed (`GET /api/notifications`) always gets
+the row. New notification types: `session_started`, `nearly_done`,
+`power_dropped` (C7); `routine_started` (with `session_id`),
+`routine_disabled`, `routine_skipped` (C5). A charge-routine occurrence gets
+only `routine_started`, never `session_started` or `queued_charge_started`.
+
+### Plug hours, max session length, amenities and access note (C4)
+
+- `PUT /api/cpo/plugs/{id}`: new optional fields `opening_hours` (list of
+  `{days: 1..127 Mon=bit0, start: 0..1439, end: 0..1440}`, at most 28; end
+  before start crosses midnight and is split; end 0 = midnight; overlaps
+  400), `max_session_minutes` (0..1440, 0/null clears), `amenities` (list
+  from restroom, cafe, wifi, covered, lit, cctv, accessible; unknown 400),
+  `access_note` (max 280, plain text). An omitted key is unchanged; an
+  explicit null/[]/0/"" clears it.
+- `GET /api/cpo/plugs`: rows add `opening_hours`, `max_session_minutes`,
+  `amenities`, `access_note` (`access_note` masked by `redact_for` for a
+  `cpo_viewer`).
+- `GET /api/plugs/available` and `GET /api/plugs/{id}`: add
+  `opening_hours`, `open_now` (null = 24x7), `hours_changes_at` (ISO; next
+  close when open, next open when closed), `max_session_minutes`,
+  `amenities`, `access_note` (masked for a `cpo_viewer`).
+  `/api/plugs/public` is unchanged.
+- `POST /api/sessions/start` and the queued/scheduled auto-start: 409 "This
+  charger is closed right now. It opens at HH:MM." outside hours (a typed
+  `PlugClosedError`; the queued sweep leaves its row WAITING without a
+  notice). The echoed `max_duration_seconds` is the clamped value.
+- `POST /api/reservations`: 409 "This charger is closed during part of that
+  slot. Pick a time within its opening hours."
+- `PATCH /api/sessions/{id}/limits`: `max_duration_seconds` is capped by the
+  start window's closing time and `max_session_minutes`. The cap only bounds
+  a raise: the stored value is min(requested, max(cap, current limit)), so it
+  never drops below the session's current limit, even after a CPO edits the
+  hours or the max length mid-session. A session with no limit takes the
+  requested value as is.
+
+### Charge routines (C5)
+
+| Method | Path | Auth | Body/Params | Behaviour |
+|--------|------|------|-------------|-----------|
+| GET | `/api/me/routines` | JWT | - | `{routines: [{id, plug_id, plug_name, weekdays, start_time 'HH:MM', max_kwh, max_duration_seconds, auto_stop_when_full, enabled, consecutive_failures, last_materialized_date, tenant_timezone, created_at}], max_routines: 5}` |
+| POST | `/api/me/routines` | JWT (a `cpo_viewer` gets 403) | `{plug_id, weekdays (1..127, Mon=1..Sun=64), start_time ('HH:MM', tenant wall-clock, no offset), max_kwh? (0<x<=100), max_duration_seconds? (0<x<=86400), auto_stop_when_full=false, enabled=true}` | 201 row. 422 when no limit is given; 409 `{code: 'routine_limit'}`; 409 `{code: 'queue_disabled'}` while queued/scheduled charging is off for the plug; 404 for an unknown plug; 403 for a private group. |
+| PATCH | `/api/me/routines/{id}` | JWT (a `cpo_viewer` gets 403) | any field except `plug_id` | A limit may be cleared with null while another remains (otherwise 422 `{code: 'routine_needs_limit'}`). Re-enabling resets `consecutive_failures` and requires the queue gate (409 `queue_disabled`). Disabling cancels the routine's queued row if it has not started. |
+| DELETE | `/api/me/routines/{id}` | JWT (a `cpo_viewer` gets 403) | - | `{id, status: 'deleted'}` |
+
+Owner only: another driver's routine answers 404. When queued/scheduled
+charging is off for the plug, each occurrence is stamped and skipped: the
+routine stays enabled, the driver gets one `routine_skipped` ("Charge routine
+paused") notification per outage, and the routine resumes by itself when the
+gate is back on. `routine_disabled` means only three consecutive failed
+occurrences. Creating a routine, re-enabling it, or editing its weekdays or
+start time skips an occurrence whose start already passed, so the routine
+first runs at its next occurrence.
+
 ## Payments — Razorpay (`services/payments.py`)
 
 | Method | Path | Auth | Body | Behaviour |

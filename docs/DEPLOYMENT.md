@@ -520,6 +520,58 @@ backfill and no new index on a hot table.
    --run-only ... --drop-to-zero-after 600` (or `--taper-after 600`), then
    wait the 5 min grace plus `CHARGE_FULL_MINUTES` after the drop.
 
+### Features wave 3 (2026-11-19, built on `release/2026-11-17-w3`, not deployed)
+
+`release/2026-11-17-w3` contains waves 1 and 2 as well (branched from
+`release/2026-11-17-w2` at `590293e`), so a deploy of it ships all three. It
+is a **migration deploy**: the backend boot runs `alembic upgrade head`
+through `0048_notification_prefs` (`users.notification_prefs` JSONB),
+`0049_plug_hours` (four nullable `plugs` columns) and `0050_charge_routines`
+(one new table plus `ix_charge_routines_user_id`), after wave 2's `0044` to
+`0047` if those are still pending, all in one transaction. All three are
+additive, reversible and idempotent (IF NOT EXISTS), with no backfill, no
+GRANT and no index on a hot table.
+
+0. **Path.** Same as wave 2: the deploy kit's thin-layer script refuses
+   `backend/migrations/versions/*`, so take a DB backup, tag the rollback
+   image (step 1), build the backend layer with the merged source including
+   every pending migration file, `up -d backend` (`init_db` runs the upgrade
+   at boot), verify `/api/health`, `alembic_version` == `0050_charge_routines`
+   and RestartCount 0, then ship the frontend as the usual dist-only thin
+   layer. `deploy.ps1` also works but rebuilds the frontend with npm on the
+   1 GB VM.
+1. **Rollback image first.** Before deploying, build and tag a rollback image
+   from the code that is live at deploy time plus only the migration files it
+   lacks (today that is prod `ac00d46`-era code at `0043` plus `0044` to
+   `0050`, because wave 2 is itself undeployed; if wave 2 ships first, it is
+   the wave-2 code plus `0048` to `0050`). Name it after the sha being
+   deployed (`amphive_backend:rollback-<new sha>-m0050`, with a tree proof)
+   and also tag it `amphive_backend:pre-<new sha>` so the kit's
+   `rollback_backend.sh <new sha>` lands on an image that can boot. Never use
+   an older `pre-*` tag: those images cannot boot on a database at `0050`.
+   An `alembic downgrade` to the live revision drops the new column, the four
+   plug columns and the `charge_routines` table (data in them is lost); the
+   wave-2 `0045_cpo_viewer_role` caveat in "Features wave 2" still applies if
+   rolling back past it.
+2. **Backend and frontend ship together** (C10 checklist in the CPO gateway
+   drawer, C3 estimate line, C7 Push preferences panel, C4 hours editor and
+   driver badges, C5 Charge routines card). An old frontend with the new
+   backend is harmless but hides the new features.
+3. **Env vars: none new.** `services/routines.py` also reads the existing
+   `MAX_QUEUED_CHARGES_PER_USER` (default 2). C7 push gating only matters
+   when `VAPID_PRIVATE_KEY` is set, as before. Quiet hours use the IANA tz
+   database already used by pricing (the prod image resolves Asia/Kolkata).
+4. **No new service, port, dependency, nginx, Caddy, compose or Dockerfile
+   change, no firmware change.** New routes live under `/api/me/*`,
+   `/api/plugs/*` and `/api/cpo/*`, already proxied. The reaper gains two
+   cheap passes per 60 s tick (one indexed scan of enabled routines, one scan
+   of routines with a pending row). The C10 selftest is a pure read and adds
+   no MQTT traffic.
+5. **No manual VM step is required.** To use C5 on the real plug, queued or
+   scheduled charging must be enabled for it (tenant or plug override), as for
+   one-off scheduled starts; otherwise routines stay inert and the driver gets
+   one "paused" notice.
+
 ### Backend dependency lockfile — `backend/requirements.lock.txt`
 
 `backend/Dockerfile` installs `backend/requirements.lock.txt`, a fully-pinned

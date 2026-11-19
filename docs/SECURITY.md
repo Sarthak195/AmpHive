@@ -1058,6 +1058,51 @@ one read-only `amph_` token (env `AMPHIVE_METER_TOKEN`), so it can only read
 `GET /api/me/meter`, and it refuses every command a CSMS sends. Keep the token
 out of shell history and revoke it from Account when done.
 
+### 8.12 2026-11-19 features wave 3 (built on `release/2026-11-17-w3`, not deployed)
+
+**Read-only viewer (F10) on the merged tree.** The every-write-route walk
+(`backend/tests/test_cpo_viewer_role.py`) asserts 403 `read_only_demo` on 74
+write routes, including the new `PUT /api/me/notification-prefs` (C7),
+`POST/PATCH/DELETE /api/me/routines*` (C5) and the changed
+`PUT /api/cpo/plugs/{id}`, `PATCH /api/sessions/{id}/limits` and
+`POST /api/reservations` (C4), pinned by
+`test_wave3_write_routes_are_in_the_viewer_walk`. New GETs a viewer can reach:
+
+- **Gateway selftest (C10).** `GET /api/cpo/gateways/{id}/selftest` is
+  viewer-safe by construction: it returns no IP, SSID, broker URL or log
+  text, only pass/warn/fail with generic hints and plug names. `label`,
+  `detail` and `fix_hint` also pass through `redact_for` for a `cpo_viewer`
+  (the label carries the plug name, which is operator free text).
+- **Plug hours (C4).** `plugs.access_note` is operator free text: masked with
+  `redact_for` for a `cpo_viewer` on `GET /api/cpo/plugs` and on the driver
+  routes `/api/plugs/available` and `/api/plugs/{id}`. It is never included
+  in the unauthenticated `/api/plugs/public`, and it is rendered as a React
+  text node, never as HTML. Amenity tags come from a fixed server-side
+  allowlist; opening hours and `max_session_minutes` are not personal data.
+- **Estimate (C3).** `GET /api/plugs/{id}/estimate` is read-only and returns
+  only numbers and timestamps (no personal or infra data), so it needs no
+  masking; plug visibility reuses `ensure_plug_group_access` (a viewer gets
+  the missing-plug 404, like `GET /api/plugs/{id}`).
+- **Own-account reads (C7, C5).** `GET /api/me/notification-prefs` returns
+  only the caller's own toggles, times and timezone name, and
+  `GET /api/me/routines` only the caller's own routines (another driver's
+  routine answers 404), so no viewer masking applies.
+
+**Notification preferences (C7).** Prefs can mute only routine pushes.
+Safety, fault and billing notices (severity critical or warning, plus
+`ALWAYS_PUSH_TYPES` in `services/notification_prefs.py`, which includes
+`routine_started` and `routine_disabled`) are decided before any prefs read
+and always push, even in quiet hours; a test pins that no allowlisted type can
+be given a toggle. A prefs read failure fails open (push sent). The feed row
+is never suppressed.
+
+**Charge routines (C5).** Owner-only routes; another driver's routine is a 404
+(no existence oracle). A routine re-checks private-group access at every
+occurrence and never queues for a disabled or closed account. The materialize
+pass locks the routine row and then the plug row FOR UPDATE, so its check for
+another driver's WAITING row is serialized with the queue endpoint's
+scheduled path. Safety posture: SAFETY.md.
+
 ---
 
 ## Quick remediation checklist
