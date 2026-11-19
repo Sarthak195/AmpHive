@@ -18,13 +18,13 @@ constraint names match the model because test_migrations.py diffs the
 migrated schema against it.
 
 Revision ID: 0050_charge_routines
-Revises: 0047_promo_codes
+Revises: 0049_plug_hours
 Create Date: 2026-11-19
 """
 from alembic import op
 
 revision = "0050_charge_routines"
-down_revision = "0047_promo_codes"
+down_revision = "0049_plug_hours"
 branch_labels = None
 depends_on = None
 

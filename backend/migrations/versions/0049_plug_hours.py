@@ -16,13 +16,13 @@ already has these columns from models.py, so every DDL is guarded with
 IF NOT EXISTS.
 
 Revision ID: 0049_plug_hours
-Revises: 0047_promo_codes
+Revises: 0048_notification_prefs
 Create Date: 2026-11-19
 """
 from alembic import op
 
 revision = "0049_plug_hours"
-down_revision = "0047_promo_codes"
+down_revision = "0048_notification_prefs"
 branch_labels = None
 depends_on = None
 
