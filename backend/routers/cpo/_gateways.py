@@ -2,7 +2,7 @@
 CPO Gateway Management routes — split out of the original monolithic cpo.py
 (2026-07-21 package split, TD#7 follow-up).
 """
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import and_, func, select
@@ -13,6 +13,7 @@ from backend.database.db import get_db
 from backend.database.models import (
     FirmwareRelease,
     Gateway,
+    GatewayEvent,
     GatewayStatus,
     Plug,
     User,
@@ -24,6 +25,7 @@ from backend.schemas import (
     CpoGatewayOtaRequest,
 )
 from backend.services.audit import try_record_audit
+from backend.services.gateway_selftest import LOOKBACK_HOURS, build_selftest
 from backend.services.rate_limit import (
     account_rate_limit_dependency,
     cpo_gateway_claim_account_rate_limiter,
@@ -38,6 +40,7 @@ from ._common import (
     clamp_list_window,
     hide_for,
     logger,
+    redact_for,
     require_cpo_tenant,
 )
 
@@ -368,3 +371,92 @@ async def cpo_gateway_ota(
         "release_version": release_version,
         "message": "OTA command published. Watch the gateway's alarms topic / status fw version.",
     }
+
+
+# Bounds for the commissioning checklist's reads (all hit existing indexes).
+_SELFTEST_MAX_PLUGS = 50
+_SELFTEST_MAX_EVENTS = 200
+_SELFTEST_BOOT_LOOKBACK_DAYS = 30
+
+
+@router.get("/api/cpo/gateways/{gateway_id}/selftest")
+async def cpo_gateway_selftest(
+    gateway_id: str,
+    user: User = Depends(require_cpo_tenant),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Read-only commissioning checklist for one of the CPO's gateways (C10):
+    pass/warn/fail per check with a fix hint, computed from rows and events
+    the backend already has (services/gateway_selftest.py). No probe, no MQTT
+    command, no relay actuation. The Wi-Fi reading is the value reported at
+    the last boot, not live. Viewer-safe: the payload carries no address,
+    network name, broker URL or log text; free text still goes through
+    redact_for.
+    """
+    gateway = (
+        await db.execute(
+            select(Gateway).where(
+                and_(Gateway.id == gateway_id, Gateway.tenant_id == user.tenant_id)
+            )
+        )
+    ).scalar_one_or_none()
+    if gateway is None:
+        raise HTTPException(status_code=404, detail="Gateway not found or access denied.")
+
+    now = datetime.now(timezone.utc)
+    plugs = list(
+        (
+            await db.execute(
+                select(Plug)
+                .where(Plug.gateway_id == gateway_id)
+                .order_by(Plug.id)
+                .limit(_SELFTEST_MAX_PLUGS)
+            )
+        ).scalars().all()
+    )
+    boot_event = (
+        await db.execute(
+            select(GatewayEvent)
+            .where(
+                and_(
+                    GatewayEvent.gateway_id == gateway_id,
+                    GatewayEvent.event_type == "GATEWAY_BOOT",
+                    GatewayEvent.created_at >= now - timedelta(days=_SELFTEST_BOOT_LOOKBACK_DAYS),
+                )
+            )
+            .order_by(GatewayEvent.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    plug_events = list(
+        (
+            await db.execute(
+                select(GatewayEvent)
+                .where(
+                    and_(
+                        GatewayEvent.gateway_id == gateway_id,
+                        GatewayEvent.event_type.in_(("PLUG_UNREACHABLE", "PLUG_RECOVERED")),
+                        GatewayEvent.created_at >= now - timedelta(hours=LOOKBACK_HOURS),
+                    )
+                )
+                .order_by(GatewayEvent.created_at.desc())
+                .limit(_SELFTEST_MAX_EVENTS)
+            )
+        ).scalars().all()
+    )
+    active_versions = list(
+        (
+            await db.execute(
+                select(FirmwareRelease.version)
+                .where(FirmwareRelease.is_active.is_(True))
+                .limit(200)
+            )
+        ).scalars().all()
+    )
+
+    result = build_selftest(gateway, plugs, boot_event, plug_events, active_versions, now)
+    for check in result["checks"]:
+        check["detail"] = redact_for(user, check["detail"])
+        check["fix_hint"] = redact_for(user, check["fix_hint"])
+    return result
