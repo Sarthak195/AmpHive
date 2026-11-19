@@ -412,7 +412,9 @@ and `rollback-ac00d46-m0043` tags are kept. To restore a tag:
 `rollback-ac00d46-m0043` and `pre-nonroot` can boot on a database at alembic
 0043 (see "Non-root containers" above); the older `pre-<sha>` tags cannot.
 
-### Features wave 1 (2026-11-17, built on `release/2026-11-17-w1`, not deployed)
+### Features wave 1 (2026-11-17, built on `release/2026-11-17-w1`, deployed 2026-11-19)
+
+*Executed 2026-11-19 (PR #151, merge `63f41b7`), thin kit: backend 07:24Z, frontend 07:32Z, no migration. DB backup `amphive-20261119-072134.dump`.*
 
 No migration, nginx, compose, Dockerfile or dependency change: the thin
 backend layer then the thin frontend layer carry it. All new env vars are
@@ -437,14 +439,14 @@ optional with working defaults; see the env table in
   Optional: a free Cloudflare Cache Rule for `/api/status` (Eligible for
   cache, edge TTL 60 s).
 
-**Host health alerts (F5, not installed yet).** `deploy/scripts/check_host_health.sh`
+**Host health alerts (F5, installed 2026-11-19).** `deploy/scripts/check_host_health.sh`
 mails `support@amphive.app` when available memory or free disk drops below a
 floor or `/api/health` fails, with a cooldown (see
 `deploy/docs/host_health_alerts.md`). Install as the normal user, not sudo:
 
 1. `scp deploy/scripts/check_host_health.sh amphive-relay:/tmp/`, then
    `ssh amphive-relay 'sed -i "s/\r$//" /tmp/check_host_health.sh && install -m 755 /tmp/check_host_health.sh ~/amphive-relay/check_host_health.sh'`.
-2. `crontab -e` and add `*/5 * * * * ~/amphive-relay/check_host_health.sh`.
+2. `crontab -e` and add `*/5 * * * * HEALTH_URL=http://127.0.0.1:8000/api/health /home/Sarthak/amphive-relay/check_host_health.sh`.
 3. Verify: `MIN_MEM_MB=999999 STAMP_DIR=/tmp/hh-test ~/amphive-relay/check_host_health.sh`
    should send a mail and exit 1.
 
@@ -454,7 +456,15 @@ Optional overrides: `ALERT_TO`, `MIN_MEM_MB`, `MIN_DISK_FREE_PCT`,
 HTTPS on the VM, set `HEALTH_URL` in the crontab line to a local URL that
 answers 200.
 
-### Features wave 2 (2026-11-17, built on `release/2026-11-17-w2`, not deployed)
+*Executed 2026-11-19:* installed with exactly the crontab line in step 2. `HEALTH_URL` points at the backend's host loopback port because port 80 answers 308 to HTTPS and `https://localhost` fails without SNI. Alerts go to `support@amphive.app`; a forced test alert was delivered.
+
+### Features wave 2 (2026-11-17, built on `release/2026-11-17-w2`, deployed 2026-11-19)
+
+*Executed 2026-11-19 (PR #152, merge `3e7d26c`, includes the two `cpo_viewer` masking rounds) by the manual migration path: backend 08:48Z (alembic `0043_email_ci_unique` to `0047_promo_codes` at boot, healthy in about 15 s, 0 tracebacks), frontend 08:52Z (thin kit). DB backup `amphive-20261119-084706.dump`. Prod now: backend and frontend `3e7d26c`, alembic `0047_promo_codes`. The deploy kit now defaults `EXPECTED_ALEMBIC` to `0047_promo_codes`. The demo viewer is deployed but not seeded.*
+
+*Rollback:* backend `./rollback_backend.sh 3e7d26c` (tag `pre-3e7d26c`, the same image as `rollback-3e7d26c-m0047`: the `63f41b7` code plus the four 0044-0047 migration files, so it boots on 0047). The tags `live-63f41b7`, `pre-63f41b7` and every older `pre-*` image can NOT boot on 0047. If a `cpo_viewer` user exists, first `UPDATE users SET role='driver' WHERE role='cpo_viewer'` (the `63f41b7` code cannot load that enum value). Frontend: `./rollback_frontend.sh 3e7d26c` (the `63f41b7` dist).
+
+*Ops gotchas:* an `ssh host 'bash -s' <<EOF` script stops at the first `docker compose exec -T` because exec reads the rest of the script from stdin; copy the script to the VM and run it with `ssh -n`, or give exec `</dev/null`. The backend container has no Docker healthcheck, so check `{{.State.Status}}` and `{{.RestartCount}}`, not `.State.Health`.
 
 `release/2026-11-17-w2` contains wave 1 as well (branched from
 `release/2026-11-17-w1`), so a deploy of it ships both waves. Unlike wave 1
@@ -522,37 +532,52 @@ backfill and no new index on a hot table.
 
 ### Features wave 3 (2026-11-19, built on `release/2026-11-17-w3`, not deployed)
 
-`release/2026-11-17-w3` contains waves 1 and 2 as well (branched from
-`release/2026-11-17-w2` at `590293e`), so a deploy of it ships all three. It
-is a **migration deploy**: the backend boot runs `alembic upgrade head`
-through `0048_notification_prefs` (`users.notification_prefs` JSONB),
+Production runs `3e7d26c` (backend and frontend, waves 1 and 2, deployed
+2026-11-19) at alembic `0047_promo_codes`. `release/2026-11-17-w3` contains
+waves 1 and 2 as well (branched from `release/2026-11-17-w2` at `590293e`,
+then merged with main `6c1234f`), so the code delta against prod is wave 3
+only. It is a **migration deploy**: the backend boot runs `alembic upgrade
+head` through `0048_notification_prefs` (`users.notification_prefs` JSONB),
 `0049_plug_hours` (four nullable `plugs` columns) and `0050_charge_routines`
-(one new table plus `ix_charge_routines_user_id`), after wave 2's `0044` to
-`0047` if those are still pending, all in one transaction. All three are
-additive, reversible and idempotent (IF NOT EXISTS), with no backfill, no
-GRANT and no index on a hot table.
+(one new table plus `ix_charge_routines_user_id`) in one transaction. All
+three are additive, reversible and idempotent (IF NOT EXISTS), with no
+backfill, no GRANT and no index on a hot table.
 
-0. **Path.** Same as wave 2: the deploy kit's thin-layer script refuses
-   `backend/migrations/versions/*`, so take a DB backup, tag the rollback
-   image (step 1), build the backend layer with the merged source including
-   every pending migration file, `up -d backend` (`init_db` runs the upgrade
-   at boot), verify `/api/health`, `alembic_version` == `0050_charge_routines`
-   and RestartCount 0, then ship the frontend as the usual dist-only thin
-   layer. `deploy.ps1` also works but rebuilds the frontend with npm on the
-   1 GB VM.
-1. **Rollback image first.** Before deploying, build and tag a rollback image
-   from the code that is live at deploy time plus only the migration files it
-   lacks (today that is prod `ac00d46`-era code at `0043` plus `0044` to
-   `0050`, because wave 2 is itself undeployed; if wave 2 ships first, it is
-   the wave-2 code plus `0048` to `0050`). Name it after the sha being
-   deployed (`amphive_backend:rollback-<new sha>-m0050`, with a tree proof)
-   and also tag it `amphive_backend:pre-<new sha>` so the kit's
-   `rollback_backend.sh <new sha>` lands on an image that can boot. Never use
-   an older `pre-*` tag: those images cannot boot on a database at `0050`.
-   An `alembic downgrade` to the live revision drops the new column, the four
-   plug columns and the `charge_routines` table (data in them is lost); the
-   wave-2 `0045_cpo_viewer_role` caveat in "Features wave 2" still applies if
-   rolling back past it.
+0. **Path.** Same manual migration path as wave 2 (the kit's thin-layer script
+   refuses `backend/migrations/versions/*`). In order:
+   - DB backup.
+   - Tag the running image `amphive_backend:live-3e7d26c`.
+   - Build the rollback image FROM `live-3e7d26c` plus ONLY the three new
+     migration files (`0048_notification_prefs`, `0049_plug_hours`,
+     `0050_charge_routines`) as `amphive_backend:rollback-<new sha>-m0050`,
+     and also tag it `amphive_backend:pre-<new sha>` (the kit's
+     `rollback_backend.sh` only accepts `pre-<hex>` tags).
+   - Build `amphive_backend:thin-<new sha>` FROM `live-3e7d26c` plus the added
+     and modified backend files of the release (git diff of `backend/`
+     against `3e7d26c`; at the time of writing 16 added including the three
+     migrations, 21 modified; recount at deploy time).
+   - Proofs on both images: alembic head reports `['0050_charge_routines']`;
+     file counts (rollback = live + 3, thin = live + the added-file count);
+     the container user is uid 10001.
+   - Switch with `docker compose up -d --no-deps backend` and an nginx reload
+     (`init_db` runs the upgrade at boot).
+   - Verify: `alembic_version` == `0050_charge_routines`, the new column,
+     columns and table exist, `{{.State.Status}}` is `running` with
+     `{{.RestartCount}}` 0 (the backend has no Docker healthcheck, so do not
+     read `.State.Health`), and 0 tracebacks in the backend log.
+   - Then ship the frontend with the thin kit, `BASE_REF` set to the full
+     `3e7d26c` sha.
+   - Afterwards bump the kit's `EXPECTED_ALEMBIC` default from
+     `0047_promo_codes` to `0050_charge_routines`.
+   `deploy.ps1` also works but rebuilds the frontend with npm on the 1 GB VM.
+1. **Rollback.** Use only `rollback-<new sha>-m0050` (also tagged
+   `pre-<new sha>`, so `rollback_backend.sh <new sha>` lands on it). NEVER use
+   `live-3e7d26c`, `pre-3e7d26c` or any older `pre-*` tag as a rollback after
+   the switch: those images cannot boot on a database at `0050`. An `alembic
+   downgrade` to `0047` drops the new column, the four plug columns and the
+   `charge_routines` table (data in them is lost); the wave-2
+   `0045_cpo_viewer_role` caveat in "Features wave 2" does not apply when
+   rolling back only to `0047`.
 2. **Backend and frontend ship together** (C10 checklist in the CPO gateway
    drawer, C3 estimate line, C7 Push preferences panel, C4 hours editor and
    driver badges, C5 Charge routines card). An old frontend with the new
@@ -700,7 +725,7 @@ retirement time (namespace `amphive`, all Deployments `replicas: 1`):
 |------|--------|
 | `web_tls_rollout.md` | Caddy HTTPS front door — rollout, verification, rollback |
 | `db_backup_restore.md` | Nightly DB/config backups + disk snapshots — setup, restore, restore test |
-| `host_health_alerts.md` | Host cron alerter for memory, disk and `/api/health` (F5, 2026-11-17, not installed yet) |
+| `host_health_alerts.md` | Host cron alerter for memory, disk and `/api/health` (F5, 2026-11-17, installed 2026-11-19) |
 | `new_device_setup.md` | Setting up a new dev workstation |
 | `gcp_migration_runbook.md` | Full AWS EC2 → GCP, then region migration log |
 | `wireguard_tunnel_setup.md` | Direct-Mode WireGuard setup — **retired** (Path B is gone; kept as historical reference) |
