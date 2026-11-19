@@ -22,12 +22,16 @@ hold, billing and the start, exactly as for a one-off scheduled charge.
    than `min(5 min, schedule_ttl)` ago, and `last_materialized_date` is
    before that date. The routine row is locked `FOR UPDATE SKIP LOCKED` and
    the date is stamped in the same transaction as the insert, so a double
-   tick queues one row. A missed window (backend down) is skipped. Per
-   occurrence:
+   tick queues one row. The plug row is then locked `FOR UPDATE` (routine,
+   then plug), as in the queue endpoint's scheduled path, so the
+   other-driver check below is serialized with it. A missed window (backend
+   down) is skipped. Per occurrence:
    - closed or disabled account: stamp, nothing else;
-   - queued/scheduled charging off for the plug: the routine turns itself
-     off and the driver gets one `routine_disabled` notification (the API
-     refuses to turn it back on while the gate stays off);
+   - queued/scheduled charging off for the plug: stamp and skip; the
+     routine stays enabled and the driver gets one `routine_skipped`
+     ("paused") notification per outage (`gate_notified`, cleared by the next
+     queued row), so it resumes by itself when the gate is back on (the API
+     refuses to create or re-enable a routine while the gate is off);
    - the driver already has a WAITING row on that plug: stamp and skip;
    - lost private-group access, another driver's WAITING row on the plug, or
      the driver at the queued-charge cap: a failed occurrence
@@ -38,6 +42,11 @@ hold, billing and the start, exactly as for a one-off scheduled charge.
    `routine_started` (with the session id); EXPIRED or FAILED counts a
    failure; CANCELLED counts nothing. The third failure in a row turns the
    routine off and sends `routine_disabled`. Re-enabling resets the count.
+
+Creating a routine, re-enabling it, or editing its days or start time stamps
+an occurrence whose start already passed (within the window), so a routine
+never queues a row whose `not_before` is in the past; it first runs at its
+next occurrence.
 
 Turning a routine off or deleting it cancels its row if it has not started.
 Account closure deletes the driver's routines.
@@ -54,4 +63,5 @@ Account closure deletes the driver's routines.
 Writes are refused for a cpo_viewer by the global read-only guard; a GET
 returns only the caller's own rows and no infrastructure fields.
 
-Migration `0050_charge_routines` adds the `charge_routines` table only.
+Migration `0050_charge_routines` adds the `charge_routines` table only
+(including `gate_notified`).

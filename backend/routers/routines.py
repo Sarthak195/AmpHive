@@ -13,7 +13,7 @@ every row returns as tenant_timezone. Writes are refused for a cpo_viewer by
 the global read-only guard; a GET returns only the caller's own rows (plug
 name and limits, no infrastructure fields).
 """
-from datetime import time
+from datetime import datetime, time, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -29,6 +29,7 @@ from backend.services.routines import (
     MAX_ROUTINES_PER_USER,
     cancel_pending,
     has_group_access,
+    skip_started_occurrence,
 )
 from backend.services.session_start import queued_charging_enabled
 
@@ -185,6 +186,7 @@ async def create_routine(
         enabled=req.enabled,
         consecutive_failures=0,
     )
+    skip_started_occurrence(routine, pricing._zone(tenant.timezone), datetime.now(timezone.utc))
     db.add(routine)
     await db.commit()
     await db.refresh(routine)
@@ -216,7 +218,9 @@ async def update_routine(
             setattr(routine, name, getattr(req, name))
     if routine.max_kwh is None and routine.max_duration_seconds is None:
         raise _conflict("routine_needs_limit", "Set a time or energy limit for a routine.", status_code=422)
+    reenabled = False
     if "enabled" in fields and req.enabled is not None and req.enabled != routine.enabled:
+        reenabled = req.enabled
         if req.enabled:
             _require_gate(tenant, plug)
             # A fresh start: earlier failures no longer count.
@@ -224,6 +228,9 @@ async def update_routine(
         else:
             await cancel_pending(db, routine)
         routine.enabled = req.enabled
+    if reenabled or {"weekdays", "start_time"} & fields:
+        # Never fire for an occurrence that began before this save.
+        skip_started_occurrence(routine, pricing._zone(tenant.timezone), datetime.now(timezone.utc))
     await db.commit()
     await db.refresh(routine)
     return _routine_response(routine, plug.name, tenant.timezone)

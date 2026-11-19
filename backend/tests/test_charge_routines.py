@@ -182,6 +182,7 @@ def _routine(start=time(7, 30), weekdays=ALL_DAYS, failures=0, enabled=True,
     r.enabled = enabled
     r.last_materialized_date = None
     r.consecutive_failures = failures
+    r.gate_notified = False
     r.last_queued_charge_id = last_qc
     return r
 
@@ -294,18 +295,43 @@ async def test_existing_waiting_row_is_skipped_and_stamped():
 
 
 @pytest.mark.asyncio
-async def test_queued_gate_off_turns_the_routine_off_and_tells_the_driver_once():
+async def test_queued_gate_off_skips_and_tells_the_driver_once():
+    """The routine stays on through a gate outage: each occurrence is skipped
+    and stamped, the driver hears about it once, and the next queued row
+    re-arms the notice."""
     routine = _routine()
-    now = _ist(MONDAY, 7, 31)
-    mdb = _db(*_head(routine, _tenant(enabled=False)), _one(_live_user()))
     with _patched_zone(), patch("backend.services.notifications.notify", AsyncMock()) as notify:
-        queued = await svc.materialize_routines(_factory(_scan([routine]), mdb), now=now)
-    assert queued == 0
-    mdb.add.assert_not_called()
-    assert routine.enabled is False
-    assert routine.last_materialized_date == MONDAY
-    notify.assert_awaited_once()
-    assert notify.await_args.args[1] == "routine_disabled"
+        for day in range(2):
+            mdb = _db(*_head(routine, _tenant(enabled=False)), _one(_live_user()))
+            queued = await svc.materialize_routines(
+                _factory(_scan([routine]), mdb), now=_ist(MONDAY + timedelta(days=day), 7, 31)
+            )
+            assert queued == 0
+            mdb.add.assert_not_called()
+        assert routine.enabled is True
+        assert routine.last_materialized_date == MONDAY + timedelta(days=1)
+        notify.assert_awaited_once()
+        assert notify.await_args.args[1] == "routine_skipped"
+
+        # Gate back on: the routine queues again and the notice re-arms.
+        mdb = _db(*_head(routine), _one(_live_user()), _s1n(None), _s1n(None), _s1(0))
+        assert await svc.materialize_routines(
+            _factory(_scan([routine]), mdb), now=_ist(MONDAY + timedelta(days=2), 7, 31)
+        ) == 1
+    assert routine.gate_notified is False
+
+
+@pytest.mark.asyncio
+async def test_materialize_locks_the_plug_like_the_scheduled_path():
+    """queue_charge's scheduled path takes the plug FOR UPDATE; the routine's
+    other-driver check must run under the same lock."""
+    routine = _routine()
+    mdb = _db(*_head(routine), _one(_live_user()), _s1n(42))
+    with _patched_zone():
+        await svc.materialize_routines(_factory(_scan([routine]), mdb), now=_ist(MONDAY, 7, 31))
+    plug_stmt = mdb.execute.call_args_list[1].args[0]
+    sql = str(plug_stmt.compile(dialect=postgresql.dialect()))
+    assert sql.startswith("SELECT plugs.") and sql.endswith("FOR UPDATE")
 
 
 @pytest.mark.asyncio
@@ -468,6 +494,62 @@ async def test_create_refused_while_scheduled_charging_is_off():
         )
     assert exc.value.detail["code"] == "queue_disabled"
     db.add.assert_not_called()
+
+
+def _just_started():
+    """A start time one to two minutes ago (IST wall clock) and its local date."""
+    start = datetime.now(timezone.utc) - timedelta(minutes=1)
+    local = start.astimezone(IST)
+    return local.time().replace(second=0, microsecond=0), local.date()
+
+
+@pytest.mark.asyncio
+async def test_create_after_todays_start_waits_for_the_next_occurrence():
+    """Saving a routine just after its start time must not queue a row whose
+    not_before is already past (the scheduled path requires now < not_before)."""
+    start, today = _just_started()
+    db = _db(MagicMock(), _s1(0), _one((_plug(), _tenant())))
+    with _patched_zone():
+        await create_routine(
+            RoutineCreateRequest(plug_id=1, weekdays=ALL_DAYS, start_time=start, max_kwh=5),
+            _driver(), db,
+        )
+    routine = db.add.call_args.args[0]
+    assert routine.last_materialized_date == today
+    assert svc.due_occurrence(ALL_DAYS, start, routine.last_materialized_date, IST,
+                              datetime.now(timezone.utc)) is None
+
+    later = (datetime.now(timezone.utc) + timedelta(hours=1)).astimezone(IST).time()
+    db = _db(MagicMock(), _s1(0), _one((_plug(), _tenant())))
+    with _patched_zone():
+        await create_routine(
+            RoutineCreateRequest(plug_id=1, weekdays=ALL_DAYS, start_time=later, max_kwh=5),
+            _driver(), db,
+        )
+    assert db.add.call_args.args[0].last_materialized_date is None
+
+
+@pytest.mark.asyncio
+async def test_reenable_or_retime_after_todays_start_waits_for_the_next_occurrence():
+    start, today = _just_started()
+    routine = _routine(start=start, enabled=False)
+    with _patched_zone():
+        await update_routine(3, RoutineUpdateRequest(enabled=True), _driver(),
+                             _db(_s1n(routine), _one((_plug(), _tenant()))))
+    assert routine.last_materialized_date == today
+
+    routine = _routine()
+    with _patched_zone():
+        await update_routine(3, RoutineUpdateRequest(start_time=start), _driver(),
+                             _db(_s1n(routine), _one((_plug(), _tenant()))))
+    assert routine.last_materialized_date == today
+
+    # A limits-only edit leaves a due occurrence alone.
+    routine = _routine(start=start)
+    with _patched_zone():
+        await update_routine(3, RoutineUpdateRequest(max_kwh=6.0), _driver(),
+                             _db(_s1n(routine), _one((_plug(), _tenant()))))
+    assert routine.last_materialized_date is None
 
 
 @pytest.mark.asyncio
@@ -640,10 +722,12 @@ async def test_db_disabled_routine_and_gate_off(factory):
     rid_gate, uid_gate, _ = await _seed(factory, gate=False)
     with _patched_zone(), patch("backend.services.notifications.notify", AsyncMock()) as notify:
         assert await svc.materialize_routines(factory, now=TUE_0001) == 0
+        assert await svc.materialize_routines(factory, now=TUE_0001 + timedelta(days=7)) == 0
     assert await _rows(factory, uid_off) == []
     assert await _rows(factory, uid_gate) == []
-    assert (await _routine_row(factory, rid_gate)).enabled is False
-    assert [c.args[1] for c in notify.await_args_list] == ["routine_disabled"]
+    gated = await _routine_row(factory, rid_gate)
+    assert gated.enabled is True and gated.gate_notified is True
+    assert [c.args[1] for c in notify.await_args_list] == ["routine_skipped"]
 
 
 @requires_db

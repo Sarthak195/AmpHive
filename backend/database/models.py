@@ -1846,7 +1846,9 @@ class ChargeRoutine(Base):
     points at the row queued for that occurrence until its outcome is settled
     (services/routines.py settle_routines): a start resets
     consecutive_failures, an EXPIRED/FAILED row increments it, and the third
-    in a row disables the routine. tenant_id is denormalized from
+    in a row disables the routine. gate_notified records that the driver was
+    told their routine is paused because queued charging is off for the plug
+    (sent once, cleared by the next queued row). tenant_id is denormalized from
     plug -> gateway -> tenant like QueuedCharge. Alembic revision
     0050_charge_routines.
     """
@@ -1864,6 +1866,7 @@ class ChargeRoutine(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("true"), nullable=False)
     last_materialized_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
     consecutive_failures: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"), nullable=False)
+    gate_notified: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"), nullable=False)
     last_queued_charge_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("queued_charges.id", ondelete="SET NULL"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
 

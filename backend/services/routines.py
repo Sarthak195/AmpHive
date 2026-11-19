@@ -15,6 +15,10 @@ the routine's failure count:
   - CANCELLED          -> no count (the driver cancelled it, or started the
                           plug themselves first).
 
+While queued charging is off for the plug an occurrence is skipped and the
+driver is told once (gate_notified, cleared by the next queued row); the
+routine stays enabled and resumes when the gate is back on.
+
 Due-ness is evaluated per occurrence date in the plug's tenant timezone
 (users have no zone): an occurrence on local date D fires when D's weekday bit
 is set, its local start time has been reached within the materialize window,
@@ -94,6 +98,15 @@ def due_occurrence(
     return None
 
 
+def skip_started_occurrence(routine: ChargeRoutine, tz, now: datetime) -> None:
+    """Stamp an occurrence whose start already passed when the routine was
+    saved (created, re-enabled, or its days or time edited), so it never
+    fires for it: the scheduled path likewise requires now < not_before."""
+    occ = due_occurrence(routine.weekdays, routine.start_time, routine.last_materialized_date, tz, now)
+    if occ is not None:
+        routine.last_materialized_date = occ[0]
+
+
 def build_queued_charge(
     routine: ChargeRoutine, tenant: Tenant, plug: Plug, gateway: Gateway, not_before: datetime
 ) -> QueuedCharge:
@@ -171,7 +184,12 @@ async def _materialize_one(factory: Callable, routine_id: int, now: datetime) ->
         )).scalar_one_or_none()
         if routine is None:
             return False  # disabled/deleted since the scan, or another tick holds it
-        plug = (await db.execute(select(Plug).where(Plug.id == routine.plug_id))).scalar_one()
+        # Plug FOR UPDATE, like queue_charge's scheduled path, so the
+        # other-driver check below is serialized with it. Lock order is
+        # routine then plug; the reaper never locks charge_routines.
+        plug = (await db.execute(
+            select(Plug).where(Plug.id == routine.plug_id).with_for_update()
+        )).scalar_one()
         gateway = (await db.execute(
             select(Gateway).where(Gateway.id == plug.gateway_id)
         )).scalar_one()
@@ -199,17 +217,19 @@ async def _materialize_one(factory: Callable, routine_id: int, now: datetime) ->
             return False
 
         if not queued_charging_enabled(tenant, plug):
-            # Tell the driver once: the routine turns off and the API refuses
-            # to turn it back on while scheduled charging stays off.
-            routine.enabled = False
+            # Skip, and tell the driver once per outage: the routine stays on
+            # and resumes when the CPO turns scheduled charging back on.
+            if not routine.gate_notified:
+                routine.gate_notified = True
+                notice = (
+                    "routine_skipped",
+                    "Charge routine paused",
+                    f"Scheduled charging is turned off on {plug_name}, so your "
+                    "routine won't run until it is turned back on.",
+                    "warning",
+                )
             await db.commit()
-            await _send(user_id, plug_id, (
-                "routine_disabled",
-                "Charge routine turned off",
-                f"Scheduled charging is no longer enabled on {plug_name}, so your "
-                "routine was turned off.",
-                "warning",
-            ))
+            await _send(user_id, plug_id, notice)
             return False
 
         own_waiting = (await db.execute(
@@ -258,6 +278,7 @@ async def _materialize_one(factory: Callable, routine_id: int, now: datetime) ->
             await db.commit()
             return False
         routine.last_queued_charge_id = qc.id
+        routine.gate_notified = False
         await db.commit()
         logger.info(
             "Charge routine queued",

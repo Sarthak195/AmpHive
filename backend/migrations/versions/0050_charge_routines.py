@@ -5,8 +5,8 @@ bitmask (Monday=1 .. Sunday=64), a local start time in the plug's tenant
 timezone, a mandatory energy and/or duration limit, the "stop when full"
 opt-in, and the bookkeeping the session reaper needs to materialize each
 occurrence exactly once (last_materialized_date, last_queued_charge_id,
-consecutive_failures). Each occurrence becomes an ordinary scheduled
-queued_charges row, so no other table changes.
+consecutive_failures, gate_notified). Each occurrence becomes an ordinary
+scheduled queued_charges row, so no other table changes.
 
 No enum change, so this migration is fully reversible. The least-privilege
 runtime role already covers public-schema tables and sequences created by the
@@ -45,6 +45,7 @@ def upgrade() -> None:
             enabled                 BOOLEAN NOT NULL DEFAULT true,
             last_materialized_date  DATE,
             consecutive_failures    INTEGER NOT NULL DEFAULT 0,
+            gate_notified           BOOLEAN NOT NULL DEFAULT false,
             last_queued_charge_id   INTEGER REFERENCES queued_charges(id) ON DELETE SET NULL,
             created_at              TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
             CONSTRAINT ck_charge_routines_has_limit
