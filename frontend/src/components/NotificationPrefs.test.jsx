@@ -56,6 +56,30 @@ describe('NotificationPrefs', () => {
     expect(toast.ok).toHaveBeenCalled();
   });
 
+  it('shows the info toggles on by default and saves one turned off', async () => {
+    const user = userEvent.setup();
+    render(<NotificationPrefs />);
+    const rate = await screen.findByLabelText('My charging rate changes mid-session');
+    expect(rate).toBeChecked();
+    for (const label of [
+      'A charger I am watching is free',
+      'A charge I queue or schedule is confirmed',
+      'A reservation is confirmed',
+      'My reservation starts',
+    ]) {
+      expect(screen.getByLabelText(label)).toBeChecked();
+    }
+    await user.click(rate);
+    await user.click(screen.getByRole('button', { name: 'Save preferences' }));
+    await waitFor(() => expect(api.put).toHaveBeenCalledTimes(1));
+    expect(api.put.mock.calls[0][1].push).toEqual({
+      session_started: true,
+      nearly_done: false,
+      power_dropped: true,
+      rate_changed: false,
+    });
+  });
+
   it('blocks a quiet-hours window that starts and ends at the same time', async () => {
     api.get.mockResolvedValue({
       ...SAVED,

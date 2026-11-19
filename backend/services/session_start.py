@@ -327,11 +327,10 @@ async def begin_active_session(
     await set_plug_telemetry_interval(db, plug.id, 1000)
 
     # [Notification prefs C7] Once per session, only after the ON publish
-    # succeeded (never on the CANCELLED rollback above). Every start path runs
-    # through here, so a queued auto-start also gets the reaper's own
-    # "queued_charge_started" notice. notify() never raises.
-    # announce_start=False: the caller owns the start notice (a C5 routine
-    # occurrence gets exactly one, routine_started, from settle_routines).
+    # succeeded (never on the CANCELLED rollback above). notify() never raises.
+    # announce_start=False: the caller owns the start notice. The queued-start
+    # sweep always passes it, so an auto-start gets exactly one notice:
+    # queued_charge_started, or routine_started for a C5 routine occurrence.
     if announce_start:
         from backend.services.notifications import notify
         await notify(

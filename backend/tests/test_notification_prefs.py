@@ -52,7 +52,41 @@ def test_allowlist_names_the_safety_billing_and_routine_types():
               "routine_started", "routine_disabled", "queued_charge_started"):
         assert t in ALWAYS_PUSH_TYPES
     assert not (ALWAYS_PUSH_TYPES & SUPPRESSIBLE_TYPES)
-    assert SUPPRESSIBLE_TYPES == {"session_started", "nearly_done", "power_dropped"}
+    assert SUPPRESSIBLE_TYPES == {
+        "session_started", "nearly_done", "power_dropped",
+        "rate_changed", "plug_available", "reservation_booked",
+        "reservation_started", "queued",
+    }
+    # Booking changes against the driver's will, and every unattended start,
+    # have no toggle.
+    for t in ("reservation_cancelled", "reservation_ahead", "queued_charge_started",
+              "queued_charge_failed", "queued_charge_expired", "routine_skipped"):
+        assert t not in SUPPRESSIBLE_TYPES
+
+
+@pytest.mark.parametrize("type_", ["reservation_cancelled", "reservation_ahead"])
+def test_booking_changes_against_the_driver_cannot_be_muted(type_):
+    """Both are sent as warnings, and no toggle exists for them."""
+    assert push_allowed(type_, "warning", _muted_everything(), NOON, UTC)
+    with pytest.raises(ValidationError):
+        NotificationPrefs.model_validate({"push": {type_: False}})
+
+
+@pytest.mark.parametrize("type_", ["rate_changed", "plug_available", "reservation_booked",
+                                   "reservation_started", "queued"])
+def test_new_info_toggles_default_on_and_mute_only_their_type(type_):
+    assert push_allowed(type_, "info", NotificationPrefs(), NOON, UTC)
+    prefs = NotificationPrefs.model_validate({"push": {type_: False}})
+    assert not push_allowed(type_, "info", prefs, NOON, UTC)
+    assert push_allowed("session_started", "info", prefs, NOON, UTC)
+
+
+def test_prefs_saved_before_the_new_toggles_keep_them_on():
+    old = {"push": {"session_started": False, "nearly_done": True, "power_dropped": True},
+           "quiet_hours": {"enabled": False, "start": "22:00", "end": "07:00"}}
+    prefs = load_prefs(old)
+    assert prefs.push.session_started is False
+    assert prefs.push.rate_changed is True and prefs.push.queued is True
 
 
 @pytest.mark.parametrize("type_", sorted(ALWAYS_PUSH_TYPES))
@@ -407,6 +441,23 @@ async def _begin(publish_ok, **kw):
     return notify
 
 
+def test_direct_start_route_keeps_the_session_started_notice():
+    """[C7] The walk-up start is the one path whose notice is session_started:
+    its begin_active_session call leaves announce_start at the default (True),
+    which the next test shows sends exactly one notice."""
+    import ast
+    import inspect
+
+    from backend.routers import sessions
+
+    calls = [
+        node for node in ast.walk(ast.parse(inspect.getsource(sessions)))
+        if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "begin_active_session"
+    ]
+    assert len(calls) == 1
+    assert "announce_start" not in {kw.arg for kw in calls[0].keywords}
+
+
 @pytest.mark.asyncio
 async def test_session_started_sent_once_when_the_start_succeeds():
     notify = await _begin(publish_ok=True)
@@ -417,7 +468,8 @@ async def test_session_started_sent_once_when_the_start_succeeds():
 
 @pytest.mark.asyncio
 async def test_no_session_started_when_the_caller_owns_the_notice():
-    # [C5 + C7] A routine occurrence's only start notice is routine_started.
+    # [C5 + C7] The queued-start sweep owns the notice: queued_charge_started,
+    # or routine_started for a routine occurrence.
     notify = await _begin(publish_ok=True, announce_start=False)
     notify.assert_not_awaited()
 

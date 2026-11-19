@@ -1866,8 +1866,8 @@ class ChargeRoutine(Base):
     consecutive_failures, an EXPIRED/FAILED row increments it, and the third
     in a row disables the routine. gate_notified records that the driver was
     told their routine is paused because queued charging is off for the plug
-    (sent once, cleared by the next queued row). tenant_id is denormalized from
-    plug -> gateway -> tenant like QueuedCharge. Alembic revision
+    (sent once, re-armed when a due occurrence sees the gate on). tenant_id is
+    denormalized from plug -> gateway -> tenant like QueuedCharge. Alembic revision
     0050_charge_routines.
     """
     __tablename__ = "charge_routines"

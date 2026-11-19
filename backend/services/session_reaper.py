@@ -116,6 +116,14 @@ class SessionReaperService:
         # services/mqtt_manager.py. Only touched on the event loop (this
         # service's own _run() task), so no lock is needed.
         self._silence_pushed: set = set()
+        # [C5 + C7] Routine-owned auto-starts awaiting settle_routines'
+        # routine_started, keyed by queued-charge id: (user_id, plug_id,
+        # session_id, title, body). If the routine is gone by settle time
+        # (deleted, or its link cleared), settle_routines_once sends
+        # queued_charge_started instead, so every auto-start gets exactly one
+        # start notice. In memory, event loop only; at most one entry per
+        # routine, dropped once settled.
+        self._routine_starts: dict = {}
 
     def start(self, loop: asyncio.AbstractEventLoop) -> None:
         self._task = loop.create_task(self._run())
@@ -507,10 +515,40 @@ class SessionReaperService:
 
     async def settle_routines_once(self) -> int:
         """[C5] After the queued-start sweep: reset or count each routine's
-        failures from its last queued row's outcome (services/routines.py)."""
+        failures from its last queued row's outcome (services/routines.py).
+        Then the start-notice fallback for routine-owned starts (see
+        _routine_starts)."""
         from backend.services.routines import settle_routines
 
-        return await settle_routines(self.db_session_factory)
+        announced: set = set()
+        examined = await settle_routines(self.db_session_factory, announced)
+        await self._routine_start_fallback(announced)
+        return examined
+
+    async def _routine_start_fallback(self, announced: set) -> None:
+        """[C5 + C7] For each routine-owned start this reaper made: settle
+        sent routine_started (drop it), a routine still links the row (settle
+        skipped it while locked, or failed: keep it for the next tick), or
+        no routine links it any more (deleted or unlinked since the start:
+        send the queued_charge_started the sweep held back)."""
+        for qc_id in announced:
+            self._routine_starts.pop(qc_id, None)
+        if not self._routine_starts:
+            return
+        from backend.database.models import ChargeRoutine
+        from backend.services.notifications import notify
+
+        async with self.db_session_factory() as db:
+            linked = set((await db.execute(
+                select(ChargeRoutine.last_queued_charge_id)
+                .where(ChargeRoutine.last_queued_charge_id.in_(list(self._routine_starts)))
+            )).scalars().all())
+        for qc_id in [k for k in self._routine_starts if k not in linked]:
+            user_id, plug_id, session_id, title, body = self._routine_starts.pop(qc_id)
+            await notify(
+                user_id, "queued_charge_started", title, body,
+                severity="info", plug_id=plug_id, session_id=session_id,
+            )
 
     async def reap_queued_starts_once(self) -> int:
         """[Queued charge] Process each WAITING queued charge: expire the ones
@@ -907,9 +945,11 @@ class SessionReaperService:
                     # overwrites it on failure.
                     # [C5 + C7] A charge routine's occurrence gets exactly one
                     # start notice, the mandatory routine_started that
-                    # settle_routines sends; neither session_started nor
-                    # queued_charge_started fires for it. A plain read (the
-                    # reaper never locks charge_routines).
+                    # settle_routines sends (or the queued_charge_started
+                    # fallback when the routine is gone by then); neither
+                    # session_started nor an immediate queued_charge_started
+                    # fires for it. A plain read (the reaper never locks
+                    # charge_routines).
                     from_routine = (await db.execute(
                         select(ChargeRoutine.id)
                         .where(ChargeRoutine.last_queued_charge_id == qc.id)
@@ -926,7 +966,11 @@ class SessionReaperService:
                             # exactly as the manual start route does.
                             covering_reservation=covering,
                             auto_stop_when_full=bool(qc.auto_stop_when_full),
-                            announce_start=not from_routine,
+                            # [C7] Exactly one start notice per auto-start:
+                            # queued_charge_started below (always pushed) or
+                            # a routine's routine_started, never also the
+                            # generic session_started.
+                            announce_start=False,
                         )
                     except PlugClosedError:
                         # [Plug hours] Closed between the check above (the
@@ -965,10 +1009,8 @@ class SessionReaperService:
                         )
                         continue
 
-                    qc.started_session_id = session.id
                     user_id = qc.user_id
                     plug_name = plug.name
-                    await db.commit()
                     started += 1
                     if not_before is None:
                         title = "Your queued charge started"
@@ -984,14 +1026,26 @@ class SessionReaperService:
                     else:
                         title = "Your scheduled charge started"
                         body = f"Your scheduled charge on {plug_name} started."
-                    if not from_routine:
-                        await notify(
-                            user_id, "queued_charge_started", title, body,
-                            severity="info", plug_id=plug.id, session_id=session.id,
-                        )
+                    # The session is live and the STARTED claim committed
+                    # (begin_active_session's own commit), so the one start
+                    # notice must not depend on this link commit: if it raises,
+                    # the notice (or the routine stash) still goes out before
+                    # the except below logs it. notify() never raises.
+                    plug_id, session_id = plug.id, session.id
+                    try:
+                        qc.started_session_id = session_id
+                        await db.commit()
+                    finally:
+                        if not from_routine:
+                            await notify(
+                                user_id, "queued_charge_started", title, body,
+                                severity="info", plug_id=plug_id, session_id=session_id,
+                            )
+                        else:
+                            self._routine_starts[qc_id] = (user_id, plug_id, session_id, title, body)
                     logger.info(
-                        f"Auto-started queued charge {qc_id} on plug {plug.id} "
-                        f"(session {session.id})"
+                        f"Auto-started queued charge {qc_id} on plug {plug_id} "
+                        f"(session {session_id})"
                     )
             except Exception:
                 logger.exception(f"Failed to process queued charge {qc_id}")

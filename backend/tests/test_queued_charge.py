@@ -424,7 +424,42 @@ async def test_sweep_starts_debounced_row():
     assert begin.await_args.kwargs["auto_stop_when_full"] is False
     assert qc.status == QueuedChargeStatus.STARTED
     assert qc.started_session_id == 99
+    # [C7] Outage-queue path: exactly one start notice, queued_charge_started
+    # (the sweep tells begin_active_session not to send session_started).
+    assert begin.await_args.kwargs["announce_start"] is False
+    notify.assert_awaited_once()
     assert notify.await_args.args[1] == "queued_charge_started"
+
+
+@pytest.mark.asyncio
+async def test_sweep_start_notice_survives_a_failed_link_commit():
+    """The plug is live once begin_active_session returns (it committed the
+    STARTED claim), so a failure of the follow-up started_session_id commit
+    must not swallow the one start notice: queued_charge_started still goes
+    out, and the sweep only logs the error."""
+    qc = _qc()
+    plug = _plug(powered=True)
+    plug.powered_since = datetime.now(timezone.utc) - timedelta(minutes=10)
+    row_db = _row_db(
+        _s1n(qc), _s1n(_user()), _s1(0), _s1n(plug), _s1(_tenant(delay=2)),
+        _upd(), _s1n(None), _s1n(None), _s1(_gateway()),
+        _s1n(None),  # [C5] routine lookup: no routine owns this row
+    )
+    row_db.commit = AsyncMock(side_effect=OSError("connection lost"))
+    svc = SessionReaperService(_factory(_scan_db([1]), row_db), AsyncMock())
+
+    session = MagicMock()
+    session.id = 99
+    with patch("backend.services.session_start.begin_active_session",
+               AsyncMock(return_value=session)) as begin, \
+         patch("backend.services.notifications.notify", AsyncMock()) as notify:
+        await svc.reap_queued_starts_once()
+
+    begin.assert_awaited_once()
+    row_db.commit.assert_awaited_once()
+    notify.assert_awaited_once()
+    assert notify.await_args.args[1] == "queued_charge_started"
+    assert notify.await_args.kwargs["session_id"] == 99
 
 
 @pytest.mark.asyncio
@@ -1030,9 +1065,11 @@ async def test_sweep_starts_schedule_at_not_before_when_power_never_dropped():
     assert started == 1
     assert begin.await_args.kwargs == {
         "max_kwh": 30.0, "max_duration_seconds": 14400, "covering_reservation": None,
-        "auto_stop_when_full": False, "announce_start": True,
+        "auto_stop_when_full": False, "announce_start": False,
     }
     assert qc.status == QueuedChargeStatus.STARTED
+    # [C7] Scheduled path: exactly one start notice, no session_started.
+    notify.assert_awaited_once()
     assert notify.await_args.args[1] == "queued_charge_started"
     assert notify.await_args.args[2] == "Your scheduled charge started"
 
@@ -1040,7 +1077,8 @@ async def test_sweep_starts_schedule_at_not_before_when_power_never_dropped():
 @pytest.mark.asyncio
 async def test_sweep_routine_row_starts_with_no_start_notice_of_its_own():
     """[C5 + C7] A row a charge routine owns: neither queued_charge_started nor
-    session_started fires (settle_routines sends the one routine_started)."""
+    session_started fires in the sweep (settle_routines sends the one
+    routine_started)."""
     qc = _qc(not_before=_ago(seconds=30))
     chain = _scheduled_start_chain(qc, _due_plug())
     chain.execute.side_effect = list(chain.execute.side_effect)[:-1] + [_s1n(42)]
@@ -1049,6 +1087,88 @@ async def test_sweep_routine_row_starts_with_no_start_notice_of_its_own():
     assert qc.status == QueuedChargeStatus.STARTED
     assert begin.await_args.kwargs["announce_start"] is False
     notify.assert_not_awaited()
+
+
+def _settle_factory(routine_ids, settle_dbs=(), linked=None):
+    """Sessions settle_routines_once opens: the routine id scan, one session
+    per routine settled, then (only when a routine start is still pending)
+    the fallback's still-linked query."""
+    dbs = [_scan_db(routine_ids), *settle_dbs]
+    if linked is not None:
+        dbs.append(_scan_db(linked))
+    return _factory(*dbs)
+
+
+def _routine_owning(qc_id):
+    routine = MagicMock()
+    routine.id = 3
+    routine.user_id = 5
+    routine.plug_id = 1
+    routine.enabled = True
+    routine.consecutive_failures = 1
+    routine.last_queued_charge_id = qc_id
+    return routine
+
+
+async def _routine_start_then_settle(settle_factories):
+    """A routine-owned row starts in the sweep, then each settle tick runs
+    with its own factory. Returns the notify mock for the whole flow."""
+    qc = _qc(not_before=_ago(seconds=30))
+    chain = _scheduled_start_chain(qc, _due_plug())
+    chain.execute.side_effect = list(chain.execute.side_effect)[:-1] + [_s1n(3)]
+    svc = SessionReaperService(_factory(_scan_db([1]), chain), AsyncMock())
+    with patch("backend.services.session_start.begin_active_session",
+               AsyncMock(return_value=_started_session())),          patch("backend.services.notifications.notify", AsyncMock()) as notify:
+        assert await svc.reap_queued_starts_once() == 1
+        notify.assert_not_awaited()
+        for factory in settle_factories:
+            svc.db_session_factory = factory
+            await svc.settle_routines_once()
+    assert svc._routine_starts == {}
+    return notify
+
+
+@pytest.mark.asyncio
+async def test_routine_start_sends_exactly_one_routine_started():
+    """[C5 + C7] Routine path: sweep plus settle send one notice, the
+    routine's own, and no fallback fires after it."""
+    started = _qc(status=QueuedChargeStatus.STARTED)
+    started.started_session_id = 99
+    settle_db = _row_db(_s1n(_routine_owning(1)), _s1n(started), _s1("Bay 1"))
+    notify = await _routine_start_then_settle([_settle_factory([3], [settle_db])])
+    notify.assert_awaited_once()
+    assert notify.await_args.args[1] == "routine_started"
+    assert notify.await_args.kwargs["session_id"] == 99
+
+
+@pytest.mark.asyncio
+async def test_routine_settle_skipped_while_locked_waits_without_a_fallback():
+    """A routine still linked to the row (settle skipped it under SKIP
+    LOCKED) is not a deleted one: no fallback, and the next tick's settle
+    sends the one routine_started."""
+    started = _qc(status=QueuedChargeStatus.STARTED)
+    started.started_session_id = 99
+    locked = _row_db(_s1n(None))
+    later = _row_db(_s1n(_routine_owning(1)), _s1n(started), _s1("Bay 1"))
+    notify = await _routine_start_then_settle([
+        _settle_factory([3], [locked], linked=[1]),
+        _settle_factory([3], [later]),
+    ])
+    notify.assert_awaited_once()
+    assert notify.await_args.args[1] == "routine_started"
+
+
+@pytest.mark.asyncio
+async def test_routine_deleted_before_settle_falls_back_to_queued_charge_started():
+    """[C5 + C7] The routine was deleted (or its link cleared) between the
+    sweep's start and the settle pass: settle finds nothing, so the reaper
+    sends the queued_charge_started it held back. Exactly one notice."""
+    notify = await _routine_start_then_settle([_settle_factory([], linked=[])])
+    notify.assert_awaited_once()
+    assert notify.await_args.args[:2] == (5, "queued_charge_started")
+    assert notify.await_args.args[2] == "Your scheduled charge started"
+    assert notify.await_args.kwargs["session_id"] == 99
+    assert notify.await_args.kwargs["plug_id"] == 1
 
 
 @pytest.mark.asyncio

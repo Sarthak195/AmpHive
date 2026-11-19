@@ -9,14 +9,18 @@ billing unchanged, and is the only thing that can switch the plug on. After
 that sweep, settle_routines() reads what happened to the queued row and keeps
 the routine's failure count:
 
-  - STARTED            -> consecutive_failures = 0, notify "routine_started".
+  - STARTED            -> consecutive_failures = 0, notify "routine_started"
+                          (if the routine is gone by then, the reaper sends
+                          queued_charge_started instead, so each auto-start
+                          gets exactly one start notice).
   - EXPIRED / FAILED   -> consecutive_failures += 1; the third in a row
                           disables the routine and notifies "routine_disabled".
   - CANCELLED          -> no count (the driver cancelled it, or started the
                           plug themselves first).
 
 While queued charging is off for the plug an occurrence is skipped and the
-driver is told once (gate_notified, cleared by the next queued row); the
+driver is told once (gate_notified, cleared by the next materialize pass
+that sees the gate on, whether or not it queues a row); the
 routine stays enabled and resumes when the gate is back on.
 
 Due-ness is evaluated per occurrence date in the plug's tenant timezone
@@ -269,6 +273,9 @@ async def _materialize_one(factory: Callable, routine_id: int, now: datetime) ->
             await db.commit()
             await _send(user_id, plug_id, notice)
             return False
+        # The gate is on: the outage (if any) is over, so re-arm its notice
+        # whether or not this occurrence ends up queued.
+        routine.gate_notified = False
 
         own_waiting = (await db.execute(
             select(QueuedCharge.id).where(and_(
@@ -316,7 +323,6 @@ async def _materialize_one(factory: Callable, routine_id: int, now: datetime) ->
             await db.commit()
             return False
         routine.last_queued_charge_id = qc.id
-        routine.gate_notified = False
         await db.commit()
         logger.info(
             "Charge routine queued",
@@ -359,8 +365,11 @@ async def materialize_routines(factory: Callable, now: Optional[datetime] = None
     return queued
 
 
-async def _settle_one(factory: Callable, routine_id: int) -> None:
+async def _settle_one(factory: Callable, routine_id: int) -> Optional[int]:
+    """Settle one routine. Returns the queued-charge id it sent
+    routine_started for, else None."""
     notice: Optional[Notice] = None
+    announced: Optional[int] = None
     async with factory() as db:
         routine = (await db.execute(
             select(ChargeRoutine)
@@ -371,19 +380,21 @@ async def _settle_one(factory: Callable, routine_id: int) -> None:
             .with_for_update(skip_locked=True)
         )).scalar_one_or_none()
         if routine is None:
-            return
+            return None
         qc = (await db.execute(
             select(QueuedCharge).where(QueuedCharge.id == routine.last_queued_charge_id)
         )).scalar_one_or_none()
         if qc is not None and qc.status == QueuedChargeStatus.WAITING:
             await db.commit()  # not decided yet
-            return
+            return None
+        qc_id = routine.last_queued_charge_id
         routine.last_queued_charge_id = None
         user_id, plug_id = routine.user_id, routine.plug_id
         session_id = None
         if qc is not None and qc.status == QueuedChargeStatus.STARTED:
             routine.consecutive_failures = 0
             session_id = qc.started_session_id
+            announced = qc_id
             plug_name = (await db.execute(select(Plug.name).where(Plug.id == plug_id))).scalar_one()
             notice = (
                 "routine_started",
@@ -401,18 +412,23 @@ async def _settle_one(factory: Callable, routine_id: int) -> None:
                 notice = None
         await db.commit()
     await _send(user_id, plug_id, notice, session_id=session_id)
+    return announced
 
 
-async def settle_routines(factory: Callable) -> int:
+async def settle_routines(factory: Callable, announced: Optional[set] = None) -> int:
     """Settle the outcome of every routine's last queued row once the reaper
-    has decided it. Returns the number of routines examined."""
+    has decided it. Returns the number of routines examined; the queued-charge
+    ids that got routine_started are added to `announced` when given (the
+    reaper's start-notice fallback, SessionReaperService.settle_routines_once)."""
     async with factory() as db:
         ids = list((await db.execute(
             select(ChargeRoutine.id).where(ChargeRoutine.last_queued_charge_id.is_not(None))
         )).scalars().all())
     for routine_id in ids:
         try:
-            await _settle_one(factory, routine_id)
+            qc_id = await _settle_one(factory, routine_id)
+            if qc_id is not None and announced is not None:
+                announced.add(qc_id)
         except Exception:
             logger.exception(f"Failed to settle charge routine {routine_id}")
     return len(ids)
