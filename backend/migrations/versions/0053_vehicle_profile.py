@@ -20,13 +20,13 @@ reasoning as 0048). IF NOT EXISTS so a create_all()-built database migrates
 cleanly (the 0038 idempotency idiom).
 
 Revision ID: 0053_vehicle_profile
-Revises: 0050_charge_routines
+Revises: 0052_idle_fee
 Create Date: 2026-11-19
 """
 from alembic import op
 
 revision = "0053_vehicle_profile"
-down_revision = "0050_charge_routines"
+down_revision = "0052_idle_fee"
 branch_labels = None
 depends_on = None
 

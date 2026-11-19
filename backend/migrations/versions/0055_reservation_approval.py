@@ -23,13 +23,13 @@ The least-privilege runtime role already covers public-schema tables owned by
 the owner role (docs/DATA_MODEL.md), so no GRANT is needed.
 
 Revision ID: 0055_reservation_approval
-Revises: 0050_charge_routines
+Revises: 0054_member_price_invites
 Create Date: 2026-11-19
 """
 from alembic import op
 
 revision = "0055_reservation_approval"
-down_revision = "0050_charge_routines"
+down_revision = "0054_member_price_invites"
 branch_labels = None
 depends_on = None
 

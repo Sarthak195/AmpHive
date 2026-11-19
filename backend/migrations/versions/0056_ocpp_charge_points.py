@@ -22,13 +22,13 @@ PRIVILEGES, docs/DATA_MODEL.md), so no GRANT is needed. With the flag off the
 tables stay empty and nothing reads them.
 
 Revision ID: 0056_ocpp_charge_points
-Revises: 0050_charge_routines
+Revises: 0055_reservation_approval
 Create Date: 2026-11-19
 """
 from alembic import op
 
 revision = "0056_ocpp_charge_points"
-down_revision = "0050_charge_routines"
+down_revision = "0055_reservation_approval"
 branch_labels = None
 depends_on = None
 

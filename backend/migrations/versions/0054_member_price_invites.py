@@ -17,13 +17,13 @@ match the model because test_migrations.py diffs the migrated schema against
 it.
 
 Revision ID: 0054_member_price_invites
-Revises: 0050_charge_routines
+Revises: 0053_vehicle_profile
 Create Date: 2026-11-19
 """
 from alembic import op
 
 revision = "0054_member_price_invites"
-down_revision = "0050_charge_routines"
+down_revision = "0053_vehicle_profile"
 branch_labels = None
 depends_on = None
 
