@@ -88,6 +88,10 @@ class TransactionType(str, enum.Enum):
     # Added via ALTER TYPE in migration 0038_account_closure (same pattern as
     # 0026_offline_topups).
     ACCOUNT_CLOSURE = "account_closure"
+    # [Idle fee C1] The capped per-minute fee for a car left plugged in after
+    # it looked fully charged, settled once at finalize as its own line
+    # (services/idle_fee.py). Added via ALTER TYPE in migration 0052_idle_fee.
+    IDLE_FEE = "idle_fee"
 
 # --- SQLAlchemy Model Classes ---
 
@@ -610,6 +614,19 @@ class ChargingSession(Base):
     full_notified_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     nearly_done_notified_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     power_dropped_notified_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # [Idle fee C1] Terms snapshotted from the plug's tariff at start (NULL =
+    # no fee, the default), so a tariff edit never changes a running session.
+    # Idle time is tracked as transitions only (services/idle_fee.py):
+    # idle_started_at opens a stretch of low draw after the car looked full,
+    # idle_seconds banks closed parts of it. idle_fee_coins is what finalize
+    # collected (also included in coins_spent). Alembic revision 0052_idle_fee.
+    idle_grace_min: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    idle_fee_per_min: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
+    idle_fee_cap: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
+    idle_started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    idle_seconds: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    idle_fee_coins: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
 
     # Hot-path composite indexes (Alembic revision 0024_session_ledger_indexes):
     # plug_id/status backs "is this plug's session still active", user_id/status
@@ -1250,6 +1267,13 @@ class Tariff(Base):
     price_per_kwh: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), onupdate=text("CURRENT_TIMESTAMP"), nullable=False)
+    # [Idle fee C1] Opt-in, 0 = off: once the car looks full and idle_grace_min
+    # more minutes pass, idle_fee_per_min coins per whole idle minute, at most
+    # idle_fee_cap per session. Snapshotted onto the session at start.
+    # Alembic revision 0052_idle_fee.
+    idle_grace_min: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    idle_fee_per_min: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal("0.00"), server_default="0", nullable=False)
+    idle_fee_cap: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal("0.00"), server_default="0", nullable=False)
 
 
 class TariffSlot(Base):
