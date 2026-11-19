@@ -397,7 +397,15 @@ async def _enable(factory, uid):  # noqa: F811
 
 
 async def _session(factory, uid, started):  # noqa: F811
-    from backend.database.models import ChargingSession, Gateway, GatewayStatus, Plug, PlugStatus, SessionStatus, Tenant
+    from backend.database.models import (
+        ChargingSession,
+        Gateway,
+        GatewayStatus,
+        Plug,
+        PlugStatus,
+        SessionStatus,
+        Tenant,
+    )
 
     async with factory() as db:
         t = Tenant(name=f"T{uid}-{started.month}")
