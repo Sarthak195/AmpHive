@@ -1,7 +1,8 @@
 /**
  * ChargeRoutines tests: the list shows days, local time with its zone and the
  * limit; saving needs a charger and a limit and sends wall-clock time as
- * typed with the "stop when full" opt-in; toggling and deleting hit the
+ * typed with the "stop when full" opt-in; the chosen charger's idle fee terms
+ * show before saving; toggling and deleting hit the
  * owner routes; a read-only cpo_viewer sees nothing.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -93,6 +94,25 @@ describe('ChargeRoutines', () => {
       max_kwh: 6,
       auto_stop_when_full: true,
     });
+  });
+
+  it("shows the chosen charger's idle fee terms before saving", async () => {
+    api.get.mockImplementation((url) => {
+      if (url === '/api/me/routines') return Promise.resolve({ routines: [], max_routines: 5 });
+      if (url === '/api/plugs/1/tariff-preview') {
+        return Promise.resolve({ idle_fee: { grace_min: 15, per_min: 2, cap: 30 } });
+      }
+      return Promise.resolve([{ id: 1, name: 'Home bay', tenant_timezone: 'Asia/Kolkata' }]);
+    });
+    render(<ChargeRoutines />);
+    await screen.findByRole('option', { name: 'Home bay' });
+    expect(screen.queryByTestId('routine-idle-fee')).not.toBeInTheDocument();
+    await userEvent.selectOptions(screen.getByLabelText('Charger'), '1');
+    const terms = await screen.findByTestId('routine-idle-fee');
+    expect(terms).toHaveTextContent(/per minute if the car stays plugged in more than 15 min/);
+    expect(terms).toHaveTextContent(/Stop and unplug in time/);
+    await userEvent.click(screen.getByLabelText('Stop automatically when the car is full'));
+    expect(terms).toHaveTextContent(/Not charged: these runs stop themselves/);
   });
 
   it('turns a routine off and deletes one after confirming', async () => {
