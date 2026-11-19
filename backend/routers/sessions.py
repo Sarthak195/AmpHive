@@ -5,6 +5,7 @@ import logging
 import math
 import os
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -557,7 +558,11 @@ async def update_session_limits(
         # under-floored hold here would silently forgive the difference (the
         # "charge 29 kWh, PATCH max_kwh to 0.1" exploit).
         accrued_floor = to_money(session_cost(session, session.energy_kwh or 0.0))
-        resized = to_money(min(headroom, energy_cost(session.max_kwh, max_rate)))
+        # [Idle fee C1] Keep the snapshotted idle-fee cap reserved, as at start.
+        from backend.services.idle_fee import session_terms
+        idle_terms = session_terms(session)
+        idle_cap = idle_terms[2] if idle_terms is not None else Decimal("0.00")
+        resized = to_money(min(headroom, energy_cost(session.max_kwh, max_rate) + idle_cap))
         session.hold_coins = to_money(max(accrued_floor, resized))
 
     await db.commit()
@@ -1571,12 +1576,15 @@ async def get_session_detail(
         else default_rate()
     )
     coins_spent = float(session.coins_spent or 0)
+    # [Idle fee C1] The idle-fee part of coins_spent, settled after the energy
+    # debit in the same finalize transaction (0 when none).
+    idle_fee = float(session.idle_fee_coins) if isinstance(session.idle_fee_coins, Decimal) else 0.0
 
     is_active = session.status == SessionStatus.ACTIVE
     shortfall = 0.0
     if not is_active:
         # Billed cost re-derived exactly as finalize computed it (segment-aware).
-        shortfall = max(float(session_cost(session, energy)) - coins_spent, 0.0)
+        shortfall = max(float(session_cost(session, energy)) - (coins_spent - idle_fee), 0.0)
 
     # The finalize-time SESSION_DEBIT ledger row carries the wallet balances
     # (admin adjustments use session_id NULL, refunds use REFUND — no clash).
@@ -1597,7 +1605,8 @@ async def get_session_detail(
     reason = None
     if ledger is not None:
         if ledger.balance_after is not None:
-            balance_remaining = round(float(ledger.balance_after), 2)
+            # The IDLE_FEE line (if any) was debited right after this one.
+            balance_remaining = round(float(ledger.balance_after) - idle_fee, 2)
             # amount is the signed delta (negative debit): before = after - amount.
             balance_before = round(float(ledger.balance_after - ledger.amount), 2)
         if ledger.description:
@@ -1628,6 +1637,7 @@ async def get_session_detail(
             if session.settled_cost_coins is not None else None
         ),
         "coins_spent": round(coins_spent, 2),
+        "idle_fee_coins": round(idle_fee, 2),
         "shortfall_coins": round(shortfall, 2),
         "balance_before": balance_before,
         "balance_remaining": balance_remaining,

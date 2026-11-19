@@ -178,6 +178,7 @@ async def test_session_detail_receipt_shape_for_owner():
         "price_per_kwh": 8.0,
         "settled_cost_coins": None,
         "coins_spent": 12.0,
+        "idle_fee_coins": 0.0,    # [Idle fee C1] none on this session
         "shortfall_coins": 0.0,   # 1.5 kWh * 8.00 == 12.00 collected
         "balance_before": 100.0,  # 88.00 - (-12.00)
         "balance_remaining": 88.0,

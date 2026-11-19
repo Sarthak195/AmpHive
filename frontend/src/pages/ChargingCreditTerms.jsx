@@ -72,6 +72,13 @@ export default function ChargingCreditTerms() {
             when the session ends</strong>, and any unused reservation is
             released. A GST tax invoice is available for every billed session.
           </p>
+          <p className="text-2">
+            Where the host has set an idle fee (shown before you start), the
+            per-minute fee for staying plugged in after the car looks fully
+            charged is also deducted when the session ends, as its own line in
+            your credit history. It never exceeds the stated maximum or the
+            amount reserved for the session.
+          </p>
         </section>
 
         <section className="card">

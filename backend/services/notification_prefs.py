@@ -48,6 +48,9 @@ ALWAYS_PUSH_TYPES = frozenset({
     "gateway_fault",
     # F1 "your car looks fully charged" notice.
     "charge_full",
+    # C1 "Charging done, please stop and unplug": an idle fee is about to
+    # start, so it is about money (services/idle_fee.py).
+    "idle_fee_notice",
     # Charge routines (services/routines.py, C5).
     "routine_started",
     "routine_disabled",

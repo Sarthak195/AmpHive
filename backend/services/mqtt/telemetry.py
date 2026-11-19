@@ -465,6 +465,9 @@ class MQTTTelemetryMixin:
         # the row loaded below, no extra query). A sent notice is never claimed
         # or sent again, so a restarted process issues no write for it.
         full_noticed = nearly_noticed = dropped_noticed = False
+        # [Idle fee C1] The session's snapshotted idle terms (None = no fee,
+        # or the driver opted into auto-stop), for the grace-start notice.
+        updated_idle_terms = None
 
         try:
             async with self.db_session_factory() as session:
@@ -634,7 +637,16 @@ class MQTTTelemetryMixin:
                     full_noticed = active_session.full_notified_at is not None
                     nearly_noticed = active_session.nearly_done_notified_at is not None
                     dropped_noticed = active_session.power_dropped_notified_at is not None
+                    from backend.services.idle_fee import session_terms, track_idle
+                    updated_idle_terms = session_terms(active_session)
                     if watts_reported and not is_offline:
+                        # [Idle fee C1] Transitions only, on this already
+                        # locked row; prev_frame_at is the plug's previous LIVE
+                        # frame, so an offline gap is never counted as idle.
+                        track_idle(
+                            active_session, plug.last_telemetry_at, watts, relay_on,
+                            prev_frame_at,
+                        )
                         if relay_on:
                             charge_sample = (
                                 active_session.id, active_session.peak_power_w,
@@ -912,6 +924,9 @@ class MQTTTelemetryMixin:
                     send_notice=not full_noticed and await self._claim_session_notice(
                         updated_session_id, "full_notified_at",
                     ),
+                    # Passed only when the session has a fee, so the call
+                    # for a fee-free session is unchanged.
+                    **({"idle_terms": updated_idle_terms} if updated_idle_terms else {}),
                 )
             elif charge_stop_retry:
                 await self._charge_full_stop(updated_session_id, updated_user_id, plug_id)
@@ -946,7 +961,8 @@ class MQTTTelemetryMixin:
                     )
 
     async def _on_charge_full(self, session_id: int, user_id: int, plug_id: int,
-                              auto_stop: bool, send_notice: bool = True):
+                              auto_stop: bool, send_notice: bool = True,
+                              idle_terms=None):
         """[Charge complete] The detector fired (once per process and
         session): flag the live snapshot for the session banner, tell the
         driver (bell + push via notify()) unless send_notice is False (the
@@ -956,7 +972,12 @@ class MQTTTelemetryMixin:
         same finalize_charging_session call the driver's own stop makes (relay
         OFF + bill + free the plug). Never switches anything ON. The stop
         re-checks ACTIVE under its row lock, so a concurrent driver stop,
-        limit or reaper settles the session exactly once."""
+        limit or reaper settles the session exactly once.
+
+        [Idle fee C1] When the session carries idle terms, the one notice is
+        "Charging done, please stop and unplug" (type idle_fee_notice, always
+        pushed: it is about money) instead of charge_full, stating the grace
+        and the fee. The grace starts now (services/idle_fee.py)."""
         from backend.services.mqtt_manager import CHARGE_FULL_MINUTES
         from backend.services.notifications import notify
 
@@ -974,7 +995,15 @@ class MQTTTelemetryMixin:
             "Auto-stop is on for this session."
             if auto_stop else "Stop the session when you are ready to free the plug."
         )
-        if send_notice:
+        if send_notice and idle_terms is not None:
+            from backend.services.idle_fee import terms_text
+            await notify(
+                user_id, "idle_fee_notice", "Charging done, please stop and unplug",
+                f"Power draw has stayed near zero for {CHARGE_FULL_MINUTES:g} minutes. "
+                f"{terms_text(*idle_terms)}",
+                severity="info", plug_id=plug_id, session_id=session_id,
+            )
+        elif send_notice:
             await notify(
                 user_id, "charge_full", "Your car looks fully charged",
                 f"Power draw has stayed near zero for {CHARGE_FULL_MINUTES:g} minutes. {follow_up}",

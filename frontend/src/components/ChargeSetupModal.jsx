@@ -31,6 +31,11 @@
  * on a flat tariff or when already cheapest) is offered as one tap that picks
  * "At a time" and fills the start time. Best-effort: a failed fetch hides it.
  *
+ * [Idle fee C1] The same preview (fetched for every plug while the modal is
+ * open) carries `idle_fee` ({grace_min, per_min, cap}, null when the plug's
+ * tariff has none). When set, the terms are shown under the auto-stop toggle:
+ * an opted-in auto-stop never pays it.
+ *
  * [Charge complete] An opt-in "Stop automatically when the car is full" toggle
  * (default off). When on, `limits.auto_stop_when_full = true` is passed to
  * onConfirm; the backend then stops the session once the car's draw has stayed
@@ -121,6 +126,7 @@ export default function ChargeSetupModal({ open, onClose, plug, mode = 'start', 
   const [autoLimit, setAutoLimit] = useState(false);
   const [cheapest, setCheapest] = useState(null);
   const [autoStopFull, setAutoStopFull] = useState(false);
+  const [idleFee, setIdleFee] = useState(null);
 
   const schedulable = Boolean(open && mode === 'start' && plug?.schedule_available && plug?.tenant_timezone);
   // [Plug hours] A closed plug can only be scheduled: open on "At a time"
@@ -129,21 +135,24 @@ export default function ChargeSetupModal({ open, onClose, plug, mode = 'start', 
   const plugId = plug?.id;
   useEffect(() => {
     setCheapest(null);
-    if (!schedulable || plugId == null) return undefined;
+    setIdleFee(null);
+    if (!open || plugId == null) return undefined;
     let cancelled = false;
     (async () => {
       try {
         const res = await api.get(`/api/plugs/${plugId}/tariff-preview`);
+        if (cancelled) return;
         const w = res?.cheapest_window;
-        if (!cancelled && w && Number(w.price_per_kwh) < Number(res.price_now)) {
+        if (schedulable && w && Number(w.price_per_kwh) < Number(res.price_now)) {
           setCheapest({ hhmm: w.start_hhmm, price: Number(w.price_per_kwh), now: Number(res.price_now) });
         }
+        if (res?.idle_fee) setIdleFee(res.idle_fee);
       } catch {
         /* best-effort hint: hide on failure */
       }
     })();
     return () => { cancelled = true; };
-  }, [schedulable, plugId]);
+  }, [open, schedulable, plugId]);
 
   // [Estimate] Limits as the endpoint takes them. An out-of-range value is
   // dropped so the fetch is only made for a request the backend accepts.
@@ -476,6 +485,14 @@ export default function ChargeSetupModal({ open, onClose, plug, mode = 'start', 
           />
           Stop automatically when the car is full
         </label>
+        {idleFee && (
+          <p className="field-hint text-sm" data-testid="idle-fee-terms">
+            Idle fee: <Money coins={idleFee.per_min} rate={coin_inr_rate} /> per minute if the car stays
+            plugged in more than {idleFee.grace_min} min after it looks full, at most{' '}
+            <Money coins={idleFee.cap} rate={coin_inr_rate} />.{' '}
+            {autoStopFull ? 'Not charged: this session stops itself.' : 'Stop and unplug in time, or tick the box above.'}
+          </p>
+        )}
 
         {scheduling && !hasLimit && (
           <p className="field-hint text-sm">A scheduled charge needs a time or energy limit.</p>
