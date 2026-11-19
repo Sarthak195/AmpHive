@@ -398,6 +398,34 @@ def test_heartbeat_call_error_keeps_the_connection(tmp_path):
     asyncio.run(scenario())
 
 
+def test_call_propagates_a_cancel_that_races_the_reply(tmp_path):
+    # The reply and the cancel land in the same loop tick. Python 3.11's
+    # wait_for returned the reply and dropped the cancel (cpython gh-86296),
+    # so a stopping bridge kept running and CI hung in teardown.
+    cfg = Config(api_url="https://meter.test", token=TOKEN, csms_url="ws://127.0.0.1:1/ocpp",
+                 poll_seconds=0.05, state_file=tmp_path / "s.json")
+    cp = ChargePoint("AMPHIVE-7", 7, cfg, StateStore(cfg.state_file))
+
+    class SilentWs:
+        async def send(self, data: str) -> None:
+            pass
+
+        async def close(self) -> None:
+            pass
+
+    cp._ws = SilentWs()
+
+    async def scenario():
+        task = asyncio.create_task(cp.call("Heartbeat", {}))
+        await wait_until(lambda: cp._pending)
+        next(iter(cp._pending.values())).set_result({})
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+
+
 def test_start_transaction_precedes_the_charging_status(tmp_path):
     meter, csms = FakeMeter(), FakeCsms()
     meter.plugs = [plug()]
