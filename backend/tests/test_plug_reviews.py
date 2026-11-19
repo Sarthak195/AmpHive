@@ -47,7 +47,7 @@ def test_author_display_prefers_first_name():
     ("sarthak", "sarthak.jain@example.com"),
     ("sam_k", "sam_k@example.com"),
     ("sam", "sam+ev@example.com"),
-    ("jo-ann", "jo-ann.lee@example.com"),
+    ("jo", "jo-ann.lee@example.com"),
     ("someone@example.com", "other@example.com"),
 ])
 def test_author_display_never_shows_anything_derived_from_the_email(name, email):
