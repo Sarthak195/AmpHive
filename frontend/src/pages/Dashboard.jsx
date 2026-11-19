@@ -517,6 +517,9 @@ const Dashboard = () => {
     const state = getPlugAvailability(plug);
     const reservedByOther = plug.reserved_now === true && plug.reserved_now_by_me !== true;
     const startable = state === 'available' && !reservedByOther && plug.open_now !== false;
+    // [Plug hours] Closed but schedulable: the setup modal opens on "At a time".
+    const schedulable =
+      state === 'available' && !reservedByOther && plug.open_now === false && plug.schedule_available === true;
     const queueable = state === 'unpowered' && plug.queue_available === true;
     // Guard against stale closure: only allow actions if this lookup is current
     const isCurrentLookup = lookup.query === query;
@@ -538,6 +541,11 @@ const Dashboard = () => {
           {startable && isCurrentLookup && (
             <button type="button" className="btn btn-primary btn-sm" onClick={() => openCharge(plug)}>
               Start charging
+            </button>
+          )}
+          {schedulable && isCurrentLookup && (
+            <button type="button" className="btn btn-primary btn-sm" onClick={() => openCharge(plug)}>
+              Schedule a start
             </button>
           )}
           {queueable && isCurrentLookup && (

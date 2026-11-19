@@ -205,6 +205,13 @@ describe('PlugCard: opening hours', () => {
     expect(screen.getByRole('button', { name: /reserve/i })).toBeInTheDocument();
   });
 
+  it('a closed but schedulable plug offers Schedule, which opens the charge setup', async () => {
+    renderCard({ ...BASE, open_now: false, schedule_available: true, tenant_timezone: 'UTC' });
+    expect(screen.queryByRole('button', { name: /^charge/i })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: /^schedule/i }));
+    expect(handlers.onCharge).toHaveBeenCalledWith(expect.objectContaining({ id: BASE.id }));
+  });
+
   it('a 24x7 plug with nothing set renders no hours line', () => {
     renderCard({ ...BASE, open_now: null });
     expect(screen.queryByText(/Open now|Closed,/)).not.toBeInTheDocument();

@@ -26,7 +26,8 @@
  *
  * [Plug hours] PlugHours shows "Open now, closes HH:MM" / "Closed, opens
  * HH:MM", amenities and the access note; a closed plug offers no Charge (the
- * start would 409), Reserve stays for a later slot inside the hours.
+ * start would 409) but a Schedule action when schedule_available (the setup
+ * modal then opens on "At a time"), and Reserve for a slot inside the hours.
  *
  * No whole-card click — every action is a real button. Copy comes from
  * utils/statusCopy; colors from the --state-* tokens via StatusDot.
@@ -60,6 +61,8 @@ export default function PlugCard({ plug, onCharge, onReserve, onQueue, onToggleW
   const reservedByOther = plug.reserved_now === true && plug.reserved_now_by_me !== true;
   const queueable = state === 'unpowered' && plug.queue_available === true;
   const canCharge = state === 'available' && !reservedByOther && plug.open_now !== false;
+  const canSchedule =
+    state === 'available' && !reservedByOther && plug.open_now === false && plug.schedule_available === true;
   const canReserve = state === 'available' || state === 'in_use';
   const showBell =
     state === 'in_use' || (state === 'unpowered' && !queueable);
@@ -133,7 +136,7 @@ export default function PlugCard({ plug, onCharge, onReserve, onQueue, onToggleW
 
       {hint && <p className="plug-card-hint text-3 text-sm">{hint}</p>}
 
-      {(canCharge || canReserve || queueable || showBell) && (
+      {(canCharge || canSchedule || canReserve || queueable || showBell) && (
         <div className="plug-card-actions">
           {canCharge && (
             <button
@@ -143,6 +146,16 @@ export default function PlugCard({ plug, onCharge, onReserve, onQueue, onToggleW
             >
               <Zap size={16} aria-hidden="true" />
               Charge
+            </button>
+          )}
+          {canSchedule && (
+            <button
+              type="button"
+              className="btn btn-primary btn-sm"
+              onClick={() => onCharge?.(plug)}
+            >
+              <CalendarClock size={16} aria-hidden="true" />
+              Schedule
             </button>
           )}
           {queueable && (

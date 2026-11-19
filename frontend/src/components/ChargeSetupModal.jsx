@@ -110,6 +110,9 @@ export default function ChargeSetupModal({ open, onClose, plug, mode = 'start', 
   const [autoStopFull, setAutoStopFull] = useState(false);
 
   const schedulable = Boolean(open && mode === 'start' && plug?.schedule_available && plug?.tenant_timezone);
+  // [Plug hours] A closed plug can only be scheduled: open on "At a time"
+  // (with the 8h preselect chooseStart applies) and offer no "Now".
+  const closedStart = schedulable && plug?.open_now === false;
   const plugId = plug?.id;
   useEffect(() => {
     setCheapest(null);
@@ -140,11 +143,12 @@ export default function ChargeSetupModal({ open, onClose, plug, mode = 'start', 
     setCircuitFull(false);
     setCapacityAsked(false);
     setAsking(false);
-    setStartAt('now');
+    setStartAt(closedStart ? 'later' : 'now');
     setAtTime('');
-    setAutoLimit(false);
+    setAutoLimit(closedStart);
+    if (closedStart) setTimePreset('8h');
     setAutoStopFull(false);
-  }, [open, plug?.id]);
+  }, [open, plug?.id, closedStart]);
 
   if (!open || !plug) return null;
 
@@ -290,7 +294,7 @@ export default function ChargeSetupModal({ open, onClose, plug, mode = 'start', 
               {[
                 ['now', 'Now'],
                 ['later', 'At a time'],
-              ].map(([value, label]) => (
+              ].filter(([value]) => !(closedStart && value === 'now')).map(([value, label]) => (
                 <button
                   key={value}
                   type="button"
