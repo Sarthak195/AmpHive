@@ -107,7 +107,7 @@ Legend: ✅ present · 🟡 partial · ❌ absent.
 | Authorization *hold* sized to the session | Tesla, EA (pre-auth) | ✅ (2026-07-12) `ChargingSession.hold_coins` reserves `min(available_balance, max_kwh × rate)` at start (`services/wallet.py available_balance`, net of what the driver's OTHER active sessions already hold); `finalize_charging_session` caps the debit at the hold and releases any unspent remainder — closes the old forgiven-overage leak (see [SECURITY.md](SECURITY.md) §5) for every held session. Legacy pre-migration sessions (`hold_coins IS NULL`) keep the old floor-only/forgiven-overage behavior. | — |
 | GST tax invoice / downloadable receipt | Indian legal requirement | 🟡 (2026-07-12) backend live: numbered `Invoice` per session (inclusive GST split, immutable seller/line snapshot, sequential per-tenant numbering), `GET /api/sessions/{id}/invoice` (+ `?format=html`), CPO list `GET /api/cpo/invoices`; intra-state only (no CGST/SGST/IGST split); no CPO/driver-portal UI yet | Should-do (UI) |
 | Refunds | all | 🟡 coins-only: a CPO-approved session dispute credits the driver's wallet (`REFUND` ledger type, capped at the session's cost); no Razorpay money-out | — |
-| Promo codes / coupons / referral credit | Statiq, Ather, Kazam | ❌ | Should-do |
+| Promo codes / coupons / referral credit | Statiq, Ather, Kazam | 🟡 promo codes (F12) built 2026-11-17 on release/2026-11-17-w2, not deployed: CPO-issued, single or multi-use, funded from the tenant's offline top-up pool; no referral or loyalty credit | Should-do |
 | Loyalty / reward points | Tata, Ather | ❌ | Nice-to-have |
 | Subscription / membership plans | ChargePoint, EA (Pass+) | ❌ | Nice-to-have |
 | Corporate / fleet billing accounts | ChargePoint, Statiq business | ❌ | By design (consumer MVP) |
@@ -175,7 +175,7 @@ design**, but the trade-offs should be explicit.
 
 | Standard | What it buys | AmpHive | Verdict |
 |----------|--------------|:-------:|---------|
-| **OCPP** (charger ↔ network) | Works with any compliant EVSE; the universal CPO protocol | ❌ proprietary MQTT contract | By design (smart plugs, not OCPP hardware) — but it means **zero interoperability with real EVSEs**, and no path to onboard commercial chargers later |
+| **OCPP** (charger to network) | Works with any compliant EVSE; the universal CPO protocol | Partial: proprietary MQTT contract to the gateways, plus a read-only OCPP 1.6J virtual charge-point bridge (tools/ocpp_bridge, see [OCPP_BRIDGE.md](OCPP_BRIDGE.md)) that mirrors each plug's status, transactions and meter values into any OCPP back office | By design (smart plugs, not OCPP hardware). The bridge gives display-only interoperability with OCPP central systems; AmpHive still cannot onboard or control real OCPP EVSEs, and a full central system stays out of scope |
 | **OCPI** (network ↔ network roaming) | A driver on network A charges on network B; eMSP roaming hubs | ❌ | By design (closed network) — caps AmpHive to an island; competitors increasingly roam |
 | Connector model (Type 2 / CCS2 / CHAdeMO) | DC fast + standard AC charging | ❌ AC wall-socket (Tapo P110) only | By design (this is the cost-disruption thesis) — but it structurally excludes DC-fast and most public-charging use cases |
 
@@ -221,6 +221,4 @@ topic).
 **Strategic (larger bets):** PWA/native app · dynamic/ToU pricing + idle fees ·
 promo/referral/loyalty · localization · dynamic load balancing.
 
-**Consciously not pursuing (state it, don't drift into):** OCPP/OCPI/ISO 15118 ·
-DC-fast connectors · trip planning — unless the product pivots off the
-smart-plug thesis.
+**Consciously not pursuing (state it, don't drift into):** a full OCPP central system (accepting or controlling third-party OCPP chargers; only a read-only OCPP 1.6J virtual charge-point bridge exists, see [OCPP_BRIDGE.md](OCPP_BRIDGE.md)) · OCPI/ISO 15118 · DC-fast connectors · trip planning, unless the product pivots off the smart-plug thesis.

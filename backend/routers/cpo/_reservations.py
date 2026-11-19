@@ -17,7 +17,13 @@ from backend.database.db import get_db
 from backend.database.models import Plug, Reservation, ReservationStatus, User
 from backend.services.reservations import expire_lapsed_reservations
 
-from ._common import _require_tenant_id, require_cpo_tenant
+from ._common import (
+    _require_tenant_id,
+    is_cpo_viewer,
+    redact_for,
+    redact_name_for,
+    require_cpo_tenant,
+)
 
 router = APIRouter()
 
@@ -47,7 +53,9 @@ async def cpo_list_reservations(
     now = datetime.now(timezone.utc)
 
     expired = await expire_lapsed_reservations(db, tenant_id=tenant_id, now=now)
-    if expired:
+    # [F10] A read-only viewer still sees lapsed holds as expired, but its
+    # GET never persists the flip (the request session rolls back on close).
+    if expired and not is_cpo_viewer(user):
         await db.commit()  # read path — persist the lazy flip
 
     conditions = [Reservation.tenant_id == tenant_id]
@@ -87,8 +95,8 @@ async def cpo_list_reservations(
                 "plug_id": r.plug_id,
                 "plug_name": plug_name,
                 "user_id": r.user_id,
-                "user_email": user_email,
-                "user_name": user_name,
+                "user_email": redact_for(user, user_email),
+                "user_name": redact_name_for(user, user_name),
                 "start_at": r.start_at.isoformat(),
                 "end_at": r.end_at.isoformat(),
                 "status": r.status.value,

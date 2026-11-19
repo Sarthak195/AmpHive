@@ -33,6 +33,7 @@ from . import (
     _plug_reports,
     _plugs,
     _profile,
+    _promos,
     _reservations,
     _tariffs,
     _topups,
@@ -100,6 +101,7 @@ from ._plugs import (
     cpo_update_plug,
 )
 from ._profile import cpo_profile, cpo_setup, cpo_update_profile
+from ._promos import cpo_create_promo, cpo_disable_promo, cpo_list_promos
 from ._reservations import cpo_list_reservations
 from ._tariffs import (
     cpo_assign_group_tariff,
@@ -142,6 +144,7 @@ __all__ = [
     "cpo_profile", "cpo_setup", "cpo_update_profile",
     "cpo_list_reservations",
     "cpo_create_topup", "cpo_list_topups",
+    "cpo_create_promo", "cpo_disable_promo", "cpo_list_promos",
     "cpo_assign_group_tariff", "cpo_assign_plug_tariff",
     "cpo_assign_tenant_default_tariff", "cpo_create_tariff", "cpo_create_tariff_slot",
     "cpo_delete_tariff", "cpo_delete_tariff_slot", "cpo_list_tariff_slots",
@@ -159,6 +162,7 @@ router = APIRouter()
 for _sub in (
     _profile.router, _gateways.router, _plugs.router, _groups.router,
     _analytics.router, _events.router, _payouts.router, _topups.router,
+    _promos.router,
     _tariffs.router, _disputes.router, _invoices.router, _reservations.router,
     _plug_reports.router, _plug_photos.router,
 ):

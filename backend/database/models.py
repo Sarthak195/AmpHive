@@ -46,6 +46,11 @@ class UserRole(str, enum.Enum):
     ADMIN = "admin"
     CPO = "cpo"
     DRIVER = "driver"
+    # [F10] Read-only CPO demo login: sees its tenant's CPO console, cannot
+    # change anything. Every non-GET/HEAD/OPTIONS request is refused in
+    # services/auth.py (enforce_viewer_read_only). Added via ALTER TYPE in
+    # migration 0045_cpo_viewer_role.
+    CPO_VIEWER = "cpo_viewer"
 
 class GatewayStatus(str, enum.Enum):
     ONLINE = "online"
@@ -560,6 +565,13 @@ class ChargingSession(Base):
     #     restart mid-session. Alembic revision 0027_energy_counter_reset.
     energy_counter_last_raw_kwh: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     energy_reset_offset_kwh: Mapped[float] = mapped_column(Float, default=0.0, server_default="0", nullable=False)
+
+    # [Charge complete] Driver opt-in (start request or queued charge): when the
+    # telemetry path decides the car looks full (services/mqtt/charge_full.py),
+    # finalize through the same finalize_charging_session call a driver stop
+    # makes. NULL/false = off: the driver is only told. Alembic revision
+    # 0044_session_auto_stop_full.
+    auto_stop_when_full: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
 
     # Hot-path composite indexes (Alembic revision 0024_session_ledger_indexes):
     # plug_id/status backs "is this plug's session still active", user_id/status
@@ -1085,12 +1097,78 @@ class OfflineTopup(Base):
     amount_coins: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     note: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+    # [Promo codes] Set when this top-up was a driver redeeming one of the
+    # tenant's promo codes (POST /api/wallet/redeem) rather than a cash
+    # top-up keyed in by an operator. The pool and payout math is identical
+    # for both, which is the point: a promo credit is just an offline top-up
+    # the driver triggered. Alembic revision 0047_promo_codes.
+    promo_code_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("promo_codes.id", ondelete="SET NULL"), nullable=True)
 
     # Leading tenant_id backs both the tenant-scoped listing and the
     # watermark-window SUM query (services.payouts.sum_offline_topups) —
     # same shape as Payout/GatewayEvent/AuditLog's tenant+created_at index.
     __table_args__ = (
         Index("idx_offline_topups_tenant_created", "tenant_id", "created_at"),
+    )
+
+
+class PromoCode(Base):
+    """[Promo codes] A CPO-issued code a driver redeems for charging credit,
+    funded from the issuing tenant's own offline top-up pool.
+
+    Only the SHA-256 hex digest of the code is stored (same scheme as
+    PasswordResetToken.token_hash): the plain code is returned once by
+    POST /api/cpo/promos and never again. Codes are 16 characters from an
+    unambiguous 31-symbol alphabet (about 79 bits), so an unsalted digest is
+    not practically reversible even with the last 4 characters kept as
+    `code_hint` for the CPO's list. Nothing is reserved at creation: the pool
+    is checked at redemption (routers/payments.py redeem_promo_code), which
+    then writes an ordinary OfflineTopup row, so payouts need no new math.
+
+    Redemption limits are counts of PromoRedemption rows, taken while the code
+    row is locked. Codes are never deleted, only disabled (disabled_at).
+    Alembic revision 0047_promo_codes.
+    """
+    __tablename__ = "promo_codes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    code_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    code_hint: Mapped[str] = mapped_column(String(4), nullable=False)
+    amount_coins: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    # NULL = never expires.
+    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    max_redemptions: Mapped[int] = mapped_column(Integer, nullable=False)
+    per_user_limit: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
+    note: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    created_by: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+    disabled_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint("amount_coins > 0", name="ck_promo_codes_amount_positive"),
+        CheckConstraint("max_redemptions >= 1", name="ck_promo_codes_max_redemptions"),
+        CheckConstraint("per_user_limit >= 1", name="ck_promo_codes_per_user_limit"),
+        Index("idx_promo_codes_tenant_created", "tenant_id", "created_at"),
+    )
+
+
+class PromoRedemption(Base):
+    """[Promo codes] One redemption of a PromoCode by a driver, pointing at the
+    OfflineTopup it created. user_id is SET NULL rather than CASCADE so a
+    removed account can never free up redemptions (closed accounts are
+    tombstoned anyway, so in practice it stays set)."""
+    __tablename__ = "promo_redemptions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    code_id: Mapped[int] = mapped_column(Integer, ForeignKey("promo_codes.id", ondelete="CASCADE"), nullable=False)
+    user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    offline_topup_id: Mapped[int] = mapped_column(Integer, ForeignKey("offline_topups.id", ondelete="CASCADE"), unique=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+
+    # Backs both limit counts (per code, and per code + user).
+    __table_args__ = (
+        Index("idx_promo_redemptions_code_user", "code_id", "user_id"),
     )
 
 
@@ -1728,6 +1806,9 @@ class QueuedCharge(Base):
     # Linked once the reaper starts the session; SET NULL keeps the queue
     # history row if the session is later deleted.
     started_session_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("charging_sessions.id", ondelete="SET NULL"), nullable=True)
+    # [Charge complete] Carried onto the session the reaper starts
+    # (ChargingSession.auto_stop_when_full). Migration 0044_session_auto_stop_full.
+    auto_stop_when_full: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
 
     __table_args__ = (
         # "At most one WAITING queued charge per (driver, plug)" as a DB
@@ -1832,3 +1913,33 @@ class RevokedSession(Base):
     user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     revoked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+
+
+class ApiToken(Base):
+    """[F7] A personal read-only API token (Home Assistant, evcc).
+
+    The raw token ("amph_" + secrets.token_urlsafe(32)) is shown to the user
+    once at creation and NEVER stored or logged: only its SHA-256 hex digest
+    lives here (same rationale as PasswordResetToken: ~256 bits of entropy, so
+    an unsalted digest is fine and lookup stays one indexed equality).
+    token_prefix is a short display stub so the user can tell tokens apart.
+
+    scope is always "read". The only endpoint that accepts a token is
+    GET /api/me/meter (services/api_tokens.py get_meter_user); every other
+    route authenticates through get_current_user, which only knows JWTs, so a
+    token is read-only by construction. revoked_at NULL = live. Revoked by
+    DELETE /api/me/tokens/{id}, log out everywhere, a password reset, a
+    Google first-link takeover and account closure. last_used_at is stamped
+    at most once a minute. Alembic revision 0046_api_tokens.
+    """
+    __tablename__ = "api_tokens"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(64), nullable=False)
+    token_prefix: Mapped[str] = mapped_column(String(16), nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    scope: Mapped[str] = mapped_column(String(16), default="read", server_default=text("'read'"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+    last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)

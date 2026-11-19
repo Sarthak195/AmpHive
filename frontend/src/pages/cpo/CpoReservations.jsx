@@ -223,7 +223,7 @@ export default function CpoReservations() {
       label: '',
       render: (r) =>
         r.status === 'booked' ? (
-          <button type="button" className="btn btn-quiet btn-sm" onClick={() => setCancelTarget(r)}>
+          <button data-write type="button" className="btn btn-quiet btn-sm" onClick={() => setCancelTarget(r)}>
             Cancel
           </button>
         ) : (

@@ -346,9 +346,12 @@ async def test_logout_with_a_legacy_token_falls_back_to_the_global_bump():
     res = await logout(_user(token_version=4), db, _creds(token))
 
     assert res == {"status": "logged_out", "scope": "all"}
-    assert [c[0] for c in calls] == ["execute", "commit"]
+    assert [c[0] for c in calls] == ["execute", "execute", "commit"]
     assert calls[0][1].startswith("UPDATE users")
     assert "token_version + " in calls[0][1]
+    # [F7] scope "all" also revokes personal API tokens, in the same commit.
+    assert calls[1][1].startswith("UPDATE api_tokens")
+    assert "revoked_at IS NULL" in calls[1][1]
     assert not any("revoked_sessions" in (c[1] or "") for c in calls)
 
 
@@ -359,10 +362,13 @@ async def test_logout_everywhere_bumps_token_version_even_with_a_sid():
     res = await logout_everywhere(_user(token_version=4), db)
 
     assert res == {"status": "logged_out", "scope": "all"}
-    assert [c[0] for c in calls] == ["execute", "commit"]
+    assert [c[0] for c in calls] == ["execute", "execute", "commit"]
     assert calls[0][1].startswith("UPDATE users")
     assert "token_version + " in calls[0][1]
     assert "RETURNING users.token_version" in calls[0][1]
+    # [F7] Personal API tokens die in the same commit.
+    assert calls[1][1].startswith("UPDATE api_tokens")
+    assert "revoked_at IS NULL" in calls[1][1]
 
 
 def test_logout_everywhere_route_is_registered():

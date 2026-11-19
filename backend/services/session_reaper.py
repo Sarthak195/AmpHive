@@ -864,6 +864,7 @@ class SessionReaperService:
                             # deferred above): fulfilled with the session,
                             # exactly as the manual start route does.
                             covering_reservation=covering,
+                            auto_stop_when_full=bool(qc.auto_stop_when_full),
                         )
                     except HTTPException as exc:
                         # 402 = balance floor no longer met -> EXPIRED (funds were

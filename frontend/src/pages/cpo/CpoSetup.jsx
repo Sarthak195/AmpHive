@@ -23,6 +23,7 @@ import { useAuth } from '../../contexts/AuthContext';
 import { useToast } from '../../components/ui';
 import api from '../../api/client';
 import { apiErrorCopy } from '../../utils/statusCopy';
+import { isReadOnlyViewer } from '../../utils/roles';
 import useTheme from '../../hooks/useTheme';
 import './CpoSetup.css';
 
@@ -45,7 +46,11 @@ const CpoSetup = () => {
   // the declarative <Navigate> element instead of calling navigate() in the
   // render body — an imperative navigate during render updates the router
   // mid-render, which React warns about and can loop under StrictMode.
-  if (user?.role === 'cpo' || (user?.role === 'admin' && user?.tenant_id)) {
+  if (
+    user?.role === 'cpo' ||
+    isReadOnlyViewer(user) ||
+    (user?.role === 'admin' && user?.tenant_id)
+  ) {
     return <Navigate to="/cpo/dashboard" replace />;
   }
   if (user?.role === 'admin') {

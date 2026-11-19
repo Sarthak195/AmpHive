@@ -95,7 +95,7 @@ async def cpo_setup(
 
 @router.get("/api/cpo/profile")
 async def cpo_profile(
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_role("cpo", "admin", "cpo_viewer")),
     db: AsyncSession = Depends(get_db),
 ):
     """

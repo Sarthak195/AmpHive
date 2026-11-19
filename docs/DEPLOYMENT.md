@@ -454,6 +454,72 @@ Optional overrides: `ALERT_TO`, `MIN_MEM_MB`, `MIN_DISK_FREE_PCT`,
 HTTPS on the VM, set `HEALTH_URL` in the crontab line to a local URL that
 answers 200.
 
+### Features wave 2 (2026-11-17, built on `release/2026-11-17-w2`, not deployed)
+
+`release/2026-11-17-w2` contains wave 1 as well (branched from
+`release/2026-11-17-w1`), so a deploy of it ships both waves. Unlike wave 1
+this is a **migration deploy**: the backend boot runs `alembic upgrade head`
+from `0043_email_ci_unique` through `0044_session_auto_stop_full`,
+`0045_cpo_viewer_role`, `0046_api_tokens` and `0047_promo_codes` in one
+transaction. All four are additive and idempotent (IF NOT EXISTS), with no
+backfill and no new index on a hot table.
+
+0. **Path.** The deploy kit's thin-layer script refuses
+   `backend/migrations/versions/*`, so ship it on the migration path the
+   2026-11-16 `0043` deploy used (IMPLEMENTATION_STATUS.md §0c): take a DB
+   backup, tag the rollback image (step 1), build the backend layer with the
+   merged source including `0044` to `0047`, `up -d backend` (`init_db` runs
+   the upgrade at boot), verify `/api/health`, `alembic_version` ==
+   `0047_promo_codes` and RestartCount 0, then ship the frontend as the usual
+   dist-only thin layer. `deploy.ps1` also works but rebuilds the frontend with
+   npm on the 1 GB VM.
+1. **Rollback image first.** Same rule as "Rollback images and migrations"
+   above: before deploying, build and tag a rollback image from the code now in
+   prod plus only the four new migration files, named after the sha being
+   deployed like the `rollback-ac00d46-m0043` precedent
+   (`amphive_backend:rollback-<new sha>-m0047`), with a tree proof, and also
+   tag it `amphive_backend:pre-<new sha>`: the kit's `rollback_backend.sh`
+   only accepts `pre-<sha>` tags, so its standard `rollback_backend.sh <new
+   sha>` then lands on an image that can boot. Any other `pre-<sha>` tag
+   cannot boot on a database at 0047. `0045_cpo_viewer_role`
+   downgrade is a no-op (an enum value cannot be dropped), so `alembic
+   downgrade` is not a full rollback. If a `cpo_viewer` login exists, set its
+   role back to `driver` (owner connection) before rolling back: older code
+   does not know the enum value, and disabling the account leaves the value on
+   the row (untested either way).
+2. **Backend and frontend ship together** (F10 viewer UI, F1 opt-in toggle,
+   F7 token panel, F12 promo card and wallet redeem). An old frontend with the
+   new backend is harmless (the server still refuses viewer writes) but hides
+   the new features.
+3. **Env vars, all optional with code defaults**, read from the relay `.env`
+   through `env_file` (a line in the VM's `.env`, no compose edit; empty
+   values fall back to the defaults): `CHARGE_FULL_ACTIVE_W` (200),
+   `CHARGE_FULL_IDLE_W` (30), `CHARGE_FULL_GRACE_MIN` (5),
+   `CHARGE_FULL_MINUTES` (10), `API_TOKEN_RATE_LIMIT` (`60/60`),
+   `PROMO_REDEEM_RATE_LIMIT` (`20/3600`), `PROMO_REDEEM_ACCOUNT_RATE_LIMIT`
+   (`10/3600`).
+4. **No new service, port, dependency, nginx, Caddy, compose or Dockerfile
+   change.** New routes live under `/api/me/*`, `/api/wallet/*` and
+   `/api/cpo/*`, already proxied. F1 state is one small object per plug.
+5. **No manual VM step is required.** Optional, owner only, after the deploy:
+   create the demo viewer with
+   `docker exec -it <backend container> python -m backend.seed_cpo_viewer --tenant-id <owner tenant id> --email <demo address>`
+   (prints the password once; re-running resets it and signs out old
+   sessions; never run so far). Also optional: the wave 1 F5 host cron above.
+6. **Using F12:** redeem from a DRIVER-role account; the issuing tenant needs
+   unsettled earnings in its pool.
+7. **OCPP bridge:** nothing to deploy on the VM. It runs on a laptop with
+   `python -m tools.ocpp_bridge` from the repo root, needs
+   `AMPHIVE_METER_TOKEN` (an F7 token, so F7 must be live first) and
+   `OCPP_CSMS_URL`; optional `AMPHIVE_API_URL` (default
+   `https://amphive.app`), `OCPP_CP_PREFIX`, `OCPP_POLL_SECONDS`,
+   `OCPP_ID_TAG`, `OCPP_BASIC_USER`, `OCPP_BASIC_PASSWORD`,
+   `OCPP_STATE_FILE`. It needs `websockets` (in the lock) and `httpx`
+   (`backend/requirements-dev.txt`). See [OCPP_BRIDGE.md](OCPP_BRIDGE.md).
+8. **Local demo of F1** (operator only, not run): `tools/fake_plug.py
+   --run-only ... --drop-to-zero-after 600` (or `--taper-after 600`), then
+   wait the 5 min grace plus `CHARGE_FULL_MINUTES` after the drop.
+
 ### Backend dependency lockfile — `backend/requirements.lock.txt`
 
 `backend/Dockerfile` installs `backend/requirements.lock.txt`, a fully-pinned

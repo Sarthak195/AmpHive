@@ -74,6 +74,12 @@ describe('CpoProtectedRoute', () => {
     expect(screen.getByText('login page')).toBeInTheDocument();
   });
 
+  it('admits the read-only cpo_viewer to the CPO console (F10)', () => {
+    useAuth.mockReturnValue({ user: { email: 'demo@amphive.test', role: 'cpo_viewer' } });
+    renderGuarded(<CpoProtectedRoute><div>cpo dashboard</div></CpoProtectedRoute>);
+    expect(screen.getByText('cpo dashboard')).toBeInTheDocument();
+  });
+
   it('redirects authenticated non-CPO users to /cpo onboarding', () => {
     useAuth.mockReturnValue({ user: { email: 'driver@amphive.test', role: 'driver' } });
     renderGuarded(<CpoProtectedRoute><div>cpo dashboard</div></CpoProtectedRoute>);
@@ -107,5 +113,14 @@ describe('AdminProtectedRoute', () => {
     useAuth.mockReturnValue({ user: { email: 'root@amphive.test', role: 'admin' } });
     renderGuarded(<AdminProtectedRoute><div>admin content</div></AdminProtectedRoute>);
     expect(screen.getByText('admin content')).toBeInTheDocument();
+  });
+});
+
+describe('AdminProtectedRoute (F10 viewer)', () => {
+  it('keeps the read-only cpo_viewer out of the admin console', () => {
+    useAuth.mockReturnValue({ user: { email: 'demo@amphive.test', role: 'cpo_viewer' } });
+    renderGuarded(<AdminProtectedRoute><div>admin content</div></AdminProtectedRoute>);
+    expect(screen.queryByText('admin content')).not.toBeInTheDocument();
+    expect(screen.getByText('cpo dashboard page')).toBeInTheDocument();
   });
 });

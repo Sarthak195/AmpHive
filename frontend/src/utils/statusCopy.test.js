@@ -49,12 +49,15 @@ describe('txTypeLabel', () => {
     expect(txTypeLabel('refund')).toBe('Refund');
     expect(txTypeLabel('hold')).toBe('Hold');
     expect(txTypeLabel('hold_release')).toBe('Hold released');
-    expect(txTypeLabel('cpo_topup')).toBe('Credit added by operator (cash)');
+    expect(txTypeLabel('cpo_topup')).toBe('Credit added by operator');
   });
 });
 
 describe('stopReasonCopy', () => {
   it('maps the backend finalize reasons to friendly copy', () => {
+    expect(stopReasonCopy('auto-stopped: charge complete')).toBe(
+      'Stopped automatically: the car looked fully charged'
+    );
     expect(stopReasonCopy('auto-stopped: wallet balance exhausted')).toBe(
       'Stopped automatically — charging credit used up'
     );

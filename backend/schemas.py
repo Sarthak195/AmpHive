@@ -177,6 +177,9 @@ class SessionStartRequest(BaseModel):
     # which the firmware reads unsafely).
     max_duration_seconds: Optional[int] = Field(default=None, gt=0, le=86400)
     max_kwh: Optional[float] = Field(default=None, gt=0, le=100.0)
+    # [Charge complete] Opt-in: stop the session once the car looks full
+    # (services/mqtt/charge_full.py). Omitted/false = only notify.
+    auto_stop_when_full: bool = False
 
 
 class QueueChargeRequest(BaseModel):
@@ -188,6 +191,8 @@ class QueueChargeRequest(BaseModel):
     plug_id: int
     max_duration_seconds: Optional[int] = Field(default=None, gt=0, le=86400)
     max_kwh: Optional[float] = Field(default=None, gt=0, le=100.0)
+    # [Charge complete] Carried to the auto-started session.
+    auto_stop_when_full: bool = False
     # [Scheduled start] Set = "start at this instant" on a POWERED plug instead
     # of the outage queue. Must carry a UTC offset: a naive value would be read
     # as UTC (the C12 bug class), so the client converts the tenant wall-clock
@@ -899,6 +904,51 @@ class CpoTopupResponse(BaseModel):
     amount_coins: float
     note: Optional[str] = None
     created_at: Optional[str] = None
+
+
+# --- Promo code schemas ([Promo codes], routers/cpo/_promos.py + /api/wallet/redeem) ---
+
+class PromoCodeCreateRequest(BaseModel):
+    """Body for POST /api/cpo/promos. Nothing is reserved from the pool at
+    creation; each redemption is checked against it (409 when short).
+    expires_in_days None means the code never expires."""
+    amount_coins: float = Field(gt=0, le=10000)
+    max_redemptions: int = Field(default=1, ge=1, le=10000)
+    per_user_limit: int = Field(default=1, ge=1, le=100)
+    expires_in_days: Optional[int] = Field(default=30, ge=1, le=365)
+    note: Optional[str] = Field(default=None, max_length=200)
+
+
+class PromoCodeResponse(BaseModel):
+    """A promo code as its issuing CPO sees it. `code` (the plain code,
+    formatted ABCD-EFGH-JKMN-PQRS) is set ONLY in the create response; it is
+    not stored and cannot be shown again. `status` is one of active,
+    expired, used_up, disabled. `code_hint` is None for a read-only
+    cpo_viewer (F10)."""
+    id: int
+    tenant_id: int
+    code_hint: Optional[str] = None
+    amount_coins: float
+    expires_at: Optional[str] = None
+    max_redemptions: int
+    per_user_limit: int
+    redemption_count: int = 0
+    note: Optional[str] = None
+    created_by_email: Optional[str] = None
+    created_at: Optional[str] = None
+    disabled_at: Optional[str] = None
+    status: str
+    code: Optional[str] = None
+
+
+class PromoRedeemRequest(BaseModel):
+    """Body for POST /api/wallet/redeem. Case, spaces and dashes are ignored."""
+    code: str = Field(min_length=1, max_length=64)
+
+
+class PromoRedeemResponse(BaseModel):
+    amount_coins: float
+    new_balance: float
 
 
 # --- Plug Reservation Schemas (feat/reservations) ---

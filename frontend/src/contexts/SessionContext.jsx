@@ -295,6 +295,7 @@ export const SessionProvider = ({ children }) => {
       const payload = { plug_id: parseInt(plugId) };
       if (limits?.max_kwh != null) payload.max_kwh = limits.max_kwh;
       if (limits?.max_duration_seconds != null) payload.max_duration_seconds = limits.max_duration_seconds;
+      if (limits?.auto_stop_when_full) payload.auto_stop_when_full = true;
       const result = await api.post('/api/sessions/start', payload);
       const startedAt = new Date().toISOString();
       // The backend echoes the EFFECTIVE limits (user-chosen, or null/null

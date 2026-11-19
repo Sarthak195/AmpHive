@@ -24,7 +24,7 @@ from backend.schemas import (
 )
 from backend.services.audit import try_record_audit
 
-from ._common import DEFAULT_LIST_LIMIT, clamp_list_window, logger, require_cpo_tenant
+from ._common import DEFAULT_LIST_LIMIT, clamp_list_window, hide_for, logger, require_cpo_tenant
 
 router = APIRouter()
 
@@ -56,7 +56,10 @@ async def cpo_list_plugs(
             "id": plug.id,
             "name": plug.name,
             "gateway_id": plug.gateway_id,
-            "local_ip": plug.local_ip,
+            # [F10] The plug's home-LAN address and its coordinates (a
+            # private-group plug is not on the public map) are None for a
+            # read-only cpo_viewer.
+            "local_ip": hide_for(user, plug.local_ip),
             "plug_model": plug.plug_model,
             "status": plug.status.value,
             "current_power_w": plug.current_power_w,
@@ -66,8 +69,8 @@ async def cpo_list_plugs(
             # default — see resolve_rate_for_plug()). CpoPricing's assignment
             # table/dropdown reads this.
             "tariff_id": plug.tariff_id,
-            "latitude": plug.latitude,
-            "longitude": plug.longitude,
+            "latitude": hide_for(user, plug.latitude),
+            "longitude": hide_for(user, plug.longitude),
             # [Caps] The per-plug current cap (None = default hardware cutoff).
             "max_current_a": plug.max_current_a,
             # [Discovery] Advertised specs shown to drivers — pre-fill the edit form.

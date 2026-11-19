@@ -18,7 +18,7 @@ import os
 import time
 from dataclasses import asdict, dataclass, field
 from decimal import Decimal
-from typing import AsyncGenerator, Dict, Optional, Union
+from typing import AsyncGenerator, Dict, Optional, Set, Union
 
 from backend.services.money import energy_cost
 
@@ -55,6 +55,9 @@ class TelemetrySnapshot:
     cost_coins: float = 0.0       # Running cost deducted from wallet
     status: str = "idle"          # "idle" | "starting" | "charging" | "completed"
     relay_on: bool = False        # Plug's actual reported relay state (device_on)
+    # [Charge complete] The car looks fully charged (services/mqtt/charge_full.py
+    # fired for this session); the session monitor shows a banner.
+    charge_full: bool = False
     updated_at: float = field(default_factory=time.time)
 
     def to_dict(self) -> dict:
@@ -89,6 +92,9 @@ class TelemetryStore:
             # calc identical to the old single-rate multiply.
             cls._instance._session_settled: Dict[int, float] = {}
             cls._instance._session_segment_start: Dict[int, float] = {}
+            # [Charge complete] Plugs whose ACTIVE session looks fully charged
+            # (mark_charge_full); cleared on start_session/end_session.
+            cls._instance._charge_full: Set[int] = set()
         return cls._instance
 
     def increment_listeners(self, plug_id: int) -> int:
@@ -155,6 +161,7 @@ class TelemetryStore:
             cost_coins=cost_coins,
             status=status,
             relay_on=relay_on,
+            charge_full=plug_id in self._charge_full,
         )
 
         # Signal any SSE consumers waiting on this plug's data
@@ -181,6 +188,7 @@ class TelemetryStore:
         # settled, segment begins at 0 kWh (matches ChargingSession init).
         self._session_settled[plug_id] = 0.0
         self._session_segment_start[plug_id] = 0.0
+        self._charge_full.discard(plug_id)
         self._data[plug_id] = TelemetrySnapshot(
             plug_id=plug_id, status="starting"
         )
@@ -222,8 +230,20 @@ class TelemetryStore:
         if rate_coins_per_kwh is not None:
             self._session_rates[plug_id] = rate_coins_per_kwh
 
+    def mark_charge_full(self, plug_id: int) -> None:
+        """[Charge complete] Flag this plug's live session as looking fully
+        charged: every following snapshot carries charge_full=True until the
+        session ends or a new one starts. In memory, like the rest of the store."""
+        self._charge_full.add(plug_id)
+        snap = self._data.get(plug_id)
+        if snap is not None:
+            snap.charge_full = True
+        if plug_id in self._events:
+            self._events[plug_id].set()
+
     def end_session(self, plug_id: int) -> None:
         """Clean up session tracking when a session ends."""
+        self._charge_full.discard(plug_id)
         if plug_id in self._session_start_times:
             del self._session_start_times[plug_id]
         if plug_id in self._session_rates:

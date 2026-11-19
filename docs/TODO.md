@@ -11,6 +11,31 @@ been fixed by the 2026-07-08…11 work — see the shipped sections below).*
 
 ---
 
+## 2026-11-17 features wave 2 (built 2026-11-17 on release/2026-11-17-w2, not deployed)
+
+- [x] F1 charge-complete detection: "looks fully charged" notification and opt-in auto-stop. (built 2026-11-17 on release/2026-11-17-w2, not deployed)
+- [x] F10 read-only CPO viewer role (`cpo_viewer`, demo login seed). (built 2026-11-17 on release/2026-11-17-w2, not deployed)
+- [x] F7 personal read-only API token and `GET /api/me/meter` (Home Assistant, evcc). (built 2026-11-17 on release/2026-11-17-w2, not deployed)
+- [x] F12 promo codes (CPO issue/list/disable, driver redeem, funded from the offline top-up pool). (built 2026-11-17 on release/2026-11-17-w2, not deployed)
+- [x] OCPP 1.6J read-only virtual charge-point bridge (`tools/ocpp_bridge`). (built 2026-11-17 on release/2026-11-17-w2, not deployed)
+- [ ] Deploy wave 1 + wave 2 (migration deploy 0044 to 0047; tag the rollback image first, see docs/DEPLOYMENT.md "Features wave 2").
+- [ ] F1 known limits: detector state is in memory (a restart delays detection and can repeat one "looks full" notification); car-side scheduled charging or a long mid-charge pause can look full (why the stop is opt-in); firmware < 2.8.0 may publish a failed-poll frame that is indistinguishable from a real 0 W; a limit stop and a "looks full" notice can both fire on the same frame (rare).
+- [ ] F10 follow-ups: let viewers load pending plug photos only if wanted (`routers/plugs.py` checks `role == 'cpo'`); show an existing invoice to viewers without issuing one (with the HTML's "Bill To" name and email masked). Promo `code_hint` is now hidden from a viewer.
+- [ ] Public plug reviews: `_author_display` (`routers/plugs.py`) shows the first word of `full_name`, which for a Google signup without a name claim is the whole email local part. The read is unauthenticated, so this is not a viewer issue; changing it changes what every reader sees.
+- [x] F7 known gaps: the legacy sid-less `/api/auth/logout` fallback and an admin role change or disable left API tokens live. Fixed in the review fix round (both now call `revoke_user_api_tokens`; the email-verification bump deliberately does not).
+- [ ] F7: add a screenshot to docs/HOME_ASSISTANT.md once it runs against prod.
+- [x] F1 review fix: a failed opted-in auto-stop is now retried on later idle frames (at most once per 60 s, only while ACTIVE and opted in); the "looks full" notice no longer claims the session is stopping.
+- [x] F12 review fix: a sub-cent promo amount returns 400 (was a 500 after 5 retries); only a code-hash collision is retried.
+- [x] F10 review fix: gateway log text is hidden from a viewer (firmware WARN lines carry the home SSID and broker URL).
+- [x] DB-gated enum drift check in `backend/tests/test_migrations.py` (pg_enum labels equal the model enums after `alembic upgrade head`).
+- [x] F10, before seeding a public viewer: `GET /api/sessions/{id}/invoice` answered a viewer 403 for another tenant's session but 404 for a missing one (existence oracle). Fixed: a viewer always gets the missing-session 404, before any lookup. The private-plug reads (`/api/plugs/{id}` and its sub-reads, `/api/plugs/{id}/reservations`) now give a viewer their missing-plug 404 instead of 403 too.
+- [x] F10, before seeding a public viewer: driver full names were shown unmasked to a viewer (reservations `user_name`, group members `full_name`). Fixed: initials ("S. J.") via `redact_name_for`.
+- [x] F10, before seeding a public viewer: plug LAN addresses (`local_ip`) were shown to the viewer by `GET /api/cpo/plugs`. Fixed: null for a viewer, with plug coordinates, gateway `vpn_ip` and promo `code_hint`; `mask_pii` also scrubs IPv4 addresses and code tails in audit details.
+- [x] F10 review fix (round 2): the promo hint in a redeemed top-up's note ("Promo code ...XXXX") and a driver problem report's text in `GET /api/cpo/events` `detail` are masked for a viewer; an IPv4 address ending a sentence is masked too.
+- [x] Pre-existing, found in the F10 review: `POST /api/plugs/{id}/report` broadcast its `GatewayEvent.detail` (the driver's free-text description) over `gateway_alarm`, which reaches every signed-in socket of every tenant. Fixed: the broadcast carries the category only; the full text stays in the stored event for the tenant's `GET /api/cpo/events` (the CPO console only uses the broadcast as a refetch trigger).
+- [x] OCPP review fix: the reconnect backoff resets after a healthy boot, a StopTransaction the CSMS keeps refusing is closed locally after 3 CallErrors, a Heartbeat CallError keeps the link, and StartTransaction goes before the Charging status; `backend/tests/test_meter_ocpp_contract.py` pins the meter contract.
+- [ ] OCPP bridge: run it against the real `GET /api/me/meter` and a real CSMS once F7 is deployed.
+
 ## 2026-11-17 features wave 1 (built 2026-11-17 on release/2026-11-17-w1, not deployed)
 
 - [x] F2 per-session power curve (`GET /api/sessions/{id}/telemetry`, SessionPowerCurve). (built 2026-11-17 on release/2026-11-17-w1, not deployed)

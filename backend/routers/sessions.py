@@ -39,6 +39,7 @@ from backend.schemas import (
 )
 from backend.services.auth import (
     get_current_user,
+    is_cpo_viewer,
 )
 from backend.services.billing import session_cost
 from backend.services.money import energy_cost, to_money
@@ -295,6 +296,7 @@ async def start_charging_session(
         max_kwh=req.max_kwh,
         max_duration_seconds=req.max_duration_seconds,
         covering_reservation=covering_reservation,
+        auto_stop_when_full=req.auto_stop_when_full,
     )
     if own_scheduled:
         # After success only: begin_active_session commits its claim before the
@@ -372,6 +374,7 @@ async def start_charging_session(
         # show progress toward them without a second fetch.
         "max_kwh": session.max_kwh,
         "max_duration_seconds": session.max_duration_seconds,
+        "auto_stop_when_full": bool(session.auto_stop_when_full),
         "message": f"Charging started on {plug.name}.",
     }
 
@@ -628,6 +631,7 @@ async def get_active_session(
             # progress toward them ("0.42 / 1.00 kWh · stops automatically").
             "max_kwh": session.max_kwh,
             "max_duration_seconds": session.max_duration_seconds,
+            "auto_stop_when_full": bool(session.auto_stop_when_full),
             # [Restore/switch preview] Without these, a client restoring or
             # switching between active sessions has no energy/cost to show and
             # fabricates 0 — understating the stop-confirmation preview and
@@ -974,6 +978,7 @@ async def queue_charge(
         plug_id=plug.id,
         max_kwh=req.max_kwh,
         max_duration_seconds=req.max_duration_seconds,
+        auto_stop_when_full=True if req.auto_stop_when_full else None,
         status=QueuedChargeStatus.WAITING,
         not_before=nb,
         expires_at=(
@@ -1253,7 +1258,15 @@ async def get_session_invoice(
     cpo_cancel_payout's cross-tenant guard. `?format=html` returns a
     minimal printable invoice (inline CSS, no PDF dependency — meant to be
     saved/printed via the browser's own print dialog) instead of JSON.
+
+    [F10] A read-only cpo_viewer always gets the same 404 as a missing
+    session, decided before any lookup: issuing writes the invoice on first
+    read and the HTML prints the driver's name and email, and a 403 for an
+    existing session (vs 404 for a missing one) would be an existence oracle.
+    The CPO console lists invoices through GET /api/cpo/invoices instead.
     """
+    if is_cpo_viewer(user):
+        raise HTTPException(status_code=404, detail="Session not found.")
     session_result = await db.execute(
         select(ChargingSession).where(ChargingSession.id == session_id)
     )
@@ -1451,12 +1464,13 @@ async def get_my_disputes(
 
 def _assert_session_viewer(session: ChargingSession, user: User) -> None:
     """Access rule shared by the session detail and telemetry reads: the
-    owning driver, or a cpo/admin of the owning tenant. Anyone else gets 404,
-    not 403, so existence isn't leaked."""
+    owning driver, or a cpo/admin (or read-only cpo_viewer, F10: both routes
+    are pure reads) of the owning tenant. Anyone else gets 404, not 403, so
+    existence isn't leaked."""
     if user.role == UserRole.DRIVER:
         if session.user_id != user.id:
             raise HTTPException(status_code=404, detail="Session not found.")
-    elif user.role == UserRole.CPO:
+    elif user.role in (UserRole.CPO, UserRole.CPO_VIEWER):
         if session.tenant_id != user.tenant_id:
             raise HTTPException(status_code=404, detail="Session not found.")
     elif user.role != UserRole.ADMIN:

@@ -8,7 +8,7 @@ from sqlalchemy import and_, select
 
 from backend.database.db import async_session_factory
 from backend.database.models import ChargingSession, SessionStatus, User
-from backend.services.auth import decode_access_token, is_sid_revoked, token_sid
+from backend.services.auth import decode_access_token, is_cpo_viewer, is_sid_revoked, token_sid
 from backend.services.rate_limit import (
     client_ip_from_forwarded,
     socketio_connect_rate_limiter,
@@ -221,6 +221,10 @@ async def connect(sid, environ, auth=None):
         # when the token has one) so the same re-validation also catches a
         # per-device logout.
         socket_session = {"user_id": user_id, "tv": payload.get("tv", 0)}
+        # [F10] A read-only cpo_viewer may connect (it only receives pushes)
+        # but may not emit anything that acts: see subscribe_session.
+        if is_cpo_viewer(user):
+            socket_session["read_only"] = True
         if auth_sid is not None:
             socket_session["auth_sid"] = auth_sid
         await sio.save_session(sid, socket_session)
@@ -315,6 +319,12 @@ async def subscribe_session(sid, data):
     user_id = socket_session.get("user_id")
     if not user_id:
         await sio.emit("subscription_error", {"detail": "Unauthenticated"}, to=sid)
+        return
+    # [F10] Subscribing starts a telemetry stream that raises the plug's
+    # report rate over MQTT (a device side effect): never for a read-only
+    # viewer, whatever session id it names.
+    if socket_session.get("read_only"):
+        await sio.emit("subscription_error", {"detail": "read_only_demo"}, to=sid)
         return
 
     # Verify session and ownership

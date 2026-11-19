@@ -19,7 +19,10 @@ from ._common import (
     DEFAULT_LIST_LIMIT,
     _require_tenant_id,
     clamp_list_window,
+    is_cpo_viewer,
     logger,
+    redact_for,
+    redact_name_for,
     require_cpo_tenant,
 )
 
@@ -96,7 +99,14 @@ async def cpo_list_groups(
             "id": group.id,
             "name": group.name,
             "is_public": group.is_public,
-            "access_code": group.access_code if not group.is_public else None,
+            # [F10] A private group's join code is a credential (it lets a
+            # driver account charge on the group's plugs): never shown to a
+            # read-only viewer.
+            "access_code": (
+                group.access_code
+                if not group.is_public and not is_cpo_viewer(user)
+                else None
+            ),
             "plug_count": plug_count,
             "member_count": member_count,
             "max_current_a": group.max_current_a,
@@ -318,8 +328,8 @@ async def cpo_list_group_members(
     return [
         {
             "user_id": m.user_id,
-            "email": email,
-            "full_name": full_name,
+            "email": redact_for(user, email),
+            "full_name": redact_name_for(user, full_name),
             "joined_at": m.joined_at.isoformat() if m.joined_at else None,
         }
         for m, email, full_name in result.all()

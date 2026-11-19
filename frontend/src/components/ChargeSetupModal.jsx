@@ -31,6 +31,11 @@
  * on a flat tariff or when already cheapest) is offered as one tap that picks
  * "At a time" and fills the start time. Best-effort: a failed fetch hides it.
  *
+ * [Charge complete] An opt-in "Stop automatically when the car is full" toggle
+ * (default off). When on, `limits.auto_stop_when_full = true` is passed to
+ * onConfirm; the backend then stops the session once the car's draw has stayed
+ * near zero (backend/services/mqtt/charge_full.py). Off sends nothing.
+ *
  * `priceStale` marks the price as last saved (the plug row came from the
  * instant-open snapshot and the live list has not answered yet).
  */
@@ -102,6 +107,7 @@ export default function ChargeSetupModal({ open, onClose, plug, mode = 'start', 
   const [atTime, setAtTime] = useState('');
   const [autoLimit, setAutoLimit] = useState(false);
   const [cheapest, setCheapest] = useState(null);
+  const [autoStopFull, setAutoStopFull] = useState(false);
 
   const schedulable = Boolean(open && mode === 'start' && plug?.schedule_available && plug?.tenant_timezone);
   const plugId = plug?.id;
@@ -137,6 +143,7 @@ export default function ChargeSetupModal({ open, onClose, plug, mode = 'start', 
     setStartAt('now');
     setAtTime('');
     setAutoLimit(false);
+    setAutoStopFull(false);
   }, [open, plug?.id]);
 
   if (!open || !plug) return null;
@@ -198,6 +205,7 @@ export default function ChargeSetupModal({ open, onClose, plug, mode = 'start', 
         ? parseCustomMinutes(customTime)
         : TIME_PRESETS.find((p) => p.id === timePreset)?.minutes;
     if (minutes) limits.max_duration_seconds = minutes * 60;
+    if (autoStopFull) limits.auto_stop_when_full = true;
 
     setBusy(true);
     setError('');
@@ -383,6 +391,15 @@ export default function ChargeSetupModal({ open, onClose, plug, mode = 'start', 
             </p>
           )}
         </div>
+
+        <label className="checkbox-row text-sm">
+          <input
+            type="checkbox"
+            checked={autoStopFull}
+            onChange={(e) => setAutoStopFull(e.target.checked)}
+          />
+          Stop automatically when the car is full
+        </label>
 
         {scheduling && !hasLimit && (
           <p className="field-hint text-sm">A scheduled charge needs a time or energy limit.</p>

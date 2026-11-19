@@ -148,6 +148,11 @@ same `sum_offline_topups` helper over the exact same
 [watermark, now) window `tenant_earnings_summary` uses, so the dashboard's
 ``topup_pool.available_coins`` and a payout's actual payable net still can
 never disagree (same principle as the gross/fee/net split above).
+
+A redeemed promo code (POST /api/wallet/redeem) is the same thing triggered
+by the driver: `issue_offline_topup` below is the single writer both paths
+share, so the OfflineTopup row (tagged with promo_code_id) lands in the same
+sum and the pool and payouts stay consistent with no extra math.
 """
 import os
 from datetime import datetime, timezone
@@ -160,13 +165,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.database.models import (
     ChargingSession,
     DisputeStatus,
+    LedgerTransaction,
     OfflineTopup,
     Payout,
     PayoutStatus,
     SessionDispute,
     SessionStatus,
+    TransactionType,
 )
 from backend.services.money import ZERO_MONEY, to_money
+from backend.services.wallet import credit_wallet
 
 # A tenant with no payout history yet has watermark = EPOCH, so "unsettled"
 # runs from the beginning of time to now (i.e. all of its lifetime earnings).
@@ -389,6 +397,63 @@ async def sum_offline_topups(
         )
     )
     return to_money(result.scalar() or 0)
+
+
+async def issue_offline_topup(
+    db: AsyncSession,
+    *,
+    tenant_id: int,
+    actor_user_id: Optional[int],
+    driver_id: int,
+    amount: Decimal,
+    watermark: datetime,
+    note: Optional[str],
+    description: str,
+    promo_code_id: Optional[int] = None,
+) -> Optional[Tuple[OfflineTopup, Decimal]]:
+    """Credit `driver_id` by `amount` and stage the matching OfflineTopup and
+    CPO_TOPUP ledger rows; the caller commits. Returns (topup, new_balance),
+    or None if the driver row is gone.
+
+    The caller MUST already hold the Tenant row lock (then the driver's User
+    row lock), have read `watermark` from tenant_earnings_summary under that
+    lock, and have checked `amount` against its available_pool_coins. Shared
+    by POST /api/cpo/topups and POST /api/wallet/redeem.
+    """
+    new_balance = await credit_wallet(db, driver_id, amount)
+    if new_balance is None:
+        return None
+
+    # Invariant: a top-up's created_at is taken while holding the tenant row
+    # lock, from the same app clock cpo_request_payout uses for period_end.
+    # Every payout that committed before us got its period_end before we got
+    # the lock, and every later payout reads its `now` after we commit, so
+    # this top-up falls in exactly one payout's [watermark, now) window and is
+    # deducted exactly once. Do NOT fall back to the column's
+    # CURRENT_TIMESTAMP default: that is the transaction START time, which can
+    # predate a payout that committed while we waited for the lock, putting
+    # the top-up behind the new watermark where no payout ever deducts it.
+    # Floored at the under-lock watermark so a wall clock that steps back
+    # still cannot stamp the row behind it.
+    topup = OfflineTopup(
+        tenant_id=tenant_id,
+        actor_user_id=actor_user_id,
+        driver_user_id=driver_id,
+        amount_coins=amount,
+        note=note,
+        created_at=max(datetime.now(timezone.utc), watermark),
+        promo_code_id=promo_code_id,
+    )
+    db.add(topup)
+
+    db.add(LedgerTransaction(
+        user_id=driver_id,
+        amount=amount,  # Positive = credit
+        transaction_type=TransactionType.CPO_TOPUP,
+        description=description,
+        balance_after=new_balance,
+    ))
+    return topup, new_balance
 
 
 async def tenant_settlement_watermark(db: AsyncSession, tenant_id: int) -> datetime:

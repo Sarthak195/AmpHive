@@ -173,7 +173,7 @@ export default function CpoPlugPhotos() {
         ) : (
           <span className="row cpo-photo-actions">
             {p.status === 'pending' && (
-              <button
+              <button data-write
                 type="button"
                 className="btn btn-primary btn-sm"
                 disabled={busyId === p.id}
@@ -182,7 +182,7 @@ export default function CpoPlugPhotos() {
                 Approve
               </button>
             )}
-            <button
+            <button data-write
               type="button"
               className="btn btn-quiet btn-sm"
               disabled={busyId === p.id}

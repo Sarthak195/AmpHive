@@ -21,6 +21,7 @@ import { useWallet } from '../contexts/WalletContext';
 import NotificationBell from './NotificationBell';
 import Money from './ui/Money';
 import { isCpoHost, isSplitHost, cpoOrigin } from '../utils/appHost';
+import { isReadOnlyViewer } from '../utils/roles';
 
 const navLinkClass = ({ isActive }) => `appbar-link${isActive ? ' active' : ''}`;
 
@@ -137,7 +138,7 @@ const AppBar = () => {
                       Host your chargers
                     </a>
                   )}
-                  {!cpoHost && user.role === 'cpo' && (
+                  {!cpoHost && (user.role === 'cpo' || isReadOnlyViewer(user)) && (
                     splitHost ? (
                       <a href={`${cpoOrigin()}/cpo/dashboard`} className="user-menu-item" role="menuitem">
                         <PlugZap size={16} aria-hidden="true" />

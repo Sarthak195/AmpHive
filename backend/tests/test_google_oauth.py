@@ -444,7 +444,8 @@ async def test_callback_link_evicts_a_verified_accounts_password_too(monkeypatch
     )
     req = _FakeRequest(cookies={"google_oauth_state": "abc"}, query_params={"state": "abc", "code": "x"})
 
-    resp = await google_callback(req, _db_returning(existing))
+    db = _db_returning(existing)
+    resp = await google_callback(req, db)
 
     assert "#code=" in resp.headers["location"]
     assert existing.google_sub == "google-sub-2"
@@ -452,6 +453,9 @@ async def test_callback_link_evicts_a_verified_accounts_password_too(monkeypatch
     assert existing.token_version == 1
     assert existing.auth_provider == "google"
     assert existing.email_verified is True
+    # [F7] A squatter's personal API tokens are revoked by the takeover too.
+    stmts = [str(c.args[0]) for c in db.execute.await_args_list]
+    assert any(s.startswith("UPDATE api_tokens") and "revoked_at IS NULL" in s for s in stmts)
 
 
 @pytest.mark.asyncio
@@ -600,6 +604,31 @@ async def test_callback_link_race_maps_to_400(monkeypatch):
     existing = _user(auth_provider="password", google_sub=None)
     db = _db_returning(existing)
     db.commit = AsyncMock(side_effect=IntegrityError("UPDATE ...", {}, Exception("duplicate key")))
+    req = _FakeRequest(cookies={"google_oauth_state": "abc"}, query_params={"state": "abc", "code": "x"})
+
+    resp = await google_callback(req, db)
+
+    assert _login_error(resp) == "google_in_use"
+    db.rollback.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_callback_link_race_surfacing_at_the_token_revoke_flush_maps_to_400(monkeypatch):
+    """[F7] The api_tokens revoke autoflushes the pending google_sub write, so
+    the unique-index race can raise there instead of at commit."""
+    _set_google_env(monkeypatch)
+    _mock_token_exchange(monkeypatch)
+    _mock_verify_claims(monkeypatch, _claims(sub="google-sub-2"))
+    existing = _user(auth_provider="password", google_sub=None)
+    db = _db_returning(existing)
+    lookup = db.execute.return_value
+
+    async def _execute(stmt, *a, **kw):
+        if str(stmt).startswith("UPDATE api_tokens"):
+            raise IntegrityError("UPDATE ...", {}, Exception("duplicate key"))
+        return lookup
+
+    db.execute = AsyncMock(side_effect=_execute)
     req = _FakeRequest(cookies={"google_oauth_state": "abc"}, query_params={"state": "abc", "code": "x"})
 
     resp = await google_callback(req, db)

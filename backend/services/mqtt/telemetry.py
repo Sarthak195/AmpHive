@@ -120,6 +120,10 @@ class MQTTTelemetryMixin:
         # version depending) could kill message dispatch. Non-finite values
         # (NaN/inf parse fine as JSON-ish strings) are rejected too: NaN
         # watts would poison the peak-power comparison and session totals.
+        # [Charge complete] Only a frame that actually carries a power reading
+        # is a real sample; the 0.0 default below must never look like an idle
+        # car (services/mqtt/charge_full.py).
+        watts_reported = payload.get("watts") is not None
         try:
             watts = float(payload.get("watts", 0.0))
             kwh = float(payload.get("kwh", 0.0))
@@ -277,7 +281,8 @@ class MQTTTelemetryMixin:
         if self.db_session_factory and self.event_loop:
             asyncio.run_coroutine_threadsafe(
                 self._persist_telemetry(gateway_id, plug_id, watts, kwh, session_id, sample, relay_on, is_offline,
-                                        today_kwh=today_kwh, month_kwh=month_kwh),
+                                        today_kwh=today_kwh, month_kwh=month_kwh,
+                                        watts_reported=watts_reported),
                 self.event_loop,
             )
             # Telemetry proves the gateway is alive — refresh its liveness
@@ -386,7 +391,8 @@ class MQTTTelemetryMixin:
                                  relay_on: bool = False,
                                  is_offline: bool = False,
                                  today_kwh: Optional[float] = None,
-                                 month_kwh: Optional[float] = None):
+                                 month_kwh: Optional[float] = None,
+                                 watts_reported: bool = False):
         """
         Persist the latest telemetry snapshot to the database:
         - Verify the claimed plug actually belongs to the publishing gateway
@@ -448,6 +454,12 @@ class MQTTTelemetryMixin:
         updated_settled: Optional[Decimal] = None
         updated_segment_start: Optional[float] = None
         reprice = None
+        # [Charge complete] (session_id, peak_w, started_at) of a real live
+        # power sample of the car, fed to the detector after the commit; and
+        # whether the driver opted into the auto-stop.
+        charge_sample: Optional[tuple] = None
+        charge_relay_off_session: Optional[int] = None
+        updated_auto_stop_full = False
 
         try:
             async with self.db_session_factory() as session:
@@ -613,6 +625,15 @@ class MQTTTelemetryMixin:
                     updated_max_kwh = active_session.max_kwh
                     updated_max_duration = active_session.max_duration_seconds
                     updated_started_at = active_session.started_at
+                    updated_auto_stop_full = bool(active_session.auto_stop_when_full)
+                    if watts_reported and not is_offline:
+                        if relay_on:
+                            charge_sample = (
+                                active_session.id, active_session.peak_power_w,
+                                active_session.started_at,
+                            )
+                        else:
+                            charge_relay_off_session = active_session.id
 
                 # [REC-02] Level-triggered OFF reconciliation. The relay is
                 # reported ON but no ACTIVE session owns this plug — a prior OFF
@@ -776,6 +797,26 @@ class MQTTTelemetryMixin:
             )
             return
 
+        # [Charge complete] Feed the detector now the frame is committed.
+        # Synchronous, before any await, so concurrent frames can't both fire.
+        charge_full_fired = False
+        charge_stop_retry = False
+        at = (sample or {}).get("recorded_at") or datetime.now(timezone.utc)
+        if charge_sample is not None:
+            charge_full_fired = self._charge_full.observe(
+                plug_id, charge_sample[0], at, watts, charge_sample[1], charge_sample[2],
+            )
+            if not charge_full_fired and updated_auto_stop_full:
+                charge_stop_retry = self._charge_full.stop_retry_due(
+                    plug_id, charge_sample[0], at, watts,
+                )
+        elif charge_relay_off_session is not None:
+            self._charge_full.interrupt(plug_id, charge_relay_off_session)
+            if updated_auto_stop_full:
+                charge_stop_retry = self._charge_full.stop_retry_due(
+                    plug_id, charge_relay_off_session, at, watts,
+                )
+
         # [Unmetered consumption] Raise the GatewayEvent (+ CPO bell notify —
         # see MQTTAlarmMixin._persist_gateway_event) in its own transaction,
         # after the telemetry commit above — same deferred-action shape as
@@ -832,6 +873,78 @@ class MQTTTelemetryMixin:
             await self._maybe_auto_stop_on_limits(
                 updated_session_id, updated_user_id, updated_energy_kwh,
                 updated_max_kwh, updated_max_duration, updated_started_at,
+            )
+            if charge_full_fired:
+                await self._on_charge_full(
+                    updated_session_id, updated_user_id, plug_id, updated_auto_stop_full,
+                )
+            elif charge_stop_retry:
+                await self._charge_full_stop(updated_session_id, updated_user_id, plug_id)
+
+    async def _on_charge_full(self, session_id: int, user_id: int, plug_id: int,
+                              auto_stop: bool):
+        """[Charge complete] The detector fired (once per session): flag the
+        live snapshot for the session banner, tell the driver once (bell +
+        push via notify()), and, only when the driver opted in
+        (ChargingSession.auto_stop_when_full), stop the session through the
+        same finalize_charging_session call the driver's own stop makes (relay
+        OFF + bill + free the plug). Never switches anything ON. The stop
+        re-checks ACTIVE under its row lock, so a concurrent driver stop,
+        limit or reaper settles the session exactly once."""
+        from backend.services.mqtt_manager import CHARGE_FULL_MINUTES
+        from backend.services.notifications import notify
+
+        if self.telemetry_store is not None:
+            self.telemetry_store.mark_charge_full(plug_id)
+        logger.info(
+            "Car looks fully charged",
+            extra={"session_id": session_id, "plug_id": plug_id, "auto_stop": auto_stop},
+        )
+        # The notice never says the session is stopping: the stop can fail and
+        # is retried, and finalize_charging_session sends its own "Charging
+        # complete" notification when it succeeds.
+        follow_up = (
+            "Auto-stop is on for this session."
+            if auto_stop else "Stop the session when you are ready to free the plug."
+        )
+        await notify(
+            user_id, "charge_full", "Your car looks fully charged",
+            f"Power draw has stayed near zero for {CHARGE_FULL_MINUTES:g} minutes. {follow_up}",
+            severity="info", plug_id=plug_id, session_id=session_id,
+        )
+        if auto_stop:
+            await self._charge_full_stop(session_id, user_id, plug_id)
+
+    async def _charge_full_stop(self, session_id: int, user_id: int, plug_id: int):
+        """Opted-in stop through finalize_charging_session (which notifies the
+        driver on success). A failure is logged and left pending: the detector
+        offers a retry on later idle frames (ChargeFullDetector.stop_retry_due).
+        A None outcome (no longer ACTIVE) ends the retries."""
+        from backend.services.mqtt.charge_full import CHARGE_COMPLETE_REASON
+
+        if not self.db_session_factory:
+            return
+        try:
+            from backend.services.session_lifecycle import finalize_charging_session
+            async with self.db_session_factory() as db:
+                outcome = await finalize_charging_session(
+                    db, session_id, expected_user_id=user_id, reason=CHARGE_COMPLETE_REASON,
+                )
+            self._charge_full.note_stop_done(plug_id, session_id)
+            if outcome is not None:
+                logger.info(
+                    "Auto-stopped session: car looks fully charged",
+                    extra={
+                        "session_id": session_id, "user_id": user_id,
+                        "energy_kwh": outcome["energy_kwh"],
+                        "coins_spent": outcome["coins_spent"],
+                    },
+                )
+        except Exception:
+            self._charge_full.note_stop_failed(plug_id, session_id)
+            logger.exception(
+                "Charge-complete auto-stop failed, will retry on a later idle frame",
+                extra={"session_id": session_id, "user_id": user_id},
             )
 
     async def _maybe_auto_stop_on_exhaustion(self, session_id: int, user_id: int, energy_kwh: float,

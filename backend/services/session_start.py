@@ -109,6 +109,7 @@ async def begin_active_session(
     max_kwh: Optional[float],
     max_duration_seconds: Optional[int],
     covering_reservation=None,
+    auto_stop_when_full: bool = False,
 ) -> ChargingSession:
     """
     Admit and start an ACTIVE charging session on an already-locked, already-
@@ -219,6 +220,9 @@ async def begin_active_session(
         # auth hold too.
         max_kwh=max_kwh,
         max_duration_seconds=max_duration_seconds,
+        # [Charge complete] Driver opt-in; NULL (not False) when off so a
+        # pre-0044 row and an opted-out row read the same.
+        auto_stop_when_full=True if auto_stop_when_full else None,
     )
     db.add(session)
     if covering_reservation is not None:

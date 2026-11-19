@@ -415,6 +415,7 @@ const Dashboard = () => {
       const body = { plug_id: Number(plugId) };
       if (limits?.max_kwh) body.max_kwh = limits.max_kwh;
       if (limits?.max_duration_seconds) body.max_duration_seconds = limits.max_duration_seconds;
+      if (limits?.auto_stop_when_full) body.auto_stop_when_full = true;
       await api.queueCharge(body);
       toast.ok('Charge queued — it starts automatically when power returns.');
       fetchUpNext();

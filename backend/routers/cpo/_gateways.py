@@ -36,6 +36,7 @@ from ._common import (
     DEFAULT_LIST_LIMIT,
     _require_tenant_id,
     clamp_list_window,
+    hide_for,
     logger,
     require_cpo_tenant,
 )
@@ -89,7 +90,8 @@ async def cpo_list_gateways(
         response.append({
             "id": gw.id,
             "name": gw.name,
-            "vpn_ip": gw.vpn_ip,
+            # [F10] Legacy overlay address: None for a read-only cpo_viewer.
+            "vpn_ip": hide_for(user, gw.vpn_ip),
             # Liveness-derived, not the raw DB flag: the stored status only
             # flips on a delivered LWT, so a crash outage (broker died with the
             # connection — no LWT) leaves it ONLINE forever, and the firmware's
@@ -239,7 +241,7 @@ async def cpo_claim_gateway(
 
 @router.get("/api/cpo/firmware-releases")
 async def cpo_list_firmware_releases(
-    user: User = Depends(require_role("cpo", "admin")),
+    user: User = Depends(require_role("cpo", "admin", "cpo_viewer")),
     db: AsyncSession = Depends(get_db),
 ):
     """

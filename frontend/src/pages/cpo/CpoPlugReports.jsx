@@ -176,11 +176,11 @@ export default function CpoPlugReports() {
         ) : (
           <span className="row plug-reports-row-actions">
             {r.status === 'open' && (
-              <button type="button" className="btn btn-quiet btn-sm" onClick={() => openAcknowledge(r)}>
+              <button data-write type="button" className="btn btn-quiet btn-sm" onClick={() => openAcknowledge(r)}>
                 Acknowledge
               </button>
             )}
-            <button type="button" className="btn btn-primary btn-sm" onClick={() => openResolve(r)}>
+            <button data-write type="button" className="btn btn-primary btn-sm" onClick={() => openResolve(r)}>
               Resolve
             </button>
           </span>

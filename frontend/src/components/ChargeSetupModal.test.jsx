@@ -127,6 +127,15 @@ describe('ChargeSetupModal — limits payload', () => {
     await waitFor(() => expect(onClose).toHaveBeenCalled());
   });
 
+  it('the full-car auto-stop is off by default and sent only when ticked', async () => {
+    const { onConfirm } = renderModal();
+    const toggle = screen.getByLabelText('Stop automatically when the car is full');
+    expect(toggle).not.toBeChecked();
+    await userEvent.click(toggle);
+    await userEvent.click(screen.getByRole('button', { name: 'Start charging' }));
+    expect(onConfirm).toHaveBeenCalledWith(7, { auto_stop_when_full: true });
+  });
+
   it('preset chip + energy field → max_duration_seconds + max_kwh', async () => {
     const { onConfirm } = renderModal();
     await userEvent.click(screen.getByRole('button', { name: '2h' }));

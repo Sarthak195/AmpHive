@@ -358,6 +358,7 @@ def _qc(status=QueuedChargeStatus.WAITING, expires_in_min=60, plug_id=1, user_id
     qc.max_duration_seconds = 14400
     qc.expires_at = datetime.now(timezone.utc) + timedelta(minutes=expires_in_min)
     qc.not_before = not_before   # None = outage queue (a MagicMock attr would be truthy)
+    qc.auto_stop_when_full = None
     return qc
 
 
@@ -418,9 +419,31 @@ async def test_sweep_starts_debounced_row():
 
     assert started == 1
     begin.assert_awaited_once()
+    assert begin.await_args.kwargs["auto_stop_when_full"] is False
     assert qc.status == QueuedChargeStatus.STARTED
     assert qc.started_session_id == 99
     assert notify.await_args.args[1] == "queued_charge_started"
+
+
+@pytest.mark.asyncio
+async def test_sweep_carries_the_auto_stop_opt_in_to_the_session():
+    """[Charge complete] A queued/scheduled charge's auto_stop_when_full
+    reaches begin_active_session, so the auto-started session keeps it."""
+    qc = _qc()
+    qc.auto_stop_when_full = True
+    plug = _plug(powered=True)
+    plug.powered_since = datetime.now(timezone.utc) - timedelta(minutes=10)
+    row_db = _row_db(
+        _s1n(qc), _s1n(_user()), _s1(0), _s1n(plug), _s1(_tenant(delay=2)),
+        _upd(), _s1n(None), _s1n(None), _s1(_gateway()),
+    )
+    svc = SessionReaperService(_factory(_scan_db([1]), row_db), AsyncMock())
+
+    with patch("backend.services.session_start.begin_active_session",
+               AsyncMock(return_value=MagicMock(id=99))) as begin,          patch("backend.services.notifications.notify", AsyncMock()):
+        await svc.reap_queued_starts_once()
+
+    assert begin.await_args.kwargs["auto_stop_when_full"] is True
 
 
 @pytest.mark.asyncio
@@ -967,6 +990,7 @@ async def test_sweep_starts_schedule_at_not_before_when_power_never_dropped():
     assert started == 1
     assert begin.await_args.kwargs == {
         "max_kwh": 30.0, "max_duration_seconds": 14400, "covering_reservation": None,
+        "auto_stop_when_full": False,
     }
     assert qc.status == QueuedChargeStatus.STARTED
     assert notify.await_args.args[1] == "queued_charge_started"

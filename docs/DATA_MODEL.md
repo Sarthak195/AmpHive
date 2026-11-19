@@ -20,7 +20,7 @@ ORM: SQLAlchemy 2.0 `DeclarativeBase` with `mapped_column`. Enums use
 
 | Enum (DB type) | Values |
 |----------------|--------|
-| `UserRole` (`user_role`) | `admin`, `cpo`, `driver` |
+| `UserRole` (`user_role`) | `admin`, `cpo`, `driver`, `cpo_viewer` (F10, `0045_cpo_viewer_role`, 2026-11-17-w2, not deployed: `ALTER TYPE ... ADD VALUE`, cannot be dropped on downgrade) |
 | `GatewayStatus` (`gateway_status`) | `online`, `offline` |
 | `PlugStatus` (`plug_status`) | `available`, `occupied`, `offline`, `maintenance` |
 | `SessionStatus` (`session_status`) | `active`, `completed`, `paid`, `cancelled` |
@@ -42,6 +42,10 @@ Owns users, gateways, sessions, charger_groups (cascade delete-orphan).
 2026-07-08) · `created_at`.
 `deleted_at` TIMESTAMPTZ nullable (revision `0038_account_closure`,
 2026-08-18) — when the holder closed the account; NULL while live.
+`role` (enum `user_role`): `admin` | `cpo` | `driver` | `cpo_viewer`.
+`cpo_viewer` was added in `0045_cpo_viewer_role` via `ALTER TYPE ... ADD
+VALUE`; it cannot be dropped on downgrade. A `cpo_viewer` has `tenant_id` set
+to the tenant whose console it can read (read-only, see SECURITY.md §8.11).
 CHECK `ck_users_coin_balance_non_negative` (`coin_balance >= 0`, revision
 `0002_wallet_non_negative`, 2026-07-07) — the DB-level backstop behind the
 row-locked, clamped wallet debits.
@@ -133,6 +137,10 @@ concrete watchdog values locally — the driver's own limit, or a large
 UNLIMITED sentinel (`services/mqtt_manager.py`) when this column is NULL,
 since the wire protocol has no way to encode "no limit" directly. `max_kwh`
 is float, not NUMERIC — an energy threshold, not money.
+
+`auto_stop_when_full` BOOLEAN NULL (`0044_session_auto_stop_full`, F1,
+2026-11-17-w2, not deployed): driver opt-in to stop when the car looks full;
+NULL/false = off.
 
 ### `ledger_transactions`
 Double-entry-style wallet audit. `id` PK · `user_id` → users (CASCADE) ·
@@ -296,6 +304,8 @@ full column list of each:
   2026-11-15): NULL = outage queue; set = a scheduled start on a
   powered plug that the sweep never begins before this instant (its
   `expires_at` is `not_before + min(queue_ttl_min, SCHEDULE_START_GRACE_MIN)`).
+  `auto_stop_when_full BOOLEAN NULL` (`0044_session_auto_stop_full`, F1):
+  carried onto the auto-started session.
 - **`password_reset_tokens`** (`0023_password_reset_tokens.py`) — a
   single-use, SHA-256-digest-only "forgot password" token
   (`PasswordResetToken`). Backs `POST /api/auth/forgot-password` +
@@ -337,6 +347,11 @@ full column list of each:
   `services/payouts.py tenant_earnings_summary`'s `available_pool_coins` so
   neither a top-up nor a later bank payout can draw the same earnings twice.
   Backs `POST/GET /api/cpo/topups`.
+  `promo_code_id INT NULL` FK promo_codes SET NULL (`0047_promo_codes`, F12):
+  set when the top-up came from a promo redemption. Redemptions write an
+  ordinary `offline_topups` row plus a `cpo_topup` ledger line, so
+  `sum_offline_topups`, the top-up pool and payouts include them unchanged. No
+  `tx_type` change.
 - **`firmware_releases`** (`0036_firmware_releases.py`, feat/ota-version-
   picker) — an admin-registered firmware release catalog (`FirmwareRelease`:
   `version` UNIQUE, `url` the already-published `https://` image location —
@@ -358,9 +373,33 @@ full column list of each:
   kept only as legacy back-compat for URLs registered before the switch).
   Re-uploading/re-registering a **deactivated** version overwrites
   `url`/`notes` and reactivates the row; an active duplicate stays a 400.
+- **`api_tokens`** (`0046_api_tokens.py`, F7, 2026-11-17-w2, not deployed) - a
+  personal read-only API token. Columns: `id` SERIAL PK; `user_id` INT NOT
+  NULL FK users ON DELETE CASCADE (`ix_api_tokens_user_id`); `name`
+  VARCHAR(64) NOT NULL; `token_prefix` VARCHAR(16) NOT NULL; `token_hash`
+  VARCHAR(64) NOT NULL UNIQUE (sha256 hex); `scope` VARCHAR(16) NOT NULL
+  DEFAULT `'read'`; `created_at` TIMESTAMPTZ NOT NULL DEFAULT now;
+  `last_used_at` TIMESTAMPTZ NULL; `revoked_at` TIMESTAMPTZ NULL (NULL =
+  live). The runtime role needs SELECT/INSERT/UPDATE, covered by the owner
+  role's default privileges. Backs `/api/me/tokens*` and `GET /api/me/meter`.
+- **`promo_codes`** (`0047_promo_codes.py`, F12, 2026-11-17-w2, not
+  deployed) - `id`, `tenant_id` FK tenants CASCADE, `code_hash` VARCHAR(64)
+  UNIQUE (sha256 of the canonical code), `code_hint` VARCHAR(4) (last 4
+  chars), `amount_coins` NUMERIC(12,2) CHECK > 0, `expires_at` TIMESTAMPTZ
+  NULL (NULL = never), `max_redemptions` INT CHECK >= 1, `per_user_limit` INT
+  DEFAULT 1 CHECK >= 1, `note` VARCHAR(200), `created_by` FK users SET NULL,
+  `created_at`, `disabled_at`. Index `idx_promo_codes_tenant_created`
+  (`tenant_id`, `created_at`).
+- **`promo_redemptions`** (`0047_promo_codes.py`) - `id`, `code_id` FK
+  promo_codes CASCADE, `user_id` FK users SET NULL, `offline_topup_id` FK
+  offline_topups CASCADE UNIQUE, `created_at`. Index
+  `idx_promo_redemptions_code_user` (`code_id`, `user_id`). Limits are
+  COUNT(*) of these rows, taken under the `promo_codes` row lock.
 
-The live schema is now **26 tables** (up from the 15 documented in the
-sections above), all applied via Alembic per §4 below.
+The ORM declares **35 tables** as of `0047_promo_codes` (`__tablename__`
+count, rechecked 2026-11-17; the earlier "26" had drifted). Prod, at
+`0043_email_ci_unique`, has 32; it reaches 35 once wave 2's migrations are
+applied. All are applied via Alembic per §4 below.
 
 ## 3. Relationships
 
@@ -394,7 +433,15 @@ joined via `access_code`.
   arrived via `0005_gateway_events` (2026-07-10), `audit_logs` via
   `0007_audit_log` (2026-07-12), and `notifications` + `push_subscriptions`
   via `0008_notifications` (2026-07-11, renumbered from 0007 at merge); it's
-  **26 tables** today — see "Tables added since" in §2 above for the rest.)
+  **35 tables** once `0047_promo_codes` is applied (32 at `0043`); see "Tables added since" in §2 above for the rest.)
+- **Wave 2 chain (2026-11-17, `release/2026-11-17-w2`, not deployed).**
+  `0043_email_ci_unique` -> `0044_session_auto_stop_full` (two nullable
+  booleans, IF NOT EXISTS) -> `0045_cpo_viewer_role` (enum value, downgrade is
+  a no-op) -> `0046_api_tokens` (CREATE TABLE IF NOT EXISTS, downgrade drops
+  it) -> `0047_promo_codes` (two tables plus `offline_topups.promo_code_id`,
+  downgrade drops them). One head. `env.py` runs all pending revisions in one
+  transaction; `ALTER TYPE ... ADD VALUE` is allowed there on PG 12+ (prod is
+  15) because no later revision uses the new value.
 - **New schema change** = new revision: `alembic -c backend/alembic.ini
   revision --autogenerate -m "..."` (autogenerate needs a reachable database —
   use the CI postgres or the VM; dev boxes run no DB by policy).

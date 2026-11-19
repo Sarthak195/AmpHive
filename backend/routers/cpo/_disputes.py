@@ -28,7 +28,7 @@ from backend.services.invoices import adjust_invoice_for_session_refund
 from backend.services.money import ZERO_MONEY, to_money
 from backend.services.wallet import credit_wallet
 
-from ._common import _dispute_response, logger, require_cpo_tenant
+from ._common import _dispute_response, logger, redact_for, require_cpo_tenant
 
 router = APIRouter()
 
@@ -72,7 +72,9 @@ async def cpo_list_disputes(
     out = []
     for d, email, cost, plug_name in result.all():
         resp = _dispute_response(d)
-        resp.user_email = email
+        resp.user_email = redact_for(user, email)
+        resp.reason = redact_for(user, resp.reason) or ""
+        resp.resolution_note = redact_for(user, resp.resolution_note)
         resp.session_cost_coins = float(cost) if cost is not None else None
         resp.plug_name = plug_name
         out.append(resp)

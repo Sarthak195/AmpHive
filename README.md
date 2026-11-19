@@ -55,6 +55,7 @@ the code actually does today, verified against source. Start at
 | [Deployment](docs/DEPLOYMENT.md) | GCP VM + Docker Compose, scripts, K8s |
 | [Implementation Status](docs/IMPLEMENTATION_STATUS.md) | Works / stub / aspirational + discrepancies |
 | [Security](docs/SECURITY.md) | Open gaps, committed secrets, remediation |
+| [Home Assistant](docs/HOME_ASSISTANT.md) | Read-only meter for Home Assistant and evcc |
 
 This README plus [requirements.md](requirements.md) and
 [features_list.md](features_list.md) describe the **product vision**; for the gap

@@ -33,6 +33,23 @@
   gap: var(--sp-4);
 }
 
+.wallet-promo-card {
+  display: grid;
+  gap: var(--sp-3);
+}
+
+.wallet-promo-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--sp-3);
+}
+
+.wallet-promo-form .field {
+  flex: 1 1 14rem;
+  min-width: 0;
+}
+
 .wallet-ledger-heading {
   margin-bottom: var(--sp-3);
 }

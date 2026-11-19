@@ -11,8 +11,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.database.db import get_db
 from backend.database.models import AuditLog, Gateway, GatewayEvent, GatewayLog, User
 from backend.schemas import GatewayEventResponse, GatewayLogResponse
+from backend.services.auth import is_cpo_viewer
 
-from ._common import require_cpo_tenant
+from ._common import redact_for, require_cpo_tenant
+
+# [F10] Firmware WARN lines can carry the home Wi-Fi SSID and the broker URL,
+# which mask_pii does not cover, so a read-only viewer never sees log bodies.
+VIEWER_LOG_PLACEHOLDER = "(log text hidden in the read-only demo)"
 
 router = APIRouter()
 
@@ -69,7 +74,8 @@ async def cpo_list_events(
                 plug_id=ev.plug_id,
                 event_type=ev.event_type,
                 severity=ev.severity,
-                detail=ev.detail,
+                # [F10] A driver problem report puts free text here.
+                detail=redact_for(user, ev.detail),
                 acknowledged=ev.acknowledged,
                 created_at=ev.created_at.isoformat() if ev.created_at else None,
             )
@@ -140,6 +146,7 @@ async def cpo_gateway_logs(
         .offset(offset)
     )
     logs = list(result.scalars().all())
+    hide_text = is_cpo_viewer(user)
 
     return {
         "total": int(total),
@@ -148,7 +155,7 @@ async def cpo_gateway_logs(
                 id=log.id,
                 gateway_id=log.gateway_id,
                 level=log.level,
-                message=log.message,
+                message=VIEWER_LOG_PLACEHOLDER if hide_text else log.message,
                 created_at=log.created_at.isoformat() if log.created_at else None,
             )
             for log in logs
@@ -187,11 +194,11 @@ async def cpo_list_audit_log(
         {
             "id": entry.id,
             "actor_user_id": entry.actor_user_id,
-            "actor_email": actor_email,
+            "actor_email": redact_for(user, actor_email),
             "action": entry.action,
             "target_type": entry.target_type,
             "target_id": entry.target_id,
-            "detail": entry.detail,
+            "detail": redact_for(user, entry.detail),
             "created_at": entry.created_at.isoformat() if entry.created_at else None,
         }
         for entry, actor_email in result.all()

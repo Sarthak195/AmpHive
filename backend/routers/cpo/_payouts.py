@@ -35,6 +35,7 @@ from ._common import (
     _require_tenant_id,
     clamp_list_window,
     logger,
+    redact_for,
     require_cpo_tenant,
 )
 
@@ -251,7 +252,11 @@ async def cpo_list_payouts(
         .limit(limit)
         .offset(offset)
     )
-    return [_payout_response(p) for p in result.scalars().all()]
+    # [F10] The free-text note is masked for a read-only cpo_viewer.
+    return [
+        {**_payout_response(p), "note": redact_for(user, p.note)}
+        for p in result.scalars().all()
+    ]
 
 
 @router.post("/api/cpo/payouts/{payout_id}/mark_paid")
