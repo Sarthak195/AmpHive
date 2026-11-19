@@ -37,6 +37,9 @@ Touching windows chain, so 22:00-24:00 plus 00:00-06:00 closes at 06:00.
 - **Queued and scheduled starts** (`session_reaper.reap_queued_starts_once`):
   a closed plug leaves the row WAITING until it opens or the row's TTL
   expires. The row is not failed early.
+- **Raising a running session's limit** (`PATCH /api/sessions/{id}/limits`):
+  the new `max_duration_seconds` is capped to the same bounds, measured from
+  the session's `started_at`, so the clamp cannot be bypassed.
 - Ad-hoc closures use maintenance mode; there are no blackout dates.
 - NULL hours and NULL max length skip all of this with no extra query.
 
@@ -52,12 +55,13 @@ Touching windows chain, so 22:00-24:00 plus 00:00-06:00 closes at 06:00.
 - `GET /api/plugs/available` and `GET /api/plugs/{id}`: add `opening_hours`,
   `open_now`, `hours_changes_at` (next close when open, next open when
   closed), `max_session_minutes`, `amenities`, `access_note`. All are null for
-  a 24x7 plug with nothing set. The unauthenticated `/api/plugs/public`
+  a 24x7 plug with nothing set. `access_note` is masked the same way for a
+  cpo_viewer here. The unauthenticated `/api/plugs/public`
   projection is unchanged (the note may hold a gate code).
 
 ## Driver UI
 
-The plug card and the Home "charge now" lookup show "Open now, closes HH:MM"
+The plug card, the Home "charge now" lookup and the map's reviews modal show "Open now, closes HH:MM"
 or "Closed, opens HH:MM" in the plug's `tenant_timezone`, the max session
 length, amenity chips and the note. A closed plug offers no Charge button
 (Reserve stays). The Home filter bar adds "Any hours / Open now / Open 24x7".
