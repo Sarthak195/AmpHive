@@ -350,7 +350,7 @@ export default function CpoGroups() {
 
   const savePrice = async (member) => {
     if (!selected || priceBusy) return;
-    const raw = (priceDrafts[member.user_id] ?? '').trim();
+    const raw = String(priceDrafts[member.user_id] ?? member.price_per_kwh_override ?? '').trim();
     const value = raw === '' ? null : Number(raw);
     if (value !== null && !(value > 0 && value <= 1000)) {
       toast.error('Enter a price above 0 and up to 1000, or leave it blank for the tariff.');
@@ -549,8 +549,8 @@ export default function CpoGroups() {
                                   step="0.01"
                                   className="input groups-member-price-input"
                                   aria-label={`Own price for ${who} (coins per kWh, blank for the tariff)`}
-                                  placeholder={current != null ? String(current) : 'Tariff'}
-                                  value={priceDrafts[m.user_id] ?? ''}
+                                  placeholder="Tariff"
+                                  value={priceDrafts[m.user_id] ?? (current != null ? String(current) : '')}
                                   onChange={(e) =>
                                     setPriceDrafts((d) => ({ ...d, [m.user_id]: e.target.value }))
                                   }

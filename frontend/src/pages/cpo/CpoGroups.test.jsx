@@ -344,6 +344,15 @@ describe('[C9] member price and email invites', () => {
     await screen.findByText('Sunrise Society');
     await userEvent.click(screen.getByRole('button', { name: /Sunrise Society/ }));
     expect(await screen.findByText('Own price: 2.5 coins/kWh')).toBeInTheDocument();
+    // Prefilled, so saving an untouched row keeps the price instead of clearing it.
+    expect(screen.getByLabelText(/Own price for Driver One/)).toHaveValue(2.5);
+    api.put.mockResolvedValue({ status: 'updated' });
+    await userEvent.click(screen.getByRole('button', { name: 'Save price for Driver One' }));
+    await waitFor(() =>
+      expect(api.put).toHaveBeenCalledWith('/api/cpo/groups/1/members/100/price', {
+        price_per_kwh_override: 2.5,
+      })
+    );
   });
 
   it('sends an invite and lists it as pending', async () => {

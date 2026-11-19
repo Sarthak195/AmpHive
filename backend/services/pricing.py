@@ -568,7 +568,7 @@ async def reprice_session_if_due(db: AsyncSession, session, plug: Plug, at: date
     """
     from backend.services.billing import close_out_segment
 
-    if getattr(session, "member_price_override", None):
+    if getattr(session, "member_price_override", None) is True:
         # [C9 member price] A frozen member rate never reprices, even after a
         # tariff edit stamped rate_valid_until (defense in depth: the mark
         # below already skips these sessions).

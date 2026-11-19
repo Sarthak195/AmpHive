@@ -412,6 +412,96 @@ async def test_viewer_cannot_write_through_the_cpo_gate():
 
 
 # =============================================================================
+# 1f. Route happy paths: audit actions, and the raw token never leaks
+# =============================================================================
+
+PRIVATE_GROUP = SimpleNamespace(id=11, is_public=False, name="Family", tenant_id=1)
+CPO = SimpleNamespace(id=2, tenant_id=1, role=UserRole.CPO)
+
+
+@pytest.mark.asyncio
+async def test_invite_route_mails_the_token_and_audits_without_it():
+    from backend.routers.cpo import _groups
+
+    invite = SimpleNamespace(id=5, expires_at=NOW + timedelta(days=7))
+    audit = AsyncMock()
+    with patch.object(_groups, "_own_group", AsyncMock(return_value=PRIVATE_GROUP)),          patch.object(_groups.group_invites, "create_invite",
+                      AsyncMock(return_value=(invite, "raw-secret-token"))),          patch.object(_groups.group_invites, "schedule_invite_email") as mail,          patch.object(_groups, "try_record_audit", audit):
+        out = await _groups.cpo_invite_to_group(
+            11, _groups.GroupInviteRequest(email=" Friend@Example.com "), user=CPO, db=AsyncMock(),
+        )
+    mail.assert_called_once_with("friend@example.com", "Family", "raw-secret-token")
+    assert "raw-secret-token" not in str(out)
+    kwargs = audit.await_args.kwargs
+    assert kwargs["action"] == "group.invite"
+    assert "raw-secret-token" not in kwargs["detail"]
+
+
+@pytest.mark.asyncio
+async def test_invite_route_refuses_a_public_group():
+    from backend.routers.cpo import _groups
+
+    public = SimpleNamespace(id=12, is_public=True, name="Lot", tenant_id=1)
+    with patch.object(_groups, "_own_group", AsyncMock(return_value=public)):
+        with pytest.raises(HTTPException) as exc:
+            await _groups.cpo_invite_to_group(
+                12, _groups.GroupInviteRequest(email="a@b.co"), user=CPO, db=AsyncMock(),
+            )
+    assert exc.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_revoke_route_audits():
+    from backend.routers.cpo import _groups
+
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=MagicMock(rowcount=1))
+    audit = AsyncMock()
+    with patch.object(_groups, "_own_group", AsyncMock(return_value=PRIVATE_GROUP)),          patch.object(_groups, "try_record_audit", audit):
+        out = await _groups.cpo_revoke_group_invite(11, 5, user=CPO, db=db)
+    assert out == {"status": "revoked", "invite_id": 5}
+    assert audit.await_args.kwargs["action"] == "group.invite_revoke"
+
+
+@pytest.mark.asyncio
+async def test_price_route_sets_the_override_and_audits_old_and_new():
+    from backend.routers.cpo import _groups
+
+    membership = SimpleNamespace(price_per_kwh_override=None)
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=_scalar(membership))
+    audit = AsyncMock()
+    with patch.object(_groups, "_own_group", AsyncMock(return_value=PRIVATE_GROUP)),          patch.object(_groups, "try_record_audit", audit):
+        out = await _groups.cpo_set_member_price(
+            11, 9, _groups.MemberPriceRequest(price_per_kwh_override=3.5), user=CPO, db=db,
+        )
+    assert membership.price_per_kwh_override == Decimal("3.50")
+    assert out["price_per_kwh_override"] == 3.5
+    kwargs = audit.await_args.kwargs
+    assert kwargs["action"] == "group.member_price"
+    assert "old=None" in kwargs["detail"] and "new=3.50" in kwargs["detail"]
+
+
+@pytest.mark.asyncio
+async def test_accept_route_audits_in_the_groups_tenant():
+    from backend.routers import groups as groups_router
+
+    invite = SimpleNamespace(id=5, tenant_id=1)
+    group = SimpleNamespace(id=11, name="Family")
+    audit = AsyncMock()
+    with patch.object(groups_router.group_invites, "accept_invite",
+                      AsyncMock(return_value=(invite, group, True))),          patch.object(groups_router, "try_record_audit", audit):
+        out = await groups_router.accept_group_invite(
+            groups_router.AcceptGroupInviteRequest(token="raw-secret-token"),
+            user=_driver(), db=AsyncMock(),
+        )
+    assert out == {"status": "joined", "group_id": 11, "group_name": "Family"}
+    kwargs = audit.await_args.kwargs
+    assert (kwargs["action"], kwargs["tenant_id"]) == ("group.invite_accept", 1)
+    assert "raw-secret-token" not in kwargs["detail"]
+
+
+# =============================================================================
 # 2. DB-gated
 # =============================================================================
 
@@ -556,3 +646,45 @@ async def test_db_daily_cap_counts_this_cpos_invites(factory, monkeypatch):
         with pytest.raises(HTTPException) as exc:
             await group_invites.create_invite(db, cpo, group, "c@example.com")
         assert exc.value.status_code == 429
+
+
+@db_gated
+@pytest.mark.asyncio
+async def test_db_limits_patch_resizes_the_hold_at_the_frozen_override(factory, monkeypatch):
+    from sqlalchemy import select
+
+    from backend import state
+    from backend.database.models import ChargingSession, SessionStatus, Tariff, User
+    from backend.routers.sessions import update_session_limits
+    from backend.schemas import SessionLimitsUpdateRequest
+
+    monkeypatch.setattr(state, "mqtt_manager", MagicMock())
+    s = await _seed(factory)
+    async with factory() as db:
+        tariff = Tariff(tenant_id=s.tenant.id, name="Flat", price_per_kwh=Decimal("9.00"))
+        db.add(tariff)
+        await db.flush()
+        plug = await db.get(type(s.plug), s.plug.id)
+        plug.tariff_id = tariff.id
+        driver = await db.get(User, s.driver.id)
+        driver.coin_balance = Decimal("500.00")
+        session = ChargingSession(
+            tenant_id=s.tenant.id, user_id=s.driver.id, plug_id=s.plug.id,
+            status=SessionStatus.ACTIVE, rate_coins_per_kwh=Decimal("3.00"),
+            member_price_override=True, hold_coins=Decimal("3.00"),
+            max_kwh=1.0, max_duration_seconds=1800, energy_kwh=0.0,
+        )
+        db.add(session)
+        await db.commit()
+        sid = session.id
+
+    async with factory() as db:
+        await update_session_limits(
+            sid, SessionLimitsUpdateRequest(max_kwh=10.0), MagicMock(id=s.driver.id), db,
+        )
+    async with factory() as db:
+        hold = (await db.execute(
+            select(ChargingSession.hold_coins).where(ChargingSession.id == sid)
+        )).scalar_one()
+    # 10 kWh at the frozen 3.00, not at the plug tariff's 9.00.
+    assert hold == Decimal("30.00")

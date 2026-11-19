@@ -549,7 +549,7 @@ async def update_session_limits(
         # its own snapshotted rate is the worst case.
         max_rate = (
             to_money(session.rate_coins_per_kwh)
-            if session.member_price_override and session.rate_coins_per_kwh is not None
+            if session.member_price_override is True and session.rate_coins_per_kwh is not None
             else await max_rate_over_window(
                 db, plug, datetime.now(timezone.utc),
                 session.max_duration_seconds or 24 * 3600,
