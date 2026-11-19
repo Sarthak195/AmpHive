@@ -62,7 +62,9 @@ export default function Refunds() {
             Open the session in your activity history and choose{' '}
             <strong>Dispute this bill</strong>. Tell us what happened — for
             example the charger delivered nothing, it stopped early, or the
-            energy figure looks wrong.
+            energy figure looks wrong. An idle fee (a charge for staying
+            plugged in after the car looked full) can be disputed the same way,
+            for example if your car had only paused charging.
           </p>
           <ul className="text-2">
             <li>The dispute goes to the host who operates that charger, along with the metered readings for the session.</li>

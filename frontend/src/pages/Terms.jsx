@@ -97,6 +97,19 @@ export default function Terms() {
             invoice is available for every billed session.
           </p>
           <p className="text-2">
+            A host may also set an <strong>idle fee</strong>, shown before you
+            start: a per-minute charge, with a stated maximum per session, for
+            staying plugged in after your car looks fully charged. It starts only
+            after a free period of at least 15 minutes from the moment we tell
+            you charging is done, counts only while the charger keeps reporting
+            near-zero draw, pauses whenever the charger is not reporting, and is
+            never charged if you chose to stop automatically when the car is
+            full. Some cars pause charging on their own and can look full; the
+            free period is there for that, and an idle fee can be disputed like
+            any other charge. We cannot see a car left on the bay after the
+            session has ended, and charge nothing for that.
+          </p>
+          <p className="text-2">
             If you believe a session was billed incorrectly, raise a dispute from
             your activity history. The host reviews it and can issue a refund of
             charging credit. See the{' '}
