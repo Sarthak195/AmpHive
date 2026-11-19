@@ -34,6 +34,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy import Enum as SQLEnum
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -244,6 +245,11 @@ class User(Base):
     # Alembic revision 0038_account_closure.
     deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+    # [Notification prefs] Per-type push toggles and quiet hours, the JSON dump
+    # of services/notification_prefs.NotificationPrefs. NULL = defaults (all on,
+    # no quiet hours). Gates Web Push only, never the in-app feed row.
+    # Alembic revision 0048_notification_prefs.
+    notification_prefs: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
 
     # Relationships
     tenant: Mapped[Optional[Tenant]] = relationship("Tenant", back_populates="users")

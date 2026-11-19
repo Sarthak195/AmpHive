@@ -12,7 +12,10 @@ safety / ops emit points. Each call:
      async_session_factory, so callers' transactions stay untouched),
   2. emits a Socket.io "notification" event to the user's room (live UI),
   3. fans out Web Push to the user's stored browser subscriptions
-     (best-effort, in a thread — pywebpush is blocking).
+     (best-effort, in a thread — pywebpush is blocking), unless the user's
+     notification prefs or quiet hours mute this type. Steps 1 and 2 are
+     never gated, and the non-suppressible allowlist (safety, faults,
+     billing receipts; services/notification_prefs.py) always pushes.
 
 Web Push is enabled by setting VAPID_PRIVATE_KEY (+ optional VAPID_SUBJECT)
 in the environment; without it, steps 1–2 still work and push is skipped.
@@ -23,13 +26,15 @@ import ipaddress
 import json
 import logging
 import os
+from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import urlsplit
 
 from sqlalchemy import delete, select
 
 from backend.database.db import async_session_factory
-from backend.database.models import Notification, PushSubscription
+from backend.database.models import Notification, PushSubscription, Tenant, User
+from backend.services.notification_prefs import always_pushed, load_prefs, push_allowed
 
 logger = logging.getLogger("amphive.notifications")
 
@@ -179,9 +184,11 @@ async def notify(
     except Exception:
         logger.exception(f"Socket.io delivery failed for notification {payload.get('id')}")
 
-    # Web Push fan-out (skipped when VAPID keys are not configured).
+    # Web Push fan-out (skipped when VAPID keys are not configured, or when
+    # the user's prefs / quiet hours mute this type).
     try:
-        await _push_to_user(user_id, payload)
+        if push_enabled() and await _push_wanted(user_id, type, severity):
+            await _push_to_user(user_id, payload)
     except Exception:
         logger.exception(f"Web push fan-out failed for notification {payload.get('id')}")
 
@@ -190,6 +197,28 @@ async def notify(
 
 def push_enabled() -> bool:
     return bool(VAPID_PRIVATE_KEY)
+
+
+async def _push_wanted(user_id: int, type: str, severity: str) -> bool:
+    """[Notification prefs] Whether this notification should be pushed. The
+    allowlist is decided first, with no DB access, so a safety or billing
+    push never depends on reading prefs. Any read failure pushes (defaults)."""
+    if always_pushed(type, severity):
+        return True
+    try:
+        async with async_session_factory() as db:
+            row = (await db.execute(
+                select(User.notification_prefs, Tenant.timezone)
+                .outerjoin(Tenant, Tenant.id == User.tenant_id)
+                .where(User.id == user_id)
+            )).first()
+    except Exception:
+        logger.exception(f"Could not read notification prefs for user {user_id}; pushing")
+        return True
+    raw, tz_name = (row[0], row[1]) if row is not None else (None, None)
+    # Late import: keeps this widely imported module from loading pricing at import time.
+    from backend.services.pricing import _zone
+    return push_allowed(type, severity, load_prefs(raw), datetime.now(timezone.utc), _zone(tz_name))
 
 
 async def _push_to_user(user_id: int, payload: dict) -> None:
