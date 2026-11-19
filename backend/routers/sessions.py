@@ -33,6 +33,7 @@ from backend.schemas import (
     DisputeCreateRequest,
     DisputeResponse,
     QueueChargeRequest,
+    ReadyByRequest,
     SessionLimitsUpdateRequest,
     SessionStartRequest,
     SessionStopRequest,
@@ -1068,6 +1069,51 @@ async def queue_charge(
     )
 
     return _queued_charge_response(qc, tz_name)
+
+
+@router.post("/api/sessions/queue/ready-by", status_code=201)
+async def queue_ready_by(
+    req: ReadyByRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    [F6R] "Ready by T": plan the cheapest ONE contiguous window that ends by
+    ``ready_by`` (services/ready_by.py) and create it through POST /queue with
+    ``not_before``, so the row and every admission check (powered idle plug,
+    opening hours, reservations, another driver's schedule, balance floor,
+    queue cap) are exactly the scheduled start's. Nothing here switches a plug
+    on: the session reaper starts it at ``not_before`` like any scheduled
+    charge. 409 ``ready_by_unreachable`` (with ``earliest_finish_at`` when
+    there is one) when the deadline cannot be met.
+    """
+    from backend.routers.plugs import ensure_plug_group_access
+    from backend.services.ready_by import plan_ready_by
+
+    plug = (await db.execute(select(Plug).where(Plug.id == req.plug_id))).scalar_one_or_none()
+    if not plug:
+        raise HTTPException(status_code=404, detail=f"Plug {req.plug_id} not found.")
+    await ensure_plug_group_access(db, plug, user)
+    plan = await plan_ready_by(
+        db, plug, user.id, req.ready_by, req.max_kwh, req.max_duration_seconds
+    )
+    queued = await queue_charge(
+        QueueChargeRequest(
+            plug_id=plug.id,
+            max_kwh=req.max_kwh,
+            max_duration_seconds=plan["max_duration_seconds"],
+            auto_stop_when_full=req.auto_stop_when_full,
+            not_before=plan["not_before"],
+        ),
+        user,
+        db,
+    )
+    return {
+        **queued,
+        "planned_finish_at": plan["finish_at"].isoformat(),
+        "estimated_cost_coins": plan["cost_coins"],
+        "ready_by": plan["ready_by"].isoformat(),
+    }
 
 
 @router.get("/api/sessions/queued")

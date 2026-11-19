@@ -207,6 +207,26 @@ class QueueChargeRequest(BaseModel):
         return v
 
 
+class ReadyByRequest(BaseModel):
+    """[F6R] Body for POST /api/sessions/queue/ready-by: plan the cheapest ONE
+    contiguous window that ends by ``ready_by`` and schedule it through the
+    normal scheduled-start path. Needs an energy or time target (the limit the
+    scheduled row carries). ``ready_by`` must carry a UTC offset, like
+    ``not_before``."""
+    plug_id: int
+    ready_by: datetime
+    max_duration_seconds: Optional[int] = Field(default=None, gt=0, le=86400)
+    max_kwh: Optional[float] = Field(default=None, gt=0, le=100.0)
+    auto_stop_when_full: bool = False
+
+    @field_validator("ready_by")
+    @classmethod
+    def _aware_ready_by(cls, v):
+        if v.tzinfo is None:
+            raise ValueError("ready_by must include a UTC offset")
+        return v
+
+
 class SessionLimitsUpdateRequest(BaseModel):
     """PATCH a RUNNING session's stop conditions ("start now, set the target
     later"). Both optional — send whichever you're changing; the same bounds as
