@@ -12,7 +12,7 @@ safety / ops emit points. Each call:
      async_session_factory, so callers' transactions stay untouched),
   2. emits a Socket.io "notification" event to the user's room (live UI),
   3. fans out Web Push to the user's stored browser subscriptions
-     (best-effort, in a thread — pywebpush is blocking), unless the user's
+     (best-effort, in a thread: pywebpush is blocking), unless the user's
      notification prefs or quiet hours mute this type. Steps 1 and 2 are
      never gated, and the non-suppressible allowlist (safety, faults,
      billing receipts; services/notification_prefs.py) always pushes.
