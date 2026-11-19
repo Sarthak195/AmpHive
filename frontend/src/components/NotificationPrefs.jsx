@@ -7,7 +7,8 @@
  * Only push is affected: every notice still lands in the bell feed. Safety,
  * fault and billing notices (and anything marked warning or critical) always
  * push, even in quiet hours, so they have no toggle here. Times are in the
- * zone the server reports (the charger owner's timezone). A read-only
+ * zone the server reports (the account's tenant zone; a driver has no
+ * tenant, so it is the platform default, Asia/Kolkata). A read-only
  * cpo_viewer cannot save, so the panel is not shown to one.
  */
 

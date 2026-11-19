@@ -44,14 +44,17 @@ If the prefs cannot be read, the push goes out (defaults).
 - The personal data export includes `account.notification_prefs`.
 
 Quiet hours are wall-clock times in the user's tenant timezone (resolved with
-`services/pricing._zone`, falling back to `Asia/Kolkata`, then UTC). The window
+`services/pricing._zone`, falling back to `Asia/Kolkata`, then UTC). Drivers
+are created with no tenant, so a driver's quiet hours are always read in the
+default zone (`pricing.DEFAULT_TZ`, `Asia/Kolkata`), never a charger owner's
+zone; the API returns that zone name as `timezone`. The window
 is half-open `[start, end)`; start later than end wraps across midnight.
 
 ## The new notices
 
 | type | when | where |
 |---|---|---|
-| `session_started` | once per session, after the ON publish succeeds | `services/session_start.begin_active_session` (every start path; a queued auto-start also gets `queued_charge_started`) |
+| `session_started` | once per session, after the ON publish succeeds | `services/session_start.begin_active_session` (every start path; a queued auto-start also gets `queued_charge_started`; a charge-routine occurrence gets neither, only the mandatory `routine_started`, integrated on `release/2026-11-17-w3`) |
 | `nearly_done` | once, first live sample with `0.9 * max_kwh <= energy < max_kwh` | `services/mqtt/session_events.py` via `_persist_telemetry` |
 | `power_dropped` | once, after the session peaked at `CHARGE_FULL_ACTIVE_W` or more, live power stays below 50% of the peak and at or above `CHARGE_FULL_IDLE_W` for 3 continuous minutes | same |
 
@@ -61,7 +64,11 @@ the `power_dropped` timer, so it never duplicates "Your car looks fully
 charged". A relay-OFF frame or a gap longer than the reaper's stale window also
 restarts it. When the same frame auto-stops the session (wallet or hold
 exhausted, energy or time limit), neither notice is sent, and neither is the
-"looks fully charged" handling: the driver already has the stop receipt.
+"looks fully charged" handling: the driver already has the stop receipt. Once
+the charge-complete detector has judged the session fully charged (that frame
+or an earlier one), neither detector is fed again for that session, so
+"Almost done" or "slowing down" never follows "Your car looks fully charged"
+(`ChargeFullDetector.has_fired`, integrated on `release/2026-11-17-w3`).
 
 The per-session dedupe is in memory and keyed by plug. A backend restart clears
 it, so a session can see each notice once more at most.

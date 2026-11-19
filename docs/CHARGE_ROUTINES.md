@@ -42,6 +42,13 @@ hold, billing and the start, exactly as for a one-off scheduled charge.
    `routine_started` (with the session id); EXPIRED or FAILED counts a
    failure; CANCELLED counts nothing. The third failure in a row turns the
    routine off and sends `routine_disabled`. Re-enabling resets the count.
+   `routine_started` is the occurrence's only start notice: the queued-start
+   sweep sees that a routine owns the row (`last_queued_charge_id`) and sends
+   neither `queued_charge_started` nor C7's `session_started`
+   (`begin_active_session(announce_start=False)`). On a plug outside its
+   opening hours (C4) the row stays WAITING until the plug opens or the row's
+   TTL lapses; that EXPIRED row counts as one failure. (Both integrated on
+   `release/2026-11-17-w3`.)
 
 Creating a routine, re-enabling it, or editing its days or start time stamps
 an occurrence whose start already passed (within the window), so a routine
