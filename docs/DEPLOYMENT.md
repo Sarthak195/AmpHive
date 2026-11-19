@@ -515,7 +515,7 @@ backfill and no new index on a hot table.
    create the demo viewer with
    `docker exec -it <backend container> python -m backend.seed_cpo_viewer --tenant-id <owner tenant id> --email <demo address>`
    (prints the password once; re-running resets it and signs out old
-   sessions; never run so far). Also optional: the wave 1 F5 host cron above.
+   sessions; run once on 2026-11-19, see "Features wave 3"). Also optional: the wave 1 F5 host cron above.
 6. **Using F12:** redeem from a DRIVER-role account; the issuing tenant needs
    unsettled earnings in its pool.
 7. **OCPP bridge:** nothing to deploy on the VM. It runs on a laptop with
@@ -530,7 +530,13 @@ backfill and no new index on a hot table.
    --run-only ... --drop-to-zero-after 600` (or `--taper-after 600`), then
    wait the 5 min grace plus `CHARGE_FULL_MINUTES` after the drop.
 
-### Features wave 3 (2026-11-19, built on `release/2026-11-17-w3`, not deployed)
+### Features wave 3 (2026-11-19, built on `release/2026-11-17-w3`, deployed 2026-11-19)
+
+*Executed 2026-11-19 (PR #153, merge `0047a2b`) by the manual migration path: backend 10:46Z (alembic `0047_promo_codes` to `0050_charge_routines` at boot, healthy in about 12 s; `charge_routines` table and the 5 new columns present; a 150 s soak covering the 60 s routine reaper showed 0 tracebacks, errors or warnings), frontend 10:53Z (thin kit). DB backup before it: `amphive-20261119-104547.dump`. Production now: backend and frontend both `0047a2b`, alembic `0050_charge_routines`.*
+
+*Rollback:* backend `./rollback_backend.sh 0047a2b` (tag `pre-0047a2b`, the same image as `rollback-0047a2b-m0050`: the `3e7d26c` code plus the three 0048-0050 migration files, so it boots on 0050). `live-3e7d26c`, `pre-3e7d26c` and every older `pre-*` image can NOT boot on 0050. Frontend `./rollback_frontend.sh 0047a2b` (`3e7d26c` dist). The deploy kit (outside the repo) now defaults `EXPECTED_ALEMBIC` to `0050_charge_routines`. Logged-in read-only smoke passed in production: notification prefs, routines, an estimate on plug 1, and the commissioning checklist (all six checks pass on the real gateway). The demo viewer was seeded afterwards (one `cpo_viewer` on tenant 1, via `python -m backend.seed_cpo_viewer` in the backend container).
+
+*Plan as written before the deploy:*
 
 Production runs `3e7d26c` (backend and frontend, waves 1 and 2, deployed
 2026-11-19) at alembic `0047_promo_codes`. `release/2026-11-17-w3` contains

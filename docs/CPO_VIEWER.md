@@ -78,6 +78,8 @@ hides every control marked `data-write`. The API client turns the
 
 ## Creating the demo login
 
+Status: seeded in production on 2026-11-19 (one `cpo_viewer` on tenant 1, the owner's tenant). Its credentials are kept outside the repo. Verified in production as that viewer: plug `local_ip` and coordinates null, gateway log text replaced by the placeholder, no raw email or IP in sessions, events, audit, meter or promo responses, the commissioning checklist readable with no IP, and a write attempt answers 403 `read_only_demo`. Still open, viewer-adjacent: public plug reviews show the first word of `full_name` to everyone.
+
 Operator only, after migration `0045_cpo_viewer_role` is applied:
 
 ```

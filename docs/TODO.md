@@ -11,25 +11,25 @@ been fixed by the 2026-07-08…11 work — see the shipped sections below).*
 
 ---
 
-## 2026-11-19 features wave 3 (built 2026-11-19 on release/2026-11-17-w3, not deployed)
+## 2026-11-19 features wave 3 (built 2026-11-19 on release/2026-11-17-w3, deployed 2026-11-19)
 
-- [x] C10 gateway commissioning checklist (`GET /api/cpo/gateways/{id}/selftest`, CPO gateway Diagnostics drawer). (built 2026-11-19 on release/2026-11-17-w3, not deployed)
-- [x] C3 pre-start charge estimate in the charge setup modal (`GET /api/plugs/{id}/estimate`), clamped by plug hours. (built 2026-11-19 on release/2026-11-17-w3, not deployed)
-- [x] C7 notification preferences and quiet hours (push toggles for session_started, nearly_done, power_dropped). (built 2026-11-19 on release/2026-11-17-w3, not deployed)
-- [x] C4 plug opening hours, max session length, amenities and access note. (built 2026-11-19 on release/2026-11-17-w3, not deployed)
-- [x] C5 recurring weekly charge routines. (built 2026-11-19 on release/2026-11-17-w3, not deployed)
-- [x] Integration: a routine start sends only `routine_started`; the estimate applies the plug-hours clamp; no nearly_done / power_dropped after F1 judged the car full; the plugs/cpo import cycle; selftest labels masked for a viewer. (built 2026-11-19 on release/2026-11-17-w3, not deployed)
-- [ ] Deploy wave 3 (migration deploy 0048 to 0050 on top of prod `3e7d26c` at 0047; waves 1 and 2 are deployed; tag the rollback image first, built from `live-3e7d26c`, see docs/DEPLOYMENT.md "Features wave 3").
+- [x] C10 gateway commissioning checklist (`GET /api/cpo/gateways/{id}/selftest`, CPO gateway Diagnostics drawer). (built 2026-11-19 on release/2026-11-17-w3, deployed 2026-11-19)
+- [x] C3 pre-start charge estimate in the charge setup modal (`GET /api/plugs/{id}/estimate`), clamped by plug hours. (built 2026-11-19 on release/2026-11-17-w3, deployed 2026-11-19)
+- [x] C7 notification preferences and quiet hours (push toggles for session_started, nearly_done, power_dropped). (built 2026-11-19 on release/2026-11-17-w3, deployed 2026-11-19)
+- [x] C4 plug opening hours, max session length, amenities and access note. (built 2026-11-19 on release/2026-11-17-w3, deployed 2026-11-19)
+- [x] C5 recurring weekly charge routines. (built 2026-11-19 on release/2026-11-17-w3, deployed 2026-11-19)
+- [x] Integration: a routine start sends only `routine_started`; the estimate applies the plug-hours clamp; no nearly_done / power_dropped after F1 judged the car full; the plugs/cpo import cycle; selftest labels masked for a viewer. (built 2026-11-19 on release/2026-11-17-w3, deployed 2026-11-19)
+- [x] Deploy wave 3 (migration deploy 0048 to 0050). Done 2026-11-19: PR #153, merge 0047a2b, prod alembic 0050_charge_routines; see docs/DEPLOYMENT.md "Features wave 3".
 - [ ] C10: add `wifi_rssi` to the firmware periodic status message so the checklist can show a live signal reading instead of the boot-time value.
 - [ ] C10 nit: `check_firmware` reports "Running X, the newest release" even when the gateway is ahead of every active release (a dev build).
 - [ ] C10 nit: the checklist's `run()` has no cancellation or sequence guard, so a slow earlier response can overwrite a newer one if the gateway changes or Re-check is pressed mid-request.
 - [ ] C3 nit: the estimate route's own validation is untested, and the history query is exercised only through mocks.
-- [x] C7 x scheduled start: a one-off scheduled or outage-queue auto-start sent no push in quiet hours (`queued_charge_started` was info and not allowlisted, unlike `routine_started`). Added to `ALWAYS_PUSH_TYPES`; `rate_changed` deliberately stays muted by quiet hours (forward-only info; the always-pushed `session_stopped` receipt carries the totals). (fix round 2026-11-19 on release/2026-11-17-w3, not deployed)
-- [x] C4 x scheduled create: `POST /api/sessions/queue` with `not_before` now refuses a closed slot with 409 `plug_closed` (same clamp as a start); routine create and a PATCH that changes days, start time or turns it on refuse a start time that is closed on any selected day. (fix round 2026-11-19 on release/2026-11-17-w3, not deployed)
+- [x] C7 x scheduled start: a one-off scheduled or outage-queue auto-start sent no push in quiet hours (`queued_charge_started` was info and not allowlisted, unlike `routine_started`). Added to `ALWAYS_PUSH_TYPES`; `rate_changed` deliberately stays muted by quiet hours (forward-only info; the always-pushed `session_stopped` receipt carries the totals). (fix round 2026-11-19 on release/2026-11-17-w3, deployed 2026-11-19)
+- [x] C4 x scheduled create: `POST /api/sessions/queue` with `not_before` now refuses a closed slot with 409 `plug_closed` (same clamp as a start); routine create and a PATCH that changes days, start time or turns it on refuse a start time that is closed on any selected day. (fix round 2026-11-19 on release/2026-11-17-w3, deployed 2026-11-19)
 - [ ] C4 nit: an outage-queue row held WAITING past its TTL only because the plug was closed expires with "Power didn't return in time", which names the wrong cause. A routine whose plug hours a CPO edits after creation still fails its closed occurrences (three warnings, then disabled); no re-check runs on an hours edit.
 - [ ] C7: consider toggles for other info types (rate_changed, plug_available, reservation_*, the `queued` creation confirmation), which today are muted only by quiet hours; consider persisting the nearly_done / power_dropped dedupe if restart repeats become noticeable.
 - [ ] C7: a plain queued (non-routine) auto-start still sends both `queued_charge_started` and `session_started` (by the builder's design); merge them if it reads as a duplicate.
-- [x] C7 nit: the docs said quiet hours use "the charger owner's" / "the user's tenant" zone, which is wrong for drivers (created with `tenant_id` NULL, so always `pricing.DEFAULT_TZ`). Docs and the component comment corrected at integration; the behaviour is unchanged. (built 2026-11-19 on release/2026-11-17-w3, not deployed)
+- [x] C7 nit: the docs said quiet hours use "the charger owner's" / "the user's tenant" zone, which is wrong for drivers (created with `tenant_id` NULL, so always `pricing.DEFAULT_TZ`). Docs and the component comment corrected at integration; the behaviour is unchanged. (built 2026-11-19 on release/2026-11-17-w3, deployed 2026-11-19)
 - [ ] C4 nit: `hoursPatch` (CpoChargers) compares `JSON.stringify(plug.opening_hours)` with the form windows in key order days,start,end, but Postgres JSONB returns keys sorted by length ({end, days, start}), so every save of a plug that has hours re-sends `opening_hours` (harmless, the value is equal). The vitest round-trip case passes only because its fixture uses insertion order.
 - [ ] C5 known limit (accepted): `gate_notified` clears only when a row is actually queued. If the gate comes back on, the next occurrences are skipped for another reason (the driver's own WAITING row, or a counted failure), and the gate then goes off again, the driver gets no notice for that second outage.
 - [ ] C5 test gap: no local test covers the routine row lock or the IntegrityError savepoint branch; removing `with_for_update(skip_locked=True)` from `_materialize_one`, or the `except IntegrityError` path, leaves every non-DB test green. Only the CI-only `test_db_tick_across_midnight_and_double_tick_queue_one_row` covers concurrency, and nothing covers the savepoint branch.
@@ -39,7 +39,7 @@ been fixed by the 2026-07-08…11 work — see the shipped sections below).*
 ## 2026-11-17 features wave 2 (built 2026-11-17 on release/2026-11-17-w2, deployed 2026-11-19)
 
 - [x] F1 charge-complete detection: "looks fully charged" notification and opt-in auto-stop. (built 2026-11-17 on release/2026-11-17-w2, deployed 2026-11-19)
-- [x] F10 read-only CPO viewer role (`cpo_viewer`, demo login seed). (built 2026-11-17 on release/2026-11-17-w2, deployed 2026-11-19)
+- [x] F10 read-only CPO viewer role (`cpo_viewer`, demo login seed). (built 2026-11-17 on release/2026-11-17-w2, deployed 2026-11-19; demo viewer seeded 2026-11-19 on tenant 1, credentials kept outside the repo)
 - [x] F7 personal read-only API token and `GET /api/me/meter` (Home Assistant, evcc). (built 2026-11-17 on release/2026-11-17-w2, deployed 2026-11-19)
 - [x] F12 promo codes (CPO issue/list/disable, driver redeem, funded from the offline top-up pool). (built 2026-11-17 on release/2026-11-17-w2, deployed 2026-11-19)
 - [x] OCPP 1.6J read-only virtual charge-point bridge (`tools/ocpp_bridge`). (built 2026-11-17 on release/2026-11-17-w2, deployed 2026-11-19)
