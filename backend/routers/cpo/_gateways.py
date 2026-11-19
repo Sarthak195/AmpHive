@@ -457,6 +457,8 @@ async def cpo_gateway_selftest(
 
     result = build_selftest(gateway, plugs, boot_event, plug_events, active_versions, now)
     for check in result["checks"]:
+        # A plug check's label carries the plug name (operator free text).
+        check["label"] = redact_for(user, check["label"])
         check["detail"] = redact_for(user, check["detail"])
         check["fix_hint"] = redact_for(user, check["fix_hint"])
     return result

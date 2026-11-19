@@ -161,6 +161,26 @@ def test_wave2_write_routes_are_in_the_viewer_walk():
     assert not expected & (PUBLIC_WRITES | VIEWER_EXEMPT)
 
 
+def test_wave3_write_routes_are_in_the_viewer_walk():
+    """Integration pin (release/2026-11-17-w3): the write routes added or
+    changed by C7 (notification prefs), C5 (charge routines) and C4 (plug
+    hours: the CPO plug edit, the limits raise cap and the booking refusal)
+    are reached by the route walk, so each answers 403 read_only_demo for a
+    viewer. C10 (selftest) and C3 (estimate) add GET routes only."""
+    walked = {(m, p) for m, p, _ in _write_routes()}
+    expected = {
+        ("PUT", "/api/me/notification-prefs"),  # C7
+        ("POST", "/api/me/routines"),  # C5
+        ("PATCH", "/api/me/routines/{routine_id}"),  # C5
+        ("DELETE", "/api/me/routines/{routine_id}"),  # C5
+        ("PUT", "/api/cpo/plugs/{plug_id}"),  # C4 hours and access fields
+        ("PATCH", "/api/sessions/{session_id}/limits"),  # C4 cap on a raise
+        ("POST", "/api/reservations"),  # C4 closed-slot refusal
+    }
+    assert expected <= walked, expected - walked
+    assert not expected & (PUBLIC_WRITES | VIEWER_EXEMPT)
+
+
 def test_viewer_may_sign_out(viewer_client):
     client, _ = viewer_client(_viewer())
     resp = client.post("/api/auth/logout")
