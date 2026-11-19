@@ -13,8 +13,9 @@ rig from test_reservations.py.
    (ON, OFF or SET_INTERVAL) is ever published.
 2. Admission and scoping, through the handlers directly: another driver's
    reservation blocks a start while the holder's own start goes through; a
-   closed plug (opening hours) blocks; a second charge point (another tenant)
-   can neither meter nor stop the first one's transaction; and the app's own
+   private group blocks a non-member; a closed plug (opening hours) blocks;
+   a second charge point (another tenant) can neither meter nor stop the
+   first one's transaction; and the app's own
    walk-up start refuses an OCPP connector (its backing gateway is never
    live), so a charge point's plugs only start through StartTransaction.
 """
@@ -32,6 +33,7 @@ from starlette.testclient import TestClient, WebSocketDenialResponse
 
 from backend.tests.test_reservations import (  # noqa: F401 (factory is a fixture)
     TEST_DATABASE_URL,
+    _seed_private_group,
     _seed_reservation,
     _seed_tenant,
     _seed_user,
@@ -299,9 +301,20 @@ async def test_admission_gates_and_charge_point_scoping(factory, rig, monkeypatc
     assert session.status == SessionStatus.ACTIVE
     assert session.energy_kwh == 0.0
 
+    # Private group: a non-member is blocked.
+    group_id = await _seed_private_group(factory, t2)
+    async with factory() as db:
+        plug = (await db.execute(select(Plug).where(Plug.id == plug2))).scalar_one()
+        plug.group_id = group_id
+        await db.commit()
+    assert await adapter.handle_start(cp2, start("TAG-A")) == {
+        "transactionId": 0, "idTagInfo": {"status": "Blocked"},
+    }
+
     # Opening hours: CP2's connector is closed today, so the start is blocked.
     async with factory() as db:
         plug = (await db.execute(select(Plug).where(Plug.id == plug2))).scalar_one()
+        plug.group_id = None
         plug.opening_hours = _closed_today_hours()
         await db.commit()
     assert await adapter.handle_start(cp2, start("TAG-A")) == {

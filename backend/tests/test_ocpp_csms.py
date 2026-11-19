@@ -9,9 +9,11 @@
   invalid payloads, and a validation error never echoes the idTag.
 - The WebSocket layer, driven by a Starlette TestClient simulator against a
   small app that includes only the OCPP router: subprotocol required, HTTP
-  Basic required (wrong password, wrong username, no header), boot accepted,
-  authorize accepted and blocked, oversized frame closed with 1009, message
-  rate limit closed with 1008.
+  Basic required (wrong password, wrong username, no header), handshake and
+  connection caps, boot accepted, authorize accepted and blocked, oversized
+  frame closed with 1009, message rate limit closed with 1008.
+- begin_active_session and finalize_charging_session with actuate=False
+  publish no MQTT command.
 
 The full transaction that bills through the ledger, the admission gates and
 the per-charge-point scoping are DB-gated (test_ocpp_csms_db.py).
@@ -182,13 +184,24 @@ def _call(ws, action, payload, uid="m1"):
     return json.loads(ws.receive_text())
 
 
-def test_missing_subprotocol_is_refused(client):
+@pytest.mark.parametrize("subprotocols", [(), ("ocpp2.0.1",)])
+def test_missing_or_wrong_subprotocol_is_refused(client, subprotocols):
     from starlette.testclient import WebSocketDenialResponse
 
     with pytest.raises(WebSocketDenialResponse) as exc:
-        with _connect(client, subprotocols=()):
+        with _connect(client, subprotocols=subprotocols):
             pass
     assert exc.value.status_code == 400
+
+
+def test_connection_cap_503(client, monkeypatch):
+    from starlette.testclient import WebSocketDenialResponse
+
+    monkeypatch.setattr(ocpp_router, "MAX_CONNECTIONS", 0)
+    with pytest.raises(WebSocketDenialResponse) as exc:
+        with _connect(client):
+            pass
+    assert exc.value.status_code == 503
 
 
 @pytest.mark.parametrize("headers", [
@@ -276,3 +289,86 @@ def test_start_refused_for_unknown_connector_publishes_nothing(client, monkeypat
         })
     assert reply[2] == {"transactionId": 0, "idTagInfo": {"status": "Invalid"}}
     mgr.send_plug_command.assert_not_called()
+
+
+# --- the shared start and finalize helpers publish nothing with actuate=False
+
+@pytest.mark.asyncio
+async def test_begin_active_session_without_actuation_publishes_nothing():
+    from decimal import Decimal
+    from unittest.mock import patch
+
+    from backend.services import session_start
+
+    db = MagicMock()
+    db.commit = AsyncMock()
+    db.refresh = AsyncMock()
+    user = MagicMock(id=3, coin_balance=Decimal("500"))
+    plug = MagicMock(id=7, gateway_id="ocpp-CP1", local_ip="ocpp",
+                     opening_hours=None, max_session_minutes=None)
+    plug.name = "CP1 #1"
+    mqtt = MagicMock()
+    interval = AsyncMock()
+    store = MagicMock()
+    with patch.object(session_start, "check_circuit_admission", AsyncMock()), \
+         patch.object(session_start, "resolve_rate_window",
+                      AsyncMock(return_value=(Decimal("5.00"), None))), \
+         patch.object(session_start, "available_balance", AsyncMock(return_value=Decimal("500"))), \
+         patch.object(session_start, "max_rate_over_window",
+                      AsyncMock(return_value=Decimal("5.00"))), \
+         patch.object(session_start, "set_plug_telemetry_interval", interval), \
+         patch.object(session_start.state, "mqtt_manager", mqtt), \
+         patch.object(session_start.state, "telemetry_store", store), \
+         patch("backend.services.socketio_manager.emit_plug_status", AsyncMock()), \
+         patch("backend.services.notifications.notify", AsyncMock()):
+        await session_start.begin_active_session(
+            db, user, plug, MagicMock(tenant_id=1), max_kwh=None,
+            max_duration_seconds=None, actuate=False,
+        )
+    mqtt.send_plug_command.assert_not_called()
+    interval.assert_not_awaited()
+    store.start_session.assert_called_once()
+    db.add.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_finalize_without_actuation_bills_but_publishes_nothing(monkeypatch):
+    import contextlib
+    from decimal import Decimal
+    from unittest.mock import patch
+
+    import backend.services.session_lifecycle as sl_mod
+    from backend import state as state_module
+    from backend.tests.test_session_lifecycle import (
+        _active_session,
+        _plug,
+        _s_one,
+        _s_one_or_none,
+        _seq_db,
+    )
+
+    db = _seq_db(_s_one_or_none(MagicMock()), _s_one_or_none(_active_session()), _s_one(_plug()))
+    mqtt = MagicMock()
+    interval = AsyncMock()
+    monkeypatch.setattr(state_module, "mqtt_manager", mqtt)
+    monkeypatch.setattr(state_module, "telemetry_store", MagicMock())
+    monkeypatch.setattr(sl_mod, "set_plug_telemetry_interval", interval)
+    monkeypatch.setattr(
+        sl_mod, "debit_wallet_clamped",
+        AsyncMock(return_value=(Decimal("10.00"), Decimal("90.00"))),
+    )
+    with contextlib.ExitStack() as stack:
+        for target, mock in [
+            ("backend.services.socketio_manager.emit_plug_status", AsyncMock()),
+            ("backend.services.notifications.notify", AsyncMock()),
+            ("backend.services.plug_watch.notify_watchers_plug_available", AsyncMock(return_value=0)),
+            ("backend.services.capacity.notify_capacity_available", AsyncMock()),
+            ("backend.services.billing_emails.send_session_bill", MagicMock(return_value=None)),
+            ("backend.services.billing_emails.schedule", MagicMock()),
+        ]:
+            stack.enter_context(patch(target, mock))
+        receipt = await sl_mod.finalize_charging_session(db, 99, reason="ocpp: Local", actuate=False)
+
+    assert receipt["coins_spent"] == 10.0
+    mqtt.send_plug_command.assert_not_called()
+    interval.assert_not_awaited()
