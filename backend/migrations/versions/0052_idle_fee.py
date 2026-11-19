@@ -11,7 +11,8 @@ charging_sessions:
                     start (NULL = no fee), so a tariff edit never reprices a
                     running session
   idle_started_at   an open stretch of low draw after the "looks full" notice
-  idle_seconds      closed parts of that stretch (NOT NULL DEFAULT 0)
+  idle_seconds      closed parts of that stretch (NOT NULL DEFAULT 0; -1 =
+                    voided, the car drew again after the signal)
   idle_fee_coins    what finalize collected (also part of coins_spent)
 All written on transitions only, never per frame.
 

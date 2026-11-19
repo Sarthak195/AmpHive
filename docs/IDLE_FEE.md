@@ -36,15 +36,19 @@ All of these, measured on live telemetry (`services/idle_fee.py`):
    closed at the earlier of the plug's last live frame and the session's last
    attributed frame, never at the stop time.
 
-A frame at or above `CHARGE_FULL_IDLE_W` means the car is drawing again (a
-car-side pause can look full), so the idle time resets to zero and the next
-idle stretch gets the full grace again. A relay-OFF frame only pauses it.
+A relay-ON frame at or above `CHARGE_FULL_IDLE_W` after the "looks full"
+signal means the car is drawing again (a car-side pause can look full), so idle
+was not continuous since that signal. The session is then voided for the fee
+for good (`idle_seconds = -1`, written once): the F1 detector and its notice
+fire once per session, so a later idle stretch would have no fresh signal and
+no notice, and is never billed. A relay-OFF frame only pauses a stretch.
 
 A session whose driver ticked "Stop automatically when the car is full" never
 accrues an idle fee, and nothing is reserved for one.
 
 State lives on the session row and is written on transitions only
-(`idle_started_at` opens a stretch, `idle_seconds` banks closed parts), on the
+(`idle_started_at` opens a stretch, `idle_seconds` banks closed parts, -1
+marks a voided session), on the
 row the telemetry path already holds locked. No per-frame writes.
 
 ## Notice
@@ -80,12 +84,18 @@ The receipt, the session detail route and the stop notification carry
 ## Known limits
 
 - A car-side pause (scheduled charging, battery conditioning) can look full.
-  The 15-minute minimum grace and the reset on renewed draw limit this, and the
-  fee can be disputed, but a pause longer than the grace is billed as idle.
+  The 15-minute minimum grace and the void on renewed draw limit this, and the
+  fee can be disputed, but a pause longer than the grace that ends with the
+  driver stopping the session (no renewed draw seen) is billed as idle.
 - Once a session stops, the relay is OFF and the plug reads 0 W, so a car left
   on the bay after the session ends cannot be detected and is never charged.
 - The live session screen shows the plug's current terms; a CPO edit mid-session
   shows there although the session bills its start snapshot.
 - The GST invoice has one line (energy); its total includes the idle fee.
+- A weekly routine (C5) or a scheduled charge snapshots the plug's idle terms
+  when the run actually starts. The routine form shows the plug's terms when the
+  routine is saved, but a fee a CPO adds or raises later is not shown again
+  before each run; the driver learns of it from the terms on the live
+  session screen and the idle notice, and can dispute it.
 - An unlimited session (no energy limit) reserves the available balance, so a
   session that spends its whole hold on energy has nothing left for the fee.

@@ -13,9 +13,12 @@ What counts as idle (all of it measured, never assumed):
     PLUG_POWER_STALE_SEC (gateway offline, plug silent) is never counted, and
     an open stretch is closed at its last idle evidence at finalize (idle_end), so a
     reaper stop for lost telemetry bills nothing for the silent tail.
-A frame at or above CHARGE_FULL_IDLE_W means the car is drawing again (a
-car-side pause can look full), so the stretch resets to zero and a later idle
-stretch gets the whole grace again. A relay-OFF frame only pauses it.
+A relay-ON frame at or above CHARGE_FULL_IDLE_W after the "looks full" signal
+means the car is drawing again (a car-side pause can look full), so idle was
+not continuous since that signal: the session is voided for the fee for good
+(idle_seconds = IDLE_VOID, written once). The F1 detector and its notice fire
+once per session, so a later idle stretch would have no fresh signal and no
+notice; it is never billed. A relay-OFF frame only pauses the stretch.
 
 A session whose driver opted into auto_stop_when_full never accrues anything.
 
@@ -45,6 +48,15 @@ logger = logging.getLogger("amphive.api")
 IDLE_GRACE_FLOOR_MIN = 15
 
 IdleTerms = Tuple[int, Decimal, Decimal]  # (grace_min, per_min, cap)
+
+# idle_seconds sentinel: the car drew again after the "looks full" signal, so
+# this session never owes an idle fee (see the module docstring).
+IDLE_VOID = -1
+
+
+def _voided(session) -> bool:
+    seconds = session.idle_seconds
+    return isinstance(seconds, int) and not isinstance(seconds, bool) and seconds < 0
 
 
 def _utc(dt: Optional[datetime]) -> Optional[datetime]:
@@ -114,6 +126,8 @@ def track_idle(session, now: datetime, watts: float, relay_on: bool,
 
     if session.full_notified_at is None or session_terms(session) is None:
         return
+    if _voided(session):
+        return
     now = _utc(now)
     started = _utc(session.idle_started_at)
     prev = _utc(prev_live_at)
@@ -129,10 +143,10 @@ def track_idle(session, now: datetime, watts: float, relay_on: bool,
         session.idle_started_at = started = None
 
     if relay_on and watts >= CHARGE_FULL_IDLE_W:
-        # The car is drawing again: it was not done. Start over.
-        if started is not None or session.idle_seconds:
-            session.idle_started_at = None
-            session.idle_seconds = 0
+        # The car is drawing again: it was not done, so idle was not
+        # continuous since the signal. Void the fee for this session (once).
+        session.idle_started_at = None
+        session.idle_seconds = IDLE_VOID
         return
     if not relay_on:
         # Not a reading of the car: pause.
@@ -158,7 +172,10 @@ def idle_end(session, plug) -> Optional[datetime]:
 
 def idle_total_seconds(session, last_live_at: Optional[datetime]) -> int:
     """Banked idle seconds plus the open stretch closed at the plug's last
-    live frame (never at now, so a silent tail is never billed)."""
+    live frame (never at now, so a silent tail is never billed). 0 for a
+    session voided by a renewed draw."""
+    if _voided(session):
+        return 0
     total = int(session.idle_seconds or 0)
     started = _utc(session.idle_started_at)
     last = _utc(last_live_at)
@@ -170,9 +187,10 @@ def idle_total_seconds(session, last_live_at: Optional[datetime]) -> int:
 def idle_fee_due(session, last_live_at: Optional[datetime]) -> Decimal:
     """The fee before the hold and wallet clamps: whole idle minutes past the
     grace times the per-minute rate, at most the cap. 0 when the session has
-    no fee, was never judged full, or the driver opted into auto-stop."""
+    no fee, was never judged full, drew again after that (voided), or the
+    driver opted into auto-stop."""
     terms = session_terms(session)
-    if terms is None or session.full_notified_at is None:
+    if terms is None or session.full_notified_at is None or _voided(session):
         return ZERO_MONEY
     grace_min, per_min, cap = terms
     billable_min = max(0, idle_total_seconds(session, last_live_at) - grace_min * 60) // 60

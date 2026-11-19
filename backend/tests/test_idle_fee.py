@@ -4,7 +4,7 @@
 
 Tier 1 (DB-free, runs everywhere): terms resolution, the grace boundary, the
 cap, the idle clock's transitions (stale telemetry pauses, renewed draw
-resets, relay OFF pauses), the auto-stop opt-out, the grace-start notice and
+voids the fee for the session, relay OFF pauses), the auto-stop opt-out, the grace-start notice and
 its push policy, the persist-path wiring, and the start hold including the
 cap.
 
@@ -26,6 +26,7 @@ import pytest_asyncio
 from backend.services import idle_fee
 from backend.services.idle_fee import (
     IDLE_GRACE_FLOOR_MIN,
+    IDLE_VOID,
     idle_end,
     idle_fee_due,
     idle_total_seconds,
@@ -170,16 +171,43 @@ def test_idle_end_is_the_earlier_of_the_plug_and_session_clocks():
     assert idle_end(row, SimpleNamespace(last_telemetry_at=None)) is None
 
 
-def test_renewed_draw_resets_and_relay_off_pauses():
+def test_relay_off_pauses_and_the_next_idle_frame_resumes():
     row = _row()
-    prev = _feed(row, range(0, 301, 10))               # 5 min idle
-    prev = _feed(row, [310], watts=1500.0, prev=prev)  # car-side pause ended
-    assert row.idle_started_at is None and row.idle_seconds == 0
-    prev = _feed(row, range(320, 621, 10), prev=prev)  # idle again from 320
-    prev = _feed(row, [630], relay_on=False, prev=prev)
-    assert row.idle_started_at is None and row.idle_seconds == 310
-    _feed(row, [640], prev=prev)
-    assert row.idle_started_at == _at(640) and row.idle_seconds == 310
+    prev = _feed(row, range(0, 311, 10))                # idle from 0
+    prev = _feed(row, [320], relay_on=False, prev=prev)
+    assert row.idle_started_at is None and row.idle_seconds == 320
+    _feed(row, [330], prev=prev)
+    assert row.idle_started_at == _at(330) and row.idle_seconds == 320
+
+
+def test_renewed_draw_voids_the_fee_for_the_session():
+    """The review reproduction: idle 0..300 s, the car draws 1500 W at 310 s
+    (it was not done), then 40 min of 0 W. Idle was not continuous since the
+    one "looks full" notice, so nothing is billed, ever, and the later low
+    frames write nothing."""
+    row = _row()
+    prev = _feed(row, range(0, 301, 10))
+    prev = _feed(row, [310], watts=1500.0, prev=prev)
+    assert row.idle_started_at is None and row.idle_seconds == IDLE_VOID
+    prev = _feed(row, range(320, 320 + 40 * 60, 10), prev=prev)
+    _feed(row, [320 + 40 * 60], relay_on=False, prev=prev)
+    assert row.idle_started_at is None and row.idle_seconds == IDLE_VOID
+    assert idle_total_seconds(row, _at(3000)) == 0
+    assert idle_fee_due(row, _at(3000)) == Decimal("0.00")
+    # Even a row that somehow kept an open stretch owes nothing once voided.
+    assert idle_fee_due(_row(idle_started_at=T0, idle_seconds=IDLE_VOID),
+                        _at(3600)) == Decimal("0.00")
+
+
+def test_renewed_draw_before_any_idle_frame_also_voids():
+    """The car draws again right after the notice, before a stretch opened:
+    still voided, so a later idle stretch is not billed without a notice."""
+    row = _row()
+    prev = _feed(row, [0], watts=1500.0)
+    assert row.idle_seconds == IDLE_VOID
+    _feed(row, range(10, 3600, 10), prev=prev)
+    assert row.idle_started_at is None
+    assert idle_fee_due(row, _at(3600)) == Decimal("0.00")
 
 
 @pytest.mark.asyncio
@@ -221,7 +249,7 @@ async def test_persist_path_opens_the_idle_stretch_on_a_live_idle_frame():
         await _persist_frame(mgr, row, 40, 0.0)
         assert row.idle_started_at is not None
         await _persist_frame(mgr, row, 41, 1500.0)
-    assert row.idle_started_at is None and row.idle_seconds == 0
+    assert row.idle_started_at is None and row.idle_seconds == IDLE_VOID
 
 
 async def _begin(terms, *, max_kwh, auto_stop=False):

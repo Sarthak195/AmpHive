@@ -619,7 +619,8 @@ class ChargingSession(Base):
     # no fee, the default), so a tariff edit never changes a running session.
     # Idle time is tracked as transitions only (services/idle_fee.py):
     # idle_started_at opens a stretch of low draw after the car looked full,
-    # idle_seconds banks closed parts of it. idle_fee_coins is what finalize
+    # idle_seconds banks closed parts of it (-1 = voided: the car drew again
+    # after the signal, so no fee for this session). idle_fee_coins is what finalize
     # collected (also included in coins_spent). Alembic revision 0052_idle_fee.
     idle_grace_min: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     idle_fee_per_min: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
