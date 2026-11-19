@@ -13,6 +13,7 @@
  */
 
 import { useConfig } from '../contexts/ConfigContext';
+import { stashPostLoginPath } from '../utils/safePath';
 
 const GoogleMark = () => (
   <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true" focusable="false">
@@ -23,7 +24,10 @@ const GoogleMark = () => (
   </svg>
 );
 
-const GoogleSignInButton = () => {
+// returnTo: where to land after sign-in (Login's safe ?next= / state.from);
+// stashed on click so GoogleCallback can follow it, and cleared when absent so
+// a stale one never redirects a later sign-in.
+const GoogleSignInButton = ({ returnTo = null }) => {
   const { google_login_enabled: googleLoginEnabled } = useConfig();
   if (!googleLoginEnabled) return null;
 
@@ -32,7 +36,11 @@ const GoogleSignInButton = () => {
       <div className="auth-divider" role="separator">
         <span>or</span>
       </div>
-      <a href="/api/auth/google/login" className="btn btn-quiet btn-lg btn-full">
+      <a
+        href="/api/auth/google/login"
+        className="btn btn-quiet btn-lg btn-full"
+        onClick={() => stashPostLoginPath(returnTo)}
+      >
         <GoogleMark />
         Continue with Google
       </a>
