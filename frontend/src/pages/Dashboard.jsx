@@ -18,6 +18,8 @@
  *    and the PlugCard grid (5-state machine + favorite star).
  * 5. Desktop rail — charging credit (₹-first) + "Add credit", and month stats
  *    from GET /api/me/stats (the stats block hides if that endpoint errors).
+ *    The same payload feeds a lazy Insights card (12-month bars + estimates)
+ *    at the foot of the main column on every screen size.
  *
  * Instant open: plugs, up next and stats start from the last saved snapshot
  * (utils/snapshot.js), as does SessionContext's session list. Until each
@@ -31,7 +33,7 @@
  * plug's payload advertises queue_available (exactly as before).
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { CalendarClock, Hourglass, MapPin, PlugZap, Star, Users } from 'lucide-react';
 
@@ -69,6 +71,9 @@ import { coinsToINR, formatKw, formatKwh } from '../utils/money';
 import { fmtTime, fmtTimeInZone, fmtWindow } from '../utils/reservationTime';
 import { fmtSavedAt, readSnapshot, writeSnapshot } from '../utils/snapshot';
 import './Dashboard.css';
+
+// Insights (12-month bars + CO2 estimates) is inline SVG and loads on demand.
+const InsightsCard = lazy(() => import('../components/InsightsCard'));
 
 // Sentinel for the group filter's "no group assigned" option — distinct from
 // '' ("All groups"); group_name itself is never this.
@@ -893,6 +898,12 @@ const Dashboard = () => {
               </>
             )}
           </section>
+
+          {stats?.series?.length > 0 && (
+            <Suspense fallback={null}>
+              <InsightsCard series={stats.series} impact={stats.impact} rate={coin_inr_rate} />
+            </Suspense>
+          )}
         </div>
 
         {/* 5 — desktop rail */}

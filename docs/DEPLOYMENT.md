@@ -412,6 +412,48 @@ and `rollback-ac00d46-m0043` tags are kept. To restore a tag:
 `rollback-ac00d46-m0043` and `pre-nonroot` can boot on a database at alembic
 0043 (see "Non-root containers" above); the older `pre-<sha>` tags cannot.
 
+### Features wave 1 (2026-11-17, built on `release/2026-11-17-w1`, not deployed)
+
+No migration, nginx, compose, Dockerfile or dependency change: the thin
+backend layer then the thin frontend layer carry it. All new env vars are
+optional with working defaults; see the env table in
+[API_REFERENCE.md](API_REFERENCE.md) "Environment variables the backend reads":
+
+- F8 insights estimates: `GRID_EMISSION_FACTOR_KG_PER_KWH=0.71`,
+  `PETROL_CO2_KG_PER_L=2.31`, `PETROL_PRICE_PER_L=100`, `ICE_KM_PER_L=15`,
+  `EV_KM_PER_KWH=6`. To tune them, add them to the backend env and restart
+  the backend.
+- F3 operator alerts: `OPERATOR_ALERTS` (default on, `off` disables),
+  `OPERATOR_ALERT_EMAIL` (default unset, no mail; email needs the `SMTP_*`
+  vars, already set in prod), `GATEWAY_OFFLINE_ALERT_COOLDOWN_SEC` (10800),
+  `OPERATOR_ALERT_COOLDOWN_SEC` (3600). Cooldowns, the "offline notice was
+  sent" memory and the cooldown-expiry "still offline" re-check are in process
+  memory; a backend restart loses them and can re-alert once. The alerts
+  cannot fire while the backend itself is down or evicted, which is what the
+  host cron below covers.
+- F11 public status: `STATUS_RATE_LIMIT` (default `20/60`). Cloudflare does
+  not cache JSON by default, so `max-age=60` only helps browsers; every
+  request reaches the origin, where the 60 s in-process cache keeps it cheap.
+  Optional: a free Cloudflare Cache Rule for `/api/status` (Eligible for
+  cache, edge TTL 60 s).
+
+**Host health alerts (F5, not installed yet).** `deploy/scripts/check_host_health.sh`
+mails `support@amphive.app` when available memory or free disk drops below a
+floor or `/api/health` fails, with a cooldown (see
+`deploy/docs/host_health_alerts.md`). Install as the normal user, not sudo:
+
+1. `scp deploy/scripts/check_host_health.sh amphive-relay:/tmp/`, then
+   `ssh amphive-relay 'sed -i "s/\r$//" /tmp/check_host_health.sh && install -m 755 /tmp/check_host_health.sh ~/amphive-relay/check_host_health.sh'`.
+2. `crontab -e` and add `*/5 * * * * ~/amphive-relay/check_host_health.sh`.
+3. Verify: `MIN_MEM_MB=999999 STAMP_DIR=/tmp/hh-test ~/amphive-relay/check_host_health.sh`
+   should send a mail and exit 1.
+
+Optional overrides: `ALERT_TO`, `MIN_MEM_MB`, `MIN_DISK_FREE_PCT`,
+`HEALTH_URL`, `COOLDOWN_MIN`, `STAMP_DIR`. The script curls
+`http://localhost/api/health` without `-L`; if port 80 only redirects to
+HTTPS on the VM, set `HEALTH_URL` in the crontab line to a local URL that
+answers 200.
+
 ### Backend dependency lockfile — `backend/requirements.lock.txt`
 
 `backend/Dockerfile` installs `backend/requirements.lock.txt`, a fully-pinned
@@ -540,6 +582,7 @@ retirement time (namespace `amphive`, all Deployments `replicas: 1`):
 |------|--------|
 | `web_tls_rollout.md` | Caddy HTTPS front door — rollout, verification, rollback |
 | `db_backup_restore.md` | Nightly DB/config backups + disk snapshots — setup, restore, restore test |
+| `host_health_alerts.md` | Host cron alerter for memory, disk and `/api/health` (F5, 2026-11-17, not installed yet) |
 | `new_device_setup.md` | Setting up a new dev workstation |
 | `gcp_migration_runbook.md` | Full AWS EC2 → GCP, then region migration log |
 | `wireguard_tunnel_setup.md` | Direct-Mode WireGuard setup — **retired** (Path B is gone; kept as historical reference) |

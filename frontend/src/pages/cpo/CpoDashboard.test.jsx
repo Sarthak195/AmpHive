@@ -31,6 +31,10 @@ const OVERVIEW = {
   active_sessions: 2,
   today: { sessions: 9, energy_kwh: 21.5, revenue_coins: 340 },
   all_time: { sessions: 500, energy_kwh: 8210, revenue_coins: 41000 },
+  impact: {
+    assumptions: { estimate: true, grid_emission_factor_kg_per_kwh: 0.71 },
+    all_time: { co2_avoided_kg: 1757.4 },
+  },
 };
 
 const REVENUE = [
@@ -74,6 +78,23 @@ beforeEach(() => vi.clearAllMocks());
 afterEach(() => vi.restoreAllMocks());
 
 describe('CpoDashboard', () => {
+  it('shows the CO2-avoided tile labelled as an estimate with the grid factor', async () => {
+    mockApi();
+    renderPage();
+
+    expect(await screen.findByText(/CO₂ avoided \(estimate\)/)).toBeInTheDocument();
+    expect(screen.getByText('1757.4 kg')).toBeInTheDocument();
+    expect(screen.getByText(/0\.71 kg\/kWh/)).toBeInTheDocument();
+  });
+
+  it('hides the CO2 tile when net CO2 avoided is not positive', async () => {
+    mockApi({ overview: { ...OVERVIEW, impact: { ...OVERVIEW.impact, all_time: { co2_avoided_kg: -3.2 } } } });
+    renderPage();
+
+    await screen.findByText("Today’s revenue");
+    expect(screen.queryByText(/CO₂ avoided \(estimate\)/)).toBeNull();
+  });
+
   it('renders KPI tiles from the overview stats, each linking to its console page', async () => {
     mockApi();
     renderPage();

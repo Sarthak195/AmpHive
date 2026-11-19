@@ -19,6 +19,11 @@ pending per-gateway tasks live in a dict created lazily on the manager
 build a manager any which way keep working; MQTTManager.stop() cancels
 whatever is still pending.
 
+[Operator alert] Right after the commit point (before the driver notice), the same deferred path also calls
+services/operator_alerts.alert_gateway_offline (CPOs + admins, any session
+state, per-gateway cooldown); the matching "back online" follow-up fires on
+`online` only when an offline alert was sent.
+
 `notify` is imported at module level (not late-imported inside a method like
 most other mqtt/*.py handlers) specifically so tests can patch it at
 `backend.services.mqtt.status.notify` — the operator (CPO) orphan-OFF alert
@@ -30,6 +35,7 @@ import asyncio
 import logging
 from typing import Any, Dict, Optional
 
+from backend.services import operator_alerts
 from backend.services.notifications import notify
 
 logger = logging.getLogger("amphive.mqtt")
@@ -142,6 +148,9 @@ class MQTTStatusMixin:
             # re-asserting "reachable" is harmless.
             if became_online:
                 await self._broadcast_plug_connectivity(gateway_id, True)
+            # [Operator alert] "Back online" follow-up; a no-op unless an
+            # offline alert was actually sent for this gateway.
+            await operator_alerts.alert_gateway_online(self.db_session_factory, gateway_id)
         elif became_offline:
             # Only on a real ONLINE->OFFLINE transition — not a retained replay.
             # [Offline debounce] The driver notice and the unreachable push
@@ -156,6 +165,7 @@ class MQTTStatusMixin:
             if GATEWAY_OFFLINE_NOTIFY_DELAY_SEC > 0:
                 self._schedule_offline_notice(gateway_id, GATEWAY_OFFLINE_NOTIFY_DELAY_SEC)
             else:
+                await operator_alerts.alert_gateway_offline(self.db_session_factory, gateway_id)
                 await self._notify_drivers_gateway_offline(gateway_id)
                 await self._broadcast_plug_connectivity(gateway_id, False)
 
@@ -236,6 +246,13 @@ class MQTTStatusMixin:
                 "Gateway still offline after the notice window - notifying",
                 extra={"gateway_id": gateway_id, "delay_sec": delay},
             )
+            # [Operator alert] Idle or not: CPOs + admins get the bell/push
+            # (and optional email), cooldown-limited per gateway. First, right
+            # after the commit point: an `online` landing during the driver
+            # awaits below must find the alert already armed so its "back
+            # online" follow-up fires instead of leaving "offline" as the last
+            # word.
+            await operator_alerts.alert_gateway_offline(self.db_session_factory, gateway_id)
             await self._notify_drivers_gateway_offline(gateway_id)
             await self._broadcast_plug_connectivity(gateway_id, False)
         except Exception:

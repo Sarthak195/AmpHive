@@ -82,6 +82,8 @@ class TelemetryPersistenceService:
         self._dropped = 0
         self._flush_count = 0
         self._bad_rows_dropped = 0
+        # Wall-clock time of the last flush tick (admin health page).
+        self.last_flush_at: Optional[datetime] = None
 
     # ------------------------------------------------------------------
     # Producer side — called from the paho MQTT thread. Cheap, non-blocking.
@@ -134,6 +136,7 @@ class TelemetryPersistenceService:
             except asyncio.TimeoutError:
                 pass
             await self._flush_once()
+            self.last_flush_at = datetime.now(timezone.utc)
             self._flush_count += 1
             if RETENTION_DAYS > 0 and self._flush_count % PRUNE_EVERY_N_FLUSHES == 0:
                 await self._prune_old()

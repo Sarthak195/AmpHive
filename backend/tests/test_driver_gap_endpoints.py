@@ -33,10 +33,12 @@ from backend.routers.sessions import (
     get_my_stats,
     get_session_detail,
     get_session_history,
+    get_session_telemetry,
 )
 from backend.routers.sessions import (
     router as sessions_router,
 )
+from backend.services import insights
 
 
 def _user(user_id=7, role=UserRole.DRIVER, tenant_id=None):
@@ -301,22 +303,75 @@ async def test_my_stats_month_and_lifetime_buckets():
     db = _db(
         _first((2, 3.5, Decimal("28.00"))),     # month
         _first((10, 50.25, Decimal("400.00"))), # lifetime
+        _all([]),                               # series gross rows
+        _all([]),                               # series refund rows
     )
 
     resp = await get_my_stats(_user(user_id=7), db)
 
-    assert resp == {
-        "month": {"energy_kwh": 3.5, "spend_coins": 28.0, "sessions": 2},
-        "lifetime": {"energy_kwh": 50.25, "spend_coins": 400.0, "sessions": 10},
-    }
+    assert resp["month"] == {"energy_kwh": 3.5, "spend_coins": 28.0, "sessions": 2}
+    assert resp["lifetime"] == {"energy_kwh": 50.25, "spend_coins": 400.0, "sessions": 10}
+    # Estimates ride along with the factors used.
+    assert resp["impact"]["assumptions"]["estimate"] is True
+    assert resp["impact"]["lifetime"]["co2_avoided_kg"] == insights.estimate_impact(50.25)["co2_avoided_kg"]
 
 
 @pytest.mark.asyncio
 async def test_my_stats_zero_history():
-    db = _db(_first((0, 0, 0)), _first((0, 0, 0)))
+    db = _db(_first((0, 0, 0)), _first((0, 0, 0)), _all([]), _all([]))
     resp = await get_my_stats(_user(), db)
     assert resp["month"] == {"energy_kwh": 0.0, "spend_coins": 0.0, "sessions": 0}
     assert resp["lifetime"] == {"energy_kwh": 0.0, "spend_coins": 0.0, "sessions": 0}
+    assert len(resp["series"]) == 12
+    assert all(m["sessions"] == 0 and m["spend_coins"] == 0 for m in resp["series"])
+    assert resp["impact"]["month"]["co2_avoided_kg"] == 0
+
+
+@pytest.mark.asyncio
+async def test_my_stats_series_nets_refunds_and_zero_fills():
+    now = datetime.now(timezone.utc)
+    keys = insights.month_keys(now)
+    this_m = datetime(now.year, now.month, 1)  # date_trunc returns a naive timestamp
+    db = _db(
+        _first((1, 2.0, Decimal("10"))),
+        _first((1, 2.0, Decimal("10"))),
+        _all([(this_m, 3, 6.5, Decimal("32.50"))]),
+        _all([(this_m, Decimal("5.00"))]),
+    )
+
+    resp = await get_my_stats(_user(), db)
+
+    series = resp["series"]
+    assert [m["month"] for m in series] == keys
+    assert series[-1] == {
+        "month": keys[-1], "energy_kwh": 6.5, "spend_coins": 27.5, "sessions": 3,
+    }
+    assert series[0]["sessions"] == 0
+    # Refunds are a separate aggregate query: 4 executes, no fan-out join.
+    assert db.execute.call_count == 4
+
+
+def test_month_keys_cross_year_boundary():
+    keys = insights.month_keys(datetime(2026, 2, 10, tzinfo=timezone.utc))
+    assert keys[0] == "2025-03" and keys[-1] == "2026-02" and len(keys) == 12
+
+
+def test_estimate_impact_nets_grid_against_petrol():
+    out = insights.estimate_impact(10)
+    expected_petrol = 10 * insights.EV_KM_PER_KWH / insights.ICE_KM_PER_L * insights.PETROL_CO2_KG_PER_L
+    assert out["petrol_co2_kg"] == round(expected_petrol, 2)
+    assert out["grid_co2_kg"] == round(10 * insights.GRID_EMISSION_FACTOR_KG_PER_KWH, 2)
+    assert out["co2_avoided_kg"] == round(expected_petrol - 10 * insights.GRID_EMISSION_FACTOR_KG_PER_KWH, 2)
+    assert insights.estimate_impact(-3)["co2_avoided_kg"] == 0
+
+
+def test_insights_env_falls_back_on_bad_values(monkeypatch):
+    monkeypatch.setenv("ICE_KM_PER_L", "abc")
+    assert insights._float_env("ICE_KM_PER_L", 15.0) == 15.0
+    monkeypatch.setenv("ICE_KM_PER_L", "-2")
+    assert insights._float_env("ICE_KM_PER_L", 15.0) == 15.0
+    monkeypatch.setenv("ICE_KM_PER_L", "20")
+    assert insights._float_env("ICE_KM_PER_L", 15.0) == 20.0
 
 
 # --- GET /api/sessions/disputes/my ---------------------------------------------
@@ -391,6 +446,7 @@ async def test_tariff_preview_env_fallback_when_chain_empty():
         resp = await get_plug_tariff_preview(3, _user(), db)
 
     assert resp["slots"] == []
+    assert resp["cheapest_window"] is None
     assert resp["base_price_per_kwh"] == resp["price_now"]
     assert resp["base_price_per_kwh"] > 0
 
@@ -417,6 +473,8 @@ async def test_tariff_preview_slots_and_price_now():
 
     assert resp["base_price_per_kwh"] == 8.0
     assert resp["price_now"] == 10.0  # the covering slot wins over the flat base
+    # The 12.00 evening slot is dearer than now, so no cheaper window exists.
+    assert resp["cheapest_window"] is None
     # Sorted by (start_minute, end_minute); days expands the mask, Mon=0.
     assert resp["slots"] == [
         {"days": [0, 1, 2, 3, 4, 5, 6], "start_minute": 0,
@@ -475,3 +533,75 @@ async def test_leave_group_not_a_member_404():
     assert exc.value.status_code == 404
     db.delete.assert_not_awaited()
     db.commit.assert_not_awaited()
+
+
+# --- GET /api/sessions/{session_id}/telemetry --------------------------------
+
+
+@pytest.mark.asyncio
+async def test_session_telemetry_buckets_and_shape():
+    session = _session(status=SessionStatus.COMPLETED)  # 90 min window
+    rows = [(0, 1500.04, 1600.0, 6.5, 0.012), (3, 2300.0, 2400.5, 10.0, 0.4)]
+    db = _db(_scalar_one_or_none(session), _all(rows))
+
+    resp = await get_session_telemetry(42, _user(user_id=7), db)
+
+    assert resp["bucket_seconds"] == 45  # ceil(5400 / 120)
+    assert resp["max_kwh"] == 30.0
+    assert resp["status"] == "completed"
+    assert resp["points"] == [
+        {"offset_sec": 0, "power_w": 1500.0, "peak_power_w": 1600.0,
+         "current_a": 6.5, "energy_kwh": 0.012},
+        {"offset_sec": 135, "power_w": 2300.0, "peak_power_w": 2400.5,
+         "current_a": 10.0, "energy_kwh": 0.4},
+    ]
+    # One query stays in SQL: the grouped aggregate, filtered by plug and window.
+    sql = str(db.execute.await_args_list[1].args[0])
+    assert "GROUP BY" in sql and "telemetry_readings.plug_id" in sql
+
+
+@pytest.mark.asyncio
+async def test_session_telemetry_empty_session_has_no_points():
+    db = _db(_scalar_one_or_none(_session()), _all([]))
+    resp = await get_session_telemetry(42, _user(user_id=7), db)
+    assert resp["points"] == []
+
+
+@pytest.mark.asyncio
+async def test_session_telemetry_access_matches_detail():
+    # Unknown, foreign driver and cross-tenant CPO all 404; no readings query runs.
+    for sess, viewer in (
+        (None, _user()),
+        (_session(user_id=8), _user(user_id=7)),
+        (_session(tenant_id=1), _user(user_id=99, role=UserRole.CPO, tenant_id=2)),
+    ):
+        db = _db(_scalar_one_or_none(sess))
+        with pytest.raises(HTTPException) as exc:
+            await get_session_telemetry(42, viewer, db)
+        assert exc.value.status_code == 404
+        assert db.execute.await_count == 1
+    for viewer in (
+        _user(user_id=99, role=UserRole.CPO, tenant_id=1),
+        _user(user_id=100, role=UserRole.ADMIN),
+    ):
+        db = _db(_scalar_one_or_none(_session(tenant_id=1)), _all([]))
+        assert (await get_session_telemetry(42, viewer, db))["points"] == []
+
+
+def test_public_config_ships_co2_factor_for_the_receipt():
+    from backend.main import public_config
+
+    assert public_config()["co2_avoided_kg_per_kwh"] == round(insights.co2_avoided_kg_per_kwh(), 4)
+
+
+@pytest.mark.asyncio
+async def test_my_stats_series_sql_groups_by_one_literal_month_expr():
+    """The SELECT and GROUP BY must carry the same inline month expression
+    (no bind params, which Postgres would reject as not grouped)."""
+    from sqlalchemy.dialects import postgresql
+
+    db = _db(_first((0, 0, 0)), _first((0, 0, 0)), _all([]), _all([]))
+    await get_my_stats(_user(), db)
+    sql = str(db.execute.call_args_list[2].args[0].compile(dialect=postgresql.dialect())).lower()
+    expr = "date_trunc('month', timezone('utc', charging_sessions.started_at))"
+    assert sql.count(expr) == 2

@@ -24,7 +24,7 @@ from typing import Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import ValidationError
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import and_, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend import state
@@ -57,6 +57,7 @@ from backend.schemas import (
     AdminUserUpdateRequest,
     CpoGatewayOtaRequest,
 )
+from backend.services import sysinfo
 from backend.services.audit import try_record_audit
 from backend.services.firmware_publish import (
     FirmwarePublishError,
@@ -1664,3 +1665,46 @@ async def admin_list_audit(
             for entry, actor_email, tenant_name in rows.all()
         ],
     }
+
+
+# ===========================================================================
+# Platform health (read-only, computed per request, admin only)
+# ===========================================================================
+
+
+@router.get("/api/admin/health")
+async def admin_health(
+    user: User = Depends(require_role("admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Host + process + DB snapshot for the admin health page. Every field
+    degrades to null when its source is unavailable. Deliberately NOT part of
+    the public /api/health."""
+    snap = sysinfo.collect()
+    database = {"size_mb": None, "connections": None}
+    try:
+        size = (await db.execute(text("SELECT pg_database_size(current_database())"))).scalar()
+        conns = (
+            await db.execute(
+                text(
+                    "SELECT numbackends FROM pg_stat_database "
+                    "WHERE datname = current_database()"
+                )
+            )
+        ).scalar()
+        database = {
+            "size_mb": round(size / (1024 * 1024), 1) if size is not None else None,
+            "connections": int(conns) if conns is not None else None,
+        }
+    except Exception:
+        logger.warning("admin health: database probe failed", exc_info=True)
+        await db.rollback()
+    reaper = state.session_reaper
+    flusher = state.telemetry_persistence
+    snap["database"] = database
+    snap["last_runs"] = {
+        "session_reaper": _iso(getattr(reaper, "last_run_at", None)),
+        "telemetry_flush": _iso(getattr(flusher, "last_flush_at", None)),
+    }
+    snap["generated_at"] = datetime.now(timezone.utc).isoformat()
+    return snap

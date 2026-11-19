@@ -2234,6 +2234,8 @@ async def test_plug_connectivity_emitted_on_transition(monkeypatch):
     session = _FakeSession([_FakeResult(scalar=gateway), plug_result])
     mgr = MQTTManager(db_session_factory=lambda: session)
     mgr._notify_drivers_gateway_offline = AsyncMock()
+    from backend.services import operator_alerts
+    monkeypatch.setattr(operator_alerts, "alert_gateway_offline", AsyncMock())
 
     emit_mock = AsyncMock()
     with patch("backend.services.socketio_manager.emit_plug_connectivity", emit_mock):
@@ -2412,6 +2414,8 @@ async def test_new_offline_notice_replaces_pending_one(monkeypatch):
     gw = MagicMock()
     gw.status = GatewayStatus.OFFLINE
     mgr, session = _debounce_mgr(monkeypatch, gw, n_results=2)  # 1 re-read + spare
+    from backend.services import operator_alerts
+    monkeypatch.setattr(operator_alerts, "alert_gateway_offline", AsyncMock())
 
     mgr._schedule_offline_notice("gw-1", _NOTICE_DELAY)
     first = mgr._offline_notice_tasks()["gw-1"]

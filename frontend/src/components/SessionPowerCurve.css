@@ -1,0 +1,42 @@
+/* SessionPowerCurve: inline-SVG power curve; colours come from tokens. */
+
+.power-curve { margin: 0; }
+
+.power-curve svg {
+  display: block;
+  width: 100%;
+  height: 110px;
+}
+
+.power-curve-area { fill: var(--brand-soft); }
+
+.power-curve-line {
+  fill: none;
+  stroke: var(--brand);
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+  stroke-linejoin: round;
+}
+
+.power-curve-energy {
+  fill: none;
+  stroke: var(--ink-3);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+.power-curve-limit {
+  stroke: var(--warn-dot, currentColor);
+  stroke-width: 1;
+  stroke-dasharray: 4 3;
+  vector-effect: non-scaling-stroke;
+}
+
+.power-curve-caption {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  margin-top: var(--sp-1);
+}
+
+.power-curve-empty { margin: 0; }

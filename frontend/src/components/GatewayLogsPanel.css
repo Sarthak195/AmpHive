@@ -1,0 +1,48 @@
+/* Layout only: colour comes from primitives (.badge-*, .text-2). */
+.gwlogs-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-3);
+}
+
+.gwlogs-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 55vh;
+  overflow-y: auto;
+  display: grid;
+  gap: var(--sp-2);
+}
+
+.gwlogs-item {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: var(--sp-1) var(--sp-3);
+  align-items: start;
+  padding-bottom: var(--sp-2);
+  border-bottom: 1px solid var(--line, rgba(128, 128, 128, 0.25));
+}
+
+.gwlogs-meta {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  align-items: flex-start;
+  font-size: var(--text-sm);
+}
+
+.gwlogs-msg {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: var(--text-sm);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Tab strip above the admin fleet table / logs view. */
+.gw-tabs {
+  margin-bottom: var(--sp-4);
+}

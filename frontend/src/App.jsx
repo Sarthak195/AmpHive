@@ -73,6 +73,7 @@ const CpoDisputes = lazy(() => import('./pages/cpo/CpoDisputes'));
 const CpoPlugReports = lazy(() => import('./pages/cpo/CpoPlugReports'));
 const CpoPlugPhotos = lazy(() => import('./pages/cpo/CpoPlugPhotos'));
 const CpoSettings = lazy(() => import('./pages/cpo/CpoSettings'));
+const CpoAudit = lazy(() => import('./pages/cpo/CpoAudit'));
 // Admin pages
 const AdminOverview = lazy(() => import('./pages/admin/AdminOverview'));
 const AdminTenants = lazy(() => import('./pages/admin/AdminTenants'));
@@ -84,6 +85,7 @@ const AdminPlugs = lazy(() => import('./pages/admin/AdminPlugs'));
 const AdminFirmwareReleases = lazy(() => import('./pages/admin/AdminFirmwareReleases'));
 const AdminDisputes = lazy(() => import('./pages/admin/AdminDisputes'));
 const AdminAudit = lazy(() => import('./pages/admin/AdminAudit'));
+const AdminHealth = lazy(() => import('./pages/admin/AdminHealth'));
 
 /** Driver-host "/": Dashboard when signed in, Marketing otherwise. The
     printed-QR deep link `/?plug=<id>` keeps working: anonymous visitors go
@@ -234,6 +236,9 @@ const cpoDashboardRoutes = (
     <Route path="/cpo/plug-photos" element={
       <CpoProtectedRoute><CpoPlugPhotos /></CpoProtectedRoute>
     } />
+    <Route path="/cpo/audit" element={
+      <CpoProtectedRoute><CpoAudit /></CpoProtectedRoute>
+    } />
     <Route path="/cpo/settings" element={
       <CpoProtectedRoute><CpoSettings /></CpoProtectedRoute>
     } />
@@ -257,6 +262,7 @@ const adminRoutes = (
     <Route path="/admin/firmware-releases" element={<AdminFirmwareReleases />} />
     <Route path="/admin/disputes" element={<AdminDisputes />} />
     <Route path="/admin/audit" element={<AdminAudit />} />
+    <Route path="/admin/health" element={<AdminHealth />} />
   </Route>
 );
 

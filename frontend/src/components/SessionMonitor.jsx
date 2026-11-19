@@ -29,6 +29,7 @@ import { useWallet } from '../contexts/WalletContext';
 import api from '../api/client';
 import { ConfirmDialog, Money, useToast } from './ui';
 import ChargeRing from './ChargeRing';
+import SessionPowerCurve from './SessionPowerCurve';
 import { eventTypeCopy, apiErrorCopy } from '../utils/statusCopy';
 import { formatINR, coinsToINR, formatKw, formatKwh, formatDuration } from '../utils/money';
 
@@ -302,6 +303,13 @@ const SessionMonitor = () => {
           <dd>{sessionData?.plug_name || '—'}</dd>
         </div>
       </dl>
+      {sessionId != null && (
+        <SessionPowerCurve
+          sessionId={sessionId}
+          limitKwh={limitMaxKwh}
+          live={isActive ? { at: lastFrameAt, power_w: sessionData?.power_w, energy_kwh: sessionData?.energy_kwh } : null}
+        />
+      )}
       {priceNow != null && (
         <p className="session-rate text-3 text-sm">
           <span className="num">{formatINR(coinsToINR(priceNow, coin_inr_rate))}</span>/kWh now
