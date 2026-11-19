@@ -388,6 +388,15 @@ app.include_router(status.router)
 app.include_router(tokens.router)
 # Recurring weekly charge routines (C5) - appended last, same rationale.
 app.include_router(routines.router)
+# [C2] OCPP 1.6J central system: a flag-gated dev and portfolio module, OFF
+# by default and in production (no Caddy route). With the flag off neither
+# routers/ocpp.py nor services/ocpp_adapter.py is imported at all
+# (test_ocpp_csms.py asserts it). docs/OCPP_CSMS.md.
+OCPP_CSMS_ENABLED = os.getenv("OCPP_CSMS_ENABLED", "").strip().lower() in ("1", "true", "yes", "on")
+if OCPP_CSMS_ENABLED:
+    from backend.routers import ocpp  # noqa: E402
+
+    app.include_router(ocpp.router)
 
 import socketio  # noqa: E402
 
