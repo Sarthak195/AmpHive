@@ -195,3 +195,20 @@ async def test_unknown_plug_404_and_missing_limit_422():
     with pytest.raises(HTTPException) as exc:
         await get_plug_charge_estimate(3, None, None, None, _user(), _db())
     assert exc.value.status_code == 422
+
+
+def test_low_power_kwh_limit_is_capped_at_24h():
+    # 120 W with a 100 kWh limit would be ~833 h; the estimate stops at 24 h
+    # and reports the energy delivered within the cap.
+    energy, minutes = limited_energy_and_duration(120.0, 100.0, None)
+    assert minutes == 1440.0
+    assert round(energy, 6) == round(0.12 * 24, 6)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("delta", [timedelta(days=-2), timedelta(days=31), timedelta(days=3000)])
+async def test_start_at_out_of_range_is_422(delta):
+    start = datetime.now(timezone.utc) + delta
+    with pytest.raises(HTTPException) as exc:
+        await get_plug_charge_estimate(3, None, 60, start, _user(), _db(_one(_plug())))
+    assert exc.value.status_code == 422

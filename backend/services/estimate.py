@@ -48,6 +48,11 @@ MIN_HISTORY_SECONDS = 5 * 60
 # A walk crosses a handful of slot boundaries per day; this only stops a
 # malformed tariff from looping.
 _MAX_WINDOWS = 200
+# The longest session the API allows (max_duration_min le=1440) and the start
+# path's admission horizon: an estimate never looks further than this, so a
+# low-power history with a big kWh limit cannot show a year-long finish or a
+# cost from a truncated walk.
+MAX_ESTIMATE_MINUTES = 1440.0
 
 
 def rated_power_w(plug: Plug) -> float:
@@ -92,14 +97,15 @@ async def resolve_power_basis(
 def limited_energy_and_duration(
     power_w: float, max_kwh: Optional[float], max_duration_min: Optional[int]
 ) -> Tuple[float, float]:
-    """(energy_kwh, duration_min) for the limit that binds first."""
+    """(energy_kwh, duration_min) for the limit that binds first, capped at
+    24 h (the energy returned is what is delivered within the cap)."""
     kw = power_w / 1000.0
     candidates = []
     if max_kwh is not None:
         candidates.append((max_kwh * 60.0) / kw)
     if max_duration_min is not None:
         candidates.append(float(max_duration_min))
-    duration_min = min(candidates)
+    duration_min = min(min(candidates), MAX_ESTIMATE_MINUTES)
     return kw * duration_min / 60.0, duration_min
 
 

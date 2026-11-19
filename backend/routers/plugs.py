@@ -4,7 +4,7 @@ Plugs routes — moved verbatim from main.py (2026-07-07, TD#7 split).
 import asyncio
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
@@ -980,7 +980,18 @@ async def get_plug_charge_estimate(
     if not plug:
         raise HTTPException(status_code=404, detail=f"Plug with ID {plug_id} not found.")
     await ensure_plug_group_access(db, plug, user)
-    return await estimate_charge(db, plug, user.id, max_kwh, max_duration_min, start_at)
+    if start_at is not None:
+        start_utc = start_at if start_at.tzinfo else start_at.replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        if not (now - timedelta(days=1) <= start_utc <= now + timedelta(days=30)):
+            raise HTTPException(
+                status_code=422,
+                detail="start_at must be within 1 day in the past and 30 days ahead.",
+            )
+    try:
+        return await estimate_charge(db, plug, user.id, max_kwh, max_duration_min, start_at)
+    except OverflowError:
+        raise HTTPException(status_code=422, detail="Estimate window out of range.")
 
 
 # ===========================================================================
