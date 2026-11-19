@@ -265,6 +265,10 @@ async def test_safety_fault_skips_the_driver_who_got_the_cutoff_notice(mocks, mo
     await _drain()
     assert [c.args[0] for c in notify_mock.await_args_list] == [8]
     email_mock.assert_called_once()
+    # The notice that replaces the bell for that user (finalize's safety-cutoff
+    # receipt) is never muted by prefs or quiet hours.
+    from backend.services.notification_prefs import always_pushed
+    assert always_pushed("session_stopped", "critical")
 
 
 @pytest.mark.asyncio

@@ -175,6 +175,55 @@ async def test_claim_db_error_still_sends_the_notice():
     assert await mgr._claim_session_notice(SID, "full_notified_at") is True
 
 
+class _Capture:
+    """Fake session that records each statement (no rows)."""
+
+    def __init__(self):
+        self.stmts = []
+
+    def __call__(self):
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def execute(self, stmt):
+        self.stmts.append(stmt)
+        result = AsyncMock()
+        result.scalar_one_or_none = lambda: None
+        return result
+
+    async def commit(self):
+        pass
+
+
+def _pg(stmt):
+    from sqlalchemy.dialects import postgresql
+
+    return str(stmt.compile(dialect=postgresql.dialect())).upper()
+
+
+@pytest.mark.asyncio
+async def test_claim_and_row_lock_compile_to_the_intended_postgres_sql():
+    """Local evidence for the SQL the DB-gated tests run in CI."""
+    mgr = _manager()
+    cap = _Capture()
+    mgr.db_session_factory = cap
+    assert await mgr._claim_session_notice(SID, "nearly_done_notified_at") is False
+    sql = _pg(cap.stmts[0])
+    assert sql.startswith("UPDATE CHARGING_SESSIONS SET NEARLY_DONE_NOTIFIED_AT=NOW()")
+    assert "CHARGING_SESSIONS.NEARLY_DONE_NOTIFIED_AT IS NULL" in sql
+    assert "CHARGING_SESSIONS.STATUS = " in sql
+    assert "RETURNING CHARGING_SESSIONS.ID" in sql
+
+    await oa._locked_gateway(cap, "gw-1")
+    sql = _pg(cap.stmts[1])
+    assert "FROM GATEWAYS" in sql and sql.endswith("FOR UPDATE")
+
+
 # ===========================================================================
 # Tier 2: DB-gated (real Postgres)
 # ===========================================================================
