@@ -357,7 +357,8 @@ async def test_begin_active_session_persists_the_opt_in(opt_in, stored):
          patch.object(session_start.state, "mqtt_manager", mqtt), \
          patch.object(session_start.state, "telemetry_store", MagicMock()), \
          patch("backend.services.socketio_manager.emit_plug_status", AsyncMock()), \
-         patch("backend.services.caps.effective_plug_cap", return_value=16.0):
+         patch("backend.services.caps.effective_plug_cap", return_value=16.0), \
+         patch("backend.services.notifications.notify", AsyncMock()):
         session = await session_start.begin_active_session(
             db, user, plug, gateway, max_kwh=None, max_duration_seconds=None,
             auto_stop_when_full=opt_in,

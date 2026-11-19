@@ -159,8 +159,9 @@ class _Session:
         row.created_at = NOON
         row.read = False
 
-    async def execute(self, *_a, **_k):
+    async def execute(self, stmt, *_a, **_k):
         self.queried = True
+        self.stmt = stmt
         r = MagicMock()
         r.first.return_value = self._first
         return r
@@ -187,6 +188,11 @@ async def test_muted_type_still_writes_the_feed_row_and_live_event():
     emit.assert_awaited_once()
     assert prefs_db.queried
     push.assert_not_awaited()
+    # _push_wanted swallows errors, so pin that the query itself is valid SQL.
+    from sqlalchemy.dialects import postgresql
+    sql = str(prefs_db.stmt.compile(dialect=postgresql.dialect()))
+    assert "users.notification_prefs" in sql and "tenants.timezone" in sql
+    assert sql.count("LEFT OUTER JOIN tenants") == 1
 
 
 @pytest.mark.asyncio
