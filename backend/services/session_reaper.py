@@ -119,6 +119,9 @@ class SessionReaperService:
         # services/mqtt_manager.py. Only touched on the event loop (this
         # service's own _run() task), so no lock is needed.
         self._silence_pushed: set = set()
+        # [F8V] The monthly insights email pass runs as its own task so slow
+        # SMTP sends never delay the safety sweeps; at most one at a time.
+        self._insights_task: Optional[asyncio.Task] = None
 
     def start(self, loop: asyncio.AbstractEventLoop) -> None:
         self._task = loop.create_task(self._run())
@@ -135,6 +138,20 @@ class SessionReaperService:
                 await self._task
             except asyncio.CancelledError:
                 pass
+        if self._insights_task:
+            self._insights_task.cancel()
+            try:
+                await self._insights_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    async def _insights_pass(self) -> None:
+        try:
+            await self.send_insights_emails_once()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Monthly insights email pass failed")
 
     async def _run(self) -> None:
         while not self._stop.is_set():
@@ -185,10 +202,10 @@ class SessionReaperService:
                 except Exception:
                     logger.exception("Gateway-logs prune failed")
             if self._tick_count % INSIGHTS_EMAIL_EVERY_N_TICKS == 0:
-                try:
-                    await self.send_insights_emails_once()
-                except Exception:
-                    logger.exception("Monthly insights email pass failed")
+                if self._insights_task is None or self._insights_task.done():
+                    self._insights_task = asyncio.get_running_loop().create_task(
+                        self._insights_pass()
+                    )
 
     def _stale_session_ids_query(self, cutoff: datetime):
         from backend.database.models import ChargingSession, SessionStatus
