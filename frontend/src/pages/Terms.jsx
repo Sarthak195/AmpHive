@@ -97,6 +97,14 @@ export default function Terms() {
             invoice is available for every billed session.
           </p>
           <p className="text-2">
+            A host may set a no-show fee for bookings on a charger. It is shown
+            before you book and deducted from your charging credit only when a
+            confirmed booking goes unused, never more than your available
+            credit, and never when the charger was offline or out of service.
+            See the{' '}
+            <Link to="/charging-credit-terms">Charging credit terms</Link>.
+          </p>
+          <p className="text-2">
             If you believe a session was billed incorrectly, raise a dispute from
             your activity history. The host reviews it and can issue a refund of
             charging credit. See the{' '}

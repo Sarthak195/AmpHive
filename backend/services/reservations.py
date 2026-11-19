@@ -3,8 +3,9 @@ Reservation policy + shared helpers (feat/reservations, 2026-07-12).
 
 Group members book a future window on a charger (routers/reservations.py);
 during that window only the holder can start a session (the gate in
-routers/sessions.py start_charging_session). Reservations are FREE in v1 —
-no coin hold, no money movement anywhere in the lifecycle.
+routers/sessions.py start_charging_session). No coin is held for a booking.
+The only money movement anywhere in the lifecycle is the optional, capped
+[C8] no-show fee, charged solely by reap_reservation_no_shows_once below.
 
 Policy knobs (env). All read with the `or "x"` guard (not a getenv default):
 compose passes vars through with plain ${VAR} interpolation, so an unset
@@ -24,21 +25,44 @@ bookings as PENDING requests. HOLD_STATUSES (BOOKED + PENDING) is what blocks
 an overlapping booking and counts toward the per-user cap; only BOOKED gates a
 session start. A request still PENDING at start_at lazily flips to EXPIRED
 here, so an unanswered request never outlives its own window.
+
+[C8 no-show fee] Optional, per plug, default 0, capped by
+RESERVATION_NO_SHOW_FEE_MAX_COINS. The fee in force when a booking is made is
+snapshotted onto it (what the driver was shown). Only the reaper sweep
+reap_reservation_no_shows_once charges it, never the lazy
+expire_lapsed_reservations UPDATE: once per reservation (the stamp
+no_show_checked_at plus the UNIQUE ledger_transactions.reservation_id), only
+for a window the sweep saw lapse moments ago, skipped whenever the plug or its
+gateway may have been unusable in the window, and at most the driver's
+available balance, so a balance never goes negative.
 """
+import logging
 import os
 from datetime import datetime, timedelta, timezone
-from typing import Iterable, Optional
+from decimal import Decimal
+from typing import Callable, Iterable, Optional
 
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import and_, case, or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database.models import (
     ChargerGroup,
+    ChargingSession,
+    Gateway,
+    GatewayEvent,
     GroupMembership,
+    LedgerTransaction,
     Plug,
+    PlugStatus,
     Reservation,
     ReservationStatus,
+    TransactionType,
+    User,
 )
+from backend.services.money import ZERO_MONEY, to_money
+
+logger = logging.getLogger("amphive.reservations")
 
 # Longest bookable window, in hours.
 RESERVATION_MAX_HOURS = float(os.getenv("RESERVATION_MAX_HOURS") or "4")
@@ -76,6 +100,61 @@ def reservation_mode_of(plug) -> str:
     services/plug_hours.py accessor convention)."""
     value = getattr(plug, "reservation_mode", None)
     return value if value in RESERVATION_MODES else "instant"
+
+
+# [C8] No-show fee policy (env, same `or "x"` guard as above). The cap bounds
+# what a CPO can set and is applied again when the fee is charged.
+RESERVATION_NO_SHOW_FEE_MAX_COINS = to_money(
+    os.getenv("RESERVATION_NO_SHOW_FEE_MAX_COINS") or "100"
+)
+# The sweep charges only a window whose grace lapsed within this many
+# minutes: one that lapsed while the backend was down is never charged.
+RESERVATION_NO_SHOW_SWEEP_MAX_LAG_MIN = float(
+    os.getenv("RESERVATION_NO_SHOW_SWEEP_MAX_LAG_MIN") or "10"
+)
+NO_SHOW_SWEEP_BATCH = 50
+# Gateway events that mean the charger was unreachable at some point.
+_OUTAGE_EVENT_TYPES = ("GATEWAY_BOOT", "PLUG_UNREACHABLE")
+
+
+def no_show_fee_of(plug) -> Decimal:
+    """The no-show fee of a plug (or the snapshot on a reservation) as money,
+    0 when unset or unrecognized, never above the server cap (the accessor
+    convention above)."""
+    value = getattr(plug, "no_show_fee_coins", None)
+    if not isinstance(value, (Decimal, int, float)) or value <= 0:
+        return ZERO_MONEY
+    return min(to_money(value), RESERVATION_NO_SHOW_FEE_MAX_COINS)
+
+
+def no_show_fee_amount(fee, available) -> Decimal:
+    """What a no-show is charged: the booked fee, capped by the server max and
+    by the driver's available balance, never below zero."""
+    amount = min(to_money(fee), RESERVATION_NO_SHOW_FEE_MAX_COINS, to_money(available))
+    return amount if amount > ZERO_MONEY else ZERO_MONEY
+
+
+def no_show_skip_reason(plug, gateway, *, start_at: datetime, now: datetime) -> Optional[str]:
+    """Why the charger may have been unusable during the no-show window, or
+    None when every signal says it was usable throughout. Unknown counts as
+    unusable: blocking a fee is the safe direction. Needs: the plug in
+    service (not OFFLINE or MAINTENANCE), its gateway live now, and the plug
+    powered now without a break since before start_at (powered_since is
+    re-baselined whenever telemetry resumes after a gap)."""
+    from backend.services.session_lifecycle import gateway_is_live, plug_is_powered
+
+    if plug is None or plug.status in (PlugStatus.OFFLINE, PlugStatus.MAINTENANCE):
+        return "plug out of service"
+    if gateway is None or not gateway_is_live(gateway, now):
+        return "gateway offline"
+    since = plug.powered_since
+    if not plug_is_powered(plug, now) or since is None:
+        return "plug offline"
+    if since.tzinfo is None:
+        since = since.replace(tzinfo=timezone.utc)
+    if since > start_at:
+        return "plug offline during the window"
+    return None
 
 
 async def expire_lapsed_reservations(
@@ -128,10 +207,19 @@ async def expire_lapsed_reservations(
     if tenant_id is not None:
         conditions.append(Reservation.tenant_id == tenant_id)
 
+    # [C8] A lapsed PENDING request is stamped as settled, so the no-show
+    # sweep never charges a booking the host never confirmed. Nothing is
+    # charged here: only reap_reservation_no_shows_once charges.
     result = await db.execute(
         update(Reservation)
         .where(and_(*conditions))
-        .values(status=ReservationStatus.EXPIRED)
+        .values(
+            status=ReservationStatus.EXPIRED,
+            no_show_checked_at=case(
+                (Reservation.status == ReservationStatus.PENDING, now),
+                else_=Reservation.no_show_checked_at,
+            ),
+        )
     )
     return result.rowcount or 0
 
@@ -206,3 +294,169 @@ async def next_conflicting_reservation(
         .limit(1)
     )
     return result.scalar_one_or_none()
+
+
+async def reap_reservation_no_shows_once(
+    session_factory: Callable, now: Optional[datetime] = None
+) -> int:
+    """[C8] Charge the no-show fee for each confirmed booking whose
+    RESERVATION_NO_SHOW_GRACE_MIN lapsed within the last
+    RESERVATION_NO_SHOW_SWEEP_MAX_LAG_MIN minutes with no session (status
+    BOOKED or already lazily EXPIRED, session_id NULL, fee snapshot > 0, not
+    yet settled). Older rows are never charged: the backend may have been down
+    when they lapsed. One transaction per row; one row's failure never aborts
+    the sweep. Returns the number of fees actually charged."""
+    now = now or datetime.now(timezone.utc)
+    grace = timedelta(minutes=RESERVATION_NO_SHOW_GRACE_MIN)
+    oldest = now - grace - timedelta(minutes=RESERVATION_NO_SHOW_SWEEP_MAX_LAG_MIN)
+    async with session_factory() as db:
+        rows = (await db.execute(
+            select(Reservation.id, Reservation.user_id)
+            .where(
+                and_(
+                    Reservation.no_show_checked_at.is_(None),
+                    Reservation.no_show_fee_coins > 0,
+                    Reservation.start_at <= now - grace,
+                    Reservation.start_at > oldest,
+                    Reservation.status.in_((ReservationStatus.BOOKED, ReservationStatus.EXPIRED)),
+                    Reservation.session_id.is_(None),
+                )
+            )
+            .order_by(Reservation.start_at)
+            .limit(NO_SHOW_SWEEP_BATCH)
+        )).all()
+
+    charged = 0
+    for reservation_id, user_id in rows:
+        try:
+            if await _settle_no_show(session_factory, reservation_id, user_id, now, grace):
+                charged += 1
+        except Exception:
+            logger.exception(f"No-show fee settle failed for reservation {reservation_id}")
+    if charged:
+        logger.info(f"No-show sweep charged {charged} fee(s)")
+    return charged
+
+
+async def _settle_no_show(
+    session_factory: Callable, reservation_id: int, user_id: int,
+    now: datetime, grace: timedelta,
+) -> bool:
+    """Settle one candidate: stamp it (charged or skipped, so it is decided
+    exactly once), then charge it when every check passes. True when a fee
+    was charged."""
+    from backend.services.notifications import notify
+    from backend.services.wallet import available_balance, debit_wallet_clamped
+
+    async with session_factory() as db:
+        # Lock order user -> reservation: the session-start path holds the
+        # user row, then the plug row, then touches this driver's lapsed
+        # reservations, so taking the reservation first could deadlock.
+        await db.execute(select(User.id).where(User.id == user_id).with_for_update())
+        reservation = (await db.execute(
+            select(Reservation)
+            .where(
+                and_(
+                    Reservation.id == reservation_id,
+                    Reservation.no_show_checked_at.is_(None),
+                    Reservation.session_id.is_(None),
+                    Reservation.status.in_((ReservationStatus.BOOKED, ReservationStatus.EXPIRED)),
+                )
+            )
+            .with_for_update(skip_locked=True)
+        )).scalar_one_or_none()
+        if reservation is None:
+            return False
+        reservation.status = ReservationStatus.EXPIRED
+        reservation.no_show_checked_at = now
+
+        plug = (await db.execute(
+            select(Plug).where(Plug.id == reservation.plug_id)
+        )).scalar_one_or_none()
+        gateway = None
+        if plug is not None:
+            gateway = (await db.execute(
+                select(Gateway).where(Gateway.id == plug.gateway_id)
+            )).scalar_one_or_none()
+        start_at = reservation.start_at
+        reason = no_show_skip_reason(plug, gateway, start_at=start_at, now=now)
+        if reason is None and plug is not None and gateway is not None:
+            outage = (await db.execute(
+                select(GatewayEvent.id)
+                .where(
+                    and_(
+                        GatewayEvent.gateway_id == gateway.id,
+                        GatewayEvent.created_at >= start_at,
+                        GatewayEvent.event_type.in_(_OUTAGE_EVENT_TYPES),
+                        or_(GatewayEvent.plug_id.is_(None), GatewayEvent.plug_id == plug.id),
+                    )
+                )
+                .limit(1)
+            )).scalar_one_or_none()
+            if outage is not None:
+                reason = "gateway or plug outage in the window"
+        if reason is None and plug is not None:
+            in_use = (await db.execute(
+                select(ChargingSession.id)
+                .where(
+                    and_(
+                        ChargingSession.plug_id == plug.id,
+                        ChargingSession.started_at < start_at + grace,
+                        or_(
+                            ChargingSession.ended_at.is_(None),
+                            ChargingSession.ended_at > start_at,
+                        ),
+                    )
+                )
+                .limit(1)
+            )).scalar_one_or_none()
+            if in_use is not None:
+                reason = "plug in use during the window"
+
+        amount = ZERO_MONEY
+        if reason is None:
+            amount = no_show_fee_amount(
+                reservation.no_show_fee_coins, await available_balance(db, user_id)
+            )
+        if reason is not None or amount <= ZERO_MONEY:
+            await db.commit()
+            logger.info(
+                "No-show fee not charged",
+                extra={"reservation_id": reservation_id, "reason": reason or "no available balance"},
+            )
+            return False
+
+        assert plug is not None  # reason is None only with a plug
+        actual, new_balance = await debit_wallet_clamped(db, user_id, amount)
+        window = format_window(start_at, reservation.end_at)
+        db.add(LedgerTransaction(
+            user_id=user_id,
+            amount=-actual,
+            transaction_type=TransactionType.RESERVATION_NO_SHOW_FEE,
+            description=f"No-show fee: {plug.name}, {window}"[:255],
+            balance_after=new_balance,
+            reservation_id=reservation_id,
+        ))
+        try:
+            await db.commit()
+        except IntegrityError:
+            # The UNIQUE reservation_id: this booking was already charged.
+            await db.rollback()
+            return False
+
+    await notify(
+        user_id,
+        "reservation_no_show_fee",
+        "No-show fee charged",
+        (
+            f"{actual} coins were charged because your reservation on {plug.name} "
+            f"({window}) was not used."
+        ),
+        plug_id=plug.id,
+    )
+    logger.info(
+        "No-show fee charged",
+        extra={"reservation_id": reservation_id, "user_id": user_id, "amount": str(actual)},
+    )
+    return True
+

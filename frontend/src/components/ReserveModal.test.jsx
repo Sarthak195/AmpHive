@@ -121,6 +121,24 @@ describe('ReserveModal — submit', () => {
   });
 });
 
+describe('ReserveModal [C8] no-show fee', () => {
+  it('states the fee before booking and drops the "free" line', async () => {
+    render(
+      <ReserveModal open onClose={vi.fn()} plug={{ ...PLUG, no_show_fee_coins: 20 }} onReserved={vi.fn()} />
+    );
+    await screen.findByText(new RegExp('Asha'));
+    expect(screen.getByText(/No-show fee: 20 coins/)).toBeInTheDocument();
+    expect(screen.queryByText(/Reservations are free/)).toBeNull();
+  });
+
+  it('a charger without a fee still says reservations are free', async () => {
+    renderModal();
+    await screen.findByText(new RegExp('Asha'));
+    expect(screen.getByText(/Reservations are free/)).toBeInTheDocument();
+    expect(screen.queryByText(/No-show fee/)).toBeNull();
+  });
+});
+
 describe('ReserveModal [C8] approval mode', () => {
   it('says the host approves, labels the button Request, and marks pending windows', async () => {
     api.get.mockResolvedValue([{ ...WINDOWS[0], status: 'pending' }]);

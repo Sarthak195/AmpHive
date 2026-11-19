@@ -121,6 +121,7 @@ export const TX_TYPE_LABELS = {
   // Cash top-ups and redeemed promo codes share this type; the ledger
   // description says which.
   cpo_topup: 'Credit added by operator',
+  reservation_no_show_fee: 'Reservation no-show fee',
 };
 
 export function txTypeLabel(type) {

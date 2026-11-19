@@ -6,7 +6,10 @@ start a session (the gate lives in routers/sessions.py, inside the
 plug-locked section of start_charging_session), and everyone with plug
 access can see the upcoming schedule.
 
-FREE in v1: no coin hold, no money movement anywhere in the lifecycle.
+No coin is held for a booking. [C8] The only money movement is the optional
+no-show fee the plug's CPO may set (default 0, capped): it is snapshotted onto
+the booking here, shown to the driver, and charged only by the reaper sweep
+services/reservations.py reap_reservation_no_shows_once.
 
 Policy (env, read via services/reservations.py so tests can monkeypatch the
 module attributes):
@@ -57,6 +60,7 @@ from backend.services.reservations import (
     HOLD_STATUSES,
     expire_lapsed_reservations,
     format_window,
+    no_show_fee_of,
     reservation_mode_of,
     user_can_access_plug,
 )
@@ -85,6 +89,7 @@ def _reservation_response(
         plug_name=plug_name,
         user_name=user_name,
         is_mine=(r.user_id == current_user_id) if current_user_id is not None else None,
+        no_show_fee_coins=float(no_show_fee_of(r)),
     )
 
 
@@ -260,18 +265,24 @@ async def create_reservation(
         start_at=start_at,
         end_at=end_at,
         status=ReservationStatus.PENDING if needs_approval else ReservationStatus.BOOKED,
+        # [C8] The fee the driver was shown; later plug edits don't change it.
+        no_show_fee_coins=no_show_fee_of(plug),
     )
     db.add(reservation)
     await db.commit()
     await db.refresh(reservation)
 
     window = format_window(start_at, end_at)
+    fee_note = (
+        f" A {reservation.no_show_fee_coins} coin no-show fee applies if you don't use it."
+        if reservation.no_show_fee_coins > 0 else ""
+    )
     if needs_approval:
         await notify(
             user.id,
             "reservation_requested",
             "Reservation requested",
-            f"Your request for {plug.name} ({window}) is waiting for the host to approve it.",
+            f"Your request for {plug.name} ({window}) is waiting for the host to approve it.{fee_note}",
             plug_id=plug.id,
         )
         # The tenant's operators answer the request in the CPO console.
@@ -293,7 +304,7 @@ async def create_reservation(
             user.id,
             "reservation_booked",
             "Reservation confirmed",
-            f"{plug.name} is booked for you: {window}.",
+            f"{plug.name} is booked for you: {window}.{fee_note}",
             plug_id=plug.id,
         )
 
@@ -376,9 +387,9 @@ async def cancel_reservation(
 ):
     """
     Cancel a BOOKED reservation or withdraw a PENDING request. Allowed: the
-    owner, or a cpo/admin of the owning tenant. Anyone else gets 404 —
-    existence isn't leaked by a 403, same convention as the invoice/dispute
-    endpoints. Only BOOKED/PENDING can be cancelled (409 otherwise —
+    owner, or a cpo/admin of the owning tenant. Anyone else gets 404
+    (existence isn't leaked by a 403, same convention as the invoice/dispute
+    endpoints). Only BOOKED/PENDING can be cancelled (409 otherwise:
     fulfilled/expired/cancelled/declined are terminal).
 
     [C8] Locks the PLUG row first, then the reservation row (the order the

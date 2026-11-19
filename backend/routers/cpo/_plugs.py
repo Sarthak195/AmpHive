@@ -23,6 +23,7 @@ from backend.schemas import (
     CpoPlugUpdateRequest,
 )
 from backend.services.audit import try_record_audit
+from backend.services.money import to_money
 from backend.services.plug_hours import (
     access_note_of,
     amenities_of,
@@ -31,7 +32,11 @@ from backend.services.plug_hours import (
     normalize_amenities,
     normalize_hours,
 )
-from backend.services.reservations import reservation_mode_of
+from backend.services.reservations import (
+    RESERVATION_NO_SHOW_FEE_MAX_COINS,
+    no_show_fee_of,
+    reservation_mode_of,
+)
 
 from ._common import (
     DEFAULT_LIST_LIMIT,
@@ -105,6 +110,7 @@ async def cpo_list_plugs(
             "access_note": redact_for(user, access_note_of(plug)),
             # [C8] Booking mode: instant or approval.
             "reservation_mode": reservation_mode_of(plug),
+            "no_show_fee_coins": float(no_show_fee_of(plug)),
             "last_seen_at": plug.last_seen_at.isoformat() if plug.last_seen_at else None,
             "created_at": plug.created_at.isoformat() if plug.created_at else None,
         }
@@ -299,6 +305,15 @@ async def cpo_update_plug(
     if req.reservation_mode is not None:
         # [C8] Requests already PENDING stay pending until answered or expired.
         plug.reservation_mode = req.reservation_mode
+    if req.no_show_fee_coins is not None:
+        # [C8] Server-side cap; existing bookings keep the fee they were shown.
+        fee = to_money(req.no_show_fee_coins)
+        if fee > RESERVATION_NO_SHOW_FEE_MAX_COINS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"The no-show fee can be at most {RESERVATION_NO_SHOW_FEE_MAX_COINS} coins.",
+            )
+        plug.no_show_fee_coins = fee
 
     await db.commit()
     await db.refresh(plug)
