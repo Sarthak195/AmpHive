@@ -335,3 +335,30 @@ async def test_cpo_edit_stores_normalized_fields_and_null_clears():
     assert plug.max_session_minutes is None
     assert plug.amenities is None
     assert plug.access_note is None
+
+
+@pytest.mark.asyncio
+async def test_cpo_plug_list_masks_the_access_note_for_a_viewer():
+    from backend.database.models import PlugStatus, UserRole
+    from backend.routers.cpo._plugs import cpo_list_plugs
+
+    plug = MagicMock(id=7, gateway_id="gw-1", local_ip="10.0.0.5",
+                     plug_model="P110", status=PlugStatus.AVAILABLE, current_power_w=0.0,
+                     opening_hours=[{"days": ALL, "start": 480, "end": 1320}],
+                     max_session_minutes=None, amenities=["cafe"],
+                     access_note="Call 9876543210 for the gate", last_seen_at=None, created_at=None)
+    result = MagicMock()
+    result.all.return_value = [(plug, None)]
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=result)
+
+    viewer = MagicMock(id=2, tenant_id=1, role=UserRole.CPO_VIEWER)
+    row = (await cpo_list_plugs(viewer, db, limit=50, offset=0))[0]
+    assert "9876543210" not in row["access_note"]
+    assert row["amenities"] == ["cafe"]
+    assert row["opening_hours"] == [{"days": ALL, "start": 480, "end": 1320}]
+
+    owner = MagicMock(id=1, tenant_id=1, role=UserRole.CPO)
+    assert (await cpo_list_plugs(owner, db, limit=50, offset=0))[0]["access_note"] == (
+        "Call 9876543210 for the gate"
+    )
