@@ -39,6 +39,10 @@ ALWAYS_PUSH_TYPES = frozenset({
     "topup_refunded",
     "promo_redeemed",
     "reservation_no_show_fee",
+    # Booking changes (C8): an operator approved a PENDING request, so the
+    # slot is now held for the driver. reservation_declined is sent at
+    # severity warning, which always pushes.
+    "reservation_approved",
     # Safety and faults.
     "orphan_off",
     "charger_offline",

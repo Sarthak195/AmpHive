@@ -32,12 +32,12 @@ from backend.services.plug_hours import (
     normalize_amenities,
     normalize_hours,
 )
-from backend.services.routines import disable_closed_routines, send_disabled_notices
 from backend.services.reservations import (
     RESERVATION_NO_SHOW_FEE_MAX_COINS,
     no_show_fee_of,
     reservation_mode_of,
 )
+from backend.services.routines import disable_closed_routines, send_disabled_notices
 
 from ._common import (
     DEFAULT_LIST_LIMIT,

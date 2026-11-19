@@ -49,7 +49,10 @@ def _muted_everything() -> NotificationPrefs:
 def test_allowlist_names_the_safety_billing_and_routine_types():
     for t in ("session_stopped", "topup_credited", "topup_refunded", "orphan_off",
               "gateway_fault", "gateway_offline", "gateway_online", "charge_full",
-              "routine_started", "routine_disabled", "queued_charge_started"):
+              "routine_started", "routine_disabled", "queued_charge_started",
+              # Wave 4: the idle fee notice (C1), the no-show fee and an
+              # approved booking (C8).
+              "idle_fee_notice", "reservation_no_show_fee", "reservation_approved"):
         assert t in ALWAYS_PUSH_TYPES
     assert not (ALWAYS_PUSH_TYPES & SUPPRESSIBLE_TYPES)
     assert SUPPRESSIBLE_TYPES == {
@@ -104,6 +107,17 @@ def test_unattended_queued_start_pushes_in_quiet_hours_but_rate_change_does_not(
     assert push_allowed("queued_charge_started", "info", quiet, NOON, UTC)
     assert not push_allowed("session_started", "info", quiet, NOON, UTC)
     assert not push_allowed("rate_changed", "info", quiet, NOON, UTC)
+
+
+def test_wave4_booking_and_billing_notices_cannot_be_muted():
+    """[C1, C8] The new money and booking notices push through every toggle
+    off plus quiet hours; reservation_declined goes out at severity warning.
+    The C8 request confirmations stay ordinary info notices."""
+    muted = _muted_everything()
+    for t in ("idle_fee_notice", "reservation_no_show_fee", "reservation_approved"):
+        assert push_allowed(t, "info", muted, NOON, UTC)
+    assert push_allowed("reservation_declined", "warning", muted, NOON, UTC)
+    assert not push_allowed("reservation_requested", "info", muted, NOON, UTC)
 
 
 @pytest.mark.parametrize("severity", ["warning", "critical"])

@@ -60,6 +60,75 @@ def test_approve_and_decline_are_guarded_write_routes():
     } <= walked
 
 
+def _approve_db(plug, reservation):
+    """A mocked AsyncSession for _answer_request: the tenant-scoped plug_id
+    lookup, the plug row lock, the reservation row lock, the tenant zone."""
+    from unittest.mock import MagicMock
+
+    def _res(**kw):
+        r = MagicMock()
+        for k, v in kw.items():
+            getattr(r, k).return_value = v
+        return r
+
+    db = MagicMock()
+    db.commit = AsyncMock()
+    db.execute = AsyncMock(side_effect=[
+        _res(scalar_one_or_none=plug.id),
+        _res(scalar_one=plug),
+        _res(scalar_one=reservation),
+        _res(scalar_one_or_none="Asia/Kolkata"),
+    ])
+    return db
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("open_now", [False, True])
+async def test_approval_respects_the_current_opening_hours(monkeypatch, open_now):
+    """[C8 + C4] Approving books the slot, so hours narrowed after the request
+    refuse it (409, still PENDING, nothing sent); an open slot is approved.
+    Declining never checks hours."""
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from fastapi import HTTPException
+
+    from backend.database.models import ReservationStatus
+    from backend.routers.cpo import _reservations as mod
+
+    monkeypatch.setattr(mod, "expire_lapsed_reservations", AsyncMock())
+    monkeypatch.setattr(mod, "window_is_open", MagicMock(return_value=open_now))
+    sent = AsyncMock()
+    monkeypatch.setattr(mod, "notify", sent)
+    start = datetime(2026, 11, 20, 20, 0, tzinfo=timezone.utc)
+    plug = SimpleNamespace(id=5, name="Bay 1", opening_hours=[{"days": [0], "open": "08:00", "close": "18:00"}])
+    reservation = SimpleNamespace(
+        id=9, user_id=3, status=ReservationStatus.PENDING,
+        start_at=start, end_at=start + timedelta(hours=1),
+    )
+    user = SimpleNamespace(tenant_id=1)
+    db = _approve_db(plug, reservation)
+
+    if not open_now:
+        with pytest.raises(HTTPException) as exc:
+            await mod._answer_request(db, user, 9, approve=True)
+        assert exc.value.status_code == 409
+        assert reservation.status == ReservationStatus.PENDING
+        db.commit.assert_not_awaited()
+        sent.assert_not_awaited()
+    else:
+        out = await mod._answer_request(db, user, 9, approve=True)
+        assert out["status"] == "booked"
+        assert sent.await_args.args[1] == "reservation_approved"
+
+    # Declining a request outside the hours is always possible.
+    reservation.status = ReservationStatus.PENDING
+    db = _approve_db(plug, reservation)
+    out = await mod._answer_request(db, user, 9, approve=False)
+    assert out["status"] == "declined"
+
+
 # --- Tier 2: DB-gated -----------------------------------------------------------
 
 TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL")

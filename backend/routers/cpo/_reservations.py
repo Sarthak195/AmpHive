@@ -21,8 +21,9 @@ from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database.db import get_db
-from backend.database.models import Plug, Reservation, ReservationStatus, User
+from backend.database.models import Plug, Reservation, ReservationStatus, Tenant, User
 from backend.services.notifications import notify
+from backend.services.plug_hours import hours_of, window_is_open
 from backend.services.reservations import (
     HOLD_STATUSES,
     expire_lapsed_reservations,
@@ -138,9 +139,10 @@ async def _answer_request(
     # Plug row lock first, then the reservation row: the same order as the
     # driver cancel, booking and session-start paths. The entity is loaded for
     # the first time under its own lock, so its status is never stale.
-    plug_name = (await db.execute(
-        select(Plug.name).where(Plug.id == plug_id).with_for_update()
+    plug = (await db.execute(
+        select(Plug).where(Plug.id == plug_id).with_for_update()
     )).scalar_one()
+    plug_name = plug.name
     await expire_lapsed_reservations(db, plug_id=plug_id)
     reservation = (await db.execute(
         select(Reservation).where(Reservation.id == reservation_id).with_for_update()
@@ -150,6 +152,19 @@ async def _answer_request(
             status_code=409,
             detail=f"This request is already {reservation.status.value}.",
         )
+
+    # [C8 + C4] Approval books the slot, so it obeys the plug's opening hours
+    # as a direct booking does: hours narrowed after the request was made
+    # refuse the approval (the request stays PENDING; decline it instead).
+    if approve and hours_of(plug) is not None:
+        tz_name = (await db.execute(
+            select(Tenant.timezone).where(Tenant.id == tenant_id)
+        )).scalar_one_or_none()
+        if not window_is_open(plug, tz_name, reservation.start_at, reservation.end_at):
+            raise HTTPException(
+                status_code=409,
+                detail="The charger is closed during part of this slot under its current opening hours. Decline the request instead.",
+            )
 
     reservation.status = ReservationStatus.BOOKED if approve else ReservationStatus.DECLINED
     await db.commit()
