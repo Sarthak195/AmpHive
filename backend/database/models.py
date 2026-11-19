@@ -12,7 +12,7 @@ Phase 2 additions (marked with [P2]):
 """
 
 import enum
-from datetime import datetime
+from datetime import date, datetime, time
 from decimal import Decimal
 from typing import List, Optional
 
@@ -20,6 +20,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -29,6 +30,7 @@ from sqlalchemy import (
     SmallInteger,
     String,
     Text,
+    Time,
     UniqueConstraint,
     func,
     text,
@@ -1842,6 +1844,56 @@ class QueuedCharge(Base):
             unique=True,
             postgresql_where=text("status = 'waiting'"),
         ),
+    )
+
+
+class ChargeRoutine(Base):
+    """[C5] A driver's recurring weekly charge: on each selected weekday at a
+    local start time (the plug's tenant timezone; users have no zone), the
+    session reaper inserts an ordinary scheduled QueuedCharge
+    (services/routines.py materialize_routines). reap_queued_starts_once then
+    does all admission, holds and billing, so a routine is never a second
+    start path.
+
+    weekdays is a bitmask, Monday=1 .. Sunday=64. At least one of max_kwh /
+    max_duration_seconds is required (DB check + API validation): nobody is at
+    the plug when it switches on, same rule as a scheduled start.
+    last_materialized_date is the LOCAL date of the last occurrence handled
+    (queued or skipped), stamped in the same transaction as the insert under a
+    row lock, so a double tick never queues twice. last_queued_charge_id
+    points at the row queued for that occurrence until its outcome is settled
+    (services/routines.py settle_routines): a start resets
+    consecutive_failures, an EXPIRED/FAILED row increments it, and the third
+    in a row disables the routine. gate_notified records that the driver was
+    told their routine is paused because queued charging is off for the plug
+    (sent once, cleared by the next queued row). tenant_id is denormalized from
+    plug -> gateway -> tenant like QueuedCharge. Alembic revision
+    0050_charge_routines.
+    """
+    __tablename__ = "charge_routines"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    plug_id: Mapped[int] = mapped_column(Integer, ForeignKey("plugs.id", ondelete="CASCADE"), nullable=False)
+    tenant_id: Mapped[int] = mapped_column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    weekdays: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    start_time: Mapped[time] = mapped_column(Time, nullable=False)
+    max_kwh: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    max_duration_seconds: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    auto_stop_when_full: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("true"), nullable=False)
+    last_materialized_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    consecutive_failures: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"), nullable=False)
+    gate_notified: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"), nullable=False)
+    last_queued_charge_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("queued_charges.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "max_kwh IS NOT NULL OR max_duration_seconds IS NOT NULL",
+            name="ck_charge_routines_has_limit",
+        ),
+        CheckConstraint("weekdays BETWEEN 1 AND 127", name="ck_charge_routines_weekdays"),
     )
 
 

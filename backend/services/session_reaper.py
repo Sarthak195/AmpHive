@@ -155,9 +155,17 @@ class SessionReaperService:
             except Exception:
                 logger.exception("Reservation-start sweep failed")
             try:
+                await self.reap_routines_once()
+            except Exception:
+                logger.exception("Charge-routine materialize sweep failed")
+            try:
                 await self.reap_queued_starts_once()
             except Exception:
                 logger.exception("Queued-charge start sweep failed")
+            try:
+                await self.settle_routines_once()
+            except Exception:
+                logger.exception("Charge-routine settle sweep failed")
             try:
                 await self.reap_reprice_once()
             except Exception:
@@ -488,6 +496,21 @@ class SessionReaperService:
         if activated:
             logger.info(f"Reservation-start sweep activated {activated} booking(s)")
         return activated
+
+    async def reap_routines_once(self, now: Optional[datetime] = None) -> int:
+        """[C5] Queue each due charge routine's occurrence as an ordinary
+        scheduled QueuedCharge (services/routines.py). Runs just before
+        reap_queued_starts_once, which alone admits, holds, bills and starts."""
+        from backend.services.routines import materialize_routines
+
+        return await materialize_routines(self.db_session_factory, now)
+
+    async def settle_routines_once(self) -> int:
+        """[C5] After the queued-start sweep: reset or count each routine's
+        failures from its last queued row's outcome (services/routines.py)."""
+        from backend.services.routines import settle_routines
+
+        return await settle_routines(self.db_session_factory)
 
     async def reap_queued_starts_once(self) -> int:
         """[Queued charge] Process each WAITING queued charge: expire the ones

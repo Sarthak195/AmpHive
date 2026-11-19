@@ -7,7 +7,8 @@
  * normal Log out only signs out this device), and the self-service data
  * rights ("Your data": export + account closure), and personal read-only
  * API tokens for Home Assistant / evcc (components/ApiTokens.jsx, F7), and
- * push preferences with quiet hours (components/NotificationPrefs.jsx, C7).
+ * push preferences with quiet hours (components/NotificationPrefs.jsx, C7),
+ * and recurring weekly charge routines (components/ChargeRoutines.jsx, C5).
  *
  * Why the data-rights controls live HERE and not behind an email request:
  * the Privacy Policy promises the user can get a copy of their data and
@@ -30,6 +31,7 @@ import {
   Trash2,
 } from 'lucide-react';
 import ApiTokens from '../components/ApiTokens';
+import ChargeRoutines from '../components/ChargeRoutines';
 import LogoutEverywhere from '../components/LogoutEverywhere';
 import NotificationPrefs from '../components/NotificationPrefs';
 import PageHeader from '../components/ui/PageHeader';
@@ -399,6 +401,8 @@ export default function Account() {
         </section>
 
         <NotificationPrefs />
+
+        <ChargeRoutines />
 
         <ApiTokens />
 

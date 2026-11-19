@@ -359,6 +359,7 @@ from backend.routers import (  # noqa: E402
     payments,
     plugs,
     reservations,
+    routines,
     sessions,
     status,
     tokens,
@@ -385,6 +386,8 @@ app.include_router(admin.router)
 app.include_router(status.router)
 # Personal read-only API tokens + GET /api/me/meter (F7) - appended last, same rationale.
 app.include_router(tokens.router)
+# Recurring weekly charge routines (C5) - appended last, same rationale.
+app.include_router(routines.router)
 
 import socketio  # noqa: E402
 
