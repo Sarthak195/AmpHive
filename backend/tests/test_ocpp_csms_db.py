@@ -413,7 +413,7 @@ async def test_id_tag_lifecycle_scope_cap_export_and_closure(factory, rig):  # n
     for n in range(2, ocpp_router.MAX_ID_TAGS_PER_USER + 1):
         await as_user(lambda u, db, n=n: ocpp_router.create_id_tag(bind(f"CARD{n}"), u, db))
     assert await status_of(bind("ONE-TOO-MANY")) == 409   # per-account cap
-    doc = await as_user(build_export)
+    doc = await as_user(lambda u, db: build_export(db, u))
     assert len(doc["ocpp_id_tags"]) == ocpp_router.MAX_ID_TAGS_PER_USER
     assert "CARD1" not in json.dumps(doc) and "tag_hash" not in json.dumps(doc)
 
