@@ -33,6 +33,7 @@ from backend.database.models import (
     User,
     UserFavorite,
 )
+from backend.routers.cpo._common import redact_for
 from backend.schemas import (
     PlugPhotoResponse,
     PlugReportCreateRequest,
@@ -447,10 +448,19 @@ async def get_available_plugs(
                 review_count=review_count,
                 thumbnail_url=photo_thumbs.get(plug.id),
                 **reservation_fields.get(plug.id, {}),
-                **plug_hours.driver_fields(plug, tenant.timezone, now),
+                **_hours_fields(plug, tenant.timezone, now, user),
             )
         )
     return responses
+
+
+def _hours_fields(plug, tz_name, now, user) -> dict:
+    """[Plug hours] driver_fields for a PlugResponse, with the operator's
+    free-text access note masked for a read-only cpo_viewer (F10, the same
+    rule GET /api/cpo/plugs applies)."""
+    fields = plug_hours.driver_fields(plug, tz_name, now)
+    fields["access_note"] = redact_for(user, fields["access_note"])
+    return fields
 
 
 @router.get(
@@ -657,8 +667,8 @@ async def get_plug(
         review_count=review_count,
         thumbnail_url=thumbnail_url,
         **reservation_fields.get(plug.id, {}),
-        **plug_hours.driver_fields(
-            plug, tenant.timezone if tenant is not None else None, now
+        **_hours_fields(
+            plug, tenant.timezone if tenant is not None else None, now, user
         ),
     )
 

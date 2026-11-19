@@ -507,7 +507,23 @@ async def update_session_limits(
     ).scalar_one()
 
     if "max_duration_seconds" in updates:
-        session.max_duration_seconds = updates["max_duration_seconds"]
+        # [Plug hours] A raised limit still ends by the closing time of the
+        # window the session started in and by the plug's max_session_minutes
+        # (the bounds the start clamp applied). Local import: this router's
+        # header is a merge hot-spot (same rationale as the gates above).
+        from backend.services import plug_hours
+
+        new_duration = updates["max_duration_seconds"]
+        if plug_hours.hours_of(plug) is not None or plug_hours.max_minutes_of(plug) is not None:
+            tz_name = None
+            if plug_hours.hours_of(plug) is not None:
+                tz_name = (await db.execute(
+                    select(Tenant.timezone).where(Tenant.id == session.tenant_id)
+                )).scalar_one_or_none()
+            cap = plug_hours.duration_cap(plug, tz_name, session.started_at)
+            if cap is not None:
+                new_duration = min(new_duration, cap)
+        session.max_duration_seconds = new_duration
     if "max_kwh" in updates:
         session.max_kwh = updates["max_kwh"]
     # Re-size the hold whenever max_kwh OR max_duration_seconds changes (skip

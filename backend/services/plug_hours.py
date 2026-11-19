@@ -248,3 +248,19 @@ def driver_fields(plug, tz_name, now: datetime) -> dict:
         "amenities": amenities_of(plug),
         "access_note": access_note_of(plug),
     }
+
+
+def duration_cap(plug, tz_name, started_at: datetime) -> Optional[int]:
+    """[Session limits PATCH] The longest max_duration_seconds a session that
+    started at ``started_at`` may carry: by the closing time of the window it
+    started in and by max_session_minutes, the same bounds the start clamp
+    applied. None when neither applies, so a driver can not raise a running
+    session's limit past what the start would have allowed."""
+    if started_at.tzinfo is None:
+        started_at = started_at.replace(tzinfo=timezone.utc)
+    try:
+        return clamp_start_duration(plug, tz_name, started_at, None)
+    except ValueError:
+        # Hours edited since the start: the max length still applies.
+        minutes = max_minutes_of(plug)
+        return minutes * 60 if minutes is not None else None

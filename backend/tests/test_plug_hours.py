@@ -362,3 +362,28 @@ async def test_cpo_plug_list_masks_the_access_note_for_a_viewer():
     assert (await cpo_list_plugs(owner, db, limit=50, offset=0))[0]["access_note"] == (
         "Call 9876543210 for the gate"
     )
+
+
+def test_limits_patch_cap_matches_the_start_bounds():
+    from backend.services.plug_hours import duration_cap
+
+    plug = _plug_ns([{"days": ALL, "start": 480, "end": 1320}], max_minutes=600)
+    started = _loc(16, 20).astimezone(timezone.utc)
+    assert duration_cap(plug, TZ_NAME, started) == 7200              # ends by 22:00
+    assert duration_cap(_plug_ns(max_minutes=45), TZ_NAME, started) == 2700
+    assert duration_cap(_plug_ns(), TZ_NAME, started) is None
+    # Started while the (since edited) hours say closed: only the max length.
+    assert duration_cap(plug, TZ_NAME, _loc(16, 23).astimezone(timezone.utc)) == 36000
+
+
+def test_driver_plug_routes_mask_the_access_note_for_a_viewer():
+    from backend.database.models import UserRole
+    from backend.routers.plugs import _hours_fields
+
+    plug = _plug_ns()
+    plug.access_note = "Ring 9876543210 at the gate"
+    now = _loc(16, 12).astimezone(timezone.utc)
+    viewer = MagicMock(role=UserRole.CPO_VIEWER)
+    driver = MagicMock(role=UserRole.DRIVER)
+    assert "9876543210" not in _hours_fields(plug, TZ_NAME, now, viewer)["access_note"]
+    assert _hours_fields(plug, TZ_NAME, now, driver)["access_note"] == "Ring 9876543210 at the gate"
