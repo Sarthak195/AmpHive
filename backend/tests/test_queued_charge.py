@@ -407,6 +407,7 @@ async def test_sweep_starts_debounced_row():
     row_db = _row_db(
         _s1n(qc), _s1n(user), _s1(0), _s1n(plug), _s1(tenant),
         _upd(), _s1n(None), _s1n(None), _s1(gateway),
+        _s1n(None),  # [C5] routine lookup: no routine owns this row
     )
     svc = SessionReaperService(_factory(_scan_db([1]), row_db), AsyncMock())
 
@@ -436,6 +437,7 @@ async def test_sweep_carries_the_auto_stop_opt_in_to_the_session():
     row_db = _row_db(
         _s1n(qc), _s1n(_user()), _s1(0), _s1n(plug), _s1(_tenant(delay=2)),
         _upd(), _s1n(None), _s1n(None), _s1(_gateway()),
+        _s1n(None),  # [C5] routine lookup: no routine owns this row
     )
     svc = SessionReaperService(_factory(_scan_db([1]), row_db), AsyncMock())
 
@@ -457,6 +459,7 @@ async def test_sweep_expires_on_balance_failure():
     row_db = _row_db(
         _s1n(qc), _s1n(_user()), _s1(0), _s1n(plug), _s1(tenant),
         _upd(), _s1n(None), _s1n(None), _s1(_gateway()),
+        _s1n(None),  # [C5] routine lookup: no routine owns this row
     )
     svc = SessionReaperService(_factory(_scan_db([1]), row_db), AsyncMock())
 
@@ -480,6 +483,7 @@ async def test_sweep_fails_on_caps_failure():
     row_db = _row_db(
         _s1n(qc), _s1n(_user()), _s1(0), _s1n(plug), _s1(tenant),
         _upd(), _s1n(None), _s1n(None), _s1(_gateway()),
+        _s1n(None),  # [C5] routine lookup: no routine owns this row
     )
     svc = SessionReaperService(_factory(_scan_db([1]), row_db), AsyncMock())
 
@@ -553,6 +557,7 @@ async def test_sweep_passes_own_covering_reservation_to_start_helper():
     row_db = _row_db(
         _s1n(qc), _s1n(_user(user_id=5)), _s1(0), _s1n(plug), _s1(_tenant(delay=2)),
         _upd(), _s1n(own_reservation), _s1n(None), _s1(_gateway()),
+        _s1n(None),  # [C5] routine lookup: no routine owns this row
     )
     svc = SessionReaperService(_factory(_scan_db([1]), row_db), AsyncMock())
 
@@ -965,6 +970,7 @@ def _scheduled_start_chain(qc, plug, tenant=None, gateway=None):
         _s1n(qc), _s1n(_user()), _s1(0), _s1n(plug),
         _s1(tenant or _tenant(enabled=True, delay=2)),
         _upd(), _s1n(None), _s1(gateway or _gateway()),
+        _s1n(None),  # [C5] routine lookup: no routine owns this row
     )
 
 
@@ -990,11 +996,25 @@ async def test_sweep_starts_schedule_at_not_before_when_power_never_dropped():
     assert started == 1
     assert begin.await_args.kwargs == {
         "max_kwh": 30.0, "max_duration_seconds": 14400, "covering_reservation": None,
-        "auto_stop_when_full": False,
+        "auto_stop_when_full": False, "announce_start": True,
     }
     assert qc.status == QueuedChargeStatus.STARTED
     assert notify.await_args.args[1] == "queued_charge_started"
     assert notify.await_args.args[2] == "Your scheduled charge started"
+
+
+@pytest.mark.asyncio
+async def test_sweep_routine_row_starts_with_no_start_notice_of_its_own():
+    """[C5 + C7] A row a charge routine owns: neither queued_charge_started nor
+    session_started fires (settle_routines sends the one routine_started)."""
+    qc = _qc(not_before=_ago(seconds=30))
+    chain = _scheduled_start_chain(qc, _due_plug())
+    chain.execute.side_effect = list(chain.execute.side_effect)[:-1] + [_s1n(42)]
+    started, begin, notify = await _sweep(chain)
+    assert started == 1
+    assert qc.status == QueuedChargeStatus.STARTED
+    assert begin.await_args.kwargs["announce_start"] is False
+    notify.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -126,6 +126,7 @@ async def begin_active_session(
     max_duration_seconds: Optional[int],
     covering_reservation=None,
     auto_stop_when_full: bool = False,
+    announce_start: bool = True,
 ) -> ChargingSession:
     """
     Admit and start an ACTIVE charging session on an already-locked, already-
@@ -329,11 +330,14 @@ async def begin_active_session(
     # succeeded (never on the CANCELLED rollback above). Every start path runs
     # through here, so a queued auto-start also gets the reaper's own
     # "queued_charge_started" notice. notify() never raises.
-    from backend.services.notifications import notify
-    await notify(
-        user.id, "session_started", "Charging started",
-        f"{plug.name}: your session is live.",
-        severity="info", plug_id=plug.id, session_id=session.id,
-    )
+    # announce_start=False: the caller owns the start notice (a C5 routine
+    # occurrence gets exactly one, routine_started, from settle_routines).
+    if announce_start:
+        from backend.services.notifications import notify
+        await notify(
+            user.id, "session_started", "Charging started",
+            f"{plug.name}: your session is live.",
+            severity="info", plug_id=plug.id, session_id=session.id,
+        )
 
     return session

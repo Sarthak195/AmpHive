@@ -290,6 +290,7 @@ async def test_sweep_leaves_the_row_waiting_when_the_helper_finds_it_closed():
     row_db = _row_db(
         _s1n(qc), _s1n(_user()), _s1(0), _s1n(plug), _s1(_tenant(delay=2)),
         _upd(), _s1n(None), _s1n(None), _s1(_gateway()),
+        _s1n(None),  # [C5] routine lookup: no routine owns this row
     )
     svc = SessionReaperService(_factory(_scan_db([1]), row_db), AsyncMock())
 

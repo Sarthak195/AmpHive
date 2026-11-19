@@ -341,7 +341,7 @@ async def test_persist_path_ignores_offline_replays(_knobs):
 
 # --------------------------------------------------------- session_started ----
 
-async def _begin(publish_ok):
+async def _begin(publish_ok, **kw):
     from backend.services import session_start
 
     db = MagicMock()
@@ -367,6 +367,7 @@ async def _begin(publish_ok):
         try:
             await session_start.begin_active_session(
                 db, user, plug, MagicMock(tenant_id=1), max_kwh=None, max_duration_seconds=None,
+                **kw,
             )
         except Exception:
             pass
@@ -379,6 +380,13 @@ async def test_session_started_sent_once_when_the_start_succeeds():
     notify.assert_awaited_once()
     assert notify.await_args.args[:2] == (3, "session_started")
     assert notify.await_args.kwargs["plug_id"] == PLUG
+
+
+@pytest.mark.asyncio
+async def test_no_session_started_when_the_caller_owns_the_notice():
+    # [C5 + C7] A routine occurrence's only start notice is routine_started.
+    notify = await _begin(publish_ok=True, announce_start=False)
+    notify.assert_not_awaited()
 
 
 @pytest.mark.asyncio

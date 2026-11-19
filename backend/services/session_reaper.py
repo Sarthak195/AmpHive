@@ -568,6 +568,7 @@ class SessionReaperService:
         from fastapi import HTTPException
 
         from backend.database.models import (
+            ChargeRoutine,
             ChargingSession,
             Gateway,
             Plug,
@@ -889,6 +890,16 @@ class SessionReaperService:
                     # between it and a later write would otherwise return
                     # "cancelled" while the socket goes live. The except below
                     # overwrites it on failure.
+                    # [C5 + C7] A charge routine's occurrence gets exactly one
+                    # start notice, the mandatory routine_started that
+                    # settle_routines sends; neither session_started nor
+                    # queued_charge_started fires for it. A plain read (the
+                    # reaper never locks charge_routines).
+                    from_routine = (await db.execute(
+                        select(ChargeRoutine.id)
+                        .where(ChargeRoutine.last_queued_charge_id == qc.id)
+                        .limit(1)
+                    )).scalar_one_or_none() is not None
                     qc.status = QueuedChargeStatus.STARTED
                     try:
                         session = await begin_active_session(
@@ -900,6 +911,7 @@ class SessionReaperService:
                             # exactly as the manual start route does.
                             covering_reservation=covering,
                             auto_stop_when_full=bool(qc.auto_stop_when_full),
+                            announce_start=not from_routine,
                         )
                     except PlugClosedError:
                         # [Plug hours] Closed between the check above (the
@@ -957,10 +969,11 @@ class SessionReaperService:
                     else:
                         title = "Your scheduled charge started"
                         body = f"Your scheduled charge on {plug_name} started."
-                    await notify(
-                        user_id, "queued_charge_started", title, body,
-                        severity="info", plug_id=plug.id, session_id=session.id,
-                    )
+                    if not from_routine:
+                        await notify(
+                            user_id, "queued_charge_started", title, body,
+                            severity="info", plug_id=plug.id, session_id=session.id,
+                        )
                     logger.info(
                         f"Auto-started queued charge {qc_id} on plug {plug.id} "
                         f"(session {session.id})"

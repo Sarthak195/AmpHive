@@ -48,7 +48,7 @@ ALWAYS_PUSH_TYPES = frozenset({
     "gateway_fault",
     # F1 "your car looks fully charged" notice.
     "charge_full",
-    # Charging routines (emitted by a parallel lane).
+    # Charge routines (services/routines.py, C5).
     "routine_started",
     "routine_disabled",
 })
