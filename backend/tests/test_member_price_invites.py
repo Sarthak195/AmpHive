@@ -437,6 +437,30 @@ async def test_invite_email_goes_through_send_email():
     assert "Family" not in subject
 
 
+@pytest.mark.asyncio
+async def test_account_closure_scrubs_invites_sent_to_or_accepted_by_the_account():
+    from sqlalchemy.dialects import postgresql
+
+    from backend.services import account_closure
+
+    result = MagicMock(rowcount=0)
+    result.scalar_one.return_value = 0
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=result)
+    user = SimpleNamespace(id=42, email=" Friend@Example.com ", role=UserRole.DRIVER, tenant_id=None)
+    with patch.object(account_closure, "hash_password", return_value="x"):
+        out = await account_closure.close_account(db, user)
+    stmts = [c.args[0] for c in db.execute.await_args_list]
+    scrub = [st for st in stmts if getattr(getattr(st, "table", None), "name", None) == "group_invites"]
+    assert len(scrub) == 1
+    compiled = scrub[0].compile(dialect=postgresql.dialect())
+    sql = str(compiled)
+    assert sql.startswith("UPDATE group_invites") and "accepted_by_user_id" in sql
+    params = set(map(str, compiled.params.values()))
+    assert {"deleted-user-42@deleted.amphive.invalid", "friend@example.com", "42"} <= params
+    assert out["purged"]["group_invites_scrubbed"] == 0
+
+
 # =============================================================================
 # 1e. CPO routes: viewer masking and tenant scope
 # =============================================================================
