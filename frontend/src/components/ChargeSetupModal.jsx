@@ -36,6 +36,13 @@
  * tariff has none). When set, the terms are shown under the auto-stop toggle:
  * an opted-in auto-stop never pays it.
  *
+ * [Ready by] "Start: Ready by" takes a wall-clock deadline in the tenant zone and
+ * a time or energy target. GET /api/plugs/{id}/ready-by previews the cheapest
+ * single contiguous window that ends by then (best-effort, shows the backend's
+ * refusal inline when the deadline cannot be met); confirming calls
+ * `onConfirm(plugId, limits, null, readyByIso)` and the backend schedules ONE
+ * start through the normal scheduled path (no pause, no split, no restart).
+ *
  * [Charge complete] An opt-in "Stop automatically when the car is full" toggle
  * (default off). When on, `limits.auto_stop_when_full = true` is passed to
  * onConfirm; the backend then stops the session once the car's draw has stayed
@@ -168,10 +175,34 @@ export default function ChargeSetupModal({ open, onClose, plug, mode = 'start', 
     open && mode === 'start' && startAt === 'later' && atTime && estTz
       ? nextOccurrenceInZone(atTime, estTz).iso
       : null;
+  const readyActive = Boolean(open && mode === 'start' && startAt === 'ready' && atTime && estTz);
+  const readyIso = readyActive ? nextOccurrenceInZone(atTime, estTz).iso : null;
   const [estimate, setEstimate] = useState(null);
+  const [readyPlan, setReadyPlan] = useState(null);
+  // [Ready by] Preview of the planned window, or the backend's refusal text.
+  useEffect(() => {
+    setReadyPlan(null);
+    if (!readyIso || plugId == null || (estKwh == null && estMinutes == null)) return undefined;
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      const qs = new URLSearchParams({ ready_by: readyIso });
+      if (estKwh != null) qs.set('max_kwh', String(estKwh));
+      if (estMinutes != null) qs.set('max_duration_min', String(estMinutes));
+      try {
+        const res = await api.get(`/api/plugs/${plugId}/ready-by?${qs.toString()}`);
+        if (!cancelled && res) setReadyPlan({ plan: res });
+      } catch (err) {
+        if (!cancelled) setReadyPlan({ error: apiErrorCopy(err) });
+      }
+    }, ESTIMATE_DEBOUNCE_MS);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [plugId, readyIso, estKwh, estMinutes]);
   useEffect(() => {
     setEstimate(null);
-    if (!open || plugId == null || (estKwh == null && estMinutes == null)) return undefined;
+    if (!open || startAt === 'ready' || plugId == null || (estKwh == null && estMinutes == null)) return undefined;
     let cancelled = false;
     const timer = setTimeout(async () => {
       const qs = new URLSearchParams();
@@ -189,7 +220,7 @@ export default function ChargeSetupModal({ open, onClose, plug, mode = 'start', 
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [open, plugId, estKwh, estMinutes, estStartIso]);
+  }, [open, startAt, plugId, estKwh, estMinutes, estStartIso]);
 
   // Fresh form every time the modal opens (or for a different plug).
   useEffect(() => {
@@ -214,8 +245,9 @@ export default function ChargeSetupModal({ open, onClose, plug, mode = 'start', 
   const tz = plug.tenant_timezone;
   const canSchedule = mode === 'start' && Boolean(plug.schedule_available && tz);
   const scheduling = canSchedule && startAt === 'later';
-  const copy = scheduling ? COPY.schedule : COPY[mode] || COPY.start;
-  const nextStart = scheduling && atTime ? nextOccurrenceInZone(atTime, tz) : null;
+  const readyBy = canSchedule && startAt === 'ready';
+  const copy = scheduling || readyBy ? COPY.schedule : COPY[mode] || COPY.start;
+  const nextStart = (scheduling || readyBy) && atTime ? nextOccurrenceInZone(atTime, tz) : null;
 
   // Coverage line: the plug's own price (falling back to the global rate).
   // A real 0 (free charging) is a valid rate — only null/undefined/non-numeric
@@ -237,16 +269,17 @@ export default function ChargeSetupModal({ open, onClose, plug, mode = 'start', 
   const kwhInvalid = kwhNum !== null && kwhNum <= 0;
   const presetMinutes = TIME_PRESETS.find((p) => p.id === timePreset)?.minutes;
   const hasLimit = Boolean(presetMinutes || customMinutes || (kwhNum !== null && kwhNum > 0));
-  const scheduleBlocked = scheduling && (!atTime || !hasLimit);
+  const scheduleBlocked = (scheduling || readyBy) && (!atTime || !hasLimit);
 
   const chooseStart = (value) => {
     setStartAt(value);
-    // A scheduled charge must stop on its own: move off "No limit", and undo
-    // that preselect if the driver goes back to "Now" without touching it.
+    // A "Later" charge must stop on its own: move off "No limit", and undo
+    // that preselect if the driver goes back to "Now" or on to "Ready by"
+    // (where the limit sizes the window, so they must choose it) untouched.
     if (value === 'later' && timePreset === 'none' && kwh === '') {
       setTimePreset('8h');
       setAutoLimit(true);
-    } else if (value === 'now' && autoLimit && timePreset === '8h') {
+    } else if (value !== 'later' && autoLimit && timePreset === '8h') {
       setTimePreset('none');
       setAutoLimit(false);
     }
@@ -275,7 +308,9 @@ export default function ChargeSetupModal({ open, onClose, plug, mode = 'start', 
     setCircuitFull(false);
     try {
       const chosen = Object.keys(limits).length ? limits : null;
-      if (scheduling) {
+      if (readyBy) {
+        await onConfirm(plug.id, chosen, null, nextOccurrenceInZone(atTime, tz).iso);
+      } else if (scheduling) {
         // Re-resolve at confirm time so a modal left open stays correct.
         await onConfirm(plug.id, chosen, nextOccurrenceInZone(atTime, tz).iso);
       } else {
@@ -353,6 +388,7 @@ export default function ChargeSetupModal({ open, onClose, plug, mode = 'start', 
               {[
                 ['now', 'Now'],
                 ['later', 'At a time'],
+                ['ready', 'Ready by'],
               ].filter(([value]) => !(closedStart && value === 'now')).map(([value, label]) => (
                 <button
                   key={value}
@@ -365,7 +401,7 @@ export default function ChargeSetupModal({ open, onClose, plug, mode = 'start', 
                 </button>
               ))}
             </div>
-            {scheduling && (
+            {(scheduling || readyBy) && (
               <>
                 <input
                   className="input"
@@ -373,11 +409,11 @@ export default function ChargeSetupModal({ open, onClose, plug, mode = 'start', 
                   step="60"
                   value={atTime}
                   onChange={(e) => setAtTime(e.target.value)}
-                  aria-label="Start time"
+                  aria-label={readyBy ? 'Ready-by time' : 'Start time'}
                 />
                 <p className="field-hint text-sm">
                   {nextStart
-                    ? `Times are in ${tz}. Starts ${nextStart.tomorrow ? 'tomorrow' : 'today'} at ${fmtTimeInZone(nextStart.iso, tz)}.`
+                    ? `Times are in ${tz}. ${readyBy ? 'Ready by' : 'Starts'} ${nextStart.tomorrow ? 'tomorrow' : 'today'} at ${fmtTimeInZone(nextStart.iso, tz)}.`
                     : `Times are in ${tz}.`}
                 </p>
               </>
@@ -455,7 +491,25 @@ export default function ChargeSetupModal({ open, onClose, plug, mode = 'start', 
           )}
         </div>
 
-        {estimate && (
+        {readyBy && readyPlan?.plan && (
+          <p className="charge-setup-estimate text-sm" data-testid="ready-by-plan">
+            <strong>Plan:</strong> starts {fmtTimeInZone(readyPlan.plan.not_before, tz)}, about{' '}
+            {Number(readyPlan.plan.energy_kwh).toFixed(1)} kWh by{' '}
+            {fmtTimeInZone(readyPlan.plan.finish_at, tz)}, costing about{' '}
+            <Money coins={Number(readyPlan.plan.cost_coins)} rate={coin_inr_rate} />.{' '}
+            <span className="text-3">
+              One uninterrupted charge at the cheapest time that finishes by your deadline. It
+              stops at your limit or the deadline, whichever comes first.
+            </span>
+          </p>
+        )}
+        {readyBy && readyPlan?.error && (
+          <p className="field-error" role="status" data-testid="ready-by-error">
+            {readyPlan.error}
+          </p>
+        )}
+
+        {estimate && !readyBy && (
           <p className="charge-setup-estimate text-sm" data-testid="charge-estimate">
             <strong>Estimate:</strong> ≈ {Number(estimate.energy_kwh).toFixed(1)} kWh in{' '}
             {fmtDuration(estimate.duration_min)}, finishing about{' '}
@@ -494,7 +548,7 @@ export default function ChargeSetupModal({ open, onClose, plug, mode = 'start', 
           </p>
         )}
 
-        {scheduling && !hasLimit && (
+        {(scheduling || readyBy) && !hasLimit && (
           <p className="field-hint text-sm">A scheduled charge needs a time or energy limit.</p>
         )}
 

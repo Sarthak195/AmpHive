@@ -1030,6 +1030,50 @@ async def get_plug_charge_estimate(
         raise HTTPException(status_code=422, detail="Estimate window out of range.")
 
 
+@router.get("/api/plugs/{plug_id}/ready-by")
+async def get_plug_ready_by_plan(
+    plug_id: int,
+    ready_by: datetime,
+    max_kwh: Optional[float] = Query(default=None, gt=0, le=100.0),
+    max_duration_min: Optional[int] = Query(default=None, gt=0, le=1440),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    [F6R] DISPLAY-ONLY plan for a "ready by" charge: the cheapest single
+    contiguous window ending by ``ready_by`` (services/ready_by.py), as
+    ``{not_before, finish_at, duration_min, energy_kwh, cost_coins, ...}``.
+    Writes nothing; POST /api/sessions/queue/ready-by creates the scheduled
+    start. Same visibility as GET /api/plugs/{id}/estimate. Numbers and
+    timestamps only, so there is nothing for a cpo_viewer to mask. 409
+    ``ready_by_unreachable`` when the deadline cannot be met.
+    """
+    from backend.services.ready_by import plan_ready_by
+
+    if ready_by.tzinfo is None:
+        raise HTTPException(status_code=422, detail="ready_by must include a UTC offset.")
+    plug = (await db.execute(select(Plug).where(Plug.id == plug_id))).scalar_one_or_none()
+    if not plug:
+        raise HTTPException(status_code=404, detail=f"Plug with ID {plug_id} not found.")
+    await ensure_plug_group_access(db, plug, user)
+    plan = await plan_ready_by(
+        db, plug, user.id, ready_by,
+        max_kwh, max_duration_min * 60 if max_duration_min is not None else None,
+    )
+    return {
+        "not_before": plan["not_before"].isoformat(),
+        "finish_at": plan["finish_at"].isoformat(),
+        "ready_by": plan["ready_by"].isoformat(),
+        "duration_min": plan["duration_min"],
+        "energy_kwh": plan["energy_kwh"],
+        "cost_coins": plan["cost_coins"],
+        "rate_changes": plan["rate_changes"],
+        "basis": plan["basis"],
+        "power_w": plan["power_w"],
+        "is_estimate": True,
+    }
+
+
 # ===========================================================================
 # "Report a problem with this charger" (database/models.py PlugReport)
 # ===========================================================================
