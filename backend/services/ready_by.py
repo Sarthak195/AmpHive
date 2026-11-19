@@ -12,6 +12,7 @@ stopped by its own energy or duration limit.
 Pricing reuses the C3 estimate's pieces (power basis, walk_cost, the plug-hours
 clamp) so the plan and the bill cannot disagree.
 """
+import asyncio
 import math
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -173,7 +174,9 @@ async def plan_ready_by(
         base = to_money(tariff.price_per_kwh)
 
     duration_min = required_minutes(power_w, max_kwh, max_duration_s)
-    chosen = choose_window(
+    # A whole-minute scan over up to 24 h is pure CPU: keep it off the event loop.
+    chosen = await asyncio.to_thread(
+        choose_window,
         plug=plug, tz_name=tz_name, slots=slots, base_rate=base, power_w=power_w,
         duration_min=duration_min, now=now, ready_by=ready_by,
     )
