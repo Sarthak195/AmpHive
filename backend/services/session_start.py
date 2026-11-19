@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import HTTPException
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend import state
@@ -37,6 +38,12 @@ from backend.database.models import (
 )
 from backend.services.caps import check_circuit_admission
 from backend.services.money import ZERO_MONEY, energy_cost, to_money
+from backend.services.plug_hours import (
+    clamp_start_duration,
+    closed_detail,
+    hours_of,
+    max_minutes_of,
+)
 from backend.services.pricing import max_rate_over_window, resolve_rate_window
 from backend.services.session_lifecycle import set_plug_telemetry_interval
 from backend.services.wallet import available_balance
@@ -132,9 +139,31 @@ async def begin_active_session(
     Raises the same typed failures the start path always did, so both entry
     points surface identically (the reaper maps them to EXPIRED/FAILED):
       - HTTPException(409) — circuit at capacity (check_circuit_admission).
+      - HTTPException(409) — the plug is outside its opening hours.
       - HTTPException(402) — available balance below the start floor.
       - HTTPException(500) — the gateway ON publish failed (claim rolled back).
     """
+    # [Plug hours] Under the caller's plug row lock: refuse a start while the
+    # plug is closed, and shorten the session's own duration limit so it ends
+    # by the current window's closing time and by max_session_minutes (the
+    # firmware's duration watchdog then stops it; nothing here force-stops a
+    # running session). Before the hold sizing below so the hold, the
+    # persisted limit and the ON command all use the clamped value. A 24x7
+    # plug with no max length skips this entirely (no extra query).
+    now = datetime.now(timezone.utc)
+    if hours_of(plug) is not None or max_minutes_of(plug) is not None:
+        tz_name = None
+        if hours_of(plug) is not None:
+            tz_name = (await db.execute(
+                select(Tenant.timezone).where(Tenant.id == gateway.tenant_id)
+            )).scalar_one_or_none()
+        try:
+            max_duration_seconds = clamp_start_duration(
+                plug, tz_name, now, max_duration_seconds
+            )
+        except ValueError:
+            raise HTTPException(status_code=409, detail=closed_detail(plug, tz_name, now))
+
     # [Caps] Circuit admission: refuse the start if the plug's group is at its
     # shared current capacity (Σ active plug caps + this plug's cap > line max).
     # Under the plug lock; the helper locks the group row so concurrent starts
@@ -153,7 +182,6 @@ async def begin_active_session(
     # (None for a flat tariff → the session stays one segment and bills exactly
     # as before). Snapshotted below so MQTTManager._persist_telemetry can close
     # out the segment forward-only when the boundary passes.
-    now = datetime.now(timezone.utc)
     rate_coins_per_kwh, rate_valid_until = await resolve_rate_window(db, plug, at=now)
 
     # Size the session's authorization hold (MARKET_GAP_ANALYSIS.md §3): reserve

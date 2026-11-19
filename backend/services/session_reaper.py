@@ -559,6 +559,7 @@ class SessionReaperService:
         )
         from backend.services import pricing
         from backend.services.notifications import notify
+        from backend.services.plug_hours import clamp_start_duration
         from backend.services.reservations import expire_lapsed_reservations
         from backend.services.session_lifecycle import gateway_is_live, plug_is_powered
         from backend.services.session_start import (
@@ -838,6 +839,16 @@ class SessionReaperService:
                     # Replay the walk-up route's liveness gate: a publish only
                     # proves the broker took the ON, not that a gateway got it.
                     if not gateway_is_live(gateway, now):
+                        await db.commit()
+                        continue
+
+                    # [Plug hours] A closed plug leaves the row WAITING until it
+                    # opens or the row's TTL expires (step 1). Checked here, not
+                    # left to begin_active_session's own refusal, because the
+                    # except below would turn that 409 into FAILED.
+                    try:
+                        clamp_start_duration(plug, tenant.timezone, now, qc.max_duration_seconds)
+                    except ValueError:
                         await db.commit()
                         continue
 

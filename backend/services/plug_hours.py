@@ -223,3 +223,13 @@ def clamp_start_duration(
     if minutes is not None:
         limits.append(minutes * 60)
     return min(limits) if limits else None
+
+
+def closed_detail(plug, tz_name, now: datetime) -> str:
+    """The 409 detail for a start refused by opening hours."""
+    open_now, changes_at = hours_status(plug, tz_name, now)
+    if open_now:
+        return "This charger is closing now. Try again when it reopens."
+    if changes_at is not None:
+        return f"This charger is closed right now. It opens at {changes_at:%H:%M}."
+    return "This charger is closed right now."
