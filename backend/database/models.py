@@ -252,6 +252,16 @@ class User(Base):
     # no quiet hours). Gates Web Push only, never the in-app feed row.
     # Alembic revision 0048_notification_prefs.
     notification_prefs: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    # [F8V] The driver's own insights assumptions (km per kWh, petrol price and
+    # petrol km per litre), the JSON dump of services/insights.VehicleProfile.
+    # NULL = every default. The monthly insights email is opt-in (default off);
+    # insights_email_month is the last "YYYY-MM" decided (claimed, sent or
+    # skipped as empty) and insights_email_failures counts send failures for the
+    # pending month. Alembic revision 0053_vehicle_profile.
+    vehicle_profile: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    monthly_insights_email: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"), nullable=False)
+    insights_email_month: Mapped[Optional[str]] = mapped_column(String(7), nullable=True)
+    insights_email_failures: Mapped[int] = mapped_column(SmallInteger, default=0, server_default=text("0"), nullable=False)
 
     # Relationships
     tenant: Mapped[Optional[Tenant]] = relationship("Tenant", back_populates="users")

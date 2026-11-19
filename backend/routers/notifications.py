@@ -9,6 +9,8 @@ push-subscription CRUD, and the caller's own push preferences
 """
 import logging
 import os
+from datetime import datetime, timezone
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, select, update
@@ -23,8 +25,10 @@ from backend.schemas import (
     PushSubscribeRequest,
     PushUnsubscribeRequest,
 )
+from backend.services import insights
 from backend.services import notifications as notification_service
 from backend.services.auth import get_current_user
+from backend.services.insights_email import previous_month_key
 from backend.services.notification_prefs import NotificationPrefs, load_prefs
 
 logger = logging.getLogger("amphive.api")
@@ -249,3 +253,69 @@ async def put_notification_prefs(
     )
     await db.commit()
     return await _prefs_response(db, user, req)
+
+
+# --- Vehicle profile and monthly insights email (F8V) -----------------------
+
+class VehicleSettings(insights.VehicleProfile):
+    """PUT body: the three vehicle figures (null = default) and the email
+    opt-in. Omitting monthly_insights_email leaves it unchanged."""
+    monthly_insights_email: Optional[bool] = None
+
+
+def _vehicle_response(user: User, vehicle: Optional[insights.VehicleProfile],
+                      monthly: bool) -> dict:
+    """The saved figures, the defaults they replace and the net CO2 factor in
+    force (the receipt multiplies energy by it). Own data only."""
+    return {
+        "km_per_kwh": vehicle.km_per_kwh if vehicle else None,
+        "petrol_price_per_l": vehicle.petrol_price_per_l if vehicle else None,
+        "petrol_km_per_l": vehicle.petrol_km_per_l if vehicle else None,
+        "monthly_insights_email": monthly,
+        "defaults": {
+            "km_per_kwh": insights.EV_KM_PER_KWH,
+            "petrol_price_per_l": insights.PETROL_PRICE_PER_L,
+            "petrol_km_per_l": insights.ICE_KM_PER_L,
+        },
+        "co2_avoided_kg_per_kwh": round(insights.co2_avoided_kg_per_kwh(vehicle), 4),
+    }
+
+
+@router.get("/api/me/vehicle")
+async def get_vehicle(user: User = Depends(get_current_user)):
+    """The caller's vehicle figures for the F8 insights, and the monthly
+    insights email opt-in (off by default)."""
+    return _vehicle_response(
+        user, insights.load_vehicle(user.vehicle_profile), bool(user.monthly_insights_email)
+    )
+
+
+@router.put("/api/me/vehicle")
+async def put_vehicle(
+    req: VehicleSettings,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Replace the caller's vehicle figures (all null = the defaults). Only the
+    caller's own estimates change; CPO-side series keep the defaults."""
+    vehicle = insights.VehicleProfile(
+        km_per_kwh=req.km_per_kwh,
+        petrol_price_per_l=req.petrol_price_per_l,
+        petrol_km_per_l=req.petrol_km_per_l,
+    )
+    stored = vehicle.model_dump()
+    values: dict = {"vehicle_profile": stored if any(v is not None for v in stored.values()) else None}
+    monthly = bool(user.monthly_insights_email)
+    if req.monthly_insights_email is not None:
+        monthly = req.monthly_insights_email
+        values["monthly_insights_email"] = monthly
+        if monthly and not user.monthly_insights_email:
+            # Turning it on claims the month already finished: the first email
+            # is next month's, not a surprise about last month.
+            finished = previous_month_key(datetime.now(timezone.utc))
+            if not user.insights_email_month or user.insights_email_month < finished:
+                values["insights_email_month"] = finished
+            values["insights_email_failures"] = 0
+    await db.execute(update(User).where(User.id == user.id).values(**values))
+    await db.commit()
+    return _vehicle_response(user, vehicle, monthly)

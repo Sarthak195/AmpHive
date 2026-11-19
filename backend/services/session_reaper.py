@@ -84,6 +84,9 @@ SCHEDULE_LATE_NOTICE = timedelta(minutes=5)
 # PRUNE_EVERY_N_FLUSHES idiom.
 GATEWAY_LOGS_RETENTION_DAYS = int(os.getenv("GATEWAY_LOGS_RETENTION_DAYS", "14"))
 GATEWAY_LOGS_PRUNE_EVERY_N_TICKS = int(os.getenv("GATEWAY_LOGS_PRUNE_EVERY_N_TICKS", "60"))
+# [F8V] The monthly insights email pass runs every N ticks (about 15 minutes at
+# the default 60 s tick), so a failed send is retried a quarter hour later.
+INSIGHTS_EMAIL_EVERY_N_TICKS = max(1, int(os.getenv("INSIGHTS_EMAIL_EVERY_N_TICKS", "15")))
 
 
 class SessionReaperService:
@@ -181,6 +184,11 @@ class SessionReaperService:
                     await self.reap_gateway_logs_once()
                 except Exception:
                     logger.exception("Gateway-logs prune failed")
+            if self._tick_count % INSIGHTS_EMAIL_EVERY_N_TICKS == 0:
+                try:
+                    await self.send_insights_emails_once()
+                except Exception:
+                    logger.exception("Monthly insights email pass failed")
 
     def _stale_session_ids_query(self, cutoff: datetime):
         from backend.database.models import ChargingSession, SessionStatus
@@ -504,6 +512,14 @@ class SessionReaperService:
         from backend.services.routines import materialize_routines
 
         return await materialize_routines(self.db_session_factory, now)
+
+    async def send_insights_emails_once(self, now: Optional[datetime] = None) -> int:
+        """[F8V] Send each opted-in driver last month's insights email, once
+        (services/insights_email.py). Returns 0 without a query before 09:00
+        local on the 1st or when SMTP is not configured."""
+        from backend.services.insights_email import send_monthly_insights
+
+        return await send_monthly_insights(self.db_session_factory, now)
 
     async def settle_routines_once(self) -> int:
         """[C5] After the queued-start sweep: reset or count each routine's
