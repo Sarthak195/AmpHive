@@ -87,9 +87,14 @@ export function hoursPatch(form, plug) {
     }
     return { days: w.days, start, end };
   });
-  const before = JSON.stringify(plug?.opening_hours || []);
-  const after = JSON.stringify(windows.map((w) => ({ ...w, end: w.end === 0 ? 1440 : w.end })));
-  if (before !== after) body.opening_hours = windows.length ? windows : null;
+  // Field by field: Postgres JSONB returns keys in its own order, so a
+  // JSON.stringify compare would call an unchanged plug edited.
+  const before = plug?.opening_hours || [];
+  const unchanged = before.length === windows.length && windows.every((w, i) => (
+    before[i].days === w.days && before[i].start === w.start
+      && before[i].end === (w.end === 0 ? 1440 : w.end)
+  ));
+  if (!unchanged) body.opening_hours = windows.length ? windows : null;
   if (String(form.max_session_minutes) !== String(plug?.max_session_minutes ?? '')) {
     body.max_session_minutes = form.max_session_minutes === '' ? null : Number(form.max_session_minutes);
   }

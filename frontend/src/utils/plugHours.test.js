@@ -34,7 +34,8 @@ describe('matchesHours', () => {
 describe('CPO form helpers', () => {
   it('round-trips a split overnight window with no change, and sends only what changed', () => {
     const plug = {
-      opening_hours: [{ days: 1, start: 1320, end: 1440 }, { days: 2, start: 0, end: 360 }],
+      // Key order as Postgres JSONB returns it (end, days, start).
+      opening_hours: [{ end: 1440, days: 1, start: 1320 }, { end: 360, days: 2, start: 0 }],
       max_session_minutes: null,
       amenities: null,
       access_note: null,
@@ -59,7 +60,7 @@ describe('CPO form helpers', () => {
   });
 
   it('00:00 to 00:00 is a whole day, and a stored whole-day window saves unchanged', () => {
-    const plug = { opening_hours: [{ days: 63, start: 0, end: 1440 }] };
+    const plug = { opening_hours: [{ end: 1440, days: 63, start: 0 }] };
     const form = hoursFormFromPlug(plug);
     expect(form.windows[0]).toEqual({ days: 63, start: '00:00', end: '00:00' });
     expect(hoursPatch(form, plug)).toEqual({});
