@@ -252,7 +252,7 @@ async def test_persist_path_opens_the_idle_stretch_on_a_live_idle_frame():
     assert row.idle_started_at is None and row.idle_seconds == IDLE_VOID
 
 
-async def _begin(terms, *, max_kwh, auto_stop=False):
+async def _begin(terms, *, max_kwh, auto_stop=False, override=None):
     from backend.services import session_start
 
     db = MagicMock()
@@ -264,6 +264,7 @@ async def _begin(terms, *, max_kwh, auto_stop=False):
     mqtt.send_plug_command.return_value = True
     resolver = AsyncMock(return_value=terms)
     with patch.object(session_start, "check_circuit_admission", AsyncMock()), \
+         patch.object(session_start, "member_price_override", AsyncMock(return_value=override)), \
          patch.object(session_start, "resolve_rate_window",
                       AsyncMock(return_value=(Decimal("5.00"), None))), \
          patch.object(session_start, "available_balance", AsyncMock(return_value=Decimal("500"))), \
@@ -299,6 +300,27 @@ async def test_hold_includes_the_idle_fee_cap_and_terms_are_snapshotted():
 
 
 @pytest.mark.asyncio
+async def test_hold_with_a_member_override_and_an_idle_fee():
+    """[C1 + C9 hold contract] The hold is
+    min(available, energy_cost(max_kwh, max_rate) + idle_fee_cap) with the
+    member's flat override as max_rate (not the tariff's 5.00 worst case),
+    and the session is frozen at the override with the idle terms copied."""
+    terms = (15, Decimal("2.00"), Decimal("30.00"))
+    session, _ = await _begin(terms, max_kwh=10.0, override=Decimal("3.00"))
+    assert session.hold_coins == Decimal("60.00")       # 10 kWh * 3 + 30 cap
+    assert session.rate_coins_per_kwh == Decimal("3.00")
+    assert session.rate_valid_until is None and session.member_price_override is True
+    assert (session.idle_grace_min, session.idle_fee_per_min, session.idle_fee_cap) == terms
+
+    # Bounded by the available balance (500) when the energy term is large.
+    session, _ = await _begin(terms, max_kwh=200.0, override=Decimal("3.00"))
+    assert session.hold_coins == Decimal("500.00")
+    # Unlimited: the available balance, as without an override.
+    session, _ = await _begin(terms, max_kwh=None, override=Decimal("3.00"))
+    assert session.hold_coins == Decimal("500.00")
+
+
+@pytest.mark.asyncio
 async def test_auto_stop_session_reserves_and_snapshots_no_idle_fee():
     session, resolver = await _begin((15, Decimal("2.00"), Decimal("30.00")),
                                      max_kwh=10.0, auto_stop=True)
@@ -318,7 +340,8 @@ async def _patch_max_kwh(monkeypatch, *, auto_stop=None, available="500.00"):
     session = SimpleNamespace(
         id=11, user_id=3, plug_id=5, tenant_id=1, status=SessionStatus.ACTIVE,
         energy_kwh=1.0, max_kwh=4.0, max_duration_seconds=None,
-        hold_coins=Decimal("50.00"), auto_stop_when_full=auto_stop, **TERMS,
+        hold_coins=Decimal("50.00"), auto_stop_when_full=auto_stop, member_price_override=None,
+        **TERMS,
     )
     plug = SimpleNamespace(id=5, gateway_id="gw-1", local_ip="10.0.0.2")
 

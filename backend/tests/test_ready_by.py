@@ -167,10 +167,11 @@ def test_required_minutes_takes_the_limit_that_binds_first():
 
 # --- plan_ready_by glue ----------------------------------------------------
 
-def _glue_patches():
+def _glue_patches(tariff=None, override=None):
     return (
         patch.object(rb, "resolve_power_basis", AsyncMock(return_value=(2000.0, "rated_power"))),
-        patch.object(rb, "_resolve_tariff_and_tz", AsyncMock(return_value=(None, "Asia/Kolkata"))),
+        patch.object(rb, "_resolve_tariff_and_tz", AsyncMock(return_value=(tariff, "Asia/Kolkata"))),
+        patch.object(rb, "member_price_override", AsyncMock(return_value=override)),
     )
 
 
@@ -205,18 +206,38 @@ async def test_plan_maps_an_unrepresentable_deadline_to_out_of_range():
 @pytest.mark.asyncio
 async def test_plan_caps_the_duration_at_the_deadline():
     ready_by = datetime.now(timezone.utc) + timedelta(hours=6)
-    p1, p2 = _glue_patches()
-    with p1, p2:
+    p1, p2, p3 = _glue_patches()
+    with p1, p2, p3:
         plan = await plan_ready_by(AsyncMock(), _plug(powered=True), 5, ready_by, 4.0, None)
     assert plan["duration_min"] == 120 and plan["energy_kwh"] == 4.0
     # An energy-only target still stops by the deadline if the car draws less.
     assert plan["max_duration_seconds"] == int((ready_by - plan["not_before"]).total_seconds())
     assert plan["not_before"] + timedelta(minutes=120) <= ready_by
 
-    p1, p2 = _glue_patches()
-    with p1, p2:
+    p1, p2, p3 = _glue_patches()
+    with p1, p2, p3:
         plan = await plan_ready_by(AsyncMock(), _plug(powered=True), 5, ready_by, None, 3600)
     assert plan["max_duration_seconds"] == 3600  # the driver's own, shorter limit
+
+
+@pytest.mark.asyncio
+async def test_plan_prices_a_member_override_and_reports_the_idle_terms():
+    """[F6R + C9 + C1] A member's flat override prices the ready-by window
+    (no slots, so the earliest feasible start), and the plan carries the
+    tariff's idle-fee terms, which a member-priced session still snapshots."""
+    tariff = SimpleNamespace(
+        id=1, price_per_kwh=Decimal("10.00"), idle_grace_min=20,
+        idle_fee_per_min=Decimal("2.00"), idle_fee_cap=Decimal("50.00"),
+    )
+    db = AsyncMock()
+    ready_by = datetime.now(timezone.utc) + timedelta(hours=6)
+    p1, p2, p3 = _glue_patches(tariff=tariff, override=Decimal("3.00"))
+    with p1, p2, p3:
+        plan = await plan_ready_by(db, _plug(powered=True), 5, ready_by, 4.0, None)
+    assert Decimal(plan["cost_coins"]) == Decimal("12.00")  # 4 kWh x 3.00, not the tariff's 10
+    assert plan["rate_changes"] == []
+    assert plan["idle_fee"] == (20, Decimal("2.00"), Decimal("50.00"))
+    db.execute.assert_not_awaited()  # the override skips the tariff slot query
 
 
 def test_request_rejects_a_naive_deadline():

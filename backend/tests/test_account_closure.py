@@ -418,6 +418,11 @@ _USER_TABLES = {
     "reservations": ("exported", "retained"),
     "session_disputes": ("exported", "retained"),
     "charge_routines": ("exported", "purged"),
+    # [C9] The inviting operator's record: kept for the send caps, but the
+    # address is rewritten to the tombstone and a pending invite is revoked.
+    "group_invites": ("operator-side", "retained"),
+    # [C2] Bound OCPP idTags (digest only), exported and hard-deleted.
+    "ocpp_id_tags": ("exported", "purged"),
 }
 
 

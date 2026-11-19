@@ -27,9 +27,15 @@ from backend.services.estimate import (
     resolve_power_basis,
     walk_cost,
 )
+from backend.services.idle_fee import tariff_terms
 from backend.services.money import to_money
 from backend.services.plug_hours import clamp_start_duration
-from backend.services.pricing import _resolve_tariff_and_tz, _zone, default_rate
+from backend.services.pricing import (
+    _resolve_tariff_and_tz,
+    _zone,
+    default_rate,
+    member_price_override,
+)
 from backend.services.session_start import SCHEDULE_MAX_AHEAD_HOURS
 
 # The earliest start offered: scheduled starts must lie strictly after "now"
@@ -173,7 +179,13 @@ async def plan_ready_by(
 
     power_w, basis = await resolve_power_basis(db, plug, user_id, now)
     tariff, tz_name = await _resolve_tariff_and_tz(db, plug)
-    if tariff is None:
+    # [C9 member price] A member override is one flat rate for the whole
+    # charge, exactly as the start path freezes it (and as the C3 estimate
+    # prices it). [C1] The idle-fee terms still come from the tariff.
+    override = await member_price_override(db, user_id, plug)
+    if override is not None:
+        slots, base = [], override
+    elif tariff is None:
         slots, base = [], default_rate()
     else:
         slots = (
@@ -205,5 +217,8 @@ async def plan_ready_by(
         "power_w": int(round(power_w)),
         "ready_by": ready_by,
         "tz_name": tz_name,
+        # [Idle fee C1] (grace_min, per_min, cap) a session starting on this
+        # plug would snapshot, or None. Not charged when auto-stop is chosen.
+        "idle_fee": tariff_terms(tariff),
         "is_estimate": True,
     }

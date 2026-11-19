@@ -353,7 +353,11 @@ async def test_begin_active_session_without_actuation_publishes_nothing():
     mqtt = MagicMock()
     interval = AsyncMock()
     store = MagicMock()
+    terms = (15, Decimal("2.00"), Decimal("30.00"))
     with patch.object(session_start, "check_circuit_admission", AsyncMock()), \
+         patch.object(session_start, "member_price_override",
+                      AsyncMock(return_value=Decimal("3.00"))), \
+         patch.object(session_start, "resolve_idle_terms", AsyncMock(return_value=terms)), \
          patch.object(session_start, "resolve_rate_window",
                       AsyncMock(return_value=(Decimal("5.00"), None))), \
          patch.object(session_start, "available_balance", AsyncMock(return_value=Decimal("500"))), \
@@ -364,14 +368,19 @@ async def test_begin_active_session_without_actuation_publishes_nothing():
          patch.object(session_start.state, "telemetry_store", store), \
          patch("backend.services.socketio_manager.emit_plug_status", AsyncMock()), \
          patch("backend.services.notifications.notify", AsyncMock()):
-        await session_start.begin_active_session(
-            db, user, plug, MagicMock(tenant_id=1), max_kwh=None,
+        session = await session_start.begin_active_session(
+            db, user, plug, MagicMock(tenant_id=1), max_kwh=10.0,
             max_duration_seconds=None, actuate=False,
         )
     mqtt.send_plug_command.assert_not_called()
     interval.assert_not_awaited()
     store.start_session.assert_called_once()
     db.add.assert_called_once()
+    # [C2 + C9 + C1] An OCPP StartTransaction runs the same rate and hold
+    # sizing: the member's override is frozen and the hold carries the idle cap.
+    assert session.rate_coins_per_kwh == Decimal("3.00") and session.member_price_override is True
+    assert session.hold_coins == Decimal("60.00")       # 10 kWh * 3 + 30 cap
+    assert session.idle_fee_cap == Decimal("30.00")
 
 
 @pytest.mark.asyncio

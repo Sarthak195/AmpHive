@@ -919,6 +919,13 @@ async def request_capacity(
 # (redesign/ui-v3 — plans/redesign-v3-contract.md §4 "Driver gaps")
 # ===========================================================================
 
+def _idle_fee_json(idle) -> Optional[dict]:
+    """[Idle fee C1] (grace_min, per_min, cap) as the JSON the SPA reads, or None."""
+    if idle is None:
+        return None
+    return {"grace_min": idle[0], "per_min": float(idle[1]), "cap": float(idle[2])}
+
+
 @router.get("/api/plugs/{plug_id}/tariff-preview")
 async def get_plug_tariff_preview(
     plug_id: int,
@@ -963,11 +970,15 @@ async def get_plug_tariff_preview(
     # [C9 member price] A member override is one flat price: no slots and no
     # cheaper window to wait for.
     override = await member_price_override(db, user.id, plug)
-    if override is not None:
-        return {"base_price_per_kwh": float(override), "price_now": float(override),
-                "slots": [], "cheapest_window": None}
-
     tariff, tz_name = await _resolve_tariff_and_tz(db, plug)
+    from backend.services.idle_fee import tariff_terms
+    idle = tariff_terms(tariff)
+    if override is not None:
+        # [C1] The idle fee still applies to a member-priced session (the
+        # start path snapshots it from the tariff), so its terms are shown.
+        return {"base_price_per_kwh": float(override), "price_now": float(override),
+                "slots": [], "cheapest_window": None, "idle_fee": _idle_fee_json(idle)}
+
     if tariff is None:
         # Legacy env fallback — flat rate, no time-of-day structure.
         rate = float(default_rate())
@@ -983,8 +994,6 @@ async def get_plug_tariff_preview(
     slot_rate, _boundary = _slot_rate_and_bound(slots, at_local)
     price_now = slot_rate if slot_rate is not None else base
     cheapest = cheapest_window(slots, base, at_local)
-    from backend.services.idle_fee import tariff_terms
-    idle = tariff_terms(tariff)
 
     return {
         "base_price_per_kwh": float(base),
@@ -998,11 +1007,7 @@ async def get_plug_tariff_preview(
         },
         # [Idle fee C1] The plug's idle-fee terms, or null when there is none
         # (the same values a session starting now would snapshot).
-        "idle_fee": None if idle is None else {
-            "grace_min": idle[0],
-            "per_min": float(idle[1]),
-            "cap": float(idle[2]),
-        },
+        "idle_fee": _idle_fee_json(idle),
         "slots": [
             {
                 "days": [d for d in range(7) if (int(s.days_mask) >> d) & 1],
@@ -1096,6 +1101,9 @@ async def get_plug_ready_by_plan(
         "rate_changes": plan["rate_changes"],
         "basis": plan["basis"],
         "power_w": plan["power_w"],
+        # [Idle fee C1] The plug's idle-fee terms (null when none); an
+        # auto-stop-when-full charge never pays them.
+        "idle_fee": _idle_fee_json(plan["idle_fee"]),
         "is_estimate": True,
     }
 
