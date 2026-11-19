@@ -402,10 +402,11 @@ class Plug(Base):
     # refuses new starts and bookings; a running session is never stopped.
     # max_session_minutes clamps a start's duration limit (NULL = none).
     # amenities: tags from plug_hours.AMENITY_TAGS. access_note: plain text
-    # for drivers, rendered as text, never HTML.
-    opening_hours: Mapped[Optional[list]] = mapped_column(JSONB, nullable=True)
+    # for drivers, rendered as text, never HTML. none_as_null: clearing writes
+    # SQL NULL, not a JSON null.
+    opening_hours: Mapped[Optional[list]] = mapped_column(JSONB(none_as_null=True), nullable=True)
     max_session_minutes: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    amenities: Mapped[Optional[list]] = mapped_column(JSONB, nullable=True)
+    amenities: Mapped[Optional[list]] = mapped_column(JSONB(none_as_null=True), nullable=True)
     access_note: Mapped[Optional[str]] = mapped_column(String(280), nullable=True)
 
     # Relationships
