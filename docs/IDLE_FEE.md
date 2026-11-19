@@ -33,7 +33,8 @@ All of these, measured on live telemetry (`services/idle_fee.py`):
 2. a live frame reports the relay ON with draw below `CHARGE_FULL_IDLE_W`;
 3. telemetry is fresh: a gap of more than `PLUG_POWER_STALE_SEC` between the
    plug's live frames is never counted, and at the stop the open stretch is
-   closed at the plug's last live frame, never at the stop time.
+   closed at the earlier of the plug's last live frame and the session's last
+   attributed frame, never at the stop time.
 
 A frame at or above `CHARGE_FULL_IDLE_W` means the car is drawing again (a
 car-side pause can look full), so the idle time resets to zero and the next

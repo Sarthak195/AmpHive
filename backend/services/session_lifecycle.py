@@ -29,7 +29,7 @@ from backend.database.models import (
     User,
 )
 from backend.services.billing import session_cost
-from backend.services.idle_fee import idle_fee_due, idle_total_seconds, session_terms
+from backend.services.idle_fee import idle_end, idle_fee_due, idle_total_seconds, session_terms
 from backend.services.money import ZERO_MONEY
 from backend.services.telemetry import COINS_PER_KWH
 from backend.services.wallet import debit_wallet_clamped
@@ -324,13 +324,14 @@ async def finalize_charging_session(
     # [Idle fee C1] Settle the idle fee ONCE, as its own ledger line, in this
     # same transaction under the session lock (a second finalize already
     # returned None above; the existence check is defense in depth). Idle time
-    # ends at the plug's last LIVE frame, never at now, so a stop after lost
-    # telemetry bills nothing for the silence. Capped at the snapshot cap
+    # ends at the last frame that showed this session idle (idle_end), never at
+    # now, so a stop after lost telemetry bills nothing for the silence. Capped at the snapshot cap
     # (idle_fee_due), at what the hold has left after the energy debit, and at
     # the wallet (debit_wallet_clamped). Nothing is written for a 0.00 fee.
     idle_debit = ZERO_MONEY
     if session_terms(session) is not None:
-        idle_due = idle_fee_due(session, plug.last_telemetry_at)
+        idle_until = idle_end(session, plug)
+        idle_due = idle_fee_due(session, idle_until)
         if has_hold:
             idle_due = min(idle_due, max(session.hold_coins - actual_debit, ZERO_MONEY))
         if idle_due > ZERO_MONEY:
@@ -345,7 +346,7 @@ async def finalize_charging_session(
                     db, session.user_id, idle_due
                 )
         if idle_debit > ZERO_MONEY:
-            idle_min = idle_total_seconds(session, plug.last_telemetry_at) // 60
+            idle_min = idle_total_seconds(session, idle_until) // 60
             db.add(LedgerTransaction(
                 user_id=session.user_id,
                 session_id=session.id,

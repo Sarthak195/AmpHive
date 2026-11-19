@@ -26,6 +26,7 @@ import pytest_asyncio
 from backend.services import idle_fee
 from backend.services.idle_fee import (
     IDLE_GRACE_FLOOR_MIN,
+    idle_end,
     idle_fee_due,
     idle_total_seconds,
     session_terms,
@@ -43,6 +44,8 @@ def _knobs(monkeypatch):
 
     monkeypatch.setattr(mm, "CHARGE_FULL_IDLE_W", 30.0)
     monkeypatch.setattr(mm, "PLUG_POWER_STALE_SEC", 90)
+    yield
+    mm.MQTTManager._instance = None
 
 
 def _row(**kw):
@@ -154,6 +157,19 @@ def test_finalize_counts_only_up_to_the_last_live_frame():
     assert idle_total_seconds(row, None) == 0
 
 
+def test_idle_end_is_the_earlier_of_the_plug_and_session_clocks():
+    """The plug clock also moves on relay-OFF frames that are not this
+    session's; the session clock also moves on offline-resync replays. The
+    stretch closes at whichever is earlier."""
+    row = _row(idle_started_at=T0, last_telemetry_at=_at(600))
+    plug = SimpleNamespace(last_telemetry_at=_at(3000))
+    assert idle_end(row, plug) == _at(600)
+    row.last_telemetry_at = _at(4000)
+    assert idle_end(row, plug) == _at(3000)
+    row.last_telemetry_at = None
+    assert idle_end(row, SimpleNamespace(last_telemetry_at=None)) is None
+
+
 def test_renewed_draw_resets_and_relay_off_pauses():
     row = _row()
     prev = _feed(row, range(0, 301, 10))               # 5 min idle
@@ -261,6 +277,75 @@ async def test_auto_stop_session_reserves_and_snapshots_no_idle_fee():
     resolver.assert_not_awaited()
     assert session.hold_coins == Decimal("50.00")
     assert session.idle_fee_per_min is None
+
+
+@pytest.mark.asyncio
+async def test_finalize_settles_once_capped_by_the_hold_left_db_free(monkeypatch):
+    """The real finalize with mocked rows: the energy debit, then the idle fee
+    clamped to what the hold has left (14 - 10 = 4 of a 30 due), as its own
+    IDLE_FEE line, folded into coins_spent; a second finalize settles nothing."""
+    from datetime import datetime as dt
+
+    import backend.services.session_lifecycle as sl_mod
+    from backend import state as state_module
+    from backend.database.models import LedgerTransaction, SessionStatus, TransactionType
+    from backend.tests.test_plug_watch import _db, _plug, _scalar_one, _scalar_one_or_none, _user
+
+    now = dt.now(timezone.utc)
+    session = MagicMock()
+    session.id, session.status, session.user_id, session.plug_id = 99, SessionStatus.ACTIVE, 3, 7
+    session.hold_coins = Decimal("14.00")
+    session.energy_kwh = 2.0
+    session.rate_coins_per_kwh = Decimal("5.00")
+    session.settled_cost_coins = None
+    session.rate_segment_start_kwh = None
+    session.peak_power_w = 0.0
+    session.started_at = now - timedelta(hours=2)
+    session.auto_stop_when_full = None
+    session.full_notified_at = now - timedelta(minutes=50)
+    session.idle_started_at = now - timedelta(minutes=40)
+    session.idle_seconds = 0
+    session.last_telemetry_at = now
+    session.idle_grace_min, session.idle_fee_per_min, session.idle_fee_cap = (
+        15, Decimal("2.00"), Decimal("30.00"),
+    )
+    plug = _plug(plug_id=7, name="Bay 1")
+    plug.last_telemetry_at = now
+
+    no_line = MagicMock()
+    no_line.first.return_value = None
+    debit = AsyncMock(side_effect=[(Decimal("10.00"), Decimal("190.00")),
+                                   (Decimal("4.00"), Decimal("186.00"))])
+    monkeypatch.setattr(state_module, "mqtt_manager",
+                        MagicMock(send_plug_command=MagicMock(return_value=True)))
+    monkeypatch.setattr(state_module, "telemetry_store",
+                        MagicMock(get_latest=MagicMock(return_value=None), end_session=MagicMock()))
+    monkeypatch.setattr(sl_mod, "set_plug_telemetry_interval", AsyncMock())
+    monkeypatch.setattr(sl_mod, "debit_wallet_clamped", debit)
+    monkeypatch.setattr("backend.services.billing_emails.schedule", MagicMock())
+    db = _db(_scalar_one_or_none(_user(3)), _scalar_one_or_none(session), _scalar_one(plug), no_line)
+    with patch("backend.services.socketio_manager.emit_plug_status", AsyncMock()),          patch("backend.services.notifications.notify", AsyncMock()) as notify,          patch("backend.services.plug_watch.notify_watchers_plug_available", AsyncMock()),          patch("backend.services.capacity.notify_capacity_available", AsyncMock()):
+        receipt = await sl_mod.finalize_charging_session(db, 99)
+
+        assert debit.await_args_list[1].args[2] == Decimal("4.00")
+        lines = [c.args[0] for c in db.add.call_args_list
+                 if isinstance(c.args[0], LedgerTransaction)]
+        assert [(ln.transaction_type, ln.amount) for ln in lines] == [
+            (TransactionType.SESSION_DEBIT, Decimal("-10.00")),
+            (TransactionType.IDLE_FEE, Decimal("-4.00")),
+        ]
+        assert lines[1].balance_after == Decimal("186.00")
+        assert session.coins_spent == Decimal("14.00")
+        assert session.idle_fee_coins == Decimal("4.00")
+        assert receipt["coins_spent"] == 14.0 and receipt["idle_fee_coins"] == 4.0
+        assert receipt["balance_before"] == 200.0 and receipt["balance_remaining"] == 186.0
+        assert "Includes an idle fee of 4.00 coins." in notify.await_args.args[3]
+
+        # Finalize again (double stop, reaper race): the row is no longer ACTIVE.
+        db2 = _db(_scalar_one_or_none(_user(3)), _scalar_one_or_none(session))
+        assert await sl_mod.finalize_charging_session(db2, 99) is None
+    assert debit.await_count == 2
+    db2.add.assert_not_called()
 
 
 @pytest.mark.asyncio

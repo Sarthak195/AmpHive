@@ -11,7 +11,7 @@ What counts as idle (all of it measured, never assumed):
   - a LIVE frame reports the relay ON with draw below CHARGE_FULL_IDLE_W;
   - telemetry is fresh: a gap between live frames longer than
     PLUG_POWER_STALE_SEC (gateway offline, plug silent) is never counted, and
-    an open stretch is closed at the plug's last live frame at finalize, so a
+    an open stretch is closed at its last idle evidence at finalize (idle_end), so a
     reaper stop for lost telemetry bills nothing for the silent tail.
 A frame at or above CHARGE_FULL_IDLE_W means the car is drawing again (a
 car-side pause can look full), so the stretch resets to zero and a later idle
@@ -144,6 +144,16 @@ def track_idle(session, now: datetime, watts: float, relay_on: bool,
         return
     if started is None:
         session.idle_started_at = now
+
+
+def idle_end(session, plug) -> Optional[datetime]:
+    """Where an open idle stretch ends at the stop: the EARLIER of the plug's
+    last live frame (plugs.last_telemetry_at, never moved by offline-resync
+    replays) and the session's last attributed frame
+    (charging_sessions.last_telemetry_at, never moved by a frame that is not
+    this session's, such as a relay-OFF frame after a firmware cutoff)."""
+    ends = [t for t in (_utc(plug.last_telemetry_at), _utc(session.last_telemetry_at)) if t]
+    return min(ends) if ends else None
 
 
 def idle_total_seconds(session, last_live_at: Optional[datetime]) -> int:

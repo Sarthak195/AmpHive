@@ -558,7 +558,11 @@ async def update_session_limits(
         # under-floored hold here would silently forgive the difference (the
         # "charge 29 kWh, PATCH max_kwh to 0.1" exploit).
         accrued_floor = to_money(session_cost(session, session.energy_kwh or 0.0))
-        resized = to_money(min(headroom, energy_cost(session.max_kwh, max_rate)))
+        # [Idle fee C1] Keep the snapshotted idle-fee cap reserved, as at start.
+        from backend.services.idle_fee import session_terms
+        idle_terms = session_terms(session)
+        idle_cap = idle_terms[2] if idle_terms is not None else Decimal("0.00")
+        resized = to_money(min(headroom, energy_cost(session.max_kwh, max_rate) + idle_cap))
         session.hold_coins = to_money(max(accrued_floor, resized))
 
     await db.commit()
