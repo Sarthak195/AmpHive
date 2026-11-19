@@ -431,6 +431,37 @@ async def test_sweep_starts_debounced_row():
 
 
 @pytest.mark.asyncio
+async def test_sweep_start_notice_survives_a_failed_link_commit():
+    """The plug is live once begin_active_session returns (it committed the
+    STARTED claim), so a failure of the follow-up started_session_id commit
+    must not swallow the one start notice: queued_charge_started still goes
+    out, and the sweep only logs the error."""
+    qc = _qc()
+    plug = _plug(powered=True)
+    plug.powered_since = datetime.now(timezone.utc) - timedelta(minutes=10)
+    row_db = _row_db(
+        _s1n(qc), _s1n(_user()), _s1(0), _s1n(plug), _s1(_tenant(delay=2)),
+        _upd(), _s1n(None), _s1n(None), _s1(_gateway()),
+        _s1n(None),  # [C5] routine lookup: no routine owns this row
+    )
+    row_db.commit = AsyncMock(side_effect=OSError("connection lost"))
+    svc = SessionReaperService(_factory(_scan_db([1]), row_db), AsyncMock())
+
+    session = MagicMock()
+    session.id = 99
+    with patch("backend.services.session_start.begin_active_session",
+               AsyncMock(return_value=session)) as begin, \
+         patch("backend.services.notifications.notify", AsyncMock()) as notify:
+        await svc.reap_queued_starts_once()
+
+    begin.assert_awaited_once()
+    row_db.commit.assert_awaited_once()
+    notify.assert_awaited_once()
+    assert notify.await_args.args[1] == "queued_charge_started"
+    assert notify.await_args.kwargs["session_id"] == 99
+
+
+@pytest.mark.asyncio
 async def test_sweep_carries_the_auto_stop_opt_in_to_the_session():
     """[Charge complete] A queued/scheduled charge's auto_stop_when_full
     reaches begin_active_session, so the auto-started session keeps it."""

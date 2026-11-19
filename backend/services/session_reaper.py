@@ -994,10 +994,8 @@ class SessionReaperService:
                         )
                         continue
 
-                    qc.started_session_id = session.id
                     user_id = qc.user_id
                     plug_name = plug.name
-                    await db.commit()
                     started += 1
                     if not_before is None:
                         title = "Your queued charge started"
@@ -1013,16 +1011,26 @@ class SessionReaperService:
                     else:
                         title = "Your scheduled charge started"
                         body = f"Your scheduled charge on {plug_name} started."
-                    if not from_routine:
-                        await notify(
-                            user_id, "queued_charge_started", title, body,
-                            severity="info", plug_id=plug.id, session_id=session.id,
-                        )
-                    else:
-                        self._routine_starts[qc_id] = (user_id, plug.id, session.id, title, body)
+                    # The session is live and the STARTED claim committed
+                    # (begin_active_session's own commit), so the one start
+                    # notice must not depend on this link commit: if it raises,
+                    # the notice (or the routine stash) still goes out before
+                    # the except below logs it. notify() never raises.
+                    plug_id, session_id = plug.id, session.id
+                    try:
+                        qc.started_session_id = session_id
+                        await db.commit()
+                    finally:
+                        if not from_routine:
+                            await notify(
+                                user_id, "queued_charge_started", title, body,
+                                severity="info", plug_id=plug_id, session_id=session_id,
+                            )
+                        else:
+                            self._routine_starts[qc_id] = (user_id, plug_id, session_id, title, body)
                     logger.info(
-                        f"Auto-started queued charge {qc_id} on plug {plug.id} "
-                        f"(session {session.id})"
+                        f"Auto-started queued charge {qc_id} on plug {plug_id} "
+                        f"(session {session_id})"
                     )
             except Exception:
                 logger.exception(f"Failed to process queued charge {qc_id}")
