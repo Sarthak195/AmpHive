@@ -212,3 +212,50 @@ async def test_start_at_out_of_range_is_422(delta):
     with pytest.raises(HTTPException) as exc:
         await get_plug_charge_estimate(3, None, 60, start, _user(), _db(_one(_plug())))
     assert exc.value.status_code == 422
+
+
+# --- [Integration C3 + C4] the estimate respects the plug-hours clamp ---------
+
+
+def _hours_plug(opening_hours=None, max_session_minutes=None):
+    p = _plug()
+    p.name = "Bay 1"
+    p.opening_hours = opening_hours
+    p.max_session_minutes = max_session_minutes
+    return p
+
+
+async def _estimate(plug, **kw):
+    # Fixed-offset IST for the hours math too (no tzdata on CI Windows boxes).
+    with patch(
+        "backend.services.estimate._resolve_tariff_and_tz",
+        new=AsyncMock(return_value=(None, "Asia/Kolkata")),
+    ), patch("backend.services.plug_hours._zone", new=lambda _name: IST):
+        return await estimate_charge(_db(_first(None)), plug, 7, **kw)
+
+
+@pytest.mark.asyncio
+async def test_estimate_ends_at_closing_time_like_the_start_clamp():
+    # Open 08:00-13:00 every day; a 120 min ask at 12:00 local ends at 13:00.
+    plug = _hours_plug(opening_hours=[{"days": 127, "start": 480, "end": 780}])
+    out = await _estimate(plug, max_kwh=None, max_duration_min=120, start_at=_at(12))
+    assert out["duration_min"] == 60
+    assert out["finish_at"] == _at(13).isoformat()
+    assert out["energy_kwh"] == round(3.68, 2)
+
+
+@pytest.mark.asyncio
+async def test_estimate_respects_max_session_minutes_for_a_kwh_limit():
+    plug = _hours_plug(max_session_minutes=45)
+    out = await _estimate(plug, max_kwh=50.0, max_duration_min=None, start_at=_at(12))
+    assert out["duration_min"] == 45
+    assert out["finish_at"] == _at(12, 45).isoformat()
+
+
+@pytest.mark.asyncio
+async def test_estimate_for_a_closed_plug_is_409_like_the_start():
+    plug = _hours_plug(opening_hours=[{"days": 127, "start": 480, "end": 780}])
+    with pytest.raises(HTTPException) as exc:
+        await _estimate(plug, max_kwh=None, max_duration_min=60, start_at=_at(20))
+    assert exc.value.status_code == 409
+    assert "closed" in exc.value.detail

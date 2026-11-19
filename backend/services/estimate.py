@@ -20,6 +20,7 @@ from decimal import Decimal
 from types import SimpleNamespace
 from typing import List, Optional, Tuple
 
+from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -32,6 +33,12 @@ from backend.database.models import (
 from backend.services.billing import close_out_segment, session_cost
 from backend.services.caps import effective_plug_cap
 from backend.services.money import ZERO_MONEY, to_money
+from backend.services.plug_hours import (
+    clamp_start_duration,
+    closed_detail,
+    hours_of,
+    max_minutes_of,
+)
 from backend.services.pricing import (
     _resolve_tariff_and_tz,
     _slot_rate_and_bound,
@@ -95,16 +102,22 @@ async def resolve_power_basis(
 
 
 def limited_energy_and_duration(
-    power_w: float, max_kwh: Optional[float], max_duration_min: Optional[int]
+    power_w: float, max_kwh: Optional[float], max_duration_min: Optional[int],
+    hours_cap_min: Optional[float] = None,
 ) -> Tuple[float, float]:
     """(energy_kwh, duration_min) for the limit that binds first, capped at
-    24 h (the energy returned is what is delivered within the cap)."""
+    24 h (the energy returned is what is delivered within the cap).
+    ``hours_cap_min`` is the plug-hours clamp (closing time and
+    max_session_minutes) the start path would apply, so the estimate ends
+    where the real session would."""
     kw = power_w / 1000.0
     candidates = []
     if max_kwh is not None:
         candidates.append((max_kwh * 60.0) / kw)
     if max_duration_min is not None:
         candidates.append(float(max_duration_min))
+    if hours_cap_min is not None:
+        candidates.append(float(hours_cap_min))
     duration_min = min(min(candidates), MAX_ESTIMATE_MINUTES)
     return kw * duration_min / 60.0, duration_min
 
@@ -163,9 +176,23 @@ async def estimate_charge(
         start = start.replace(tzinfo=timezone.utc)
 
     power_w, basis = await resolve_power_basis(db, plug, user_id, now)
-    energy_kwh, duration_min = limited_energy_and_duration(power_w, max_kwh, max_duration_min)
-
     tariff, tz_name = await _resolve_tariff_and_tz(db, plug)
+
+    # [C4 plug hours] Apply the same clamp begin_active_session does, at the
+    # estimated start: a plug closed then would refuse the start (409 here
+    # too), and an open one ends by its closing time and max_session_minutes.
+    hours_cap_min: Optional[float] = None
+    if hours_of(plug) is not None or max_minutes_of(plug) is not None:
+        try:
+            cap_s = clamp_start_duration(plug, tz_name, start, None)
+        except ValueError:
+            raise HTTPException(status_code=409, detail=closed_detail(plug, tz_name, start))
+        if cap_s is not None:
+            hours_cap_min = cap_s / 60.0
+    energy_kwh, duration_min = limited_energy_and_duration(
+        power_w, max_kwh, max_duration_min, hours_cap_min
+    )
+
     if tariff is None:
         slots, base = [], default_rate()
     else:
