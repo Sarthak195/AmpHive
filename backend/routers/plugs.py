@@ -297,6 +297,13 @@ async def ensure_plug_group_access(
                 )
             )
             if not membership_result.scalar_one_or_none():
+                if is_cpo_viewer(user):
+                    # [F10] A read-only demo viewer gets the routes' own
+                    # missing-plug 404, so a private plug's existence is not
+                    # confirmed by a 403.
+                    raise HTTPException(
+                        status_code=404, detail=f"Plug with ID {plug.id} not found."
+                    )
                 raise HTTPException(
                     status_code=403,
                     detail="This plug belongs to a private group. Join the group first using an access code.",

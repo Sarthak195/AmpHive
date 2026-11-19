@@ -923,10 +923,11 @@ class PromoCodeResponse(BaseModel):
     """A promo code as its issuing CPO sees it. `code` (the plain code,
     formatted ABCD-EFGH-JKMN-PQRS) is set ONLY in the create response; it is
     not stored and cannot be shown again. `status` is one of active,
-    expired, used_up, disabled."""
+    expired, used_up, disabled. `code_hint` is None for a read-only
+    cpo_viewer (F10)."""
     id: int
     tenant_id: int
-    code_hint: str
+    code_hint: Optional[str] = None
     amount_coins: float
     expires_at: Optional[str] = None
     max_redemptions: int

@@ -17,7 +17,13 @@ from backend.database.db import get_db
 from backend.database.models import Plug, Reservation, ReservationStatus, User
 from backend.services.reservations import expire_lapsed_reservations
 
-from ._common import _require_tenant_id, is_cpo_viewer, redact_for, require_cpo_tenant
+from ._common import (
+    _require_tenant_id,
+    is_cpo_viewer,
+    redact_for,
+    redact_name_for,
+    require_cpo_tenant,
+)
 
 router = APIRouter()
 
@@ -90,7 +96,7 @@ async def cpo_list_reservations(
                 "plug_name": plug_name,
                 "user_id": r.user_id,
                 "user_email": redact_for(user, user_email),
-                "user_name": user_name,
+                "user_name": redact_name_for(user, user_name),
                 "start_at": r.start_at.isoformat(),
                 "end_at": r.end_at.isoformat(),
                 "status": r.status.value,

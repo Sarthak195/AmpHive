@@ -411,6 +411,9 @@ async def plug_reservations(
         raise HTTPException(status_code=404, detail=f"Plug {plug_id} not found.")
 
     if not await user_can_access_plug(db, user.id, plug):
+        if is_cpo_viewer(user):
+            # [F10] Same 404 as a missing plug for a read-only demo viewer.
+            raise HTTPException(status_code=404, detail=f"Plug {plug_id} not found.")
         raise HTTPException(
             status_code=403,
             detail="You don't have access to this plug. Join the group first.",

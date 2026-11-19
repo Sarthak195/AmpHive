@@ -22,6 +22,7 @@ from ._common import (
     is_cpo_viewer,
     logger,
     redact_for,
+    redact_name_for,
     require_cpo_tenant,
 )
 
@@ -328,7 +329,7 @@ async def cpo_list_group_members(
         {
             "user_id": m.user_id,
             "email": redact_for(user, email),
-            "full_name": full_name,
+            "full_name": redact_name_for(user, full_name),
             "joined_at": m.joined_at.isoformat() if m.joined_at else None,
         }
         for m, email, full_name in result.all()

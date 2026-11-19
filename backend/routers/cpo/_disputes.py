@@ -74,6 +74,7 @@ async def cpo_list_disputes(
         resp = _dispute_response(d)
         resp.user_email = redact_for(user, email)
         resp.reason = redact_for(user, resp.reason) or ""
+        resp.resolution_note = redact_for(user, resp.resolution_note)
         resp.session_cost_coins = float(cost) if cost is not None else None
         resp.plug_name = plug_name
         out.append(resp)

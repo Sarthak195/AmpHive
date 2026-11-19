@@ -54,8 +54,9 @@ async def cpo_list_plug_reports(
     reports = list(result.scalars().all())
     out = [_plug_report_response(r) for r in reports]
     for resp in out:
-        # [F10] Driver free text: mask any email/phone for a read-only viewer.
+        # [F10] Free text: mask any email/phone for a read-only viewer.
         resp.description = redact_for(user, resp.description) or ""
+        resp.resolution_note = redact_for(user, resp.resolution_note)
     return out
 
 

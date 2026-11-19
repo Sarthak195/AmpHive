@@ -39,6 +39,7 @@ from backend.schemas import (
 )
 from backend.services.auth import (
     get_current_user,
+    is_cpo_viewer,
 )
 from backend.services.billing import session_cost
 from backend.services.money import energy_cost, to_money
@@ -1257,7 +1258,15 @@ async def get_session_invoice(
     cpo_cancel_payout's cross-tenant guard. `?format=html` returns a
     minimal printable invoice (inline CSS, no PDF dependency — meant to be
     saved/printed via the browser's own print dialog) instead of JSON.
+
+    [F10] A read-only cpo_viewer always gets the same 404 as a missing
+    session, decided before any lookup: issuing writes the invoice on first
+    read and the HTML prints the driver's name and email, and a 403 for an
+    existing session (vs 404 for a missing one) would be an existence oracle.
+    The CPO console lists invoices through GET /api/cpo/invoices instead.
     """
+    if is_cpo_viewer(user):
+        raise HTTPException(status_code=404, detail="Session not found.")
     session_result = await db.execute(
         select(ChargingSession).where(ChargingSession.id == session_id)
     )

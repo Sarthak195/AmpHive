@@ -25,7 +25,7 @@ from backend.services import promos as promo_service
 from backend.services.audit import try_record_audit
 from backend.services.money import ZERO_MONEY, to_money
 
-from ._common import _require_tenant_id, logger, redact_for, require_cpo_tenant
+from ._common import _require_tenant_id, hide_for, logger, redact_for, require_cpo_tenant
 
 router = APIRouter()
 
@@ -178,14 +178,18 @@ async def cpo_list_promos(
     )
     now = datetime.now(timezone.utc)
     # [F10] A read-only cpo_viewer sees the issuer email and free-text note
-    # masked, like every other /api/cpo/* read (routers/cpo/_common.redact_for).
+    # masked, like every other /api/cpo/* read (routers/cpo/_common.redact_for),
+    # and no code_hint at all (the last 4 symbols of a live code).
     return {
         "total": int(total),
         "items": [
             _promo_response(
                 p, redemption_count=int(n), now=now,
                 created_by_email=redact_for(user, email),
-            ).model_copy(update={"note": redact_for(user, p.note)})
+            ).model_copy(update={
+                "note": redact_for(user, p.note),
+                "code_hint": hide_for(user, p.code_hint),
+            })
             for p, n, email in result.all()
         ],
     }
