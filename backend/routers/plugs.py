@@ -55,6 +55,8 @@ from backend.services.photo_publish import (
     upload_object,
 )
 from backend.services.pricing import (
+    member_price_override,
+    member_price_overrides,
     resolve_price_display,
     resolve_price_display_batch,
     zone_name,
@@ -405,6 +407,14 @@ async def get_available_plugs(
          for plug, _, _, group_tariff_id, _, tenant in all_rows],
         at=now,
     )
+    # [C9 member price] The caller's own flat override beats the tariff (and
+    # its next-price hint) on that group's plugs. One bounded query.
+    overrides = await member_price_overrides(
+        db, user.id, [plug.group_id for plug, *_ in all_rows]
+    )
+    for plug, *_ in all_rows:
+        if plug.group_id in overrides:
+            price_display[plug.id] = (overrides[plug.group_id], None, None)
 
     # [Reviews] avg_rating + review_count for the whole list in one grouped
     # query: keeps this endpoint N+1-free (same shape as price_display above).
@@ -613,6 +623,10 @@ async def get_plug(
     # (plug tariff -> group tariff -> tenant default -> env fallback;
     # services/pricing.py resolve_price_display).
     rate, changes_at, next_rate = await resolve_price_display(db, plug)
+    # [C9 member price] The caller's own flat override wins on this plug.
+    override = await member_price_override(db, user.id, plug)
+    if override is not None:
+        rate, changes_at, next_rate = override, None, None
 
     # [Reservations] Same grouped helper the list uses, over this one plug.
     now = datetime.now(timezone.utc)
@@ -940,6 +954,13 @@ async def get_plug_tariff_preview(
         raise HTTPException(status_code=404, detail=f"Plug with ID {plug_id} not found.")
 
     await ensure_plug_group_access(db, plug, user)
+
+    # [C9 member price] A member override is one flat price: no slots and no
+    # cheaper window to wait for.
+    override = await member_price_override(db, user.id, plug)
+    if override is not None:
+        return {"base_price_per_kwh": float(override), "price_now": float(override),
+                "slots": [], "cheapest_window": None}
 
     tariff, tz_name = await _resolve_tariff_and_tz(db, plug)
     if tariff is None:

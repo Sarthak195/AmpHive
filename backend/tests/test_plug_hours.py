@@ -182,6 +182,7 @@ def test_driver_fields_say_open_now_and_closing_time():
 def _start_patches(session_start, mqtt):
     return (
         patch.object(session_start, "check_circuit_admission", AsyncMock()),
+        patch.object(session_start, "member_price_override", AsyncMock(return_value=None)),
         patch.object(session_start, "resolve_rate_window",
                      AsyncMock(return_value=(Decimal("5.00"), None))),
         patch.object(session_start, "available_balance", AsyncMock(return_value=Decimal("500"))),

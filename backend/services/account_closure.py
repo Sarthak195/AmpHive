@@ -21,7 +21,11 @@ have no counterparty:
   the commit), queued charges, upcoming reservations, and any outstanding
   password-reset / email-verification tokens. Personal API tokens (F7) are
   revoked (revoked_at stamped) in the same commit, so none outlives the
-  account. The tombstone's notification_prefs are cleared.
+  account. The tombstone's notification_prefs are cleared. [C9] Group invites
+  the person accepted, or that were sent to their address, keep their row (the
+  inviting CPO's daily send caps count it) but the address is rewritten to the
+  tombstone address and a still-pending one is revoked, so no invite links the
+  tombstone back to the person.
 
 **Retained but detached (anonymised)** — the `users` row itself is kept as a
 tombstone so the financial rows still resolve, with every identifier scrubbed:
@@ -57,7 +61,7 @@ import logging
 import secrets
 from datetime import datetime, timezone
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import case, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database.models import (
@@ -66,6 +70,7 @@ from backend.database.models import (
     ChargingSession,
     EmailVerificationToken,
     Gateway,
+    GroupInvite,
     GroupMembership,
     LedgerTransaction,
     Notification,
@@ -276,10 +281,27 @@ async def close_account(db: AsyncSession, user: User) -> dict:
     # [F7] Revoke every personal read-only API token.
     await revoke_user_api_tokens(db, user_id)
 
+    # [C9] Scrub the address off group invites (accepted by this account, or
+    # sent to its address) and revoke a still-pending one.
+    now = datetime.now(timezone.utc)
+    old_email = (user.email or "").strip().lower()
+    scrubbed = await db.execute(
+        update(GroupInvite)
+        .where(or_(GroupInvite.accepted_by_user_id == user_id, GroupInvite.email == old_email))
+        .values(
+            email=tombstone_email(user_id),
+            revoked_at=case(
+                (GroupInvite.accepted_at.is_(None), func.coalesce(GroupInvite.revoked_at, now)),
+                else_=GroupInvite.revoked_at,
+            ),
+        )
+        .execution_options(synchronize_session=False)
+    )
+    purged["group_invites_scrubbed"] = scrubbed.rowcount or 0
+
     # --- 4. Anonymise the account row itself ------------------------------
     # token_version is bumped DB-side so every outstanding JWT (this request's
     # included) is rejected on its next use.
-    now = datetime.now(timezone.utc)
     await db.execute(
         update(User)
         .where(User.id == user_id)

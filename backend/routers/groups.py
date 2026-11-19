@@ -5,6 +5,7 @@ import logging
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,6 +20,8 @@ from backend.schemas import (
     GroupResponse,
     JoinGroupRequest,
 )
+from backend.services import group_invites
+from backend.services.audit import try_record_audit
 from backend.services.auth import (
     get_current_user,
 )
@@ -158,5 +161,47 @@ async def leave_group(
     logger.info(f"User {user.email} left group id={group_id}")
 
     return {"status": "left", "group_id": group_id}
+
+
+class AcceptGroupInviteRequest(BaseModel):
+    token: str = Field(min_length=1, max_length=128)
+
+
+@router.post(
+    "/api/groups/invites/accept",
+    dependencies=[
+        Depends(account_rate_limit_dependency(group_join_account_rate_limiter, "group join"))
+    ],
+)
+async def accept_group_invite(
+    req: AcceptGroupInviteRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    [C9] Accept an emailed group invite (services/group_invites.py): the
+    signed-in account's VERIFIED email must equal the invited address
+    (case-insensitive). Single-use; creates the GroupMembership. Shares the
+    group-join per-account rate limit. Audited (group.invite_accept).
+    """
+    invite, group, created = await group_invites.accept_invite(db, user, req.token)
+    tenant_id, invite_id, group_id, group_name = (
+        invite.tenant_id, invite.id, group.id, group.name
+    )
+    logger.info(f"User {user.id} accepted invite {invite_id} to group id={group_id}")
+    await try_record_audit(
+        db,
+        tenant_id=tenant_id,
+        actor_user_id=user.id,
+        action="group.invite_accept",
+        target_type="group",
+        target_id=group_id,
+        detail=f"invite_id={invite_id}, user_id={user.id}, new_member={created}",
+    )
+    return {
+        "status": "joined" if created else "already_member",
+        "group_id": group_id,
+        "group_name": group_name,
+    }
 
 

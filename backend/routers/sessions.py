@@ -547,9 +547,15 @@ async def update_session_limits(
         # whose price rises later can't leave the hold under-covering and
         # forgive overage — matches the start path. Flat tariff => the flat
         # rate => unchanged from the old single-rate sizing.
-        max_rate = await max_rate_over_window(
-            db, plug, datetime.now(timezone.utc),
-            session.max_duration_seconds or 24 * 3600,
+        # [C9 member price] A frozen member-rate session never reprices, so
+        # its own snapshotted rate is the worst case.
+        max_rate = (
+            to_money(session.rate_coins_per_kwh)
+            if session.member_price_override is True and session.rate_coins_per_kwh is not None
+            else await max_rate_over_window(
+                db, plug, datetime.now(timezone.utc),
+                session.max_duration_seconds or 24 * 3600,
+            )
         )
         headroom = await available_balance(db, user.id) + session.hold_coins
         # [Security] Floor the resize at what this session has ALREADY

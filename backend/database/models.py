@@ -639,6 +639,14 @@ class ChargingSession(Base):
     idle_seconds: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
     idle_fee_coins: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
 
+    # [C9 member price] True when rate_coins_per_kwh is the member's own flat
+    # GroupMembership.price_per_kwh_override, frozen at start. Such a session
+    # never reprices: mark_tenant_sessions_for_reprice skips it and
+    # reprice_session_if_due returns early, so a tariff edit or a later change
+    # or removal of the override never moves it. NULL = an ordinary tariff
+    # session. Alembic revision 0054_member_price_invites.
+    member_price_override: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+
     # Hot-path composite indexes (Alembic revision 0024_session_ledger_indexes):
     # plug_id/status backs "is this plug's session still active", user_id/status
     # backs a driver's active/past sessions, tenant_id/started_at backs CPO
@@ -748,6 +756,12 @@ class GroupMembership(Base):
     user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     group_id: Mapped[int] = mapped_column(Integer, ForeignKey("charger_groups.id", ondelete="CASCADE"), nullable=False)
     joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+    # [C9 member price] The member's own flat coins-per-kWh price on this
+    # group's plugs, set by the CPO in the members list. Beats the plug, group
+    # and tenant tariffs (and their time-of-day slots) for this member only;
+    # frozen onto the session at start (services/pricing.py
+    # member_price_override). NULL = the normal tariff chain.
+    price_per_kwh_override: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
 
     # Relationships
     user: Mapped[User] = relationship("User", back_populates="group_memberships")
@@ -2066,3 +2080,37 @@ class ApiToken(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
     last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class GroupInvite(Base):
+    """[C9] A CPO's email invite to one of its private charger groups.
+
+    The raw token (secrets.token_urlsafe(32)) is mailed to the invitee and
+    NEVER stored: only its SHA-256 hex digest lives here (same scheme as
+    EmailVerificationToken). Single-use (accepted_at, consumed by a
+    conditional UPDATE), expiring (expires_at, 7 days) and bound to `email`
+    (stored lowercased): accepting needs a signed-in account whose VERIFIED
+    email equals it, and creates the GroupMembership. A newer invite for the
+    same group and email supersedes the older one (revoked_at). invited_by +
+    created_at back the per-CPO daily send cap, created_at alone the
+    platform-wide one. Alembic revision
+    0054_member_price_invites.
+    """
+    __tablename__ = "group_invites"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    group_id: Mapped[int] = mapped_column(Integer, ForeignKey("charger_groups.id", ondelete="CASCADE"), nullable=False, index=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    email: Mapped[str] = mapped_column(String(255), nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    invited_by_user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    accepted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    accepted_by_user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        Index("ix_group_invites_inviter_created", "invited_by_user_id", "created_at"),
+        Index("ix_group_invites_created_at", "created_at"),
+    )

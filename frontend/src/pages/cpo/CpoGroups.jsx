@@ -13,6 +13,11 @@
  * GET /api/cpo/groups/{id}/members + DELETE .../members/{user_id}
  * (redesign/ui-v3 contract §4 "CPO gaps" — degrades to an inline ErrorState
  * if the backend hasn't landed these yet).
+ *
+ * [C9] Per-member price (PUT .../members/{user_id}/price, blank clears it)
+ * and email invites (POST/GET .../invites, DELETE .../invites/{id}). Every
+ * write control carries data-write, so a read-only viewer sees prices and
+ * masked pending invites but no inputs.
  */
 
 import { useCallback, useEffect, useState } from 'react';
@@ -131,6 +136,14 @@ export default function CpoGroups() {
   const [removeTarget, setRemoveTarget] = useState(null);
   const [removeBusy, setRemoveBusy] = useState(false);
 
+  const [priceDrafts, setPriceDrafts] = useState({});
+  const [priceBusy, setPriceBusy] = useState(null);
+
+  const [invites, setInvites] = useState([]);
+  const [invitesError, setInvitesError] = useState(null);
+  const [inviteEmail, setInviteEmail] = useState('');
+  const [inviteBusy, setInviteBusy] = useState(false);
+
   const selected = groups.find((g) => g.id === selectedId) || null;
 
   const fetchGroups = useCallback(async () => {
@@ -177,15 +190,30 @@ export default function CpoGroups() {
     }
   }, []);
 
+  const fetchInvites = useCallback(async (groupId) => {
+    setInvitesError(null);
+    try {
+      const data = await api.get(`/api/cpo/groups/${groupId}/invites`);
+      setInvites(data || []);
+    } catch (err) {
+      setInvitesError(err);
+    }
+  }, []);
+
   // Members only exist for private groups; re-fetch whenever the selection
   // (or its visibility) changes.
   useEffect(() => {
+    setPriceDrafts({});
+    setInviteEmail('');
     if (!selected || selected.is_public) {
       setMembers([]);
       setMembersError(null);
+      setInvites([]);
+      setInvitesError(null);
       return;
     }
     fetchMembers(selected.id);
+    fetchInvites(selected.id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected?.id, selected?.is_public]);
 
@@ -320,6 +348,61 @@ export default function CpoGroups() {
     }
   };
 
+  const savePrice = async (member) => {
+    if (!selected || priceBusy) return;
+    const raw = String(priceDrafts[member.user_id] ?? member.price_per_kwh_override ?? '').trim();
+    const value = raw === '' ? null : Number(raw);
+    if (value !== null && !(value > 0 && value <= 1000)) {
+      toast.error('Enter a price above 0 and up to 1000, or leave it blank for the tariff.');
+      return;
+    }
+    setPriceBusy(member.user_id);
+    try {
+      await api.put(`/api/cpo/groups/${selected.id}/members/${member.user_id}/price`, {
+        price_per_kwh_override: value,
+      });
+      toast.ok(value === null ? 'Member now pays the tariff.' : 'Member price saved.');
+      setPriceDrafts((d) => {
+        const next = { ...d };
+        delete next[member.user_id];
+        return next;
+      });
+      await fetchMembers(selected.id);
+    } catch (err) {
+      toast.error(apiErrorCopy(err));
+    } finally {
+      setPriceBusy(null);
+    }
+  };
+
+  const sendInvite = async (e) => {
+    e.preventDefault();
+    const email = inviteEmail.trim();
+    if (!selected || !email || inviteBusy) return;
+    setInviteBusy(true);
+    try {
+      await api.post(`/api/cpo/groups/${selected.id}/invites`, { email });
+      toast.ok(`Invite sent to ${email}.`);
+      setInviteEmail('');
+      await fetchInvites(selected.id);
+    } catch (err) {
+      toast.error(apiErrorCopy(err));
+    } finally {
+      setInviteBusy(false);
+    }
+  };
+
+  const revokeInvite = async (invite) => {
+    if (!selected) return;
+    try {
+      await api.delete(`/api/cpo/groups/${selected.id}/invites/${invite.id}`);
+      toast.ok('Invite revoked.');
+      await fetchInvites(selected.id);
+    } catch (err) {
+      toast.error(apiErrorCopy(err));
+    }
+  };
+
   const groupPlugs = selected ? plugs.filter((p) => p.group_id === selected.id) : [];
 
   const deleteBody = selected
@@ -441,24 +524,121 @@ export default function CpoGroups() {
                       <p className="text-2 text-sm">No one has joined with the access code yet.</p>
                     ) : (
                       <ul className="groups-members-list">
-                        {members.map((m) => (
-                          <li key={m.user_id} className="groups-member-row">
+                        {members.map((m) => {
+                          const who = m.full_name || m.email;
+                          const current = m.price_per_kwh_override;
+                          return (
+                            <li key={m.user_id} className="groups-member-row">
+                              <span className="groups-member-who">
+                                <span>
+                                  {who}
+                                  {m.full_name && <span className="text-3 text-sm"> · {m.email}</span>}
+                                </span>
+                                <span className="text-2 text-sm">
+                                  {current != null
+                                    ? `Own price: ${current} coins/kWh`
+                                    : 'Pays the tariff'}
+                                </span>
+                              </span>
+                              <span className="groups-member-actions">
+                                <input
+                                  data-write
+                                  type="number"
+                                  min="0.01"
+                                  max="1000"
+                                  step="0.01"
+                                  className="input groups-member-price-input"
+                                  aria-label={`Own price for ${who} (coins per kWh, blank for the tariff)`}
+                                  placeholder="Tariff"
+                                  value={priceDrafts[m.user_id] ?? (current != null ? String(current) : '')}
+                                  onChange={(e) =>
+                                    setPriceDrafts((d) => ({ ...d, [m.user_id]: e.target.value }))
+                                  }
+                                />
+                                <button data-write
+                                  type="button"
+                                  className="btn btn-quiet btn-sm"
+                                  disabled={priceBusy === m.user_id}
+                                  aria-label={`Save price for ${who}`}
+                                  onClick={() => savePrice(m)}
+                                >
+                                  {priceBusy === m.user_id ? 'Saving…' : 'Save price'}
+                                </button>
+                                <button data-write
+                                  type="button"
+                                  className="btn btn-quiet btn-sm"
+                                  aria-label={`Remove ${who} from this group`}
+                                  onClick={() => setRemoveTarget(m)}
+                                >
+                                  Remove
+                                </button>
+                              </span>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    )}
+                    <p className="field-help">
+                      A member&apos;s own price replaces every tariff on this group&apos;s chargers,
+                      for them only. It is fixed when a charge starts. Blank means the tariff.
+                    </p>
+                  </section>
+                )}
+
+                {!selected.is_public && (
+                  <section className="groups-section">
+                    <h3>Invite by email</h3>
+                    <form data-write className="groups-invite-form" onSubmit={sendInvite}>
+                      <div className="field">
+                        <label className="field-label" htmlFor="groups-invite-email">
+                          Email address
+                        </label>
+                        <input
+                          id="groups-invite-email"
+                          type="email"
+                          className="input"
+                          value={inviteEmail}
+                          onChange={(e) => setInviteEmail(e.target.value)}
+                          placeholder="friend@example.com"
+                          autoComplete="off"
+                        />
+                      </div>
+                      <button
+                        type="submit"
+                        className="btn btn-primary btn-sm"
+                        disabled={inviteBusy || !inviteEmail.trim()}
+                      >
+                        {inviteBusy ? 'Sending…' : 'Send invite'}
+                      </button>
+                    </form>
+                    <p className="field-help">
+                      The link works once, for 7 days, and only for a verified account with this
+                      email.
+                    </p>
+                    {invitesError ? (
+                      <ErrorState error={invitesError} onRetry={() => fetchInvites(selected.id)} />
+                    ) : invites.length > 0 ? (
+                      <ul className="groups-members-list">
+                        {invites.map((inv) => (
+                          <li key={inv.id} className="groups-member-row">
                             <span>
-                              {m.full_name || m.email}
-                              {m.full_name && <span className="text-3 text-sm"> · {m.email}</span>}
+                              {inv.email}
+                              <span className="text-3 text-sm">
+                                {' '}· pending until {new Date(inv.expires_at).toLocaleDateString()}
+                              </span>
                             </span>
                             <button data-write
                               type="button"
                               className="btn btn-quiet btn-sm"
-                              aria-label={`Remove ${m.full_name || m.email} from this group`}
-                              onClick={() => setRemoveTarget(m)}
+                              aria-label={`Revoke the invite to ${inv.email}`}
+                              onClick={() => revokeInvite(inv)}
                             >
-                              Remove
+                              Revoke
                             </button>
                           </li>
                         ))}
                       </ul>
-                    )}
+                    ) : null}
                   </section>
                 )}
 

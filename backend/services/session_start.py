@@ -45,7 +45,11 @@ from backend.services.plug_hours import (
     hours_of,
     max_minutes_of,
 )
-from backend.services.pricing import max_rate_over_window, resolve_rate_window
+from backend.services.pricing import (
+    max_rate_over_window,
+    member_price_override,
+    resolve_rate_window,
+)
 from backend.services.session_lifecycle import set_plug_telemetry_interval
 from backend.services.wallet import available_balance
 
@@ -194,7 +198,13 @@ async def begin_active_session(
     # (None for a flat tariff → the session stays one segment and bills exactly
     # as before). Snapshotted below so MQTTManager._persist_telemetry can close
     # out the segment forward-only when the boundary passes.
-    rate_coins_per_kwh, rate_valid_until = await resolve_rate_window(db, plug, at=now)
+    # [C9 member price] A member's own GroupMembership override wins: a flat
+    # rate frozen for the whole session (rate_valid_until None, never repriced).
+    member_override = await member_price_override(db, user.id, plug)
+    if member_override is not None:
+        rate_coins_per_kwh, rate_valid_until = member_override, None
+    else:
+        rate_coins_per_kwh, rate_valid_until = await resolve_rate_window(db, plug, at=now)
 
     # Size the session's authorization hold (MARKET_GAP_ANALYSIS.md §3): reserve
     # this session's worst-case cost up front — the smaller of (a) what's
@@ -225,7 +235,7 @@ async def begin_active_session(
     # boundary raises the rate mid-charge, finalize's min(final_cost, hold) must
     # not forgive the overage. With no slots configured max_rate_over_window
     # returns the flat rate, so this is identical to the old sizing.
-    max_rate = await max_rate_over_window(
+    max_rate = member_override if member_override is not None else await max_rate_over_window(
         db, plug, now, max_duration_seconds or 24 * 3600
     )
     # [Opt-in charging limits] No energy cap (max_kwh is None, the new default)
@@ -259,6 +269,7 @@ async def begin_active_session(
         settled_cost_coins=ZERO_MONEY,
         rate_segment_start_kwh=0.0,
         rate_valid_until=rate_valid_until,
+        member_price_override=True if member_override is not None else None,
         # [Session limits] Snapshot the request's stop conditions; the hold
         # sizing above already uses max_kwh, so a smaller user limit shrinks the
         # auth hold too.
