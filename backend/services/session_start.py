@@ -127,6 +127,7 @@ async def begin_active_session(
     covering_reservation=None,
     auto_stop_when_full: bool = False,
     announce_start: bool = True,
+    actuate: bool = True,
 ) -> ChargingSession:
     """
     Admit and start an ACTIVE charging session on an already-locked, already-
@@ -153,6 +154,12 @@ async def begin_active_session(
         opening hours.
       - HTTPException(402) — available balance below the start floor.
       - HTTPException(500) — the gateway ON publish failed (claim rolled back).
+
+    [C2 OCPP] actuate=False is for the flag-gated OCPP adapter only
+    (services/ocpp_adapter.py): an OCPP charger energizes itself and reports
+    StartTransaction, so the same admission, hold and claim run but no MQTT
+    command (ON or SET_INTERVAL) is published. Every other caller keeps the
+    default.
     """
     # [Plug hours] Under the caller's plug row lock: refuse a start while the
     # plug is closed, and shorten the session's own duration limit so it ends
@@ -291,8 +298,8 @@ async def begin_active_session(
     # services/mqtt_manager.py firmware_duration/firmware_max_kwh for why
     # neither omitting these fields nor sending 0 is safe to encode "no
     # limit" on the gateway's local relay watchdog. An explicit limit passes
-    # through unchanged.
-    success = await asyncio.to_thread(lambda: state.mqtt_manager.send_plug_command(
+    # through unchanged. [C2 OCPP] actuate=False publishes nothing.
+    success = not actuate or await asyncio.to_thread(lambda: state.mqtt_manager.send_plug_command(
         gateway_id=plug.gateway_id,
         plug_id=plug.id,
         action="ON",
@@ -324,7 +331,8 @@ async def begin_active_session(
     # snapshotted rate so the live cost_coins preview matches what
     # finalize_charging_session will actually bill.
     state.telemetry_store.start_session(plug.id, rate_coins_per_kwh=rate_coins_per_kwh)
-    await set_plug_telemetry_interval(db, plug.id, 1000)
+    if actuate:
+        await set_plug_telemetry_interval(db, plug.id, 1000)
 
     # [Notification prefs C7] Once per session, only after the ON publish
     # succeeded (never on the CANCELLED rollback above). Every start path runs
