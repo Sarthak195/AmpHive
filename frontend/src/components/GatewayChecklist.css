@@ -1,0 +1,42 @@
+/* Layout only: colour comes from primitives (.badge-*, .text-2). */
+.gwcheck {
+  margin-bottom: var(--sp-4);
+}
+
+.gwcheck-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-3);
+}
+
+.gwcheck-title {
+  margin: 0;
+  font-size: var(--text-md, 1rem);
+}
+
+.gwcheck-head .btn {
+  margin-left: auto;
+}
+
+.gwcheck-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--sp-2);
+}
+
+.gwcheck-item {
+  display: grid;
+  grid-template-columns: 5.5rem 1fr;
+  gap: var(--sp-3);
+  align-items: start;
+  padding-bottom: var(--sp-2);
+  border-bottom: 1px solid var(--line, rgba(128, 128, 128, 0.25));
+}
+
+.gwcheck-item .badge {
+  justify-self: start;
+}
