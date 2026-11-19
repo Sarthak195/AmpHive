@@ -22,10 +22,13 @@ It fires once per session (one notice). An opted-in stop that fails is
 retried on later idle frames, at most once per CHARGE_FULL_STOP_RETRY_SEC. State is keyed by plug and replaced when a new
 session id shows up on that plug, so it stays bounded with no cleanup.
 
-State is in memory only. A backend restart clears it: the idle timer starts
-over (detection is only delayed), and a session that had already fired can
-fire once more, which repeats one notification at most (an auto-stopped
-session is no longer ACTIVE, so it is never stopped twice).
+The timing state is in memory only. A backend restart clears it: the idle
+timer starts over, so detection is only delayed by up to CHARGE_FULL_MINUTES.
+The notice itself is durable: the caller claims ChargingSession.full_notified_at
+(migration 0051) when this detector fires, so a session that already got the
+notice before a restart fires again here without a second notice; only the
+banner and an opted-in stop run then (an auto-stopped session is no longer
+ACTIVE, so it is never stopped twice).
 """
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone

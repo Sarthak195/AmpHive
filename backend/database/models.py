@@ -320,6 +320,14 @@ class Gateway(Base):
     # make a dead gateway look freshly seen.
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+    # [Operator alerts F3] Durable alert state (services/operator_alerts.py),
+    # written only on an alert decision under this row's lock, never per frame.
+    # offline_notified_at: a "Gateway offline" alert is outstanding (cleared by
+    # the "back online" follow-up). last_operator_alert_at: when the last
+    # offline alert went out (cooldown; a pending "still offline" re-check is
+    # re-armed from it at startup). Alembic revision 0051_durable_notice_state.
+    offline_notified_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_operator_alert_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # Relationships
     tenant: Mapped[Optional[Tenant]] = relationship("Tenant", back_populates="gateways")
@@ -592,6 +600,16 @@ class ChargingSession(Base):
     # makes. NULL/false = off: the driver is only told. Alembic revision
     # 0044_session_auto_stop_full.
     auto_stop_when_full: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+
+    # [Durable notice state] Once-per-session notices, claimed with
+    # UPDATE ... WHERE col IS NULL when the in-memory detector fires (a state
+    # transition, never per frame), so a backend restart neither repeats nor
+    # loses them. full_notified_at is also the durable "judged fully charged"
+    # marker (services/mqtt/charge_full.py). Alembic revision
+    # 0051_durable_notice_state.
+    full_notified_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    nearly_done_notified_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    power_dropped_notified_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # Hot-path composite indexes (Alembic revision 0024_session_ledger_indexes):
     # plug_id/status backs "is this plug's session still active", user_id/status

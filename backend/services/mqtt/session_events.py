@@ -19,8 +19,11 @@ power_dropped: once per session. After the session has drawn at least
   longer than the reaper's stale window. Missing frames are never zero-filled.
 
 State is keyed by plug and replaced when a new session id shows up on that
-plug, so it stays bounded with no cleanup. It is in memory only: a backend
-restart clears it, so a session can see each notice once more at most.
+plug, so it stays bounded with no cleanup. The timers are in memory only (a
+restart restarts the power-drop timer). The once-per-session dedupe is
+durable: the caller claims ChargingSession.nearly_done_notified_at /
+power_dropped_notified_at (migration 0051) when a detector fires and skips a
+notice the row already records, so a restart neither repeats nor loses one.
 """
 from dataclasses import dataclass
 from datetime import datetime

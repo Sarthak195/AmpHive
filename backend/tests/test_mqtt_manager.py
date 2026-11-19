@@ -442,7 +442,7 @@ async def test_overcurrent_cap_finalize_reason_string():
         async def __aexit__(self, *a): return False
         async def execute(self, *_a, **_k):
             r = MagicMock()
-            r.scalar_one_or_none.return_value = 42  # an ACTIVE session id
+            r.first.return_value = (42, 3)  # an ACTIVE session id + its driver
             return r
 
     mgr = MQTTManager(db_session_factory=lambda: _OneActive())
@@ -495,7 +495,7 @@ async def test_local_limit_cutoff_finalize_reason_string():
         async def __aexit__(self, *a): return False
         async def execute(self, *_a, **_k):
             r = MagicMock()
-            r.scalar_one_or_none.return_value = 42  # an ACTIVE session id
+            r.first.return_value = (42, 3)  # an ACTIVE session id + its driver
             return r
 
     mgr = MQTTManager(db_session_factory=lambda: _OneActive())
@@ -2277,6 +2277,10 @@ def _debounce_mgr(monkeypatch, gateway, n_results, delay=_NOTICE_DELAY):
     mgr._broadcast_plug_connectivity = AsyncMock()
     mgr._republish_off_for_orphaned_plugs = AsyncMock()
     mgr._publish_roster_for_gateway = AsyncMock()
+    # The operator follow-up reads the gateway row on every `online`; it has
+    # its own tests (test_operator_alerts.py) and would eat a result here.
+    from backend.services import operator_alerts
+    monkeypatch.setattr(operator_alerts, "alert_gateway_online", AsyncMock())
     return mgr, session
 
 
