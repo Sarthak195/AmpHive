@@ -813,12 +813,16 @@ class MQTTTelemetryMixin:
                 charge_stop_retry = self._charge_full.stop_retry_due(
                     plug_id, charge_sample[0], at, watts,
                 )
-            nearly_done_fired = self._session_events.observe_energy(
-                plug_id, charge_sample[0], updated_energy_kwh, updated_max_kwh,
-            )
-            power_dropped_fired = self._session_events.observe_power(
-                plug_id, charge_sample[0], at, watts, charge_sample[1],
-            )
+            # [C7 + F1] Once the car looks fully charged (this frame or an
+            # earlier one), "almost done" and "slowing down" would only
+            # contradict that notice, so neither detector is fed again.
+            if not self._charge_full.has_fired(plug_id, charge_sample[0]):
+                nearly_done_fired = self._session_events.observe_energy(
+                    plug_id, charge_sample[0], updated_energy_kwh, updated_max_kwh,
+                )
+                power_dropped_fired = self._session_events.observe_power(
+                    plug_id, charge_sample[0], at, watts, charge_sample[1],
+                )
         elif charge_relay_off_session is not None:
             self._charge_full.interrupt(plug_id, charge_relay_off_session)
             self._session_events.interrupt(plug_id, charge_relay_off_session)

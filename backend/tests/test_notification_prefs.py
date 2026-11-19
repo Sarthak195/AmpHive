@@ -329,6 +329,27 @@ async def test_no_notice_on_the_frame_that_auto_stops_the_session(_knobs, helper
 
 
 @pytest.mark.asyncio
+async def test_no_c7_notice_once_the_car_looks_full(_knobs):
+    """[C7 + F1] After F1's charge_full fired for the session, a later frame
+    that crosses 90% of max_kwh or a sustained mid-level drop sends neither
+    nearly_done nor power_dropped; the driver keeps only the F1 notice."""
+    mgr = _manager()
+    row = _session_row(auto_stop=False)
+    with patch("backend.services.notifications.notify", AsyncMock()) as notify:
+        for m in range(10, 31):
+            await _persist_frame(mgr, row, m, 0.0)      # idle: F1 fires
+        mgr._on_charge_full.assert_awaited_once()
+        row.max_kwh = 5.5                               # 5.0 kWh = 91% of it
+        for m in range(31, 36):
+            await _persist_frame(mgr, row, m, 1500.0)   # car wakes up
+        for m in range(36, 45):
+            await _persist_frame(mgr, row, m, 600.0)    # then a sustained drop
+    types = [c.args[1] for c in notify.await_args_list]
+    assert "nearly_done" not in types
+    assert "power_dropped" not in types
+
+
+@pytest.mark.asyncio
 async def test_persist_path_ignores_offline_replays(_knobs):
     mgr = _manager()
     row = _session_row(auto_stop=False)
