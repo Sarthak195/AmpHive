@@ -409,15 +409,20 @@ class MQTTAlarmMixin:
         # notifies the driver). This includes OVERCURRENT_CAP (a soft cap trip):
         # the firmware stopped charging, so the backend must finalize too,
         # otherwise the plug is orphaned OCCUPIED until the reaper.
+        cutoff_driver: Optional[int] = None
         if plug_id is not None and event_type in self._FINALIZE_ALARM_REASONS:
-            await self._finalize_session_after_cutoff(plug_id, event_type)
+            cutoff_driver = await self._finalize_session_after_cutoff(plug_id, event_type)
 
         # [Operator alert] Page the tenant's CPOs (bell + push, optional email)
         # for the safety faults and a failed OTA, cooldown-deduplicated per
         # (gateway, plug, event). Last, so SMTP/notify never delays the
-        # maintenance flip or the finalize above; never raises.
+        # maintenance flip or the finalize above; never raises. A CPO who was
+        # the driver of the session this cutoff just finalized already got the
+        # cutoff notice, so the gateway_fault bell skips them (one notice per
+        # user per fault).
         await operator_alerts.alert_safety_fault(
-            self.db_session_factory, gateway_id, plug_id, event_type, severity, detail
+            self.db_session_factory, gateway_id, plug_id, event_type, severity, detail,
+            exclude_user_ids=(cutoff_driver,) if cutoff_driver is not None else (),
         )
 
     # Alarms after which the firmware has already stopped charging locally, so the
@@ -438,10 +443,12 @@ class MQTTAlarmMixin:
     # only. A cap trip (OVERCURRENT_CAP) is intentionally NOT here.
     _MAINTENANCE_ALARM_REASONS = {"THERMAL_CUTOFF", "OVERCURRENT_CUTOFF"}
 
-    async def _finalize_session_after_cutoff(self, plug_id: int, event_type: str):
+    async def _finalize_session_after_cutoff(self, plug_id: int, event_type: str) -> Optional[int]:
         """Finalize the ACTIVE session (if any) on a plug the firmware just cut
         off. Race-safe: finalize row-locks and re-checks ACTIVE, so a
-        concurrent user stop / reaper settles exactly once."""
+        concurrent user stop / reaper settles exactly once. Returns the
+        driver's user id when this call finalized the session (so the driver
+        got the cutoff notice), else None."""
         from sqlalchemy import select
 
         from backend.database.models import ChargingSession, SessionStatus
@@ -449,14 +456,15 @@ class MQTTAlarmMixin:
 
         try:
             async with self.db_session_factory() as db:
-                session_id = (await db.execute(
-                    select(ChargingSession.id).where(
+                row = (await db.execute(
+                    select(ChargingSession.id, ChargingSession.user_id).where(
                         ChargingSession.plug_id == plug_id,
                         ChargingSession.status == SessionStatus.ACTIVE,
                     )
-                )).scalar_one_or_none()
-            if session_id is None:
-                return
+                )).first()
+            if row is None:
+                return None
+            session_id, user_id = row
             async with self.db_session_factory() as db:
                 outcome = await finalize_charging_session(
                     db, session_id, reason=self._FINALIZE_ALARM_REASONS[event_type]
@@ -465,8 +473,10 @@ class MQTTAlarmMixin:
                 logger.warning(
                     f"Finalized session {session_id} after {event_type} on plug {plug_id}"
                 )
+                return user_id
         except Exception:
             logger.exception(f"Post-cutoff finalize failed for plug {plug_id} ({event_type})")
+        return None
 
     async def _auto_enter_maintenance(self, plug_id: int, event_type: str):
         """

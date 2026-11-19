@@ -88,6 +88,10 @@ async def lifespan(app: FastAPI):
         telemetry_persistence=state.telemetry_persistence,
     )
     state.mqtt_manager.start()
+    # [Operator alerts F3] Re-arm the "Gateway still offline" re-checks a
+    # restart dropped (derived from the gateways rows; never raises).
+    from backend.services import operator_alerts
+    await operator_alerts.rearm_offline_rechecks(async_session_factory)
 
     # Auto-finalize ACTIVE sessions whose telemetry has gone silent (dead
     # gateway mid-session). Shares finalize_charging_session with the stop
