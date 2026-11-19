@@ -274,3 +274,35 @@ async def test_approve_stays_pending_only(status):
         await cpo_approve_plug_photo(
             photo_id=5, user=_role_user("cpo"), db=_cpo_db(_photo(status)))
     assert exc.value.status_code == 409
+
+
+# --- cpo_viewer sees only approved photos in the moderation list ---
+
+async def _listed_sql(role, status_filter):
+    from backend.routers.cpo._plug_photos import cpo_list_plug_photos
+
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=MagicMock(
+        scalars=MagicMock(return_value=MagicMock(all=MagicMock(return_value=[])))))
+    await cpo_list_plug_photos(
+        user=_role_user(role), db=db, status_filter=status_filter, limit=10)
+    return str(db.execute.call_args.args[0].compile(
+        compile_kwargs={"literal_binds": True}))
+
+
+@pytest.mark.asyncio
+async def test_viewer_photo_list_is_forced_to_approved():
+    sql = await _listed_sql("cpo_viewer", "")
+    assert "plug_photos.status = 'approved'" in sql
+
+
+@pytest.mark.asyncio
+async def test_viewer_pending_filter_cannot_widen_the_list():
+    sql = await _listed_sql("cpo_viewer", "pending")
+    assert "plug_photos.status = 'approved'" in sql and "'pending'" in sql
+
+
+@pytest.mark.asyncio
+async def test_cpo_photo_list_is_not_forced_to_approved():
+    sql = await _listed_sql("cpo", "")
+    assert "'approved'" not in sql

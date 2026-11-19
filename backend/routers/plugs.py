@@ -3,6 +3,7 @@ Plugs routes — moved verbatim from main.py (2026-07-07, TD#7 split).
 """
 import asyncio
 import logging
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
@@ -220,18 +221,26 @@ def _sniff_image(data: bytes):
     return None
 
 
+_LOCAL_SPLIT_RE = re.compile(r"[._+-]")
+ANONYMOUS_AUTHOR = "AmpHive driver"
+
+
 def _author_display(full_name: Optional[str], email: Optional[str]) -> str:
-    """Privacy-preserving label for a public review: the driver's first name if
-    they have a real full_name, else their email local-part with the tail
-    masked (``sat***``). NEVER the full email or the user id, the reviews read
-    is unauthenticated."""
+    """Privacy-preserving label for a public review (the read is
+    unauthenticated): the first word of the driver's full_name when it is a
+    real name, else "AmpHive driver". Nothing derived from the email is ever
+    shown. A name is not real when it is empty, contains "@", or equals
+    (case-insensitively) the email local part or its first word split on
+    ``. _ - +`` (a Google signup without a name claim used to store exactly
+    that)."""
     name = (full_name or "").strip()
-    if name:
-        return name.split()[0]
-    local = (email or "").split("@")[0] or "driver"
-    if len(local) <= 3:
-        return local[0] + "***"
-    return local[:3] + "***"
+    if not name or "@" in name:
+        return ANONYMOUS_AUTHOR
+    local = (email or "").split("@")[0].strip().lower()
+    if local:
+        if name.lower() in (local, _LOCAL_SPLIT_RE.split(local)[0]):
+            return ANONYMOUS_AUTHOR
+    return name.split()[0]
 
 
 def _plug_review_response(review: PlugReview, *, author_display: str, is_mine: bool = False) -> PlugReviewResponse:
@@ -1326,7 +1335,8 @@ async def get_plug_photo_image(
     for a day (``Cache-Control: public, max-age=86400``; setting the header here
     makes security_headers_middleware leave its ``no-store`` default off).
     PENDING or REJECTED: only a CPO of the plug's tenant or an admin, with
-    ``private, no-store``; everyone else gets the same 404 as a missing photo.
+    ``private, no-store``; everyone else (a read-only cpo_viewer included)
+    gets the same 404 as a missing photo.
     """
     photo = (await db.execute(
         select(PlugPhoto).where(PlugPhoto.id == photo_id, PlugPhoto.plug_id == plug_id)
@@ -1338,6 +1348,12 @@ async def get_plug_photo_image(
     if photo.status == PlugPhotoStatus.APPROVED:
         cache_control = "public, max-age=86400"
     else:
+        # [F10] Unmoderated photos can show anything (people, plates, a house
+        # number), so a read-only cpo_viewer never sees them, even for its own
+        # tenant: moderation is a cpo/admin job. Named here on purpose; the
+        # role check below would already exclude the viewer role.
+        if is_cpo_viewer(user):
+            raise not_found
         role = user.role.value if user is not None else None
         if not (role == "admin" or (role == "cpo" and user is not None and user.tenant_id == photo.tenant_id)):
             raise not_found

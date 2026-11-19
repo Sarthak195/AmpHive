@@ -392,7 +392,7 @@ async def test_callback_new_account_role_is_driver(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_callback_new_account_full_name_falls_back_to_email_local_part(monkeypatch):
+async def test_callback_new_account_without_name_claim_stores_no_email_derived_name(monkeypatch):
     _set_google_env(monkeypatch)
     _mock_token_exchange(monkeypatch)
     _mock_verify_claims(monkeypatch, _claims(email="janedoe@amphive.test", name=None))
@@ -402,7 +402,8 @@ async def test_callback_new_account_full_name_falls_back_to_email_local_part(mon
     await google_callback(req, db)
 
     created = db.add.call_args.args[0]
-    assert created.full_name == "janedoe"
+    # Never the email local part: public plug reviews and CPO screens show it.
+    assert created.full_name == ""
 
 
 @pytest.mark.asyncio
