@@ -586,7 +586,9 @@ def test_group_members_mask_driver_name_for_viewer(as_user, role, name, email):
     group = MagicMock()
     group.scalar_one_or_none.return_value = object()
     members = MagicMock()
-    member = SimpleNamespace(user_id=100, joined_at=datetime.now(timezone.utc))
+    member = SimpleNamespace(
+        user_id=100, joined_at=datetime.now(timezone.utc), price_per_kwh_override=None
+    )
     members.all.return_value = [(member, "driver1@example.com", "Driver One")]
     db.execute = AsyncMock(side_effect=[group, members])
 
