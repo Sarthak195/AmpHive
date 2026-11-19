@@ -451,14 +451,16 @@ async def alert_safety_fault(
         return
     now = _last_fault_alert[key] = _now()
     if not known and event_id is not None and cooldown > 0:
+        earlier: Optional[datetime] = None
         try:
-            earlier = await _earlier_fault_at(
+            found = await _earlier_fault_at(
                 session_factory, gateway_id, plug_id, event_type, event_id,
                 now - timedelta(seconds=cooldown),
             )
+            if isinstance(found, datetime):
+                earlier = found
         except Exception:
             logger.exception(f"Fault cooldown lookup failed for {gateway_id} ({event_type})")
-            earlier = None
         if earlier is not None:
             # Restart inside the cooldown: this fault was already reported.
             _last_fault_alert[key] = _aware(earlier)
