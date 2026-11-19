@@ -11,14 +11,14 @@ been fixed by the 2026-07-08…11 work — see the shipped sections below).*
 
 ---
 
-## 2026-11-17 features wave 2 (built 2026-11-17 on release/2026-11-17-w2, not deployed)
+## 2026-11-17 features wave 2 (built 2026-11-17 on release/2026-11-17-w2, deployed 2026-11-19)
 
-- [x] F1 charge-complete detection: "looks fully charged" notification and opt-in auto-stop. (built 2026-11-17 on release/2026-11-17-w2, not deployed)
-- [x] F10 read-only CPO viewer role (`cpo_viewer`, demo login seed). (built 2026-11-17 on release/2026-11-17-w2, not deployed)
-- [x] F7 personal read-only API token and `GET /api/me/meter` (Home Assistant, evcc). (built 2026-11-17 on release/2026-11-17-w2, not deployed)
-- [x] F12 promo codes (CPO issue/list/disable, driver redeem, funded from the offline top-up pool). (built 2026-11-17 on release/2026-11-17-w2, not deployed)
-- [x] OCPP 1.6J read-only virtual charge-point bridge (`tools/ocpp_bridge`). (built 2026-11-17 on release/2026-11-17-w2, not deployed)
-- [ ] Deploy wave 1 + wave 2 (migration deploy 0044 to 0047; tag the rollback image first, see docs/DEPLOYMENT.md "Features wave 2").
+- [x] F1 charge-complete detection: "looks fully charged" notification and opt-in auto-stop. (built 2026-11-17 on release/2026-11-17-w2, deployed 2026-11-19)
+- [x] F10 read-only CPO viewer role (`cpo_viewer`, demo login seed). (built 2026-11-17 on release/2026-11-17-w2, deployed 2026-11-19)
+- [x] F7 personal read-only API token and `GET /api/me/meter` (Home Assistant, evcc). (built 2026-11-17 on release/2026-11-17-w2, deployed 2026-11-19)
+- [x] F12 promo codes (CPO issue/list/disable, driver redeem, funded from the offline top-up pool). (built 2026-11-17 on release/2026-11-17-w2, deployed 2026-11-19)
+- [x] OCPP 1.6J read-only virtual charge-point bridge (`tools/ocpp_bridge`). (built 2026-11-17 on release/2026-11-17-w2, deployed 2026-11-19)
+- [x] Deploy wave 1 + wave 2 (migration deploy 0044 to 0047). Done 2026-11-19: wave 1 (63f41b7) then wave 2 (3e7d26c), prod alembic 0047_promo_codes; see docs/DEPLOYMENT.md "Features wave 2".
 - [ ] F1 known limits: detector state is in memory (a restart delays detection and can repeat one "looks full" notification); car-side scheduled charging or a long mid-charge pause can look full (why the stop is opt-in); firmware < 2.8.0 may publish a failed-poll frame that is indistinguishable from a real 0 W; a limit stop and a "looks full" notice can both fire on the same frame (rare).
 - [ ] F10 follow-ups: let viewers load pending plug photos only if wanted (`routers/plugs.py` checks `role == 'cpo'`); show an existing invoice to viewers without issuing one (with the HTML's "Bill To" name and email masked). Promo `code_hint` is now hidden from a viewer.
 - [ ] Public plug reviews: `_author_display` (`routers/plugs.py`) shows the first word of `full_name`, which for a Google signup without a name claim is the whole email local part. The read is unauthenticated, so this is not a viewer issue; changing it changes what every reader sees.
@@ -34,18 +34,18 @@ been fixed by the 2026-07-08…11 work — see the shipped sections below).*
 - [x] F10 review fix (round 2): the promo hint in a redeemed top-up's note ("Promo code ...XXXX") and a driver problem report's text in `GET /api/cpo/events` `detail` are masked for a viewer; an IPv4 address ending a sentence is masked too.
 - [x] Pre-existing, found in the F10 review: `POST /api/plugs/{id}/report` broadcast its `GatewayEvent.detail` (the driver's free-text description) over `gateway_alarm`, which reaches every signed-in socket of every tenant. Fixed: the broadcast carries the category only; the full text stays in the stored event for the tenant's `GET /api/cpo/events` (the CPO console only uses the broadcast as a refetch trigger).
 - [x] OCPP review fix: the reconnect backoff resets after a healthy boot, a StopTransaction the CSMS keeps refusing is closed locally after 3 CallErrors, a Heartbeat CallError keeps the link, and StartTransaction goes before the Charging status; `backend/tests/test_meter_ocpp_contract.py` pins the meter contract.
-- [ ] OCPP bridge: run it against the real `GET /api/me/meter` and a real CSMS once F7 is deployed.
+- [ ] OCPP bridge: run it against the real `GET /api/me/meter` and a real CSMS (F7 is live since 2026-11-19).
 
-## 2026-11-17 features wave 1 (built 2026-11-17 on release/2026-11-17-w1, not deployed)
+## 2026-11-17 features wave 1 (built 2026-11-17 on release/2026-11-17-w1, deployed 2026-11-19)
 
-- [x] F2 per-session power curve (`GET /api/sessions/{id}/telemetry`, SessionPowerCurve). (built 2026-11-17 on release/2026-11-17-w1, not deployed)
-- [x] F8 insights: 12-month series and estimated CO2/petrol impact on the driver Dashboard, CPO Dashboard and receipt. (built 2026-11-17 on release/2026-11-17-w1, not deployed)
-- [x] F3 operator alerts for an idle gateway going offline and for safety faults (bell, push, optional email). (built 2026-11-17 on release/2026-11-17-w1, not deployed)
-- [x] F4 diagnostics UI (gateway Logs drawer, admin Logs tab, CPO audit page). (built 2026-11-17 on release/2026-11-17-w1, not deployed)
-- [x] F5 memory-eviction visibility: admin health console (`/admin/health`) and host cron alerter. (built 2026-11-17 on release/2026-11-17-w1, not deployed)
-- [x] F6 one-tap cheapest-window scheduled start. (built 2026-11-17 on release/2026-11-17-w1, not deployed)
-- [x] F11 public network status (`GET /api/status`, Network status panel on `/map`). (built 2026-11-17 on release/2026-11-17-w1, not deployed)
-- [ ] Install the F5 host cron on the VM (`check_host_health.sh`, see docs/DEPLOYMENT.md "Features wave 1").
+- [x] F2 per-session power curve (`GET /api/sessions/{id}/telemetry`, SessionPowerCurve). (built 2026-11-17 on release/2026-11-17-w1, deployed 2026-11-19)
+- [x] F8 insights: 12-month series and estimated CO2/petrol impact on the driver Dashboard, CPO Dashboard and receipt. (built 2026-11-17 on release/2026-11-17-w1, deployed 2026-11-19)
+- [x] F3 operator alerts for an idle gateway going offline and for safety faults (bell, push, optional email). (built 2026-11-17 on release/2026-11-17-w1, deployed 2026-11-19)
+- [x] F4 diagnostics UI (gateway Logs drawer, admin Logs tab, CPO audit page). (built 2026-11-17 on release/2026-11-17-w1, deployed 2026-11-19)
+- [x] F5 memory-eviction visibility: admin health console (`/admin/health`) and host cron alerter. (built 2026-11-17 on release/2026-11-17-w1, deployed 2026-11-19)
+- [x] F6 one-tap cheapest-window scheduled start. (built 2026-11-17 on release/2026-11-17-w1, deployed 2026-11-19)
+- [x] F11 public network status (`GET /api/status`, Network status panel on `/map`). (built 2026-11-17 on release/2026-11-17-w1, deployed 2026-11-19)
+- [x] Install the F5 host cron on the VM (`check_host_health.sh`, see docs/DEPLOYMENT.md "Features wave 1"). Installed 2026-11-19, forced test alert delivered.
 - [ ] F3 known limits: cooldowns, the "offline notice was sent" memory and the pending "still offline" re-check are in process memory, so a restart during the cooldown loses the re-check and can re-alert once; an online racing the recipients query can send "back online" alongside the "offline" fan-out (ordering not guaranteed); a safety fault can give an owner who charges from an operator account both the driver cutoff notice and the `gateway_fault` bell (not deduplicated).
 - [ ] Deferred from F8: vehicle profile (per-driver km/kWh and petrol price) and a monthly insights email. Tenant-local months for CPO-side series if ever needed.
 - [ ] Deferred from F6: "ready by T" charge planner. It needs a new PAUSED session state and unattended re-energizing (a SAFETY.md concern), so it was dropped from F6. Only the one-tap cheapest-start shipped.
@@ -58,7 +58,7 @@ been fixed by the 2026-07-08…11 work — see the shipped sections below).*
 *Low severity. U0-U6 are from the 2026-11-15 review and were NOT independently verified; F10 is a known false-alarm class.*
 
 - [x] U0: queued-charge auto-start does not pass the driver's own covering reservation, so it stays BOOKED during the session (`backend/services/session_reaper.py:752`). Fixed 2026-11-16 (deployed in ac00d46): queued/scheduled auto-start now passes the owner's covering reservation to `begin_active_session` (same path as `POST /api/sessions/start`), so it becomes FULFILLED and linked to the session.
-- [x] U1: CPO dashboard revenue ignores approved refunds and disagrees with the Earnings page (`backend/routers/cpo/_analytics.py:99`). Fixed 2026-11-16 (deployed in ac00d46): today and all-time `revenue_coins` now use `payouts.sum_completed_session_coins` (coins spent minus approved refunds, same as Earnings). Follow-up 2026-11-17 (branch chore/followups-2026-11-17, not deployed): today's energy and session count now use `ended_at` like the revenue, and the 30-day chart (`/api/cpo/analytics/revenue`) nets approved refunds, each on its own session's day (never negative; the series agrees with Earnings for the same sessions). Residual: the chart's today bar can differ from the Today KPI when a session crosses local midnight (the chart keys on `started_at`) or a refund approved today belongs to an earlier session (the KPI takes it off today, the chart on that session's day).
+- [x] U1: CPO dashboard revenue ignores approved refunds and disagrees with the Earnings page (`backend/routers/cpo/_analytics.py:99`). Fixed 2026-11-16 (deployed in ac00d46): today and all-time `revenue_coins` now use `payouts.sum_completed_session_coins` (coins spent minus approved refunds, same as Earnings). Follow-up 2026-11-17 (branch chore/followups-2026-11-17, deployed 2026-11-19): today's energy and session count now use `ended_at` like the revenue, and the 30-day chart (`/api/cpo/analytics/revenue`) nets approved refunds, each on its own session's day (never negative; the series agrees with Earnings for the same sessions). Residual: the chart's today bar can differ from the Today KPI when a session crosses local midnight (the chart keys on `started_at`) or a refund approved today belongs to an earlier session (the KPI takes it off today, the chart on that session's day).
 - [x] U2: offline top-up `created_at` is transaction-start time, so one queued behind a payout can precede the new watermark and escape deduction (`backend/routers/cpo/_topups.py:133`). Fixed 2026-11-16 (deployed in ac00d46): `created_at` is now set from the app clock under the tenant row lock, floored at the watermark read under that lock, the same lock and clock `cpo_request_payout` uses, so each top-up is deducted exactly once.
 - [x] U3: GST invoice line shows the last-segment rate, so energy x rate does not foot for time-of-day sessions (`backend/services/invoices.py:193`). Fixed 2026-11-16 (deployed in ac00d46, no migration): lines show an effective rate (total / energy), so energy x rate foots the total. Adds `effective_rate_coins_per_kwh` to the API line item and a trailing CSV column; the old `rate_coins_per_kwh` is kept. Known limit: after an approved dispute refund the effective rate is net.
 - [x] U4: tenant-less users (platform admin, tenant-less CPO) match `tenant_id IS NULL` and can see and operate on unclaimed gateways and plugs (`backend/routers/cpo/_gateways.py:60`). Fixed 2026-11-16 (deployed in ac00d46): tenant-scoped `/api/cpo` routes use the shared `require_cpo_tenant` dependency, which returns 400 "You are not associated with a tenant." before any query. Open without a tenant: setup, profile, firmware-releases, payout mark_paid and cancel.
@@ -449,7 +449,7 @@ actions, and two deliberate deferrals.*
       UI shipped 2026-11-17 (feat/f4-diagnostics-ui): CPO gateway Logs
       drawer (CpoGateways), admin Logs tab (AdminGateways), CPO `/cpo/audit`
       page (CpoAudit.jsx, TD#26 trail now visible). Diagnostics UI done
-      (built 2026-11-17 on release/2026-11-17-w1, not deployed).
+      (built 2026-11-17 on release/2026-11-17-w1, deployed 2026-11-19).
 - [x] **[2026-07-06 audit] Registration validation.** Done 2026-07-11 —
       `EmailStr` + 8-72 char password rule; login left unvalidated for
       pre-rule accounts. (TD#30)

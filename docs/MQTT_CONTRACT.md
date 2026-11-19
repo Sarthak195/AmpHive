@@ -400,7 +400,7 @@ messages (`/alarms`) are ingested by `_handle_gateway_alarm` → persisted as
 > 5 W). An idle plug's OFF only logs at INFO; a relay found ON with no session
 > is still covered by the firmware's own `UNAUTHORIZED_ON` alarm.
 
-> **Operator paging (F3, 2026-11-17, not deployed).** `UNAUTHORIZED_ON`,
+> **Operator paging (F3, 2026-11-17, deployed 2026-11-19).** `UNAUTHORIZED_ON`,
 > `THERMAL_CUTOFF`, `OVERCURRENT_CUTOFF` and `OTA_FAILED` also bell the
 > tenant's CPOs (notification type `gateway_fault`, one per (gateway, plug,
 > event) per `OPERATOR_ALERT_COOLDOWN_SEC`), and a gateway that stays offline
