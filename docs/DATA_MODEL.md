@@ -20,7 +20,7 @@ ORM: SQLAlchemy 2.0 `DeclarativeBase` with `mapped_column`. Enums use
 
 | Enum (DB type) | Values |
 |----------------|--------|
-| `UserRole` (`user_role`) | `admin`, `cpo`, `driver`, `cpo_viewer` (F10, `0045_cpo_viewer_role`, 2026-11-17-w2, not deployed: `ALTER TYPE ... ADD VALUE`, cannot be dropped on downgrade) |
+| `UserRole` (`user_role`) | `admin`, `cpo`, `driver`, `cpo_viewer` (F10, `0045_cpo_viewer_role`, 2026-11-17-w2, deployed 2026-11-19: `ALTER TYPE ... ADD VALUE`, cannot be dropped on downgrade) |
 | `GatewayStatus` (`gateway_status`) | `online`, `offline` |
 | `PlugStatus` (`plug_status`) | `available`, `occupied`, `offline`, `maintenance` |
 | `SessionStatus` (`session_status`) | `active`, `completed`, `paid`, `cancelled` |
@@ -139,7 +139,7 @@ since the wire protocol has no way to encode "no limit" directly. `max_kwh`
 is float, not NUMERIC — an energy threshold, not money.
 
 `auto_stop_when_full` BOOLEAN NULL (`0044_session_auto_stop_full`, F1,
-2026-11-17-w2, not deployed): driver opt-in to stop when the car looks full;
+2026-11-17-w2, deployed 2026-11-19): driver opt-in to stop when the car looks full;
 NULL/false = off.
 
 ### `ledger_transactions`
@@ -373,7 +373,7 @@ full column list of each:
   kept only as legacy back-compat for URLs registered before the switch).
   Re-uploading/re-registering a **deactivated** version overwrites
   `url`/`notes` and reactivates the row; an active duplicate stays a 400.
-- **`api_tokens`** (`0046_api_tokens.py`, F7, 2026-11-17-w2, not deployed) - a
+- **`api_tokens`** (`0046_api_tokens.py`, F7, 2026-11-17-w2, deployed 2026-11-19) - a
   personal read-only API token. Columns: `id` SERIAL PK; `user_id` INT NOT
   NULL FK users ON DELETE CASCADE (`ix_api_tokens_user_id`); `name`
   VARCHAR(64) NOT NULL; `token_prefix` VARCHAR(16) NOT NULL; `token_hash`
@@ -398,8 +398,7 @@ full column list of each:
 
 The ORM declares **35 tables** as of `0047_promo_codes` (`__tablename__`
 count, rechecked 2026-11-17; the earlier "26" had drifted). Prod, at
-`0043_email_ci_unique`, has 32; it reaches 35 once wave 2's migrations are
-applied. All are applied via Alembic per §4 below.
+`0047_promo_codes` since 2026-11-19, has 35 (it had 32 at `0043_email_ci_unique`). All are applied via Alembic per §4 below.
 
 ## 3. Relationships
 
@@ -434,7 +433,7 @@ joined via `access_code`.
   `0007_audit_log` (2026-07-12), and `notifications` + `push_subscriptions`
   via `0008_notifications` (2026-07-11, renumbered from 0007 at merge); it's
   **35 tables** once `0047_promo_codes` is applied (32 at `0043`); see "Tables added since" in §2 above for the rest.)
-- **Wave 2 chain (2026-11-17, `release/2026-11-17-w2`, not deployed).**
+- **Wave 2 chain (2026-11-17, `release/2026-11-17-w2`, deployed 2026-11-19).**
   `0043_email_ci_unique` -> `0044_session_auto_stop_full` (two nullable
   booleans, IF NOT EXISTS) -> `0045_cpo_viewer_role` (enum value, downgrade is
   a no-op) -> `0046_api_tokens` (CREATE TABLE IF NOT EXISTS, downgrade drops

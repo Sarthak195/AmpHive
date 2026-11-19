@@ -945,7 +945,7 @@ mint plus claim on 403), `frontend/src/pages/cpo/CpoGateways.test.jsx`.
   logout, logout everywhere and any 401. A snapshot is rendered dimmed and
   labelled "last saved" until fresh data replaces it.
 
-### 8.10 2026-11-17 features wave 1 (built on `release/2026-11-17-w1`, not deployed)
+### 8.10 2026-11-17 features wave 1 (built on `release/2026-11-17-w1`, deployed 2026-11-19)
 
 - **Firmware log text in the UI (F4).** Forwarded firmware log text is
   untrusted device output: the diagnostics UI renders it as React text only
@@ -965,7 +965,7 @@ mint plus claim on 403), `frontend/src/pages/cpo/CpoGateways.test.jsx`.
 - **Power curve (F2).** `GET /api/sessions/{id}/telemetry` uses the same access
   rule as session detail (404 for non-owners).
 
-### 8.11 2026-11-17 features wave 2 (built on `release/2026-11-17-w2`, not deployed)
+### 8.11 2026-11-17 features wave 2 (built on `release/2026-11-17-w2`, deployed 2026-11-19)
 
 **Read-only CPO viewer (F10).** A `cpo_viewer` is enforced fail-closed in four layers:
 
