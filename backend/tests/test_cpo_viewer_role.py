@@ -302,13 +302,13 @@ def test_sessions_csv_masks_driver_email_for_viewer(as_user, role, expected):
 
 
 @pytest.mark.parametrize(
-    "role,email,note",
+    "role,email,note,hint",
     [
-        (UserRole.CPO_VIEWER, "o***@example.com", "for b***@example.com"),
-        (UserRole.CPO, "owner@example.com", "for buyer@example.com"),
+        (UserRole.CPO_VIEWER, "o***@example.com", "for b***@example.com", None),
+        (UserRole.CPO, "owner@example.com", "for buyer@example.com", "PQRS"),
     ],
 )
-def test_promo_list_masks_issuer_email_and_note_for_viewer(as_user, role, email, note):
+def test_promo_list_masks_issuer_email_and_note_for_viewer(as_user, role, email, note, hint):
     """Integration (F10 x F12): GET /api/cpo/promos redacts like other reads."""
     now = datetime.now(timezone.utc)
     promo = SimpleNamespace(
@@ -322,6 +322,7 @@ def test_promo_list_masks_issuer_email_and_note_for_viewer(as_user, role, email,
     item = resp.json()["items"][0]
     assert item["created_by_email"] == email
     assert item["note"] == note
+    assert item["code_hint"] == hint
 
 
 @pytest.mark.parametrize(
@@ -366,6 +367,197 @@ def test_mask_pii_handles_free_text_and_phones():
     assert mask_pii("9876543210") == "[phone hidden]"
     assert mask_pii("2026-11-17T10:00:00 plug 12") == "2026-11-17T10:00:00 plug 12"
     assert mask_pii(None) is None
+
+
+def test_mask_pii_scrubs_ips_and_code_tails_but_keeps_versions():
+    """Audit details carry vpn_ip, promo hints and claim code tails."""
+    from backend.routers.cpo._common import mask_pii
+
+    assert mask_pii("name=gw, vpn_ip=10.8.0.12") == "name=gw, vpn_ip=[ip hidden]"
+    assert mask_pii("broker mqtts://8.231.81.12:8883") == "broker mqtts://[ip hidden]:8883"
+    assert mask_pii("hint=PQRS, redemptions=3") == "hint=[hidden], redemptions=3"
+    assert mask_pii("claim_code_tail=***WXYZ") == "claim_code_tail=[hidden]"
+    assert mask_pii("OTA to 2.9.0 done") == "OTA to 2.9.0 done"
+
+
+def test_mask_name_gives_initials():
+    from backend.routers.cpo._common import mask_name
+
+    assert mask_name("Sarthak Jain") == "S. J."
+    # A Google signup without a name claim stores the email local part.
+    assert mask_name("sarthak.jain") == "S."
+    assert mask_name("asha  rao kumar extra") == "A. R. K."
+    assert mask_name(None) is None
+    assert mask_name("") == ""
+    assert mask_name("---") == "?"
+
+
+@pytest.mark.parametrize(
+    "role,name,email",
+    [
+        (UserRole.CPO_VIEWER, "D. O.", "d***@example.com"),
+        (UserRole.CPO, "Driver One", "driver1@example.com"),
+    ],
+)
+def test_group_members_mask_driver_name_for_viewer(as_user, role, name, email):
+    client, db = as_user(_viewer(role=role))
+    group = MagicMock()
+    group.scalar_one_or_none.return_value = object()
+    members = MagicMock()
+    member = SimpleNamespace(user_id=100, joined_at=datetime.now(timezone.utc))
+    members.all.return_value = [(member, "driver1@example.com", "Driver One")]
+    db.execute = AsyncMock(side_effect=[group, members])
+
+    resp = client.get("/api/cpo/groups/1/members")
+
+    assert resp.status_code == 200, resp.text
+    assert (resp.json()[0]["full_name"], resp.json()[0]["email"]) == (name, email)
+
+
+@pytest.mark.parametrize(
+    "role,name",
+    [(UserRole.CPO_VIEWER, "A. R."), (UserRole.CPO, "Asha Rao")],
+)
+def test_cpo_reservations_mask_driver_name_for_viewer(as_user, monkeypatch, role, name):
+    import backend.routers.cpo._reservations as cpo_res
+    from backend.database.models import ReservationStatus
+
+    monkeypatch.setattr(cpo_res, "expire_lapsed_reservations", AsyncMock(return_value=0))
+    now = datetime.now(timezone.utc)
+    r = SimpleNamespace(
+        id=1, plug_id=3, user_id=11, start_at=now, end_at=now + timedelta(hours=1),
+        status=ReservationStatus.BOOKED, session_id=None, created_at=now,
+    )
+    client, _ = as_user(_viewer(role=role), rows=[(r, "Garage plug", "asha@example.com", "Asha Rao")])
+
+    resp = client.get("/api/cpo/reservations")
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["items"][0]["user_name"] == name
+
+
+@pytest.mark.parametrize("role,hidden", [(UserRole.CPO_VIEWER, True), (UserRole.CPO, False)])
+def test_cpo_plugs_hide_lan_address_and_coordinates_from_viewer(as_user, role, hidden):
+    plug = SimpleNamespace(
+        id=1, name="Bay 1", gateway_id="gw1", local_ip="192.168.1.10", plug_model="P110",
+        status=SimpleNamespace(value="available"), current_power_w=0.0, group_id=5,
+        tariff_id=None, latitude=12.97, longitude=77.59, max_current_a=None,
+        rated_power_w=None, connector_type=None, queued_charging_enabled=None,
+        auto_start_delay_min=None, last_seen_at=None, created_at=None,
+    )
+    client, _ = as_user(_viewer(role=role), rows=[(plug, "Society A")])
+
+    resp = client.get("/api/cpo/plugs")
+
+    assert resp.status_code == 200, resp.text
+    item = resp.json()[0]
+    if hidden:
+        assert (item["local_ip"], item["latitude"], item["longitude"]) == (None, None, None)
+        assert "192.168.1.10" not in resp.text
+    else:
+        assert (item["local_ip"], item["latitude"]) == ("192.168.1.10", 12.97)
+    assert (item["name"], item["gateway_id"]) == ("Bay 1", "gw1")
+
+
+@pytest.mark.parametrize("role,vpn_ip", [(UserRole.CPO_VIEWER, None), (UserRole.CPO, "10.8.0.12")])
+def test_cpo_gateways_hide_vpn_ip_from_viewer(as_user, role, vpn_ip):
+    from backend.database.models import GatewayStatus
+
+    gw = SimpleNamespace(
+        id="gw1", name="Home", vpn_ip="10.8.0.12", status=GatewayStatus.OFFLINE,
+        firmware_version="2.9.0", last_seen_at=None, created_at=None,
+    )
+    client, db = as_user(_viewer(role=role))
+    db.execute.return_value.scalars.return_value.all.return_value = [gw]
+
+    resp = client.get("/api/cpo/gateways")
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()[0]["vpn_ip"] == vpn_ip
+
+
+# --- No existence oracle on {id} reads ---------------------------------------
+
+def _invoice_get(as_user, monkeypatch, role, session):
+    import backend.routers.sessions as sessions_router
+
+    issue = AsyncMock(return_value=object())
+    monkeypatch.setattr(sessions_router, "issue_invoice_for_session", issue)
+    monkeypatch.setattr(sessions_router, "invoice_to_dict", lambda inv: {"ok": True})
+    client, db = as_user(_viewer(role=role))
+    db.execute.return_value.scalar_one_or_none.return_value = session
+    resp = client.get("/api/sessions/9/invoice")
+    return resp, issue, db
+
+
+def test_viewer_invoice_missing_and_foreign_answer_identically(as_user, monkeypatch):
+    foreign = SimpleNamespace(id=9, user_id=11, tenant_id=6)
+    own = SimpleNamespace(id=9, user_id=11, tenant_id=5)
+    answers = []
+    for session in (None, foreign, own):
+        resp, issue, db = _invoice_get(as_user, monkeypatch, UserRole.CPO_VIEWER, session)
+        answers.append((resp.status_code, resp.json()))
+        issue.assert_not_awaited()
+        db.execute.assert_not_awaited()
+    assert answers[0] == (404, {"detail": "Session not found."})
+    assert answers[0] == answers[1] == answers[2]
+
+
+def test_cpo_invoice_access_is_unchanged(as_user, monkeypatch):
+    resp, issue, _ = _invoice_get(
+        as_user, monkeypatch, UserRole.CPO, SimpleNamespace(id=9, user_id=11, tenant_id=6)
+    )
+    assert resp.status_code == 404
+    issue.assert_not_awaited()
+    resp, issue, _ = _invoice_get(
+        as_user, monkeypatch, UserRole.CPO, SimpleNamespace(id=9, user_id=11, tenant_id=5)
+    )
+    assert resp.status_code == 200, resp.text
+    issue.assert_awaited_once()
+
+
+def _private_plug_results():
+    plug = MagicMock()
+    plug.scalar_one_or_none.return_value = SimpleNamespace(id=1, group_id=7, gateway_id="gw1")
+    group = MagicMock()
+    group.scalar_one_or_none.return_value = SimpleNamespace(id=7, name="Society", is_public=False)
+    membership = MagicMock()
+    membership.scalar_one_or_none.return_value = None
+    return [plug, group, membership]
+
+
+def test_viewer_private_plug_and_missing_plug_answer_identically(as_user):
+    client, db = as_user(_viewer())
+    missing = MagicMock()
+    missing.scalar_one_or_none.return_value = None
+    db.execute = AsyncMock(side_effect=[missing])
+    gone = client.get("/api/plugs/1")
+    db.execute = AsyncMock(side_effect=_private_plug_results())
+    private = client.get("/api/plugs/1")
+    assert gone.status_code == private.status_code == 404
+    assert gone.json() == private.json()
+
+
+def test_cpo_private_plug_still_gets_403(as_user):
+    client, db = as_user(_viewer(role=UserRole.CPO))
+    db.execute = AsyncMock(side_effect=_private_plug_results())
+    resp = client.get("/api/plugs/1")
+    assert resp.status_code == 403
+
+
+@pytest.mark.parametrize("role,status", [(UserRole.CPO_VIEWER, 404), (UserRole.CPO, 403)])
+def test_plug_schedule_private_plug_answer(as_user, monkeypatch, role, status):
+    import backend.routers.reservations as res_router
+
+    monkeypatch.setattr(res_router, "user_can_access_plug", AsyncMock(return_value=False))
+    client, db = as_user(_viewer(role=role))
+    db.execute.return_value.scalar_one_or_none.return_value = SimpleNamespace(id=1, group_id=7)
+    resp = client.get("/api/plugs/1/reservations")
+    assert resp.status_code == status
+    if role == UserRole.CPO_VIEWER:
+        db.execute.return_value.scalar_one_or_none.return_value = None
+        gone = client.get("/api/plugs/1/reservations")
+        assert (gone.status_code, gone.json()) == (resp.status_code, resp.json())
 
 
 @pytest.mark.parametrize("role,shown", [(UserRole.CPO_VIEWER, False), (UserRole.CPO, True)])
