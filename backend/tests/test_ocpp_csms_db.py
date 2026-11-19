@@ -80,12 +80,12 @@ async def _seed_cp(factory, tenant_id: int, cp_id: str):  # noqa: F811
         return cp.id, plug.id
 
 
-async def _seed_tag(factory, user_id: int, tag: str) -> None:  # noqa: F811
+async def _seed_tag(factory, user_id: int, tenant_id: int, tag: str) -> None:  # noqa: F811
     from backend.database.models import OcppIdTag
     from backend.services.ocpp_adapter import hash_id_tag
 
     async with factory() as db:
-        db.add(OcppIdTag(user_id=user_id, tag_hash=hash_id_tag(tag)))
+        db.add(OcppIdTag(user_id=user_id, tenant_id=tenant_id, tag_hash=hash_id_tag(tag)))
         await db.commit()
 
 
@@ -98,10 +98,15 @@ async def rig(factory, monkeypatch):  # noqa: F811
     from backend import state
     from backend.database import db as db_module
     from backend.routers import ocpp as ocpp_router
+    from backend.services import ocpp_adapter as adapter
     from backend.services.mqtt_manager import MQTTManager
     from backend.services.rate_limit import SlidingWindowRateLimiter
 
     monkeypatch.setattr(db_module, "async_session_factory", factory)
+    monkeypatch.setattr(adapter, "_last_keepalive", {})
+    # The simulator reports its energy within milliseconds of the start; the
+    # elapsed-time energy bound has its own check in the gates test.
+    monkeypatch.setattr(adapter, "MAX_CONNECTOR_KW", 1e9)
     MQTTManager._instance = None
     mgr = MQTTManager(db_session_factory=factory, telemetry_store=state.telemetry_store)
     mgr.send_plug_command = MagicMock(return_value=True)
@@ -168,8 +173,8 @@ async def test_simulator_session_bills_through_the_ledger(factory, rig):  # noqa
     _cp_pk, plug_id = await _seed_cp(factory, tenant_id, "CP1")
     rich = await _seed_user(factory, balance="500.00")
     poor = await _seed_user(factory, balance="10.00")
-    await _seed_tag(factory, rich, "TAG-RICH")
-    await _seed_tag(factory, poor, "TAG-POOR")
+    await _seed_tag(factory, rich, tenant_id, "TAG-RICH")
+    await _seed_tag(factory, poor, tenant_id, "TAG-POOR")
 
     with pytest.raises(WebSocketDenialResponse) as denied:
         await asyncio.to_thread(_simulate, lambda call: None, "wrong-password")
@@ -266,8 +271,9 @@ async def test_admission_gates_and_charge_point_scoping(factory, rig, monkeypatc
     cp2_pk, plug2 = await _seed_cp(factory, t2, "CP2")
     driver = await _seed_user(factory, balance="500.00")
     holder = await _seed_user(factory, balance="500.00")
-    await _seed_tag(factory, driver, "TAG-A")
-    await _seed_tag(factory, holder, "TAG-B")
+    await _seed_tag(factory, driver, t1, "TAG-A")
+    await _seed_tag(factory, driver, t2, "TAG-A")     # enabled at both operators
+    await _seed_tag(factory, holder, t1, "TAG-B")     # enabled at t1 only
     cp1 = adapter.ChargePointCtx(cp1_pk, "CP1", t1, "ocpp-CP1")
     cp2 = adapter.ChargePointCtx(cp2_pk, "CP2", t2, "ocpp-CP2")
 
@@ -301,6 +307,47 @@ async def test_admission_gates_and_charge_point_scoping(factory, rig, monkeypatc
     assert session.status == SessionStatus.ACTIVE
     assert session.energy_kwh == 0.0
 
+    # A tag enabled only at t1 is unknown to t2's charge point, even though
+    # its holder is funded: no oracle, no session.
+    assert await adapter.handle_authorize(cp2, adapter.AuthorizeReq(idTag="TAG-B")) == {
+        "idTagInfo": {"status": "Invalid"},
+    }
+    assert await adapter.handle_start(cp2, start("TAG-B")) == {
+        "transactionId": 0, "idTagInfo": {"status": "Invalid"},
+    }
+
+    # A charger claiming 999 kWh a moment after the start is billed at what
+    # its connector could have delivered (MAX_CONNECTOR_KW x elapsed + slack).
+    monkeypatch.setattr(adapter, "MAX_CONNECTOR_KW", 50.0)
+    await adapter.handle_meter_values(cp1, adapter.MeterValuesReq(
+        connectorId=1, transactionId=tx, meterValue=_sv(999000, 7000),
+    ))
+    async with factory() as db:
+        energy = (await db.execute(
+            select(ChargingSession.energy_kwh).where(ChargingSession.id == tx)
+        )).scalar_one()
+    assert 0.0 < energy < 0.5
+
+    # Keep-alive: a stale-looking session on a connected charger is refreshed
+    # by its own charge point only.
+    stale = datetime.now(timezone.utc) - timedelta(hours=1)
+    async with factory() as db:
+        s = (await db.execute(select(ChargingSession).where(ChargingSession.id == tx))).scalar_one()
+        s.last_telemetry_at = stale
+        await db.commit()
+    await adapter.keep_sessions_alive(cp2)
+    async with factory() as db:
+        seen = (await db.execute(
+            select(ChargingSession.last_telemetry_at).where(ChargingSession.id == tx)
+        )).scalar_one()
+    assert seen == stale
+    await adapter.keep_sessions_alive(cp1)
+    async with factory() as db:
+        seen = (await db.execute(
+            select(ChargingSession.last_telemetry_at).where(ChargingSession.id == tx)
+        )).scalar_one()
+    assert seen > datetime.now(timezone.utc) - timedelta(minutes=1)
+
     # Private group: a non-member is blocked.
     group_id = await _seed_private_group(factory, t2)
     async with factory() as db:
@@ -328,3 +375,51 @@ async def test_admission_gates_and_charge_point_scoping(factory, rig, monkeypatc
         await _start_session(factory, monkeypatch, plug_id=plug2, user_id=driver)
     assert exc.value.status_code == 409
     assert "offline" in exc.value.detail
+
+
+@pytest.mark.asyncio
+async def test_id_tag_lifecycle_scope_cap_export_and_closure(factory, rig):  # noqa: F811
+    from backend.database.models import OcppIdTag, User
+    from backend.routers import ocpp as ocpp_router
+    from backend.services.account_closure import close_account
+    from backend.services.data_export import build_export
+
+    t1 = await _seed_tenant(factory)
+    await _seed_cp(factory, t1, "CP1")
+    user_id = await _seed_user(factory, balance="0.00")
+
+    def bind(tag, cp_id="CP1"):
+        return ocpp_router.IdTagCreateRequest(id_tag=tag, charge_point_id=cp_id)
+
+    async def as_user(fn):
+        # A fresh session per call: a 409 rolls back and expires the user row.
+        async with factory() as db:
+            user = (await db.execute(select(User).where(User.id == user_id))).scalar_one()
+            return await fn(user, db)
+
+    async def status_of(req):
+        with pytest.raises(HTTPException) as exc:
+            await as_user(lambda u, db: ocpp_router.create_id_tag(req, u, db))
+        return exc.value.status_code
+
+    assert await status_of(bind("CARD1", "NOPE")) == 404
+    created = await as_user(lambda u, db: ocpp_router.create_id_tag(bind("CARD1"), u, db))
+    assert created["tenant_id"] == t1
+    assert await status_of(bind("card1")) == 409          # same tag, same operator
+    # A lost POST response is recoverable: the list carries the id.
+    listed = await as_user(ocpp_router.list_id_tags)
+    assert [t["id"] for t in listed] == [created["id"]]
+    assert "CARD1" not in json.dumps(listed)
+    for n in range(2, ocpp_router.MAX_ID_TAGS_PER_USER + 1):
+        await as_user(lambda u, db, n=n: ocpp_router.create_id_tag(bind(f"CARD{n}"), u, db))
+    assert await status_of(bind("ONE-TOO-MANY")) == 409   # per-account cap
+    doc = await as_user(build_export)
+    assert len(doc["ocpp_id_tags"]) == ocpp_router.MAX_ID_TAGS_PER_USER
+    assert "CARD1" not in json.dumps(doc) and "tag_hash" not in json.dumps(doc)
+
+    async with factory() as db:
+        user = (await db.execute(select(User).where(User.id == user_id))).scalar_one()
+        result = await close_account(db, user)
+    assert result["purged"]["ocpp_id_tags"] == ocpp_router.MAX_ID_TAGS_PER_USER
+    async with factory() as db:
+        assert (await db.execute(select(OcppIdTag.id))).first() is None
