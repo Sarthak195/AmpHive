@@ -308,3 +308,59 @@ describe('edit group', () => {
     );
   });
 });
+
+describe('[C9] member price and email invites', () => {
+  it('saves a member price and clears it with a blank value', async () => {
+    api.put.mockResolvedValue({ status: 'updated' });
+    renderPage();
+    await screen.findByText('Sunrise Society');
+    await userEvent.click(screen.getByRole('button', { name: /Sunrise Society/ }));
+    await screen.findByText('Driver One');
+
+    await userEvent.type(screen.getByLabelText(/Own price for Driver One/), '3.5');
+    await userEvent.click(screen.getByRole('button', { name: 'Save price for Driver One' }));
+    await waitFor(() =>
+      expect(api.put).toHaveBeenCalledWith('/api/cpo/groups/1/members/100/price', {
+        price_per_kwh_override: 3.5,
+      })
+    );
+
+    await userEvent.click(screen.getByRole('button', { name: 'Save price for Driver One' }));
+    await waitFor(() =>
+      expect(api.put).toHaveBeenLastCalledWith('/api/cpo/groups/1/members/100/price', {
+        price_per_kwh_override: null,
+      })
+    );
+    expect(toast.ok).toHaveBeenCalledWith('Member now pays the tariff.');
+  });
+
+  it('shows the current member price', async () => {
+    mockApi({
+      membersByGroup: {
+        1: [{ ...MEMBERS_1[0], price_per_kwh_override: 2.5 }],
+      },
+    });
+    renderPage();
+    await screen.findByText('Sunrise Society');
+    await userEvent.click(screen.getByRole('button', { name: /Sunrise Society/ }));
+    expect(await screen.findByText('Own price: 2.5 coins/kWh')).toBeInTheDocument();
+  });
+
+  it('sends an invite and lists it as pending', async () => {
+    api.post.mockResolvedValue({ status: 'sent' });
+    renderPage();
+    await screen.findByText('Sunrise Society');
+    await userEvent.click(screen.getByRole('button', { name: /Sunrise Society/ }));
+
+    await userEvent.type(screen.getByLabelText('Email address'), 'friend@example.com');
+    await userEvent.click(screen.getByRole('button', { name: 'Send invite' }));
+
+    await waitFor(() =>
+      expect(api.post).toHaveBeenCalledWith('/api/cpo/groups/1/invites', {
+        email: 'friend@example.com',
+      })
+    );
+    expect(toast.ok).toHaveBeenCalledWith('Invite sent to friend@example.com.');
+    expect(api.get).toHaveBeenCalledWith('/api/cpo/groups/1/invites');
+  });
+});

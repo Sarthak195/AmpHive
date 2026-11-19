@@ -136,6 +136,41 @@
   border-top: none;
 }
 
+/* [C9] Member price + invite rows wrap on a phone instead of overflowing. */
+.groups-member-row {
+  flex-wrap: wrap;
+}
+
+.groups-member-who {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.groups-member-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+.groups-member-price-input {
+  width: 7rem;
+}
+
+.groups-invite-form {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+}
+
+.groups-invite-form .field {
+  flex: 1 1 14rem;
+  min-width: 0;
+}
+
 .groups-charger-chips {
   display: flex;
   flex-wrap: wrap;
