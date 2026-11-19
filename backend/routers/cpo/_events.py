@@ -74,7 +74,8 @@ async def cpo_list_events(
                 plug_id=ev.plug_id,
                 event_type=ev.event_type,
                 severity=ev.severity,
-                detail=ev.detail,
+                # [F10] A driver problem report puts free text here.
+                detail=redact_for(user, ev.detail),
                 acknowledged=ev.acknowledged,
                 created_at=ev.created_at.isoformat() if ev.created_at else None,
             )

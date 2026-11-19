@@ -1050,6 +1050,9 @@ async def report_plug_problem(
     # Best-effort live broadcast (same shape MQTTAlarmMixin._persist_gateway_event
     # uses for hardware alarms) so the alert strip reacts immediately instead
     # of waiting on its 60s poll. Never blocks or fails the report itself.
+    # gateway_alarm reaches every connected socket of every tenant, so it
+    # carries the category only, never the driver's free-text description;
+    # the tenant's CPO reads the full text from GET /api/cpo/events.
     try:
         from backend.services.socketio_manager import emit_gateway_alarm
         await emit_gateway_alarm({
@@ -1058,7 +1061,7 @@ async def report_plug_problem(
             "plug_id": plug.id,
             "event_type": event.event_type,
             "severity": event.severity,
-            "detail": event.detail,
+            "detail": req.category,
             "created_at": event.created_at.isoformat() if event.created_at else None,
         })
     except Exception:

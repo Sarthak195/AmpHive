@@ -378,6 +378,168 @@ def test_mask_pii_scrubs_ips_and_code_tails_but_keeps_versions():
     assert mask_pii("hint=PQRS, redemptions=3") == "hint=[hidden], redemptions=3"
     assert mask_pii("claim_code_tail=***WXYZ") == "claim_code_tail=[hidden]"
     assert mask_pii("OTA to 2.9.0 done") == "OTA to 2.9.0 done"
+    assert mask_pii("plug is at 192.168.1.50.") == "plug is at [ip hidden]."
+    assert mask_pii("oid 1.2.3.4.5") == "oid 1.2.3.4.5"
+
+
+def test_mask_pii_scrubs_the_stored_promo_topup_note():
+    """/api/wallet/redeem stores the top-up note as "Promo code ...<hint>"."""
+    from backend.routers.cpo._common import mask_pii
+
+    assert mask_pii("Promo code ...PQRS") == "Promo code ...[hidden]"
+    assert mask_pii("Promo code credit from Acme") == "Promo code credit from Acme"
+
+
+@pytest.mark.parametrize(
+    "role,note,driver",
+    [
+        (UserRole.CPO_VIEWER, "Promo code ...[hidden]", "d***@example.com"),
+        (UserRole.CPO, "Promo code ...PQRS", "driver@example.com"),
+    ],
+)
+def test_topups_list_hides_promo_hint_from_viewer(as_user, role, note, driver):
+    """A redeemed promo writes its code hint into the top-up note; the
+    viewer must not read it there either (GET /api/cpo/promos hides it)."""
+    topup = SimpleNamespace(
+        id=3, tenant_id=5, actor_user_id=7, driver_user_id=8, amount_coins=50,
+        note="Promo code ...PQRS", created_at=datetime.now(timezone.utc),
+    )
+    client, _ = as_user(
+        _viewer(role=role), rows=[(topup, "driver@example.com", "owner@example.com")]
+    )
+    resp = client.get("/api/cpo/topups")
+    assert resp.status_code == 200, resp.text
+    item = resp.json()["items"][0]
+    assert item["note"] == note
+    assert item["driver_email"] == driver
+    if role == UserRole.CPO_VIEWER:
+        assert "PQRS" not in resp.text
+
+
+@pytest.mark.parametrize(
+    "role,detail",
+    [
+        (UserRole.CPO_VIEWER, "unsafe: call me on [phone hidden] or a***@example.com"),
+        (UserRole.CPO, "unsafe: call me on 9876543210 or asha@example.com"),
+    ],
+)
+def test_events_feed_masks_problem_report_detail_for_viewer(as_user, role, detail):
+    """A driver problem report lands in the event feed as
+    "<category>: <description>", free text a driver may fill with contacts."""
+    client, db = as_user(_viewer(role=role))
+    count = MagicMock()
+    count.scalar.return_value = 1
+    ev = SimpleNamespace(
+        id=11, gateway_id="gw1", plug_id=2, event_type="DRIVER_PROBLEM_REPORT",
+        severity="warning", acknowledged=False, created_at=datetime.now(timezone.utc),
+        detail="unsafe: call me on 9876543210 or asha@example.com",
+    )
+    rows = MagicMock()
+    rows.scalars.return_value.all.return_value = [ev]
+    db.execute = AsyncMock(side_effect=[count, rows])
+
+    resp = client.get("/api/cpo/events")
+
+    assert resp.status_code == 200, resp.text
+    item = resp.json()["items"][0]
+    assert item["detail"] == detail
+    assert (item["id"], item["gateway_id"], item["event_type"]) == (11, "gw1", "DRIVER_PROBLEM_REPORT")
+
+
+_NOTE = "refunded, ask asha@example.com"
+_MASKED_NOTE = "refunded, ask a***@example.com"
+
+
+@pytest.mark.parametrize("role,note", [(UserRole.CPO_VIEWER, _MASKED_NOTE), (UserRole.CPO, _NOTE)])
+def test_disputes_mask_resolution_note_for_viewer(as_user, role, note):
+    from backend.database.models import DisputeStatus
+
+    dispute = SimpleNamespace(
+        id=1, session_id=2, tenant_id=5, driver_user_id=8, reason="Charged twice for one session",
+        status=DisputeStatus.APPROVED, resolution_note=_NOTE, refund_coins=10,
+        created_at=None, resolved_at=None, resolved_by_user_id=42,
+    )
+    client, _ = as_user(_viewer(role=role), rows=[(dispute, "driver@example.com", 10, "Plug A")])
+    resp = client.get("/api/cpo/disputes")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()[0]["resolution_note"] == note
+
+
+@pytest.mark.parametrize("role,note", [(UserRole.CPO_VIEWER, _MASKED_NOTE), (UserRole.CPO, _NOTE)])
+def test_plug_reports_mask_resolution_note_for_viewer(as_user, role, note):
+    from backend.database.models import PlugReportStatus
+
+    report = SimpleNamespace(
+        id=1, plug_id=2, tenant_id=5, driver_user_id=8, category="unsafe",
+        description="Sparks fly whenever the plug is inserted.",
+        status=PlugReportStatus.RESOLVED, resolution_note=_NOTE,
+        created_at=None, resolved_at=None, resolved_by_user_id=42,
+    )
+    client, db = as_user(_viewer(role=role))
+    db.execute.return_value.scalars.return_value.all.return_value = [report]
+    resp = client.get("/api/cpo/plug-reports")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()[0]["resolution_note"] == note
+
+
+@pytest.mark.parametrize("role,note", [(UserRole.CPO_VIEWER, _MASKED_NOTE), (UserRole.CPO, _NOTE)])
+def test_payouts_mask_note_for_viewer(as_user, role, note):
+    from backend.database.models import PayoutStatus
+
+    payout = SimpleNamespace(
+        id=1, tenant_id=5, period_start=None, period_end=None, gross_coins=100,
+        platform_fee_coins=5, net_coins=95, status=PayoutStatus.PAID,
+        requested_by_user_id=42, requested_at=None, paid_at=None, note=_NOTE,
+    )
+    client, db = as_user(_viewer(role=role))
+    db.execute.return_value.scalars.return_value.all.return_value = [payout]
+    resp = client.get("/api/cpo/payouts")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()[0]["note"] == note
+
+
+@pytest.mark.asyncio
+async def test_problem_report_broadcast_carries_no_driver_free_text(monkeypatch):
+    """gateway_alarm goes to every connected socket of every tenant, so the
+    report's free-text description stays out of it: the live payload carries
+    the category only. The stored GatewayEvent keeps the full detail."""
+    from backend.database.models import GatewayEvent, PlugReport
+    from backend.routers.plugs import report_plug_problem
+    from backend.schemas import PlugReportCreateRequest
+    from backend.services import socketio_manager
+
+    plug = SimpleNamespace(id=2, gateway_id="gw1", group_id=None)
+    gateway = SimpleNamespace(id="gw1", tenant_id=5)
+    plug_res, gw_res = MagicMock(), MagicMock()
+    plug_res.scalar_one_or_none.return_value = plug
+    gw_res.scalar_one_or_none.return_value = gateway
+    added = []
+    db = MagicMock()
+    db.execute = AsyncMock(side_effect=[plug_res, gw_res])
+    db.add = added.append
+    db.commit = AsyncMock()
+
+    async def _refresh(obj):
+        obj.id = 1
+        obj.created_at = datetime.now(timezone.utc)
+
+    db.refresh = AsyncMock(side_effect=_refresh)
+    emit = AsyncMock()
+    monkeypatch.setattr(socketio_manager, "emit_gateway_alarm", emit)
+    driver = SimpleNamespace(id=8, email="driver@example.com", tenant_id=None)
+    description = "Call me on 9876543210, the cable is cut."
+
+    await report_plug_problem(
+        2, PlugReportCreateRequest(category="unsafe", description=description), driver, db,
+    )
+
+    payload = emit.await_args.args[0]
+    assert payload["detail"] == "unsafe"
+    assert payload["event_type"] == "DRIVER_PROBLEM_REPORT"
+    assert "9876543210" not in str(payload)
+    event = next(o for o in added if isinstance(o, GatewayEvent))
+    assert event.detail == f"unsafe: {description}"
+    assert any(isinstance(o, PlugReport) for o in added)
 
 
 def test_mask_name_gives_initials():

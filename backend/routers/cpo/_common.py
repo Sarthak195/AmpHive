@@ -94,12 +94,15 @@ async def require_cpo_tenant(
 # ids in audit text never reach 10 contiguous digits, so they are left alone.
 # IPv4 dotted quads (a plug LAN address, a legacy gateway vpn_ip) and the
 # promo / claim code tails audit details carry ("hint=PQRS",
-# "claim_code_tail=***WXYZ") are scrubbed too. A three-part firmware version
-# such as "2.9.0" is not a dotted quad, so it survives.
+# "claim_code_tail=***WXYZ") are scrubbed too, as is the hint in the note a
+# promo redemption stores on its offline top-up ("Promo code ...PQRS"). A
+# three-part firmware version such as "2.9.0" is not a dotted quad, so it
+# survives; an address ending a sentence ("at 192.168.1.50.") is still one.
 _EMAIL_RE = re.compile(r"([A-Za-z0-9._%+-])[A-Za-z0-9._%+-]*@([A-Za-z0-9.-]+\.[A-Za-z]{2,})")
 _PHONE_RE = re.compile(r"(?<![\w+])\+?\d{0,3}[ -]?\d{5}[ -]?\d{5}(?!\w)")
-_IPV4_RE = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?![\w.])")
+_IPV4_RE = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?!\.?\w)")
 _CODE_TAIL_RE = re.compile(r"\b(hint|claim_code_tail)=[^\s,;]+")
+_PROMO_NOTE_RE = re.compile(r"\b(Promo code \.\.\.)[^\s,;]+")
 
 
 def mask_pii(text: Optional[str]) -> Optional[str]:
@@ -110,7 +113,8 @@ def mask_pii(text: Optional[str]) -> Optional[str]:
     text = _EMAIL_RE.sub(lambda m: f"{m.group(1)}***@{m.group(2)}", text)
     text = _PHONE_RE.sub("[phone hidden]", text)
     text = _IPV4_RE.sub("[ip hidden]", text)
-    return _CODE_TAIL_RE.sub(r"\1=[hidden]", text)
+    text = _CODE_TAIL_RE.sub(r"\1=[hidden]", text)
+    return _PROMO_NOTE_RE.sub(r"\1[hidden]", text)
 
 
 def mask_name(name: Optional[str]) -> Optional[str]:
