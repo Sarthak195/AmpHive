@@ -32,7 +32,7 @@ export function stashPostLoginPath(p) {
 }
 
 export function takePostLoginPath() {
-  let p = null;
+  let p;
   try {
     p = sessionStorage.getItem(POST_LOGIN_KEY);
     sessionStorage.removeItem(POST_LOGIN_KEY);
