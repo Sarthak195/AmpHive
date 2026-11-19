@@ -53,6 +53,17 @@ describe('CpoPromosCard', () => {
     expect(screen.queryByRole('button', { name: 'Disable code ending AB23' })).not.toBeInTheDocument();
   });
 
+  it('shows "Hidden" when the API withholds the hint (read-only demo viewer)', async () => {
+    api.get.mockResolvedValue({
+      total: 1,
+      items: [{ ...LIST.items[0], code_hint: null }],
+    });
+    render(<CpoPromosCard />);
+    expect(await screen.findByText('Hidden')).toBeInTheDocument();
+    expect(screen.queryByText(/null/)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Disable code' })).toBeInTheDocument();
+  });
+
   it('issues a code and shows the plain code once', async () => {
     const user = userEvent.setup();
     api.post.mockResolvedValue({ ...LIST.items[0], id: 8, code_hint: 'WXYZ', code: 'ABCD-EFGH-JKMN-WXYZ' });

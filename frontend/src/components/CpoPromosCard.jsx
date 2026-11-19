@@ -126,7 +126,13 @@ export default function CpoPromosCard({ rate = 1 }) {
   };
 
   const columns = [
-    { key: 'code_hint', label: 'Code', render: (p) => <span className="mono">…{p.code_hint}</span> },
+    {
+      key: 'code_hint',
+      label: 'Code',
+      // The read-only demo viewer gets code_hint: null from the API.
+      render: (p) =>
+        p.code_hint ? <span className="mono">…{p.code_hint}</span> : <span className="text-3">Hidden</span>,
+    },
     { key: 'amount_coins', label: 'Amount', num: true, render: (p) => <Money coins={p.amount_coins} rate={rate} showCoins /> },
     { key: 'used', label: 'Redeemed', num: true, render: (p) => `${p.redemption_count} / ${p.max_redemptions}` },
     { key: 'expires_at', label: 'Expires', render: (p) => formatDate(p.expires_at) },
@@ -149,7 +155,7 @@ export default function CpoPromosCard({ rate = 1 }) {
             className="btn btn-quiet btn-sm"
             onClick={() => disable(p)}
             disabled={disablingId === p.id}
-            aria-label={`Disable code ending ${p.code_hint}`}
+            aria-label={p.code_hint ? `Disable code ending ${p.code_hint}` : 'Disable code'}
           >
             Disable
           </button>
