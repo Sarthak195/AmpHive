@@ -16,7 +16,7 @@ describe('hoursLabel', () => {
     const closed = hoursLabel({ open_now: false, hours_changes_at: iso, tenant_timezone: 'UTC' });
     expect(open).toBe(`Open now, closes ${hhmm}`);
     expect(closed).toBe(`Closed, opens ${hhmm}`);
-    expect(open + closed).not.toMatch(/—/);
+    expect(open + closed).not.toMatch(new RegExp(String.fromCharCode(0x2014)));
   });
 });
 

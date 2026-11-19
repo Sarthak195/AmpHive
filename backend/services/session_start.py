@@ -139,7 +139,7 @@ async def begin_active_session(
     Raises the same typed failures the start path always did, so both entry
     points surface identically (the reaper maps them to EXPIRED/FAILED):
       - HTTPException(409) — circuit at capacity (check_circuit_admission).
-      - HTTPException(409) — the plug is outside its opening hours.
+      - HTTPException(409): the plug is outside its opening hours.
       - HTTPException(402) — available balance below the start floor.
       - HTTPException(500) — the gateway ON publish failed (claim rolled back).
     """
