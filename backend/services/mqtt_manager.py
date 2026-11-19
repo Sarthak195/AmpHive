@@ -13,6 +13,7 @@ from backend.services.mqtt.connection import MQTTConnectionMixin
 from backend.services.mqtt.discovery import MQTTDiscoveryMixin
 from backend.services.mqtt.logs import MQTTLogsMixin
 from backend.services.mqtt.router import MQTTRouterMixin
+from backend.services.mqtt.session_events import SessionEventDetector
 from backend.services.mqtt.status import MQTTStatusMixin
 from backend.services.mqtt.telemetry import MQTTTelemetryMixin
 
@@ -252,6 +253,10 @@ class MQTTManager(
         # [Charge complete] Per-plug low-draw state (services/mqtt/charge_full.py).
         # In memory only: a restart clears it, which only delays detection.
         self._charge_full = ChargeFullDetector()
+        # [Notification prefs C7] nearly_done / power_dropped once-per-session
+        # state (services/mqtt/session_events.py). In memory only: a restart
+        # clears it, so a session can see each notice once more at most.
+        self._session_events = SessionEventDetector()
 
         self.client = mqtt.Client(client_id="amphive_backend_server", callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
 

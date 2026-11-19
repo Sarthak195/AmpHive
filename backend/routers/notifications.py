@@ -3,8 +3,9 @@ Driver notification feed + Web Push subscription management.
 
 The feed rows are written by services/notifications.py at the session
 lifecycle / wallet / safety emit points; live delivery happens over the
-Socket.io user room. This router is the pull side (list, mark read) plus the
-push-subscription CRUD.
+Socket.io user room. This router is the pull side (list, mark read), the
+push-subscription CRUD, and the caller's own push preferences
+(GET/PUT /api/me/notification-prefs, services/notification_prefs.py).
 """
 import logging
 import os
@@ -15,7 +16,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database.db import get_db
-from backend.database.models import Notification, PushSubscription, User
+from backend.database.models import Notification, PushSubscription, Tenant, User
 from backend.schemas import (
     NotificationListResponse,
     NotificationResponse,
@@ -24,6 +25,7 @@ from backend.schemas import (
 )
 from backend.services import notifications as notification_service
 from backend.services.auth import get_current_user
+from backend.services.notification_prefs import NotificationPrefs, load_prefs
 
 logger = logging.getLogger("amphive.api")
 router = APIRouter()
@@ -209,3 +211,41 @@ async def push_unsubscribe(
     )
     await db.commit()
     return {"status": "unsubscribed"}
+
+
+# --- Push preferences (C7) -------------------------------------------------
+
+async def _prefs_response(db: AsyncSession, user: User, prefs: NotificationPrefs) -> dict:
+    """The caller's own prefs plus the zone quiet hours are read in (the
+    tenant's, else the pricing default). Nothing here is personal or infra
+    data, so a cpo_viewer reading their own prefs needs no masking."""
+    from backend.services.pricing import zone_name
+
+    tz_name = None
+    if user.tenant_id is not None:
+        tz_name = await db.scalar(select(Tenant.timezone).where(Tenant.id == user.tenant_id))
+    return {**prefs.model_dump(), "timezone": zone_name(tz_name)}
+
+
+@router.get("/api/me/notification-prefs")
+async def get_notification_prefs(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Per-type push toggles and quiet hours (defaults when never saved)."""
+    return await _prefs_response(db, user, load_prefs(user.notification_prefs))
+
+
+@router.put("/api/me/notification-prefs")
+async def put_notification_prefs(
+    req: NotificationPrefs,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Replace the caller's prefs. Only suppressible types have toggles; the
+    safety and billing allowlist always pushes and cannot be set here."""
+    await db.execute(
+        update(User).where(User.id == user.id).values(notification_prefs=req.model_dump())
+    )
+    await db.commit()
+    return await _prefs_response(db, user, req)

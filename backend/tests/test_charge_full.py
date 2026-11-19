@@ -226,8 +226,8 @@ def _manager():
 
     MQTTManager._instance = None
     mgr = MQTTManager(db_session_factory=lambda: None)
-    mgr._maybe_auto_stop_on_exhaustion = AsyncMock()
-    mgr._maybe_auto_stop_on_limits = AsyncMock()
+    mgr._maybe_auto_stop_on_exhaustion = AsyncMock(return_value=False)
+    mgr._maybe_auto_stop_on_limits = AsyncMock(return_value=False)
     mgr._on_charge_full = AsyncMock()
     return mgr
 
@@ -357,7 +357,8 @@ async def test_begin_active_session_persists_the_opt_in(opt_in, stored):
          patch.object(session_start.state, "mqtt_manager", mqtt), \
          patch.object(session_start.state, "telemetry_store", MagicMock()), \
          patch("backend.services.socketio_manager.emit_plug_status", AsyncMock()), \
-         patch("backend.services.caps.effective_plug_cap", return_value=16.0):
+         patch("backend.services.caps.effective_plug_cap", return_value=16.0), \
+         patch("backend.services.notifications.notify", AsyncMock()):
         session = await session_start.begin_active_session(
             db, user, plug, gateway, max_kwh=None, max_duration_seconds=None,
             auto_stop_when_full=opt_in,
@@ -377,8 +378,8 @@ def _real_handler_manager():
 
     MQTTManager._instance = None
     mgr = MQTTManager(telemetry_store=MagicMock(), db_session_factory=lambda: None)
-    mgr._maybe_auto_stop_on_exhaustion = AsyncMock()
-    mgr._maybe_auto_stop_on_limits = AsyncMock()
+    mgr._maybe_auto_stop_on_exhaustion = AsyncMock(return_value=False)
+    mgr._maybe_auto_stop_on_limits = AsyncMock(return_value=False)
     return mgr
 
 

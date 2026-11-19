@@ -287,4 +287,15 @@ async def begin_active_session(
     state.telemetry_store.start_session(plug.id, rate_coins_per_kwh=rate_coins_per_kwh)
     await set_plug_telemetry_interval(db, plug.id, 1000)
 
+    # [Notification prefs C7] Once per session, only after the ON publish
+    # succeeded (never on the CANCELLED rollback above). Every start path runs
+    # through here, so a queued auto-start also gets the reaper's own
+    # "queued_charge_started" notice. notify() never raises.
+    from backend.services.notifications import notify
+    await notify(
+        user.id, "session_started", "Charging started",
+        f"{plug.name}: your session is live.",
+        severity="info", plug_id=plug.id, session_id=session.id,
+    )
+
     return session
