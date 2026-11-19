@@ -1141,7 +1141,7 @@ viewers). A missing session, another tenant's session and a session with no
 issued invoice all answer the same 404, so there is no existence oracle.
 Pending and rejected plug photos stay hidden from a viewer (image 404, and the
 CPO photo list returns approved photos only). The every-write-route walk on the
-merged tree asserts 403 `read_only_demo` on 75 write routes.
+merged tree asserts 403 `read_only_demo` on 74 write routes.
 
 ---
 
