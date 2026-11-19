@@ -2,8 +2,9 @@
  * GatewayChecklist: the read-only commissioning checklist for one CPO gateway
  * (GET /api/cpo/gateways/{id}/selftest), shown at the top of the gateway
  * diagnostics drawer. Loads on open; "Re-check" fetches again. Nothing here
- * touches the hardware: the server computes it from rows it already holds, and
- * the Wi-Fi line is the signal the gateway reported at its last boot.
+ * touches the hardware: the server computes it from rows it already holds. The
+ * Wi-Fi line is labelled by the server: "(live)" for the signal firmware
+ * 2.10.0 or newer reports every 5 minutes, "(at boot)" for the boot report.
  */
 
 import { useCallback, useEffect, useState } from 'react';

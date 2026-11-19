@@ -46,6 +46,8 @@ describe('isNewerVersion', () => {
   it('flags a strictly newer version', () => {
     expect(isNewerVersion('2.10.0', '2.9.0')).toBe(true);
     expect(isNewerVersion('2.9.0', '2.10.0')).toBe(false);
+    expect(isNewerVersion('2.10.0-direct', '2.9.0-direct')).toBe(true);
+    expect(isNewerVersion('2.9.0-direct', '2.10.0-direct')).toBe(false);
   });
 
   it('is false for an equal version', () => {
