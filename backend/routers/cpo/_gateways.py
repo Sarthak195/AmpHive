@@ -375,8 +375,6 @@ async def cpo_gateway_ota(
 
 # Bounds for the commissioning checklist's reads (all hit existing indexes).
 _SELFTEST_MAX_PLUGS = 50
-_SELFTEST_MAX_EVENTS = 200
-_SELFTEST_BOOT_LOOKBACK_DAYS = 30
 
 
 @router.get("/api/cpo/gateways/{gateway_id}/selftest")
@@ -422,17 +420,19 @@ async def cpo_gateway_selftest(
                 and_(
                     GatewayEvent.gateway_id == gateway_id,
                     GatewayEvent.event_type == "GATEWAY_BOOT",
-                    GatewayEvent.created_at >= now - timedelta(days=_SELFTEST_BOOT_LOOKBACK_DAYS),
                 )
             )
             .order_by(GatewayEvent.created_at.desc())
             .limit(1)
         )
     ).scalar_one_or_none()
+    # Newest fault event per plug (DISTINCT ON), so one flapping plug cannot
+    # push another plug's unresolved PLUG_UNREACHABLE out of the window.
     plug_events = list(
         (
             await db.execute(
                 select(GatewayEvent)
+                .distinct(GatewayEvent.plug_id)
                 .where(
                     and_(
                         GatewayEvent.gateway_id == gateway_id,
@@ -440,8 +440,8 @@ async def cpo_gateway_selftest(
                         GatewayEvent.created_at >= now - timedelta(hours=LOOKBACK_HOURS),
                     )
                 )
-                .order_by(GatewayEvent.created_at.desc())
-                .limit(_SELFTEST_MAX_EVENTS)
+                .order_by(GatewayEvent.plug_id, GatewayEvent.created_at.desc())
+                .limit(_SELFTEST_MAX_PLUGS + 1)
             )
         ).scalars().all()
     )

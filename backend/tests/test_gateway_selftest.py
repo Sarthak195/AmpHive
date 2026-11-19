@@ -210,14 +210,21 @@ async def test_selftest_route_tenant_scope_and_viewer_masking(factory):
         db.add_all([viewer, other, gw, FirmwareRelease(version="2.9.0-direct", url="https://x/y.bin")])
         await db.flush()
         plug = Plug(gateway_id=gw.id, name="Bay 1", local_ip="192.168.1.77", last_telemetry_at=now)
-        db.add(plug)
+        plug_b = Plug(gateway_id=gw.id, name="Bay 2", local_ip="192.168.1.78", last_telemetry_at=now)
+        db.add_all([plug, plug_b])
         await db.flush()
         db.add_all([
+            # A stable gateway's boot report can be older than any date cap.
             GatewayEvent(tenant_id=t1.id, gateway_id=gw.id, event_type="GATEWAY_BOOT",
                          detail="Gateway booted: Wi-Fi RSSI -75 dBm after 1 attempt.",
-                         created_at=now - timedelta(hours=1)),
+                         created_at=now - timedelta(days=45)),
+            # Bay 1 flaps and recovers; Bay 2 went down earlier and never came back.
+            GatewayEvent(tenant_id=t1.id, gateway_id=gw.id, plug_id=plug_b.id,
+                         event_type="PLUG_UNREACHABLE", created_at=now - timedelta(hours=10)),
             GatewayEvent(tenant_id=t1.id, gateway_id=gw.id, plug_id=plug.id,
-                         event_type="PLUG_UNREACHABLE", created_at=now - timedelta(minutes=5)),
+                         event_type="PLUG_UNREACHABLE", created_at=now - timedelta(minutes=9)),
+            GatewayEvent(tenant_id=t1.id, gateway_id=gw.id, plug_id=plug.id,
+                         event_type="PLUG_RECOVERED", created_at=now - timedelta(minutes=5)),
         ])
         await db.commit()
         gw_id = gw.id
@@ -243,4 +250,6 @@ async def test_selftest_route_tenant_scope_and_viewer_masking(factory):
     assert by_key["wifi"]["status"] == "warn"
     assert by_key["firmware"]["status"] == "warn"
     assert by_key["plug_faults"]["status"] == "warn"
+    assert "Bay 2" in by_key["plug_faults"]["detail"]
+    assert "Bay 1" not in by_key["plug_faults"]["detail"]
     assert "192.168.1.77" not in str(out)
