@@ -39,6 +39,7 @@ exactly as before.
 import os
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from typing import Dict, Iterable, Optional
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import and_, select, update
@@ -47,6 +48,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.database.models import (
     ChargerGroup,
     Gateway,
+    GroupMembership,
     Plug,
     Tariff,
     TariffSlot,
@@ -248,6 +250,40 @@ async def resolve_rate_window(db: AsyncSession, plug: Plug, at: datetime = None)
     # slot rate is falsy but must still win over the flat price.
     rate = slot_rate if slot_rate is not None else to_money(tariff.price_per_kwh)
     return rate, boundary
+
+
+async def member_price_overrides(
+    db: AsyncSession, user_id: Optional[int], group_ids: Iterable[Optional[int]]
+) -> Dict[int, Decimal]:
+    """
+    [C9 member price] ``{group_id: override}`` for every group in
+    ``group_ids`` where ``user_id`` is a member with a
+    ``price_per_kwh_override`` set. One bounded query (the caller's own
+    memberships within the given groups); empty when there is no user or no
+    grouped plug. Read-only.
+    """
+    ids = {g for g in group_ids if g is not None}
+    if user_id is None or not ids:
+        return {}
+    rows = await db.execute(
+        select(GroupMembership.group_id, GroupMembership.price_per_kwh_override).where(
+            and_(
+                GroupMembership.user_id == user_id,
+                GroupMembership.group_id.in_(ids),
+                GroupMembership.price_per_kwh_override.is_not(None),
+            )
+        )
+    )
+    return {group_id: to_money(price) for group_id, price in rows.all()}
+
+
+async def member_price_override(
+    db: AsyncSession, user_id: Optional[int], plug: Plug
+) -> Optional[Decimal]:
+    """[C9 member price] The flat override ``user_id`` gets on ``plug`` (the
+    membership of the plug's own group), or None. It beats the plug, group
+    and tenant tariffs and their time-of-day slots, for this member only."""
+    return (await member_price_overrides(db, user_id, [plug.group_id])).get(plug.group_id)
 
 
 async def resolve_rate_for_plug(db: AsyncSession, plug: Plug) -> Decimal:
@@ -532,6 +568,12 @@ async def reprice_session_if_due(db: AsyncSession, session, plug: Plug, at: date
     """
     from backend.services.billing import close_out_segment
 
+    if getattr(session, "member_price_override", None):
+        # [C9 member price] A frozen member rate never reprices, even after a
+        # tariff edit stamped rate_valid_until (defense in depth: the mark
+        # below already skips these sessions).
+        session.rate_valid_until = None
+        return None
     valid_until = session.rate_valid_until
     if valid_until is None:
         return None
@@ -582,6 +624,8 @@ async def mark_tenant_sessions_for_reprice(db: AsyncSession, tenant_id: int) -> 
             and_(
                 ChargingSession.tenant_id == tenant_id,
                 ChargingSession.status == SessionStatus.ACTIVE,
+                # [C9 member price] A frozen member-rate session keeps its rate.
+                ChargingSession.member_price_override.is_not(True),
             )
         )
         .values(rate_valid_until=datetime.now(timezone.utc))

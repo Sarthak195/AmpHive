@@ -348,6 +348,7 @@ async def test_begin_active_session_persists_the_opt_in(opt_in, stored):
     mqtt.send_plug_command.return_value = True
 
     with patch.object(session_start, "check_circuit_admission", AsyncMock()), \
+         patch.object(session_start, "member_price_override", AsyncMock(return_value=None)), \
          patch.object(session_start, "resolve_rate_window",
                       AsyncMock(return_value=(Decimal("5.00"), None))), \
          patch.object(session_start, "available_balance", AsyncMock(return_value=Decimal("500"))), \
