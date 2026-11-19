@@ -37,16 +37,30 @@ def test_author_display_prefers_first_name():
     assert _author_display("Ada Lovelace", "ada@example.com") == "Ada"
 
 
-def test_author_display_masks_email_when_no_name():
+@pytest.mark.parametrize("name,email", [
+    ("", "sarthak@example.com"),
+    (None, "ab@x.com"),
+    ("   ", "ab@x.com"),
+    # A Google signup without a name claim used to store the email local part.
+    ("sarthak.jain", "sarthak.jain@example.com"),
+    ("Sarthak.Jain", "sarthak.jain@example.com"),
+    ("sarthak", "sarthak.jain@example.com"),
+    ("sam_k", "sam_k@example.com"),
+    ("sam", "sam+ev@example.com"),
+    ("jo-ann", "jo-ann.lee@example.com"),
+    ("someone@example.com", "other@example.com"),
+])
+def test_author_display_never_shows_anything_derived_from_the_email(name, email):
     from backend.routers.plugs import _author_display
-    out = _author_display("", "sarthak@example.com")
-    assert out == "sar***"
-    assert "@" not in out and "example.com" not in out
+    out = _author_display(name, email)
+    assert out == "AmpHive driver"
+    assert "@" not in out and "***" not in out
 
 
-def test_author_display_masks_short_local_part():
+def test_author_display_keeps_a_real_name_that_differs_from_the_local_part():
     from backend.routers.plugs import _author_display
-    assert _author_display(None, "ab@x.com") == "a***"
+    assert _author_display("Sarthak Jain", "sarthak.jain@example.com") == "Sarthak"
+    assert _author_display("Priya", "pp1989@example.com") == "Priya"
 
 
 # --- verified-charger gate ---

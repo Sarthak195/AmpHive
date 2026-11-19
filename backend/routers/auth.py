@@ -947,7 +947,11 @@ async def google_callback(request: Request, db: AsyncSession = Depends(get_db)):
         # as services.auth._DUMMY_PASSWORD_HASH), no tenant (mirrors
         # /api/auth/register exactly — tenants are assigned later via
         # /api/cpo/setup, not at signup).
-        full_name = claims.get("name") or email.split("@", 1)[0]
+        # No name claim: store "" (the column is NOT NULL), never the email
+        # local part, which plug reviews (a public read) and CPO screens would
+        # otherwise show as the driver's name. Every screen already falls back
+        # to the email or a generic label for an empty name.
+        full_name = str(claims.get("name") or "").strip()[:150]
         user = User(
             email=email,
             hashed_password=hash_password(secrets.token_urlsafe(32)),

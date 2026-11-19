@@ -3,6 +3,7 @@ Plugs routes — moved verbatim from main.py (2026-07-07, TD#7 split).
 """
 import asyncio
 import logging
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
@@ -220,18 +221,26 @@ def _sniff_image(data: bytes):
     return None
 
 
+_LOCAL_SPLIT_RE = re.compile(r"[._+-]")
+ANONYMOUS_AUTHOR = "AmpHive driver"
+
+
 def _author_display(full_name: Optional[str], email: Optional[str]) -> str:
-    """Privacy-preserving label for a public review: the driver's first name if
-    they have a real full_name, else their email local-part with the tail
-    masked (``sat***``). NEVER the full email or the user id, the reviews read
-    is unauthenticated."""
+    """Privacy-preserving label for a public review (the read is
+    unauthenticated): the first word of the driver's full_name when it is a
+    real name, else "AmpHive driver". Nothing derived from the email is ever
+    shown. A name is not real when it is empty, contains "@", or equals
+    (case-insensitively) the email local part or its first word split on
+    ``. _ - +`` (a Google signup without a name claim used to store exactly
+    that)."""
     name = (full_name or "").strip()
-    if name:
-        return name.split()[0]
-    local = (email or "").split("@")[0] or "driver"
-    if len(local) <= 3:
-        return local[0] + "***"
-    return local[:3] + "***"
+    if not name or "@" in name:
+        return ANONYMOUS_AUTHOR
+    local = (email or "").split("@")[0].strip().lower()
+    if local:
+        if name.lower() in (local, _LOCAL_SPLIT_RE.split(local)[0]):
+            return ANONYMOUS_AUTHOR
+    return name.split()[0]
 
 
 def _plug_review_response(review: PlugReview, *, author_display: str, is_mine: bool = False) -> PlugReviewResponse:
