@@ -801,6 +801,9 @@ class MQTTTelemetryMixin:
         # Synchronous, before any await, so concurrent frames can't both fire.
         charge_full_fired = False
         charge_stop_retry = False
+        # [Notification prefs C7] Same real-live-sample feed, same timing.
+        nearly_done_fired = False
+        power_dropped_fired = False
         at = (sample or {}).get("recorded_at") or datetime.now(timezone.utc)
         if charge_sample is not None:
             charge_full_fired = self._charge_full.observe(
@@ -810,8 +813,15 @@ class MQTTTelemetryMixin:
                 charge_stop_retry = self._charge_full.stop_retry_due(
                     plug_id, charge_sample[0], at, watts,
                 )
+            nearly_done_fired = self._session_events.observe_energy(
+                plug_id, charge_sample[0], updated_energy_kwh, updated_max_kwh,
+            )
+            power_dropped_fired = self._session_events.observe_power(
+                plug_id, charge_sample[0], at, watts, charge_sample[1],
+            )
         elif charge_relay_off_session is not None:
             self._charge_full.interrupt(plug_id, charge_relay_off_session)
+            self._session_events.interrupt(plug_id, charge_relay_off_session)
             if updated_auto_stop_full:
                 charge_stop_retry = self._charge_full.stop_retry_due(
                     plug_id, charge_relay_off_session, at, watts,
@@ -880,6 +890,27 @@ class MQTTTelemetryMixin:
                 )
             elif charge_stop_retry:
                 await self._charge_full_stop(updated_session_id, updated_user_id, plug_id)
+            # [Notification prefs C7] Suppressible notices (notify() applies the
+            # driver's push prefs and quiet hours; the feed row is always kept).
+            if nearly_done_fired or power_dropped_fired:
+                from backend.services.notifications import notify
+                if nearly_done_fired:
+                    await notify(
+                        updated_user_id, "nearly_done", "Almost done charging",
+                        f"{(updated_energy_kwh or 0.0):.2f} of {updated_max_kwh:g} kWh delivered. "
+                        "The session stops at your energy limit.",
+                        severity="info", plug_id=plug_id, session_id=updated_session_id,
+                    )
+                if power_dropped_fired and charge_sample is not None:
+                    from backend.services.mqtt.session_events import POWER_DROP_MINUTES
+                    await notify(
+                        updated_user_id, "power_dropped", "Charging has slowed down",
+                        f"Power has stayed below half of this session's "
+                        f"{(charge_sample[1] or 0.0) / 1000:.1f} kW peak for "
+                        f"{POWER_DROP_MINUTES:g} minutes (now {watts:.0f} W). "
+                        "Cars often taper like this near the end of a charge.",
+                        severity="info", plug_id=plug_id, session_id=updated_session_id,
+                    )
 
     async def _on_charge_full(self, session_id: int, user_id: int, plug_id: int,
                               auto_stop: bool):
