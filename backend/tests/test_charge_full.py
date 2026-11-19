@@ -205,6 +205,9 @@ def _session_row(auto_stop):
     row.energy_counter_last_raw_kwh = 5.0
     row.energy_reset_offset_kwh = 0.0
     row.auto_stop_when_full = auto_stop
+    row.full_notified_at = None
+    row.nearly_done_notified_at = None
+    row.power_dropped_notified_at = None
     return row
 
 
@@ -238,7 +241,7 @@ async def test_persist_path_fires_once_from_real_live_samples():
     row = _session_row(auto_stop=True)
     for m in range(10, 31):
         await _persist_frame(mgr, row, m, 0.0)
-    mgr._on_charge_full.assert_awaited_once_with(SID, 3, PLUG, True)
+    mgr._on_charge_full.assert_awaited_once_with(SID, 3, PLUG, True, send_notice=True)
 
 
 @pytest.mark.asyncio

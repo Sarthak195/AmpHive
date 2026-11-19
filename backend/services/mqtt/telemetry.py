@@ -460,6 +460,11 @@ class MQTTTelemetryMixin:
         charge_sample: Optional[tuple] = None
         charge_relay_off_session: Optional[int] = None
         updated_auto_stop_full = False
+        # [Durable notice state] Whether the session row already records the
+        # "looks full", nearly_done and power_dropped notices as sent (read off
+        # the row loaded below, no extra query). A sent notice is never claimed
+        # or sent again, so a restarted process issues no write for it.
+        full_noticed = nearly_noticed = dropped_noticed = False
 
         try:
             async with self.db_session_factory() as session:
@@ -626,6 +631,9 @@ class MQTTTelemetryMixin:
                     updated_max_duration = active_session.max_duration_seconds
                     updated_started_at = active_session.started_at
                     updated_auto_stop_full = bool(active_session.auto_stop_when_full)
+                    full_noticed = active_session.full_notified_at is not None
+                    nearly_noticed = active_session.nearly_done_notified_at is not None
+                    dropped_noticed = active_session.power_dropped_notified_at is not None
                     if watts_reported and not is_offline:
                         if relay_on:
                             charge_sample = (
@@ -814,15 +822,17 @@ class MQTTTelemetryMixin:
                     plug_id, charge_sample[0], at, watts,
                 )
             # [C7 + F1] Once the car looks fully charged (this frame or an
-            # earlier one), "almost done" and "slowing down" would only
-            # contradict that notice, so neither detector is fed again.
-            if not self._charge_full.has_fired(plug_id, charge_sample[0]):
+            # earlier one, in memory or as recorded on the session row before
+            # a restart), "almost done" and "slowing down" would only
+            # contradict that notice, so neither detector is fed again. A
+            # notice the row already records as sent is never sent again.
+            if not self._charge_full.has_fired(plug_id, charge_sample[0]) and not full_noticed:
                 nearly_done_fired = self._session_events.observe_energy(
                     plug_id, charge_sample[0], updated_energy_kwh, updated_max_kwh,
-                )
+                ) and not nearly_noticed
                 power_dropped_fired = self._session_events.observe_power(
                     plug_id, charge_sample[0], at, watts, charge_sample[1],
-                )
+                ) and not dropped_noticed
         elif charge_relay_off_session is not None:
             self._charge_full.interrupt(plug_id, charge_relay_off_session)
             self._session_events.interrupt(plug_id, charge_relay_off_session)
@@ -894,11 +904,25 @@ class MQTTTelemetryMixin:
                 # nearly_done / power_dropped notice for a session that is over.
                 return
             if charge_full_fired:
+                # [Durable notice state] The notice is sent once per session
+                # (claimed on the row); after a restart the detector fires
+                # again, and only the banner and an opted-in stop still run.
                 await self._on_charge_full(
                     updated_session_id, updated_user_id, plug_id, updated_auto_stop_full,
+                    send_notice=not full_noticed and await self._claim_session_notice(
+                        updated_session_id, "full_notified_at",
+                    ),
                 )
             elif charge_stop_retry:
                 await self._charge_full_stop(updated_session_id, updated_user_id, plug_id)
+            if nearly_done_fired:
+                nearly_done_fired = await self._claim_session_notice(
+                    updated_session_id, "nearly_done_notified_at",
+                )
+            if power_dropped_fired:
+                power_dropped_fired = await self._claim_session_notice(
+                    updated_session_id, "power_dropped_notified_at",
+                )
             # [Notification prefs C7] Suppressible notices (notify() applies the
             # driver's push prefs and quiet hours; the feed row is always kept).
             if nearly_done_fired or power_dropped_fired:
@@ -922,10 +946,12 @@ class MQTTTelemetryMixin:
                     )
 
     async def _on_charge_full(self, session_id: int, user_id: int, plug_id: int,
-                              auto_stop: bool):
-        """[Charge complete] The detector fired (once per session): flag the
-        live snapshot for the session banner, tell the driver once (bell +
-        push via notify()), and, only when the driver opted in
+                              auto_stop: bool, send_notice: bool = True):
+        """[Charge complete] The detector fired (once per process and
+        session): flag the live snapshot for the session banner, tell the
+        driver (bell + push via notify()) unless send_notice is False (the
+        session row already records the notice, see _claim_session_notice),
+        and, only when the driver opted in
         (ChargingSession.auto_stop_when_full), stop the session through the
         same finalize_charging_session call the driver's own stop makes (relay
         OFF + bill + free the plug). Never switches anything ON. The stop
@@ -938,7 +964,8 @@ class MQTTTelemetryMixin:
             self.telemetry_store.mark_charge_full(plug_id)
         logger.info(
             "Car looks fully charged",
-            extra={"session_id": session_id, "plug_id": plug_id, "auto_stop": auto_stop},
+            extra={"session_id": session_id, "plug_id": plug_id, "auto_stop": auto_stop,
+                   "send_notice": send_notice},
         )
         # The notice never says the session is stopping: the stop can fail and
         # is retried, and finalize_charging_session sends its own "Charging
@@ -947,13 +974,49 @@ class MQTTTelemetryMixin:
             "Auto-stop is on for this session."
             if auto_stop else "Stop the session when you are ready to free the plug."
         )
-        await notify(
-            user_id, "charge_full", "Your car looks fully charged",
-            f"Power draw has stayed near zero for {CHARGE_FULL_MINUTES:g} minutes. {follow_up}",
-            severity="info", plug_id=plug_id, session_id=session_id,
-        )
+        if send_notice:
+            await notify(
+                user_id, "charge_full", "Your car looks fully charged",
+                f"Power draw has stayed near zero for {CHARGE_FULL_MINUTES:g} minutes. {follow_up}",
+                severity="info", plug_id=plug_id, session_id=session_id,
+            )
         if auto_stop:
             await self._charge_full_stop(session_id, user_id, plug_id)
+
+    async def _claim_session_notice(self, session_id: int, column: str) -> bool:
+        """[Durable notice state] Claim a once-per-session notice on the
+        session row: one UPDATE ... WHERE <column> IS NULL AND ACTIVE, run only
+        when a detector fires (a state transition, never per frame). True
+        exactly once per session, so a backend restart neither repeats the
+        notice nor, since the in-memory detector fires again, loses one that
+        was never sent. Claimed before notify(): a crash between the two loses
+        that one notice rather than repeating it. A DB error sends the notice
+        anyway (the pre-0051 behaviour: at most one repeat)."""
+        from sqlalchemy import func, update
+
+        from backend.database.models import ChargingSession, SessionStatus
+
+        col = getattr(ChargingSession, column)
+        try:
+            async with self.db_session_factory() as db:
+                claimed = (await db.execute(
+                    update(ChargingSession)
+                    .where(
+                        ChargingSession.id == session_id,
+                        ChargingSession.status == SessionStatus.ACTIVE,
+                        col.is_(None),
+                    )
+                    .values({column: func.now()})
+                    .returning(ChargingSession.id)
+                )).scalar_one_or_none()
+                await db.commit()
+            return claimed is not None
+        except Exception:
+            logger.exception(
+                "Could not claim a session notice, sending it anyway",
+                extra={"session_id": session_id, "column": column},
+            )
+            return True
 
     async def _charge_full_stop(self, session_id: int, user_id: int, plug_id: int):
         """Opted-in stop through finalize_charging_session (which notifies the
