@@ -248,7 +248,7 @@ order, same as session start).
 
 `GET /api/auth/me/export` gains an `api_tokens` array (`id, name, prefix, scope, created_at, last_used_at, revoked_at`), never the hash.
 
-## Features wave 3 (2026-11-19, `release/2026-11-17-w3`, not deployed)
+## Features wave 3 (2026-11-19, `release/2026-11-17-w3`, deployed 2026-11-19)
 
 New and changed routes from C10, C3, C7, C4 and C5. No new environment
 variable; `services/routines.py` also reads the existing

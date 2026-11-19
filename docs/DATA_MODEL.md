@@ -111,7 +111,7 @@ for ESP-gateway / manually-provisioned plugs — the `(gateway_id, unique_id)`
 discovery-upsert key) · `status` (default `offline`) · `current_power_w` float ·
 `last_seen_at` · `created_at` · `group_id` → charger_groups (SET NULL, nullable).
 
-Plug hours (`0049_plug_hours`, C4, wave 3, not deployed; down_revision
+Plug hours (`0049_plug_hours`, C4, wave 3, deployed 2026-11-19; down_revision
 `0048_notification_prefs`):
 `opening_hours` JSONB NULL: a list of `{days, start, end}` windows in tenant
 local time with TariffSlot semantics; NULL means open 24x7 (cleared values
@@ -429,8 +429,8 @@ full column list of each:
   Account closure deletes the user's routines.
 
 The ORM declares **36 tables** as of `0050_charge_routines` (`__tablename__`
-count, rechecked 2026-11-19). Prod, at `0047_promo_codes` since 2026-11-19, has
-35 (32 at `0043_email_ci_unique`); it reaches 36 once wave 3 is applied. All
+count, rechecked 2026-11-19). Prod, at `0050_charge_routines` since 2026-11-19, has
+36 (35 at `0047_promo_codes`, 32 at `0043_email_ci_unique`). All
 are applied via Alembic per §4 below.
 
 ## 3. Relationships
@@ -474,7 +474,7 @@ joined via `access_code`.
   downgrade drops them). One head. `env.py` runs all pending revisions in one
   transaction; `ALTER TYPE ... ADD VALUE` is allowed there on PG 12+ (prod is
   15) because no later revision uses the new value.
-- **Wave 3 chain (2026-11-19, `release/2026-11-17-w3`, not deployed).**
+- **Wave 3 chain (2026-11-19, `release/2026-11-17-w3`, deployed 2026-11-19).**
   `0047_promo_codes` -> `0048_notification_prefs` (`users.notification_prefs`
   JSONB, ADD COLUMN IF NOT EXISTS, no backfill, no GRANT) ->
   `0049_plug_hours` (four nullable `plugs` columns, ADD COLUMN IF NOT EXISTS,

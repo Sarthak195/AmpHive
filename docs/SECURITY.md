@@ -1058,7 +1058,7 @@ one read-only `amph_` token (env `AMPHIVE_METER_TOKEN`), so it can only read
 `GET /api/me/meter`, and it refuses every command a CSMS sends. Keep the token
 out of shell history and revoke it from Account when done.
 
-### 8.12 2026-11-19 features wave 3 (built on `release/2026-11-17-w3`, not deployed)
+### 8.12 2026-11-19 features wave 3 (built on `release/2026-11-17-w3`, deployed 2026-11-19)
 
 **Read-only viewer (F10) on the merged tree.** The every-write-route walk
 (`backend/tests/test_cpo_viewer_role.py`) asserts 403 `read_only_demo` on 74

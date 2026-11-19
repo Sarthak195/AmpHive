@@ -9,11 +9,11 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 
 ---
 
-**Production state (2026-11-19, 08:52Z):** backend and frontend both `3e7d26c` (PR #152, wave 2 on top of wave 1 `63f41b7`), alembic head `0047_promo_codes`. Backups: `amphive-20261119-072134.dump`, `amphive-20261119-084706.dump`. Rollback: backend `./rollback_backend.sh 3e7d26c` (tag `pre-3e7d26c`, same image as `rollback-3e7d26c-m0047`), frontend `./rollback_frontend.sh 3e7d26c`; see DEPLOYMENT.md "Features wave 2". Details in sections 0d and 0e below.
+**Production state (2026-11-19, 10:53Z):** backend and frontend both `0047a2b` (PR #153, wave 3 on top of wave 2 `3e7d26c` and wave 1 `63f41b7`), alembic head `0050_charge_routines`. Wave 3 deployed 2026-11-19: backend 10:46Z, frontend 10:53Z, DB backup `amphive-20261119-104547.dump`. Rollback: backend `./rollback_backend.sh 0047a2b` (tag `pre-0047a2b`, same image as `rollback-0047a2b-m0050`), frontend `./rollback_frontend.sh 0047a2b`; see DEPLOYMENT.md "Features wave 3". The read-only demo viewer account is seeded (one `cpo_viewer` on tenant 1; credentials kept outside the repo). State before wave 3, at 08:52Z: backend and frontend both `3e7d26c`, alembic head `0047_promo_codes`. Backups: `amphive-20261119-072134.dump`, `amphive-20261119-084706.dump`. Rollback: backend `./rollback_backend.sh 3e7d26c` (tag `pre-3e7d26c`, same image as `rollback-3e7d26c-m0047`), frontend `./rollback_frontend.sh 3e7d26c`; see DEPLOYMENT.md "Features wave 2". Details in sections 0d and 0e below.
 
-Wave 3 (0f below) is built on top of this state and is NOT deployed; it adds alembic `0048` to `0050`.
+Wave 3 (0f below) is deployed on top of that earlier state (alembic `0048` to `0050`).
 
-## 0f - 2026-11-19 features wave 3 (built, not deployed)
+## 0f - 2026-11-19 features wave 3 (deployed 2026-11-19)
 
 Branch `release/2026-11-17-w3`, cut from `release/2026-11-17-w2` at `590293e` (waves 1 and 2 plus their review fixes), so a deploy of it ships all three waves. Five branches merged with `--no-ff` in this order: `feat/c10-selftest`, `feat/c3-estimate`, `feat/c7-notif-prefs`, `feat/c4-plug-hours`, `feat/c5-routines`. One conflict (`frontend/src/pages/Account.jsx`: the C7 Push preferences panel and the C5 Charge routines card both kept). Migrations rechained into one line: `0047_promo_codes` -> `0048_notification_prefs` -> `0049_plug_hours` -> `0050_charge_routines` (single head, no branch point, checked offline with Alembic's `ScriptDirectory`).
 
@@ -36,7 +36,9 @@ Integration fixes on the merged tree:
 
 CI commands on the merged tree after the 2026-11-19 fix round (local, no database): backend 1633 passed / 243 DB-gated skips (they run only in CI), tools 106 passed, frontend 956 passed (98 files), ruff, mypy and eslint clean, build OK.
 
-Deploy: a migration deploy (`0048` to `0050` in one boot on top of prod `3e7d26c` at `0047`; waves 1 and 2 were deployed 2026-11-19), so the deploy kit's thin-layer script (which refuses `backend/migrations/versions/*`) does not apply as is. Same path as wave 2: DB backup, rollback image (live image plus only the three new migration files) tagged first, backend layer carrying the migration files (applied at boot by `init_db`), then the frontend dist-only thin layer; backend and frontend ship together. No new env var and no manual VM step. Details in [DEPLOYMENT.md](DEPLOYMENT.md) "Features wave 3".
+**Deployed 2026-11-19** (PR #153, merge `0047a2b`; also the OCPP bridge Python 3.11 cancel fix and the CI timeouts) by the manual migration path: backend 10:46Z (alembic `0047_promo_codes` to `0050_charge_routines` at boot, healthy in about 12 s; the `charge_routines` table and the 5 new columns present; a 150 s soak covering the 60 s routine reaper showed 0 tracebacks, errors or warnings), frontend 10:53Z (thin kit). DB backup before it: `amphive-20261119-104547.dump`. Rollback: backend `./rollback_backend.sh 0047a2b` (tag `pre-0047a2b`, same image as `rollback-0047a2b-m0050`: the `3e7d26c` code plus the three 0048-0050 migration files, so it boots on 0050); `live-3e7d26c`, `pre-3e7d26c` and every older `pre-*` image can NOT boot on 0050. Frontend `./rollback_frontend.sh 0047a2b` (`3e7d26c` dist). Logged-in read-only smoke in production passed: notification prefs, routines, an estimate on plug 1, and the commissioning checklist (all six checks pass on the real gateway). Demo viewer seeded the same day (see [CPO_VIEWER.md](CPO_VIEWER.md)).
+
+Deploy plan as written: a migration deploy (`0048` to `0050` in one boot on top of prod `3e7d26c` at `0047`; waves 1 and 2 were deployed 2026-11-19), so the deploy kit's thin-layer script (which refuses `backend/migrations/versions/*`) does not apply as is. Same path as wave 2: DB backup, rollback image (live image plus only the three new migration files) tagged first, backend layer carrying the migration files (applied at boot by `init_db`), then the frontend dist-only thin layer; backend and frontend ship together. No new env var and no manual VM step. Details in [DEPLOYMENT.md](DEPLOYMENT.md) "Features wave 3".
 
 ---
 
