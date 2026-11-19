@@ -98,3 +98,34 @@ async def test_closed_start_refused_and_max_minutes_clamp_persisted(factory, mon
             select(ChargingSession).where(ChargingSession.id == result["session_id"])
         )).scalar_one()
     assert session.max_duration_seconds == 1200
+
+
+@pytest.mark.asyncio
+async def test_limit_raise_after_a_mid_session_max_minutes_cut_never_lowers_it(factory, monkeypatch):  # noqa: F811
+    """Start under a 60 min max (clamped to 3600 s), 45 min pass, the CPO
+    cuts the max to 30 min: a driver's raise keeps the 3600 s limit instead
+    of dropping it to 1800 s, below the elapsed time, which would stop the
+    running session at once."""
+    from backend.database.models import ChargingSession
+    from backend.routers.sessions import update_session_limits
+    from backend.schemas import SessionLimitsUpdateRequest
+    from backend.tests.test_reservations import _fake_user
+
+    plug_id, uid = await _seed(factory)
+    await _set_plug(factory, plug_id, max_session_minutes=60)
+    result = await _start_session(factory, monkeypatch, plug_id=plug_id, user_id=uid)
+    sid = result["session_id"]
+    async with factory() as db:
+        session = (await db.execute(
+            select(ChargingSession).where(ChargingSession.id == sid)
+        )).scalar_one()
+        assert session.max_duration_seconds == 3600
+        session.started_at = datetime.now(timezone.utc) - timedelta(minutes=45)
+        await db.commit()
+    await _set_plug(factory, plug_id, max_session_minutes=30)
+
+    async with factory() as db:
+        resp = await update_session_limits(
+            sid, SessionLimitsUpdateRequest(max_duration_seconds=7200), _fake_user(uid), db,
+        )
+    assert resp["max_duration_seconds"] == 3600

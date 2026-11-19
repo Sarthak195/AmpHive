@@ -509,7 +509,9 @@ async def update_session_limits(
     if "max_duration_seconds" in updates:
         # [Plug hours] A raised limit still ends by the closing time of the
         # window the session started in and by the plug's max_session_minutes
-        # (the bounds the start clamp applied). Local import: this router's
+        # (the bounds the start clamp applied), but never below the current
+        # limit: a CPO edit made since the start could put the cap below the
+        # elapsed time and stop the session. Local import: this router's
         # header is a merge hot-spot (same rationale as the gates above).
         from backend.services import plug_hours
 
@@ -521,8 +523,9 @@ async def update_session_limits(
                     select(Tenant.timezone).where(Tenant.id == session.tenant_id)
                 )).scalar_one_or_none()
             cap = plug_hours.duration_cap(plug, tz_name, session.started_at)
-            if cap is not None:
-                new_duration = min(new_duration, cap)
+            new_duration = plug_hours.capped_limit(
+                new_duration, session.max_duration_seconds, cap
+            )
         session.max_duration_seconds = new_duration
     if "max_kwh" in updates:
         session.max_kwh = updates["max_kwh"]

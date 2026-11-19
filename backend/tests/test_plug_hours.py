@@ -380,6 +380,18 @@ def test_limits_patch_cap_matches_the_start_bounds():
     assert duration_cap(plug, TZ_NAME, _loc(16, 23).astimezone(timezone.utc)) == 36000
 
 
+def test_limits_patch_cap_only_bounds_a_raise():
+    """A CPO cut to the hours or max length made after the start leaves the
+    cap below the current limit: a raise keeps the current limit, never less."""
+    from backend.services.plug_hours import capped_limit
+
+    assert capped_limit(7200, 3600, 1800) == 3600     # cap below current: keep current
+    assert capped_limit(7200, 1800, 3600) == 3600     # cap above current: raise to cap
+    assert capped_limit(7200, None, 1800) == 7200     # unlimited before: any value lowers it
+    assert capped_limit(600, 3600, 1800) == 600       # a lowering is the driver's choice
+    assert capped_limit(7200, 3600, None) == 7200     # no hours, no max length
+
+
 def test_driver_plug_routes_mask_the_access_note_for_a_viewer():
     from backend.database.models import UserRole
     from backend.routers.plugs import _hours_fields

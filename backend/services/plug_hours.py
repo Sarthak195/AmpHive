@@ -264,3 +264,14 @@ def duration_cap(plug, tz_name, started_at: datetime) -> Optional[int]:
         # Hours edited since the start: the max length still applies.
         minutes = max_minutes_of(plug)
         return minutes * 60 if minutes is not None else None
+
+
+def capped_limit(requested: int, current: Optional[int], cap: Optional[int]) -> int:
+    """[Session limits PATCH] Apply duration_cap() to a requested limit so it
+    only bounds a raise: the stored limit never drops below the session's
+    current one. Hours or max_session_minutes edited after the start can
+    leave the cap below the time already elapsed, and a raise must never stop
+    a running session (no limit yet means any request is a lowering)."""
+    if cap is None or current is None:
+        return requested
+    return min(requested, max(cap, current))
