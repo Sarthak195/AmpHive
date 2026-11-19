@@ -33,12 +33,16 @@ reap_reservation_no_shows_once charges it, never the lazy
 expire_lapsed_reservations UPDATE: once per reservation (the stamp
 no_show_checked_at plus the UNIQUE ledger_transactions.reservation_id), only
 for a window the sweep saw lapse moments ago, skipped whenever the plug or its
-gateway may have been unusable in the window, and at most the driver's
+gateway may have been unusable in the window (offline, an outage or safety
+cutoff event, a maintenance or status change audited since start_at, or
+outside its opening hours at the start), skipped when the holder showed up
+another way (a session on the plug, or their own scheduled or queued charge
+or weekly routine on it inside the window), and at most the driver's
 available balance, so a balance never goes negative.
 """
 import logging
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from typing import Callable, Iterable, Optional
 
@@ -47,7 +51,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database.models import (
+    AuditLog,
     ChargerGroup,
+    ChargeRoutine,
     ChargingSession,
     Gateway,
     GatewayEvent,
@@ -55,8 +61,11 @@ from backend.database.models import (
     LedgerTransaction,
     Plug,
     PlugStatus,
+    QueuedCharge,
+    QueuedChargeStatus,
     Reservation,
     ReservationStatus,
+    Tenant,
     TransactionType,
     User,
 )
@@ -113,8 +122,22 @@ RESERVATION_NO_SHOW_SWEEP_MAX_LAG_MIN = float(
     os.getenv("RESERVATION_NO_SHOW_SWEEP_MAX_LAG_MIN") or "10"
 )
 NO_SHOW_SWEEP_BATCH = 50
-# Gateway events that mean the charger was unreachable at some point.
-_OUTAGE_EVENT_TYPES = ("GATEWAY_BOOT", "PLUG_UNREACHABLE")
+# Gateway events that mean the charger was unreachable at some point, or (the
+# safety cutoffs) that it was auto-set to MAINTENANCE (services/mqtt/alarms.py).
+_OUTAGE_EVENT_TYPES = (
+    "GATEWAY_BOOT", "PLUG_UNREACHABLE", "THERMAL_CUTOFF", "OVERCURRENT_CUTOFF",
+)
+# Audited CPO actions that take a plug out of service or hand it back
+# (routers/cpo/_plugs.py). One since start_at means it may have been out.
+_SERVICE_AUDIT_ACTIONS = (
+    "plug.maintenance_enter", "plug.maintenance_clear", "plug.status_change",
+)
+# Queued charges that show the holder meant to charge in their window. A
+# CANCELLED row was withdrawn by its owner; a STARTED one has a session,
+# which the in-use check already sees.
+_SHOW_QUEUE_STATUSES = (
+    QueuedChargeStatus.WAITING, QueuedChargeStatus.FAILED, QueuedChargeStatus.EXPIRED,
+)
 
 
 def no_show_fee_of(plug) -> Decimal:
@@ -155,6 +178,23 @@ def no_show_skip_reason(plug, gateway, *, start_at: datetime, now: datetime) -> 
     if since > start_at:
         return "plug offline during the window"
     return None
+
+
+def routine_occurs_in(
+    weekdays: int, start_time: time, tz, start_at: datetime, end_at: datetime
+) -> bool:
+    """True when a weekly routine (weekday bitmask, Monday=1, local start
+    time in zone tz) has an occurrence in [start_at, end_at). Pure; the
+    services/routines.py due_occurrence arithmetic."""
+    d: date = start_at.astimezone(tz).date() - timedelta(days=1)
+    last = end_at.astimezone(tz).date()
+    while d <= last:
+        if weekdays & (1 << d.weekday()):
+            occ = datetime.combine(d, start_time, tzinfo=tz).astimezone(timezone.utc)
+            if start_at <= occ < end_at:
+                return True
+        d += timedelta(days=1)
+    return False
 
 
 async def expire_lapsed_reservations(
@@ -380,38 +420,9 @@ async def _settle_no_show(
             )).scalar_one_or_none()
         start_at = reservation.start_at
         reason = no_show_skip_reason(plug, gateway, start_at=start_at, now=now)
-        if reason is None and plug is not None and gateway is not None:
-            outage = (await db.execute(
-                select(GatewayEvent.id)
-                .where(
-                    and_(
-                        GatewayEvent.gateway_id == gateway.id,
-                        GatewayEvent.created_at >= start_at,
-                        GatewayEvent.event_type.in_(_OUTAGE_EVENT_TYPES),
-                        or_(GatewayEvent.plug_id.is_(None), GatewayEvent.plug_id == plug.id),
-                    )
-                )
-                .limit(1)
-            )).scalar_one_or_none()
-            if outage is not None:
-                reason = "gateway or plug outage in the window"
-        if reason is None and plug is not None:
-            in_use = (await db.execute(
-                select(ChargingSession.id)
-                .where(
-                    and_(
-                        ChargingSession.plug_id == plug.id,
-                        ChargingSession.started_at < start_at + grace,
-                        or_(
-                            ChargingSession.ended_at.is_(None),
-                            ChargingSession.ended_at > start_at,
-                        ),
-                    )
-                )
-                .limit(1)
-            )).scalar_one_or_none()
-            if in_use is not None:
-                reason = "plug in use during the window"
+        if reason is None:
+            assert plug is not None and gateway is not None  # checked just above
+            reason = await _window_skip_reason(db, reservation, plug, gateway, grace)
 
         amount = ZERO_MONEY
         if reason is None:
@@ -460,3 +471,113 @@ async def _settle_no_show(
     )
     return True
 
+
+async def _window_skip_reason(
+    db: AsyncSession, reservation: Reservation, plug: Plug, gateway: Gateway,
+    grace: timedelta,
+) -> Optional[str]:
+    """The no-show checks that need the database: why the window may not have
+    been the holder's fault, or None. Every query is narrowed by an index
+    (gateway events by gateway, audit rows by tenant and time, sessions by
+    plug, queued charges and routines by user)."""
+    from backend.services import plug_hours
+    from backend.services.pricing import _zone
+
+    start_at, end_at = reservation.start_at, reservation.end_at
+    outage = (await db.execute(
+        select(GatewayEvent.id)
+        .where(
+            and_(
+                GatewayEvent.gateway_id == gateway.id,
+                GatewayEvent.created_at >= start_at,
+                GatewayEvent.event_type.in_(_OUTAGE_EVENT_TYPES),
+                or_(GatewayEvent.plug_id.is_(None), GatewayEvent.plug_id == plug.id),
+            )
+        )
+        .limit(1)
+    )).scalar_one_or_none()
+    if outage is not None:
+        return "gateway or plug outage in the window"
+
+    # Maintenance does not stop telemetry, so a plug put into maintenance
+    # and cleared again before the sweep only shows up in the audit trail.
+    serviced = (await db.execute(
+        select(AuditLog.id)
+        .where(
+            and_(
+                AuditLog.tenant_id == gateway.tenant_id,
+                AuditLog.created_at >= start_at,
+                AuditLog.action.in_(_SERVICE_AUDIT_ACTIONS),
+                AuditLog.target_type == "plug",
+                AuditLog.target_id == str(plug.id),
+            )
+        )
+        .limit(1)
+    )).scalar_one_or_none()
+    if serviced is not None:
+        return "plug out of service in the window"
+
+    tz_name = None
+    if gateway.tenant_id is not None:
+        tz_name = (await db.execute(
+            select(Tenant.timezone).where(Tenant.id == gateway.tenant_id)
+        )).scalar_one_or_none()
+    if plug_hours.hours_of(plug) is not None and not plug_hours.window_is_open(
+        plug, tz_name, start_at, start_at + grace
+    ):
+        return "charger closed during the window"
+
+    in_use = (await db.execute(
+        select(ChargingSession.id)
+        .where(
+            and_(
+                ChargingSession.plug_id == plug.id,
+                ChargingSession.started_at < start_at + grace,
+                or_(
+                    ChargingSession.ended_at.is_(None),
+                    ChargingSession.ended_at > start_at,
+                ),
+            )
+        )
+        .limit(1)
+    )).scalar_one_or_none()
+    if in_use is not None:
+        return "plug in use during the window"
+
+    # The holder may plug in and schedule their charge for later in their
+    # own window (routers/sessions.py lets them): that is a show.
+    queued = (await db.execute(
+        select(QueuedCharge.id)
+        .where(
+            and_(
+                QueuedCharge.user_id == reservation.user_id,
+                QueuedCharge.plug_id == plug.id,
+                QueuedCharge.status.in_(_SHOW_QUEUE_STATUSES),
+                QueuedCharge.created_at < start_at + grace,
+                QueuedCharge.expires_at > start_at,
+                or_(QueuedCharge.not_before.is_(None), QueuedCharge.not_before < end_at),
+            )
+        )
+        .limit(1)
+    )).scalar_one_or_none()
+    if queued is not None:
+        return "holder scheduled a charge"
+
+    # A weekly routine materializes its queued charge only at its start time,
+    # so an occurrence later in the window has no row yet at the sweep.
+    routines = (await db.execute(
+        select(ChargeRoutine.weekdays, ChargeRoutine.start_time)
+        .where(
+            and_(
+                ChargeRoutine.user_id == reservation.user_id,
+                ChargeRoutine.plug_id == plug.id,
+                ChargeRoutine.enabled.is_(True),
+            )
+        )
+        .limit(10)
+    )).all()
+    tz = _zone(tz_name)
+    for weekdays, start_time in routines:
+        if routine_occurs_in(weekdays, start_time, tz, start_at, end_at):
+            return "holder scheduled a charge"
+    return None

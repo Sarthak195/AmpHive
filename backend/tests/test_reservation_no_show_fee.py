@@ -15,7 +15,10 @@ services/reservations.py reap_reservation_no_shows_once:
 - a zero fee does nothing; a request that lapsed while PENDING is never
   charged; a window older than the sweep lag is never charged;
 - booking snapshots the plug's fee onto the reservation;
-- a lapsed booking can no longer be cancelled to dodge the fee.
+- a lapsed booking can no longer be cancelled to dodge the fee;
+- skipped when the holder scheduled a charge or has a routine in the window,
+  when maintenance was entered or cleared in it, after a safety cutoff, or
+  when the charger was closed at the start (with negative controls).
 """
 import os
 from datetime import datetime, timedelta, timezone
@@ -353,3 +356,145 @@ async def test_lapsed_booking_cannot_be_cancelled_to_dodge_the_fee(factory, monk
         await _cancel(factory, monkeypatch, reservation_id=site.resv_id,
                       user=_fake_user(site.driver))
     assert exc.value.status_code == 409
+
+
+# --- Review round: the holder showed up, or the charger was out -----------------
+
+
+def test_routine_occurrence_in_window():
+    from datetime import time
+
+    tz = timezone.utc
+    start = datetime(2026, 11, 16, 22, 0, tzinfo=tz)  # a Monday
+    end = start + timedelta(hours=4)
+    monday, tuesday = 1, 2
+    assert policy.routine_occurs_in(monday, time(23, 30), tz, start, end)
+    # Past midnight the occurrence belongs to Tuesday.
+    assert policy.routine_occurs_in(tuesday, time(1, 0), tz, start, end)
+    assert not policy.routine_occurs_in(monday, time(1, 0), tz, start, end)
+    assert not policy.routine_occurs_in(tuesday, time(23, 30), tz, start, end)
+    # end is exclusive, start inclusive.
+    assert not policy.routine_occurs_in(tuesday, time(2, 0), tz, start, end)
+    assert policy.routine_occurs_in(monday, time(22, 0), tz, start, end)
+
+
+async def _seed_queued(factory, site, *, created_at, not_before, status=None):
+    from backend.database.models import QueuedCharge, QueuedChargeStatus
+
+    async with factory() as db:
+        db.add(QueuedCharge(
+            tenant_id=site.tenant_id, user_id=site.driver, plug_id=site.plug_id,
+            status=status or QueuedChargeStatus.WAITING, created_at=created_at,
+            not_before=not_before, expires_at=not_before + timedelta(minutes=30),
+            max_duration_seconds=7200,
+        ))
+        await db.commit()
+
+
+async def _audit(factory, site, action, *, target_id=None):
+    from backend.database.models import AuditLog
+
+    async with factory() as db:
+        db.add(AuditLog(
+            tenant_id=site.tenant_id, action=action, target_type="plug",
+            target_id=str(target_id or site.plug_id), detail="test",
+        ))
+        await db.commit()
+
+
+@requires_db
+@pytest.mark.asyncio
+async def test_fee_skipped_when_holder_scheduled_a_charge_in_the_window(factory, notify_mock):
+    site = await _no_show_site(factory)
+    start = site.now - timedelta(minutes=policy.RESERVATION_NO_SHOW_GRACE_MIN + 1)
+    # Plugged in 5 minutes into the booking, start scheduled for later in it.
+    await _seed_queued(factory, site, created_at=start + timedelta(minutes=5),
+                       not_before=start + timedelta(minutes=40))
+    assert await policy.reap_reservation_no_shows_once(factory, now=site.now) == 0
+    assert await _ledger(factory, site.driver) == []
+    assert notify_mock.await_count == 0
+
+
+@requires_db
+@pytest.mark.asyncio
+async def test_old_queued_charge_does_not_excuse_a_no_show(factory, notify_mock):
+    from backend.database.models import QueuedChargeStatus
+
+    site = await _no_show_site(factory)
+    start = site.now - timedelta(minutes=policy.RESERVATION_NO_SHOW_GRACE_MIN + 1)
+    # Expired the day before, and one the holder cancelled: neither is a show.
+    await _seed_queued(factory, site, created_at=start - timedelta(days=1, hours=1),
+                       not_before=start - timedelta(days=1),
+                       status=QueuedChargeStatus.EXPIRED)
+    await _seed_queued(factory, site, created_at=start + timedelta(minutes=1),
+                       not_before=start + timedelta(minutes=30),
+                       status=QueuedChargeStatus.CANCELLED)
+    assert await policy.reap_reservation_no_shows_once(factory, now=site.now) == 1
+
+
+@requires_db
+@pytest.mark.asyncio
+async def test_fee_skipped_when_holder_routine_falls_in_the_window(factory, notify_mock):
+    from backend.database.models import ChargeRoutine
+    from backend.services.pricing import _zone
+
+    site = await _no_show_site(factory)
+    start = site.now - timedelta(minutes=policy.RESERVATION_NO_SHOW_GRACE_MIN + 1)
+    occ = (start + timedelta(minutes=40)).astimezone(_zone("Asia/Kolkata"))
+    async with factory() as db:
+        db.add(ChargeRoutine(
+            user_id=site.driver, plug_id=site.plug_id, tenant_id=site.tenant_id,
+            weekdays=1 << occ.weekday(), start_time=occ.time().replace(second=0, microsecond=0),
+            max_duration_seconds=7200,
+        ))
+        await db.commit()
+    assert await policy.reap_reservation_no_shows_once(factory, now=site.now) == 0
+    assert await _ledger(factory, site.driver) == []
+
+
+@requires_db
+@pytest.mark.asyncio
+async def test_fee_skipped_when_maintenance_entered_and_cleared_in_window(factory, notify_mock):
+    site = await _no_show_site(factory)
+    # The audit rows land "now", inside the window; the plug is AVAILABLE again.
+    await _audit(factory, site, "plug.maintenance_enter")
+    await _audit(factory, site, "plug.maintenance_clear")
+    assert await policy.reap_reservation_no_shows_once(factory, now=site.now) == 0
+    assert await _ledger(factory, site.driver) == []
+
+
+@requires_db
+@pytest.mark.asyncio
+async def test_maintenance_on_another_plug_does_not_excuse(factory, notify_mock):
+    site = await _no_show_site(factory)
+    await _audit(factory, site, "plug.maintenance_clear", target_id=site.plug_id + 1000)
+    assert await policy.reap_reservation_no_shows_once(factory, now=site.now) == 1
+
+
+@requires_db
+@pytest.mark.asyncio
+async def test_fee_skipped_after_a_safety_cutoff_in_window(factory, notify_mock):
+    from backend.database.models import GatewayEvent
+
+    site = await _no_show_site(factory)
+    async with factory() as db:
+        db.add(GatewayEvent(tenant_id=site.tenant_id, gateway_id=site.gw, plug_id=site.plug_id,
+                            event_type="THERMAL_CUTOFF", severity="critical"))
+        await db.commit()
+    assert await policy.reap_reservation_no_shows_once(factory, now=site.now) == 0
+
+
+@requires_db
+@pytest.mark.asyncio
+async def test_fee_skipped_when_charger_closed_at_the_start(factory, notify_mock):
+    from backend.database.models import Plug
+    from backend.services.pricing import _zone
+
+    site = await _no_show_site(factory)
+    start = site.now - timedelta(minutes=policy.RESERVATION_NO_SHOW_GRACE_MIN + 1)
+    # Open only on a weekday three days away: closed for the whole window.
+    other_day = (start.astimezone(_zone("Asia/Kolkata")).weekday() + 3) % 7
+    await _update(factory, Plug, site.plug_id,
+                  opening_hours=[{"days": 1 << other_day, "start": 0, "end": 1440}])
+    assert await policy.reap_reservation_no_shows_once(factory, now=site.now) == 0
+    assert await _ledger(factory, site.driver) == []
