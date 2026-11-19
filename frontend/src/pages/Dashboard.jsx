@@ -407,7 +407,18 @@ const Dashboard = () => {
   };
 
   // ChargeSetupModal's onConfirm — throws so the modal shows the error inline.
-  const handleConfirmSetup = async (plugId, limits, notBefore) => {
+  const handleConfirmSetup = async (plugId, limits, notBefore, readyBy) => {
+    if (readyBy) {
+      // [Ready by] The backend picks the cheapest single window ending by then
+      // and schedules it through the normal scheduled path.
+      const queued = await api.queueReadyBy({ plug_id: Number(plugId), ...limits, ready_by: readyBy });
+      const tz = queued?.tenant_timezone || setupPlug?.tenant_timezone;
+      toast.ok(
+        `Charge scheduled for ${fmtTimeInZone(queued?.not_before, tz)}, ready by ${fmtTimeInZone(queued?.planned_finish_at || readyBy, tz)}.`
+      );
+      fetchUpNext();
+      return;
+    }
     if (notBefore) {
       // [Scheduled start] Same queue endpoint, on a powered plug; stay here.
       const queued = await api.queueCharge({ plug_id: Number(plugId), ...limits, not_before: notBefore });

@@ -385,3 +385,66 @@ describe('ChargeSetupModal: estimate line', () => {
     expect(screen.queryByTestId('charge-estimate')).not.toBeInTheDocument();
   });
 });
+
+describe('ChargeSetupModal: ready by', () => {
+  const SCHED_PLUG = { ...PLUG, schedule_available: true, tenant_timezone: 'Asia/Kolkata' };
+  const PLAN = {
+    not_before: '2026-11-17T16:30:00+00:00',
+    finish_at: '2026-11-17T18:30:00+00:00',
+    energy_kwh: 4.0,
+    cost_coins: '16.00',
+    is_estimate: true,
+  };
+
+  it('is hidden unless the plug is schedulable', () => {
+    renderModal();
+    expect(screen.queryByRole('button', { name: 'Ready by' })).not.toBeInTheDocument();
+  });
+
+  it('previews the planned window and confirms with the deadline instant', async () => {
+    api.get.mockImplementation((url) =>
+      url.includes('/ready-by') ? Promise.resolve(PLAN) : Promise.resolve(null)
+    );
+    const { onConfirm } = renderModal({ plug: SCHED_PLUG });
+    await userEvent.click(screen.getByRole('button', { name: 'Ready by' }));
+    fireEvent.change(screen.getByLabelText('Ready-by time'), { target: { value: '08:00' } });
+    fireEvent.change(screen.getByLabelText('Energy limit (kWh)'), { target: { value: '4' } });
+
+    const line = await screen.findByTestId('ready-by-plan');
+    expect(line).toHaveTextContent(/starts 10:00/i);
+    expect(line).toHaveTextContent(/4\.0 kWh by 12:00/i);
+    const url = api.get.mock.calls.find(([u]) => u.includes('/ready-by'))[0];
+    expect(url).toMatch(/^\/api\/plugs\/7\/ready-by\?ready_by=.*&max_kwh=4/);
+    // The plain estimate is not fetched in this mode.
+    expect(api.get.mock.calls.some(([u]) => u.includes('/estimate'))).toBe(false);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Schedule charge' }));
+    const [plugId, limits, notBefore, readyBy] = onConfirm.mock.calls[0];
+    expect(plugId).toBe(7);
+    expect(limits).toEqual({ max_kwh: 4, max_duration_seconds: 28800 });
+    expect(notBefore).toBeNull();
+    // 08:00 IST is 02:30 UTC.
+    expect(readyBy).toMatch(/T02:30:00\.000Z$/);
+  });
+
+  it('shows the refusal when the deadline cannot be met', async () => {
+    api.get.mockRejectedValue(
+      Object.assign(new Error('That is too soon for this charge.'), {
+        code: 'ready_by_unreachable',
+        status: 409,
+      })
+    );
+    renderModal({ plug: SCHED_PLUG });
+    await userEvent.click(screen.getByRole('button', { name: 'Ready by' }));
+    fireEvent.change(screen.getByLabelText('Ready-by time'), { target: { value: '08:00' } });
+    fireEvent.change(screen.getByLabelText('Energy limit (kWh)'), { target: { value: '4' } });
+    expect(await screen.findByTestId('ready-by-error')).toBeInTheDocument();
+    expect(screen.queryByTestId('ready-by-plan')).not.toBeInTheDocument();
+  });
+
+  it('needs a ready-by time and a limit', async () => {
+    renderModal({ plug: SCHED_PLUG });
+    await userEvent.click(screen.getByRole('button', { name: 'Ready by' }));
+    expect(screen.getByRole('button', { name: 'Schedule charge' })).toBeDisabled();
+  });
+});
