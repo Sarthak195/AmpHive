@@ -183,6 +183,10 @@ class SessionReaperService:
             except Exception:
                 logger.exception("Reservation-start sweep failed")
             try:
+                await self.reap_reservation_no_shows_once()
+            except Exception:
+                logger.exception("Reservation no-show fee sweep failed")
+            try:
                 await self.reap_routines_once()
             except Exception:
                 logger.exception("Charge-routine materialize sweep failed")
@@ -529,6 +533,14 @@ class SessionReaperService:
         if activated:
             logger.info(f"Reservation-start sweep activated {activated} booking(s)")
         return activated
+
+    async def reap_reservation_no_shows_once(self, now: Optional[datetime] = None) -> int:
+        """[C8] Charge the optional no-show fee for confirmed bookings that
+        just lapsed unused (services/reservations.py). The only place a
+        reservation ever moves money."""
+        from backend.services.reservations import reap_reservation_no_shows_once
+
+        return await reap_reservation_no_shows_once(self.db_session_factory, now)
 
     async def reap_routines_once(self, now: Optional[datetime] = None) -> int:
         """[C5] Queue each due charge routine's occurrence as an ordinary

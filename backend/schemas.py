@@ -8,7 +8,7 @@ driver and CPO plug routes).
 import ipaddress
 import re
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
 
@@ -371,6 +371,12 @@ class PlugResponse(BaseModel):
     max_session_minutes: Optional[int] = None
     amenities: Optional[list[str]] = None
     access_note: Optional[str] = None
+    # [C8] "instant" or "approval": in approval mode a booking is a request the
+    # host approves or declines; the reserve dialog says so up front.
+    reservation_mode: str = "instant"
+    # [C8] Coins charged if a confirmed booking here goes unused (0 = none),
+    # shown in the reserve dialog before booking.
+    no_show_fee_coins: float = 0
 
 
 class PublicPlugResponse(BaseModel):
@@ -678,6 +684,11 @@ class CpoPlugUpdateRequest(BaseModel):
     max_session_minutes: Optional[int] = Field(default=None, ge=0, le=1440)
     amenities: Optional[list[str]] = Field(default=None, max_length=16)
     access_note: Optional[str] = Field(default=None, max_length=280)
+    # [C8] Booking mode; omit to leave unchanged.
+    reservation_mode: Optional[Literal["instant", "approval"]] = None
+    # [C8] No-show fee in coins (0 = none); omit to leave unchanged. The
+    # router rejects anything above RESERVATION_NO_SHOW_FEE_MAX_COINS.
+    no_show_fee_coins: Optional[float] = Field(default=None, ge=0, le=100000)
 
     @field_validator("local_ip")
     @classmethod
@@ -1048,6 +1059,8 @@ class ReservationResponse(BaseModel):
     plug_name: Optional[str] = None
     user_name: Optional[str] = None
     is_mine: Optional[bool] = None
+    # [C8] The no-show fee snapshotted when this booking was made.
+    no_show_fee_coins: float = 0
 
 
 class MyReservationsResponse(BaseModel):

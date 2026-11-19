@@ -64,6 +64,12 @@ import { apiErrorCopy } from '../../utils/statusCopy';
 import { hoursFormFromPlug, hoursPatch } from '../../utils/plugHours';
 import './CpoChargers.css';
 
+// [C8] How a booking on this charger is confirmed.
+const RESERVATION_MODE_OPTIONS = [
+  { value: 'instant', label: 'Instant (booked at once)' },
+  { value: 'approval', label: 'Needs my approval' },
+];
+
 const QUEUED_OPTIONS = [
   { value: '', label: 'Inherit tenant default' },
   { value: 'true', label: 'Enabled' },
@@ -340,6 +346,8 @@ export default function CpoChargers() {
     tariff_id: '',
     rated_power_w: '',
     connector_type: '',
+    reservation_mode: 'instant',
+    no_show_fee_coins: '',
   });
   // [Plug hours] Opening hours, max session length, amenities, access note.
   const [hoursForm, setHoursForm] = useState(() => hoursFormFromPlug(null));
@@ -358,6 +366,8 @@ export default function CpoChargers() {
       tariff_id: plug.tariff_id != null ? String(plug.tariff_id) : '',
       rated_power_w: plug.rated_power_w ?? '',
       connector_type: plug.connector_type ?? '',
+      reservation_mode: plug.reservation_mode || 'instant',
+      no_show_fee_coins: plug.no_show_fee_coins ? String(plug.no_show_fee_coins) : '',
     });
     setHoursForm(hoursFormFromPlug(plug));
     setEditError('');
@@ -404,6 +414,14 @@ export default function CpoChargers() {
       }
       if (editForm.connector_type !== (editingPlug.connector_type ?? '')) {
         body.connector_type = editForm.connector_type;
+      }
+      if (editForm.reservation_mode !== (editingPlug.reservation_mode || 'instant')) {
+        body.reservation_mode = editForm.reservation_mode;
+      }
+      // [C8] Blank or 0 = no no-show fee.
+      const newFee = editForm.no_show_fee_coins === '' ? 0 : Number(editForm.no_show_fee_coins);
+      if (newFee !== (Number(editingPlug.no_show_fee_coins) || 0)) {
+        body.no_show_fee_coins = newFee;
       }
       Object.assign(body, hoursPatch(hoursForm, editingPlug));
 
@@ -979,6 +997,47 @@ export default function CpoChargers() {
                 />
                 <p className="field-help">
                   How long power must stay on before a queued charge auto-starts.
+                </p>
+              </div>
+              <div className="field">
+                <label className="field-label" htmlFor="cpo-chargers-edit-resv-mode">
+                  Reservations
+                </label>
+                <select
+                  id="cpo-chargers-edit-resv-mode"
+                  className="select"
+                  value={editForm.reservation_mode}
+                  onChange={(e) => setEditForm({ ...editForm, reservation_mode: e.target.value })}
+                >
+                  {RESERVATION_MODE_OPTIONS.map((o) => (
+                    <option key={o.value} value={o.value}>
+                      {o.label}
+                    </option>
+                  ))}
+                </select>
+                <p className="field-help">
+                  With approval, a booking waits in Reservations until you approve or decline it.
+                  An unanswered request expires at its start time.
+                </p>
+              </div>
+              <div className="field">
+                <label className="field-label" htmlFor="cpo-chargers-edit-noshow">
+                  No-show fee (coins)
+                </label>
+                <input
+                  id="cpo-chargers-edit-noshow"
+                  className="input"
+                  type="number"
+                  min="0"
+                  step="1"
+                  placeholder="None"
+                  value={editForm.no_show_fee_coins}
+                  onChange={(e) => setEditForm({ ...editForm, no_show_fee_coins: e.target.value })}
+                />
+                <p className="field-help">
+                  Charged when a confirmed booking goes unused, and shown to drivers before they
+                  book. Never charged while this charger is offline or out of service, never more
+                  than the driver&apos;s available credit. Blank = no fee.
                 </p>
               </div>
             </Section>

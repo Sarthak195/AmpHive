@@ -92,6 +92,12 @@ class TransactionType(str, enum.Enum):
     # it looked fully charged, settled once at finalize as its own line
     # (services/idle_fee.py). Added via ALTER TYPE in migration 0052_idle_fee.
     IDLE_FEE = "idle_fee"
+    # [C8] A capped no-show fee for a confirmed reservation the holder never
+    # used, charged only by the reaper sweep
+    # (services/reservations.py reap_reservation_no_shows_once), at most the
+    # driver's available balance. Added via ALTER TYPE in migration
+    # 0055_reservation_approval.
+    RESERVATION_NO_SHOW_FEE = "reservation_no_show_fee"
 
 # --- SQLAlchemy Model Classes ---
 
@@ -437,6 +443,15 @@ class Plug(Base):
     max_session_minutes: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     amenities: Mapped[Optional[list]] = mapped_column(JSONB(none_as_null=True), nullable=True)
     access_note: Mapped[Optional[str]] = mapped_column(String(280), nullable=True)
+    # [C8 approval mode] "instant" (a booking is BOOKED at once) or "approval"
+    # (it starts PENDING until the tenant's CPO approves it). VARCHAR, not a
+    # native enum, like plug_model / connector_type; validated by the schema.
+    # Alembic revision 0055_reservation_approval.
+    reservation_mode: Mapped[str] = mapped_column(String(16), default="instant", server_default=text("'instant'"), nullable=False)
+    # [C8] Coins charged when a confirmed booking is a no-show. 0 = no fee.
+    # Capped server-side (RESERVATION_NO_SHOW_FEE_MAX_COINS) on write and again
+    # when charged; snapshotted onto each reservation at booking time.
+    no_show_fee_coins: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal("0"), server_default=text("0"), nullable=False)
 
     # Relationships
     gateway: Mapped[Gateway] = relationship("Gateway", back_populates="plugs")
@@ -691,6 +706,10 @@ class LedgerTransaction(Base):
     razorpay_payment_id: Mapped[Optional[str]] = mapped_column(String(64), unique=True, nullable=True)
     balance_after: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)  # money
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+    # [C8] The reservation a RESERVATION_NO_SHOW_FEE row charged for. UNIQUE
+    # is the fee's idempotency key (the razorpay_payment_id pattern above):
+    # a second charge for the same booking fails the INSERT. NULL elsewhere.
+    reservation_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("reservations.id", ondelete="SET NULL"), unique=True, nullable=True)
 
     # Relationships
     user: Mapped[User] = relationship("User", back_populates="transactions")
@@ -1662,6 +1681,14 @@ class ReservationStatus(str, enum.Enum):
     CANCELLED = "cancelled"    # withdrawn by the owner or the tenant's cpo/admin
     FULFILLED = "fulfilled"    # the holder started a session inside the window
     EXPIRED = "expired"        # no-show: grace after start_at lapsed unfulfilled
+    # [C8 approval mode] A request on a plug whose reservation_mode is
+    # "approval": blocks overlapping bookings (and counts toward the per-user
+    # cap) but never authorizes or blocks a session start. The tenant's CPO
+    # approves (-> BOOKED) or declines (-> DECLINED); one still PENDING at
+    # start_at lazily flips to EXPIRED. Added via ALTER TYPE in migration
+    # 0055_reservation_approval (the 0026/0038 pattern).
+    PENDING = "pending"
+    DECLINED = "declined"
 
 
 class Reservation(Base):
@@ -1672,8 +1699,9 @@ class Reservation(Base):
     session, enforced under the plug row lock in
     routers/sessions.py start_charging_session).
 
-    FREE in v1: no coin hold, no money movement anywhere in the lifecycle —
-    the hold is purely on the plug's time.
+    No coin hold: the hold is purely on the plug's time. [C8] The only money
+    movement is the optional, capped no-show fee (no_show_fee_coins below),
+    charged solely by the reaper sweep, never by the lazy expiry.
 
     Lifecycle: BOOKED -> CANCELLED | FULFILLED (session_id set, linking the
     session that consumed the window) | EXPIRED. Expiry is LAZY — there is no
@@ -1682,6 +1710,11 @@ class Reservation(Base):
     or past end_at) wherever reservations are read (the session-start gate,
     the booking overlap check, every list endpoint), so a stale hold never
     blocks anyone.
+
+    [C8] On a plug in "approval" mode a booking starts PENDING ->
+    BOOKED (CPO approves) | DECLINED (CPO declines) | CANCELLED (driver
+    withdraws) | EXPIRED (still pending at start_at). PENDING blocks
+    overlapping bookings but never authorizes or blocks a session start.
 
     Design notes:
     - tenant_id is denormalized from plug -> gateway -> tenant (mirrors
@@ -1718,12 +1751,24 @@ class Reservation(Base):
     # its 60 s ticks and across a restart (services/session_reaper.py
     # reap_reservation_starts_once — the follow-up the module header foretold).
     started_notified_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    # [C8] The plug's no-show fee when this booking was made (what the driver
+    # was shown), and when the no-show sweep settled it (charged or skipped).
+    # A request that lapses while still PENDING is stamped at expiry, so it
+    # is never a fee candidate.
+    no_show_fee_coins: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal("0"), server_default=text("0"), nullable=False)
+    no_show_checked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (
         # The hot shape: "reservations on this plug around time T" — the
         # session-start gate, the overlap check, and the per-plug schedule
         # all filter on plug_id + a start_at range.
         Index("idx_reservations_plug_start", "plug_id", "start_at"),
+        # [C8] The no-show sweep's candidates: unsettled rows with a fee.
+        Index(
+            "idx_reservations_no_show_due",
+            "start_at",
+            postgresql_where=text("no_show_checked_at IS NULL AND no_show_fee_coins > 0"),
+        ),
     )
 
 

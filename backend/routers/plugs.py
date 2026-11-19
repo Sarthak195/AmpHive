@@ -62,6 +62,7 @@ from backend.services.pricing import (
     zone_name,
 )
 from backend.services.rate_limit import public_map_rate_limiter, rate_limit_dependency
+from backend.services.reservations import no_show_fee_of, reservation_mode_of
 from backend.services.session_lifecycle import (
     gateway_is_live,
     plug_is_powered,
@@ -467,6 +468,8 @@ async def get_available_plugs(
                 thumbnail_url=photo_thumbs.get(plug.id),
                 **reservation_fields.get(plug.id, {}),
                 **_hours_fields(plug, tenant.timezone, now, user),
+                reservation_mode=reservation_mode_of(plug),
+                no_show_fee_coins=float(no_show_fee_of(plug)),
             )
         )
     return responses
@@ -696,6 +699,8 @@ async def get_plug(
         **_hours_fields(
             plug, tenant.timezone if tenant is not None else None, now, user
         ),
+        reservation_mode=reservation_mode_of(plug),
+        no_show_fee_coins=float(no_show_fee_of(plug)),
     )
 
 

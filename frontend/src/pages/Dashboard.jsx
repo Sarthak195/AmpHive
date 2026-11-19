@@ -703,7 +703,10 @@ const Dashboard = () => {
                       <CalendarClock size={18} aria-hidden="true" className="dash-upnext-icon" />
                       <div className="dash-upnext-body">
                         <p className="dash-upnext-name">{r.plug_name || `Charger ${r.plug_id}`}</p>
-                        <p className="text-3 text-sm">{fmtWindow(r.start_at, r.end_at)}</p>
+                        <p className="text-3 text-sm">
+                          {fmtWindow(r.start_at, r.end_at)}
+                          {r.status === 'pending' ? ' · Awaiting approval' : ''}
+                        </p>
                       </div>
                       <button
                         type="button"

@@ -38,6 +38,7 @@ ALWAYS_PUSH_TYPES = frozenset({
     "topup_credited",
     "topup_refunded",
     "promo_redeemed",
+    "reservation_no_show_fee",
     # Safety and faults.
     "orphan_off",
     "charger_offline",

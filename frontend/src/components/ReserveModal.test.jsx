@@ -120,3 +120,43 @@ describe('ReserveModal — submit', () => {
     expect(onReserved).not.toHaveBeenCalled();
   });
 });
+
+describe('ReserveModal [C8] no-show fee', () => {
+  it('states the fee before booking and drops the "free" line', async () => {
+    render(
+      <ReserveModal open onClose={vi.fn()} plug={{ ...PLUG, no_show_fee_coins: 20 }} onReserved={vi.fn()} />
+    );
+    await screen.findByText(new RegExp('Asha'));
+    expect(screen.getByText(/No-show fee: 20 coins/)).toBeInTheDocument();
+    expect(screen.queryByText(/Reservations are free/)).toBeNull();
+  });
+
+  it('a charger without a fee still says reservations are free', async () => {
+    renderModal();
+    await screen.findByText(new RegExp('Asha'));
+    expect(screen.getByText(/Reservations are free/)).toBeInTheDocument();
+    expect(screen.queryByText(/No-show fee/)).toBeNull();
+  });
+});
+
+describe('ReserveModal [C8] approval mode', () => {
+  it('says the host approves, labels the button Request, and marks pending windows', async () => {
+    api.get.mockResolvedValue([{ ...WINDOWS[0], status: 'pending' }]);
+    api.post.mockResolvedValue({ id: 2, status: 'pending' });
+    const onReserved = vi.fn();
+    render(
+      <ReserveModal
+        open
+        onClose={vi.fn()}
+        plug={{ ...PLUG, reservation_mode: 'approval' }}
+        onReserved={onReserved}
+      />
+    );
+    expect(await screen.findByText(/awaiting approval/)).toBeInTheDocument();
+    expect(screen.getByText(/The host approves bookings on this charger/)).toBeInTheDocument();
+
+    pickWhen('2030-06-01', '14:00');
+    await userEvent.click(screen.getByRole('button', { name: 'Request' }));
+    await waitFor(() => expect(onReserved).toHaveBeenCalled());
+  });
+});

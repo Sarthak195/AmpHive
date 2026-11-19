@@ -230,7 +230,7 @@ async def close_account(db: AsyncSession, user: User) -> dict:
         update(Reservation)
         .where(
             Reservation.user_id == user_id,
-            Reservation.status == ReservationStatus.BOOKED,
+            Reservation.status.in_((ReservationStatus.BOOKED, ReservationStatus.PENDING)),
         )
         .values(status=ReservationStatus.CANCELLED)
         .execution_options(synchronize_session=False)

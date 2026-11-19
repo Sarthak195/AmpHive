@@ -10,7 +10,12 @@
  * is checked client-side against those windows for overlap before submitting;
  * duration comes from preset chips (30m / 1h / 2h / 4h) or a custom end time.
  * POSTs {plug_id, start_at, end_at}; server rejections surface inline.
- * Reservations are free — no money is held.
+ * No money is held for a booking.
+ * [C8] A charger may carry a no-show fee (plug.no_show_fee_coins > 0): the
+ * dialog states it before booking, since an unused confirmed slot is charged.
+ * [C8] On a charger whose reservation_mode is "approval" the booking is a
+ * request the host approves or declines; the copy and button say so, and a
+ * pending window in the schedule is marked as awaiting approval.
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
@@ -110,6 +115,8 @@ export default function ReserveModal({ open, onClose, plug, onReserved }) {
 
   if (!open || !plug) return null;
 
+  const needsApproval = plug.reservation_mode === 'approval';
+  const noShowFee = Number(plug.no_show_fee_coins) || 0;
   const customEndInvalid =
     duration === 'custom' && customEnd !== '' && chosen == null && date && time;
 
@@ -137,7 +144,11 @@ export default function ReserveModal({ open, onClose, plug, onReserved }) {
         start_at: chosen.start.toISOString(),
         end_at: chosen.end.toISOString(),
       });
-      toast.ok(`Reserved — ${plug.name || `Charger ${plug.id}`}, ${fmtWindow(chosen.start, chosen.end)}`);
+      toast.ok(
+        needsApproval
+          ? `Request sent: ${plug.name || `Charger ${plug.id}`}, ${fmtWindow(chosen.start, chosen.end)}. You'll be notified when the host answers.`
+          : `Reserved: ${plug.name || `Charger ${plug.id}`}, ${fmtWindow(chosen.start, chosen.end)}`
+      );
       onReserved?.();
     } catch (err) {
       // 409s (slot taken / cap reached) and 400s (window rules) land here.
@@ -150,9 +161,22 @@ export default function ReserveModal({ open, onClose, plug, onReserved }) {
     <Modal open={open} onClose={busy ? undefined : onClose} title={`Reserve ${plug.name || `charger ${plug.id}`}`}>
       <div className="stack">
         <p className="text-2 text-sm">
-          Book a time slot — during it, only you can start a charge on this charger. Reservations
-          are free.
+          Book a time slot: during it, only you can start a charge on this charger.
+          {noShowFee > 0 ? '' : ' Reservations are free.'}
         </p>
+        {noShowFee > 0 && (
+          <p className="banner banner-warn text-sm">
+            No-show fee: {noShowFee} coins if you don&apos;t start a charge within{' '}
+            15 minutes of your slot starting. It is never charged when the charger was offline or
+            out of service, and never more than your available credit.
+          </p>
+        )}
+        {needsApproval && (
+          <p className="banner banner-info text-sm">
+            The host approves bookings on this charger. Your request holds the slot until they
+            answer, and it expires if nobody answers before it starts.
+          </p>
+        )}
 
         <div>
           <h3 className="reserve-schedule-title">Upcoming reservations</h3>
@@ -172,6 +196,7 @@ export default function ReserveModal({ open, onClose, plug, onReserved }) {
                 <li key={w.id}>
                   {fmtWindow(w.start_at, w.end_at)}
                   {w.is_mine ? ' (yours)' : w.user_name ? ` — ${w.user_name}` : ''}
+                  {w.status === 'pending' ? ' (awaiting approval)' : ''}
                 </li>
               ))}
             </ul>
@@ -264,7 +289,7 @@ export default function ReserveModal({ open, onClose, plug, onReserved }) {
               className="btn btn-primary"
               disabled={busy || Boolean(overlap)}
             >
-              {busy ? 'Reserving…' : 'Reserve'}
+              {busy ? (needsApproval ? 'Sending…' : 'Reserving…') : needsApproval ? 'Request' : 'Reserve'}
             </button>
           </div>
         </form>
