@@ -141,11 +141,16 @@ async def finalize_charging_session(
     *,
     expected_user_id: Optional[int] = None,
     reason: Optional[str] = None,
+    actuate: bool = True,
 ) -> Optional[dict]:
     """
     Shared stop path for /api/sessions/stop and the session reaper: bill the
     session, debit the wallet, write the ledger row, free the plug, and tear
     down the telemetry stream.
+
+    [C2 OCPP] actuate=False (the flag-gated OCPP adapter's StopTransaction
+    only) bills and frees exactly the same way but publishes no MQTT OFF or
+    SET_INTERVAL: the charger already stopped itself.
 
     The session row is locked (SELECT ... FOR UPDATE) and its ACTIVE status
     re-checked under the lock, so concurrent finalizers (double stop click,
@@ -201,7 +206,7 @@ async def finalize_charging_session(
     #    on-device watchdogs bound the hardware side). wait=False: this runs on
     #    the event loop, so don't block it up to 3 s on the broker ack for a
     #    best-effort publish (the reconnect/orphan OFF path already uses this).
-    success = state.mqtt_manager.send_plug_command(
+    success = not actuate or state.mqtt_manager.send_plug_command(
         gateway_id=plug.gateway_id,
         plug_id=plug.id,
         action="OFF",
@@ -421,7 +426,8 @@ async def finalize_charging_session(
 
     # 6. End telemetry stream
     state.telemetry_store.end_session(plug.id)
-    await set_plug_telemetry_interval(db, plug.id, 10000)
+    if actuate:
+        await set_plug_telemetry_interval(db, plug.id, 10000)
 
     logger.info(
         "Session stopped",

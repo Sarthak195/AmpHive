@@ -19,7 +19,8 @@ have no counterparty:
   memberships, capacity requests, weekly charge routines, charger reviews,
   charger photos (the rows, and the stored image objects best-effort after
   the commit), queued charges, upcoming reservations, and any outstanding
-  password-reset / email-verification tokens. Personal API tokens (F7) are
+  password-reset / email-verification tokens, and bound OCPP idTags (C2; that
+  table stays empty while its flag is off). Personal API tokens (F7) are
   revoked (revoked_at stamped) in the same commit, so none outlives the
   account. The tombstone's notification_prefs are cleared. [C9] Group invites
   the person accepted, or that were sent to their address, keep their row (the
@@ -74,6 +75,7 @@ from backend.database.models import (
     GroupMembership,
     LedgerTransaction,
     Notification,
+    OcppIdTag,
     PasswordResetToken,
     PlugPhoto,
     PlugPhotoStatus,
@@ -272,6 +274,7 @@ async def close_account(db: AsyncSession, user: User) -> dict:
         ("capacity_requests", CapacityRequest, CapacityRequest.user_id),
         ("password_reset_tokens", PasswordResetToken, PasswordResetToken.user_id),
         ("email_verification_tokens", EmailVerificationToken, EmailVerificationToken.user_id),
+        ("ocpp_id_tags", OcppIdTag, OcppIdTag.user_id),
     ):
         result = await db.execute(
             delete(model).where(column == user_id).execution_options(synchronize_session=False)
