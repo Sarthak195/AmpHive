@@ -1118,7 +1118,8 @@ async def _routine_start_then_settle(settle_factories):
     chain.execute.side_effect = list(chain.execute.side_effect)[:-1] + [_s1n(3)]
     svc = SessionReaperService(_factory(_scan_db([1]), chain), AsyncMock())
     with patch("backend.services.session_start.begin_active_session",
-               AsyncMock(return_value=_started_session())),          patch("backend.services.notifications.notify", AsyncMock()) as notify:
+               AsyncMock(return_value=_started_session())), \
+         patch("backend.services.notifications.notify", AsyncMock()) as notify:
         assert await svc.reap_queued_starts_once() == 1
         notify.assert_not_awaited()
         for factory in settle_factories:

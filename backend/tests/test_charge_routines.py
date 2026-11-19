@@ -506,6 +506,43 @@ async def test_waiting_and_cancelled_rows_do_not_count():
     notify.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("row_status, after", [
+    (QueuedChargeStatus.CANCELLED, []),
+    (QueuedChargeStatus.EXPIRED, []),
+    (QueuedChargeStatus.STARTED, ["routine_started"]),
+])
+async def test_hours_edit_disabled_routine_sends_nothing_after_its_one_start_notice(row_status, after):
+    """[Wave 4 FX2 x FX3] A routine an opening-hours edit turned off gets one
+    routine_disabled, then settle adds nothing: its withdrawn (CANCELLED) or
+    expired row is silent, and an occurrence that already started before the
+    edit keeps exactly one start notice (routine_started, with no reaper
+    queued_charge_started fallback on top)."""
+    routine = _routine(last_qc=11)
+    plug = _plug()
+    plug.opening_hours = [{"days": ALL_DAYS, "start": 12 * 60, "end": 20 * 60}]
+    routines = MagicMock()
+    routines.scalars.return_value.all.return_value = [routine]
+    edit_db = _db(routines, MagicMock())   # routine select, cancel_pending update
+    pending = await svc.disable_closed_routines(edit_db, plug)
+    assert routine.enabled is False
+
+    reaper_svc = SessionReaperService(None, AsyncMock())
+    if row_status == QueuedChargeStatus.STARTED:
+        # The sweep started the occurrence before the edit and stashed it.
+        reaper_svc._routine_starts[11] = (5, 1, 77, "Your scheduled charge started", "b")
+    scan, db = _settle_dbs(
+        routine, _qc(row_status, session_id=77),
+        with_name=row_status != QueuedChargeStatus.CANCELLED,
+    )
+    reaper_svc.db_session_factory = _factory(scan, db)
+    with patch("backend.services.notifications.notify", AsyncMock()) as notify:
+        await svc.send_disabled_notices(plug.id, pending)
+        await reaper_svc.settle_routines_once()
+    assert [c.args[1] for c in notify.await_args_list] == ["routine_disabled", *after]
+    assert reaper_svc._routine_starts == {}
+
+
 # --------------------------------------------------------------------------
 # API (DB-free)
 # --------------------------------------------------------------------------
