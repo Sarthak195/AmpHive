@@ -226,8 +226,8 @@ def _manager():
 
     MQTTManager._instance = None
     mgr = MQTTManager(db_session_factory=lambda: None)
-    mgr._maybe_auto_stop_on_exhaustion = AsyncMock()
-    mgr._maybe_auto_stop_on_limits = AsyncMock()
+    mgr._maybe_auto_stop_on_exhaustion = AsyncMock(return_value=False)
+    mgr._maybe_auto_stop_on_limits = AsyncMock(return_value=False)
     mgr._on_charge_full = AsyncMock()
     return mgr
 
@@ -378,8 +378,8 @@ def _real_handler_manager():
 
     MQTTManager._instance = None
     mgr = MQTTManager(telemetry_store=MagicMock(), db_session_factory=lambda: None)
-    mgr._maybe_auto_stop_on_exhaustion = AsyncMock()
-    mgr._maybe_auto_stop_on_limits = AsyncMock()
+    mgr._maybe_auto_stop_on_exhaustion = AsyncMock(return_value=False)
+    mgr._maybe_auto_stop_on_limits = AsyncMock(return_value=False)
     return mgr
 
 

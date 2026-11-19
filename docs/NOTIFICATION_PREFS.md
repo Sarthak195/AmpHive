@@ -59,7 +59,9 @@ Detection uses real live samples only (no offline-resync replays, relay ON,
 `watts` present), like the charge-complete detector. A drop to idle restarts
 the `power_dropped` timer, so it never duplicates "Your car looks fully
 charged". A relay-OFF frame or a gap longer than the reaper's stale window also
-restarts it.
+restarts it. When the same frame auto-stops the session (wallet or hold
+exhausted, energy or time limit), neither notice is sent, and neither is the
+"looks fully charged" handling: the driver already has the stop receipt.
 
 The per-session dedupe is in memory and keyed by plug. A backend restart clears
 it, so a session can see each notice once more at most.

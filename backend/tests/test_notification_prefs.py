@@ -316,6 +316,19 @@ async def test_persist_path_sends_nearly_done_and_power_dropped_once(_knobs):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("helper", ["_maybe_auto_stop_on_exhaustion", "_maybe_auto_stop_on_limits"])
+async def test_no_notice_on_the_frame_that_auto_stops_the_session(_knobs, helper):
+    mgr = _manager()
+    setattr(mgr, helper, AsyncMock(return_value=True))
+    row = _session_row(auto_stop=False)
+    row.max_kwh = 5.5
+    with patch("backend.services.notifications.notify", AsyncMock()) as notify:
+        await _persist_frame(mgr, row, 10, 600.0)
+    assert "nearly_done" not in [c.args[1] for c in notify.await_args_list]
+    mgr._on_charge_full.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_persist_path_ignores_offline_replays(_knobs):
     mgr = _manager()
     row = _session_row(auto_stop=False)
