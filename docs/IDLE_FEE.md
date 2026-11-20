@@ -61,6 +61,11 @@ it is about money), stating the grace, the rate and the cap. It replaces the
 plain `charge_full` notice for that session and uses the same durable claim
 (`full_notified_at`), so a restart never repeats it.
 
+The claim is stamped before `notify()` runs, and accrual keys on that stamp. When
+`notify()` reports that it could not record the warning (it returns None), the
+session's fee is voided for good (`idle_seconds = -1`, the renewed-draw
+sentinel), so a fee is never billed for a warning that was never stored.
+
 ## Billing
 
 Settled once, in `finalize_charging_session`, in the same transaction and under
@@ -106,5 +111,9 @@ The receipt, the session detail route and the stop notification carry
   routine is saved, but a fee a CPO adds or raises later is not shown again
   before each run; the driver learns of it from the terms on the live
   session screen and the idle notice, and can dispute it.
+- A crash (or a failed void UPDATE) between the notice claim and `notify()`
+  loses the warning, and the fee still accrues and settles at finalize. A
+  failed `notify()` that returns is handled (the fee is voided); a process
+  dying in between is not. The driver can dispute such a fee.
 - An unlimited session (no energy limit) reserves the available balance, so a
   session that spends its whole hold on energy has nothing left for the fee.

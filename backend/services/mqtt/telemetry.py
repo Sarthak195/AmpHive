@@ -997,12 +997,16 @@ class MQTTTelemetryMixin:
         )
         if send_notice and idle_terms is not None:
             from backend.services.idle_fee import terms_text
-            await notify(
+            sent = await notify(
                 user_id, "idle_fee_notice", "Charging done, please stop and unplug",
                 f"Power draw has stayed near zero for {CHARGE_FULL_MINUTES:g} minutes. "
                 f"{terms_text(*idle_terms)}",
                 severity="info", plug_id=plug_id, session_id=session_id,
             )
+            if sent is None:
+                # notify() could not record the warning, and the claim above
+                # means it is never retried: no warning, no fee.
+                await self._void_idle_fee(session_id)
         elif send_notice:
             await notify(
                 user_id, "charge_full", "Your car looks fully charged",
@@ -1011,6 +1015,33 @@ class MQTTTelemetryMixin:
             )
         if auto_stop:
             await self._charge_full_stop(session_id, user_id, plug_id)
+
+    async def _void_idle_fee(self, session_id: int) -> None:
+        """[Idle fee C1] Void this session's idle fee for good (the same
+        idle_seconds sentinel a renewed draw writes) because its warning was
+        never recorded. Best effort: a DB error is logged, and the fee then
+        stays as before (a recorded limit in docs/IDLE_FEE.md)."""
+        from sqlalchemy import update
+
+        from backend.database.models import ChargingSession, SessionStatus
+        from backend.services.idle_fee import IDLE_VOID
+
+        try:
+            async with self.db_session_factory() as db:
+                await db.execute(
+                    update(ChargingSession)
+                    .where(
+                        ChargingSession.id == session_id,
+                        ChargingSession.status == SessionStatus.ACTIVE,
+                    )
+                    .values(idle_started_at=None, idle_seconds=IDLE_VOID)
+                )
+                await db.commit()
+            logger.warning("Idle fee voided: its notice was not recorded",
+                           extra={"session_id": session_id})
+        except Exception:
+            logger.exception("Could not void the idle fee after a lost notice",
+                             extra={"session_id": session_id})
 
     async def _claim_session_notice(self, session_id: int, column: str) -> bool:
         """[Durable notice state] Claim a once-per-session notice on the

@@ -233,6 +233,41 @@ async def test_grace_start_sends_one_idle_notice_that_always_pushes():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("recorded", [True, False])
+async def test_idle_fee_is_voided_when_its_notice_was_not_recorded(recorded):
+    """notify() returns None when it could not persist the feed row; the claim
+    is already stamped, so the warning is never retried and the fee is voided
+    (idle_seconds = IDLE_VOID). A recorded notice leaves the fee alone."""
+    from backend.services.mqtt_manager import MQTTManager
+
+    MQTTManager._instance = None
+    db = MagicMock()
+    db.execute = AsyncMock()
+    db.commit = AsyncMock()
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=db)
+    cm.__aexit__ = AsyncMock(return_value=False)
+    mgr = MQTTManager(db_session_factory=lambda: cm)
+    mgr.telemetry_store = None
+    try:
+        result = {"id": 1} if recorded else None
+        with patch("backend.services.notifications.notify", AsyncMock(return_value=result)):
+            await mgr._on_charge_full(42, 3, 5, False, send_notice=True,
+                                      idle_terms=(15, Decimal("2.00"), Decimal("30.00")))
+        if recorded:
+            db.execute.assert_not_awaited()
+        else:
+            db.execute.assert_awaited_once()
+            stmt = db.execute.await_args.args[0]
+            params = stmt.compile().params
+            assert params["idle_seconds"] == IDLE_VOID
+            assert params["idle_started_at"] is None
+            db.commit.assert_awaited_once()
+    finally:
+        MQTTManager._instance = None
+
+
+@pytest.mark.asyncio
 async def test_persist_path_opens_the_idle_stretch_on_a_live_idle_frame():
     """Wiring: the locked telemetry block feeds track_idle on live frames."""
     from backend.tests.test_charge_full import _manager, _persist_frame, _session_row
