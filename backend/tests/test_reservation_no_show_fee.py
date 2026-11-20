@@ -107,6 +107,43 @@ def test_skip_reason_rules():
     assert no_show_skip_reason(plug, None, start_at=start_at, now=now)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "holder, can_access, expected",
+    [
+        (SimpleNamespace(is_disabled=False, deleted_at=None), True, None),
+        (SimpleNamespace(is_disabled=False, deleted_at=None), False,
+         "holder no longer has access to the plug"),
+        (SimpleNamespace(is_disabled=True, deleted_at=None), True,
+         "holder account disabled or closed"),
+        (SimpleNamespace(is_disabled=True, deleted_at=datetime.now(timezone.utc)), True,
+         "holder account disabled or closed"),
+    ],
+)
+async def test_window_skip_reason_checks_the_holder_can_still_start(
+    monkeypatch, holder, can_access, expected
+):
+    """Every start path refuses a disabled account and a private-group plug
+    the holder is no longer a member of, so neither is a no-show. DB-free:
+    every other window query finds nothing."""
+    now = datetime.now(timezone.utc)
+    start_at = now - timedelta(minutes=16)
+    res = MagicMock()
+    res.first.return_value = holder
+    res.scalar_one_or_none.return_value = None
+    res.all.return_value = []
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=res)
+    monkeypatch.setattr(policy, "user_can_access_plug", AsyncMock(return_value=can_access))
+    reservation = SimpleNamespace(user_id=3, start_at=start_at, end_at=start_at + timedelta(hours=1))
+    plug = SimpleNamespace(id=7, group_id=11, opening_hours=None)
+    gateway = SimpleNamespace(id="gw-1", tenant_id=None)
+    reason = await policy._window_skip_reason(
+        db, reservation, plug, gateway, timedelta(minutes=15)
+    )
+    assert reason == expected
+
+
 def test_plug_update_rejects_a_negative_fee():
     assert CpoPlugUpdateRequest(no_show_fee_coins=10).no_show_fee_coins == 10
     with pytest.raises(ValidationError):
