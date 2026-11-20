@@ -23,6 +23,10 @@ vi.mock('../../components/ui', () => ({
   useToast: () => toast,
 }));
 
+vi.mock('qrcode.react', () => ({
+  QRCodeSVG: ({ value }) => <svg data-testid="qr" data-value={value} />,
+}));
+
 vi.mock('../../components/CpoLayout', () => ({
   default: ({ children }) => <div>{children}</div>,
 }));
@@ -398,6 +402,25 @@ describe('QR code', () => {
 
     expect(screen.getByRole('dialog', { name: 'Charger QR code' })).toBeInTheDocument();
     expect(screen.getByText(/Opens AmpHive with this charger prefilled/)).toBeInTheDocument();
+  });
+});
+
+describe('Share network status QR', () => {
+  it('opens a printable QR dialog pointing at the public /map page', async () => {
+    mockApi();
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText('Bay 1');
+
+    await user.click(screen.getByRole('button', { name: /share network status/i }));
+
+    const dialog = screen.getByRole('dialog', { name: 'Network status QR code' });
+    expect(within(dialog).getByText(/public network status page/)).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: /print/i })).toBeInTheDocument();
+    expect(within(dialog).getByTestId('qr')).toHaveAttribute(
+      'data-value',
+      `${window.location.origin}/map`,
+    );
   });
 });
 

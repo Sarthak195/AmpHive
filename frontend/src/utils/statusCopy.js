@@ -88,6 +88,8 @@ export const RESERVATION_STATUS_LABELS = {
   fulfilled: 'Fulfilled',
   cancelled: 'Cancelled',
   expired: 'Expired',
+  pending: 'Awaiting approval',
+  declined: 'Declined',
 };
 
 export function reservationStatusLabel(status) {
@@ -119,6 +121,10 @@ export const TX_TYPE_LABELS = {
   // Cash top-ups and redeemed promo codes share this type; the ledger
   // description says which.
   cpo_topup: 'Credit added by operator',
+  // [Idle fee C1] Settled once at the stop, for a car left plugged in after
+  // it looked full (the tariff's opt-in idle fee).
+  idle_fee: 'Idle fee',
+  reservation_no_show_fee: 'Reservation no-show fee',
 };
 
 export function txTypeLabel(type) {

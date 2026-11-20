@@ -29,8 +29,9 @@ hold, billing and the start, exactly as for a one-off scheduled charge.
    - closed or disabled account: stamp, nothing else;
    - queued/scheduled charging off for the plug: stamp and skip; the
      routine stays enabled and the driver gets one `routine_skipped`
-     ("paused") notification per outage (`gate_notified`, cleared by the next
-     queued row), so it resumes by itself when the gate is back on (the API
+     ("paused") notification per outage (`gate_notified`, re-armed by the
+     next materialize pass that finds the gate on, whether or not that
+     occurrence is queued, so a second outage is noticed too), so it resumes by itself when the gate is back on (the API
      refuses to create or re-enable a routine while the gate is off);
    - the driver already has a WAITING row on that plug: stamp and skip;
    - lost private-group access, another driver's WAITING row on the plug, or
@@ -45,15 +46,21 @@ hold, billing and the start, exactly as for a one-off scheduled charge.
    `routine_started` is the occurrence's only start notice: the queued-start
    sweep sees that a routine owns the row (`last_queued_charge_id`) and sends
    neither `queued_charge_started` nor C7's `session_started`
-   (`begin_active_session(announce_start=False)`). On a plug outside its
+   (`begin_active_session(announce_start=False)`). If the routine is
+   deleted (or its link cleared) between the sweep's start and the settle
+   pass, settle no longer finds it and the reaper falls back to
+   `queued_charge_started`, so the start still gets exactly one notice. On a plug outside its
    opening hours (C4) the row stays WAITING until the plug opens or the row's
    TTL lapses; that EXPIRED row counts as one failure. (Both integrated on
    `release/2026-11-17-w3`.)
 
 Creating a routine, re-enabling it, or editing its days or start time on a
 plug with opening hours (C4) is refused with 409 `plug_closed` when the plug
-is closed at the start time on any selected weekday. Hours a CPO edits later
-still take the WAITING-then-EXPIRED path above.
+is closed at the start time on any selected weekday. When a CPO later edits a
+plug's opening hours, every enabled routine whose start time is now closed on
+a selected weekday is turned off in the same request (its WAITING row
+cancelled) and its owner gets one `routine_disabled` notice. An occurrence
+that already started keeps its one `routine_started`.
 
 Creating a routine, re-enabling it, or editing its days or start time stamps
 an occurrence whose start already passed (within the window), so a routine

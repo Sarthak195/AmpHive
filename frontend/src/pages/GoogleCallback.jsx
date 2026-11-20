@@ -27,6 +27,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import AuthShell from '../components/AuthShell';
 import api from '../api/client';
 import { useAuth } from '../contexts/AuthContext';
+import { takePostLoginPath } from '../utils/safePath';
 
 const GoogleCallback = () => {
   const { loginWithToken } = useAuth();
@@ -54,6 +55,9 @@ const GoogleCallback = () => {
     // in place would keep a (single-use) sign-in code recoverable from browser
     // history on a shared machine even after an error.
     window.history.replaceState(null, '', window.location.pathname + window.location.search);
+    // Taken (and cleared) once, on every path, so a stale target never
+    // outlives this attempt. Re-validated: only a same-app path, else Home.
+    const target = takePostLoginPath();
 
     if (!code) {
       setError('Google sign-in did not complete. Please try again.');
@@ -68,7 +72,7 @@ const GoogleCallback = () => {
         // that actually finished the flow.
         const { token } = await api.post('/api/auth/google/exchange', { code });
         await loginWithToken(token);
-        navigate('/', { replace: true });
+        navigate(target, { replace: true });
       } catch (err) {
         if (err.code === 'already_signed_in') setAlreadySignedIn(true);
         setError(err.message || 'Google sign-in did not complete. Please try again.');

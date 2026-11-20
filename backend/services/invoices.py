@@ -26,7 +26,7 @@ import logging
 import os
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Optional, Tuple
+from typing import Callable, Optional, Tuple
 
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
@@ -98,7 +98,7 @@ def _financial_year_label(at: datetime) -> str:
     return f"{start_year}-{str(start_year + 1)[-2:]}"
 
 
-async def _get_invoice_by_session(db: AsyncSession, session_id: int) -> Optional[Invoice]:
+async def get_invoice_by_session(db: AsyncSession, session_id: int) -> Optional[Invoice]:
     result = await db.execute(select(Invoice).where(Invoice.session_id == session_id))
     return result.scalar_one_or_none()
 
@@ -127,7 +127,7 @@ async def issue_invoice_for_session(db: AsyncSession, session_id: int) -> Invoic
     Raises SessionNotInvoiceableError if the session doesn't exist, hasn't
     finished (COMPLETED/PAID), or billed nothing (coins_spent <= 0).
     """
-    existing = await _get_invoice_by_session(db, session_id)
+    existing = await get_invoice_by_session(db, session_id)
     if existing is not None:
         return existing
 
@@ -238,7 +238,7 @@ async def issue_invoice_for_session(db: AsyncSession, session_id: int) -> Invoic
         # (still uncommitted), so no invoice_number is burned. Return the
         # winner's row.
         await db.rollback()
-        winner = await _get_invoice_by_session(db, session_id)
+        winner = await get_invoice_by_session(db, session_id)
         if winner is not None:
             return winner
         raise
@@ -302,7 +302,7 @@ async def adjust_invoice_for_session_refund(
     off at issue time (coins_spent is deliberately never rewritten by a
     refund).
     """
-    invoice = await _get_invoice_by_session(db, session_id)
+    invoice = await get_invoice_by_session(db, session_id)
     if invoice is None:
         return None
 
@@ -371,7 +371,13 @@ def invoice_to_dict(invoice: Invoice) -> dict:
     }
 
 
-async def render_invoice_html(db: AsyncSession, invoice: Invoice) -> str:
+async def render_invoice_html(
+    db: AsyncSession,
+    invoice: Invoice,
+    *,
+    redact_name: Optional[Callable[[Optional[str]], Optional[str]]] = None,
+    redact_email: Optional[Callable[[Optional[str]], Optional[str]]] = None,
+) -> str:
     """Minimal printable HTML rendering of `invoice` (inline CSS, no PDF
     dependency — meant to be saved/printed via the browser's own print
     dialog). Looks up the driver's display name/email live (not snapshotted
@@ -381,11 +387,20 @@ async def render_invoice_html(db: AsyncSession, invoice: Invoice) -> str:
     User-controlled strings (tenant legal name/GSTIN, driver name/email) are
     HTML-escaped before interpolation — a CPO or driver profile field is not
     a trusted string just because it's our own data.
+
+    `redact_name` / `redact_email` (a read-only cpo_viewer's masking, F10) are
+    applied to the Bill To name and email before escaping.
     """
     driver_result = await db.execute(select(User).where(User.id == invoice.driver_user_id))
     driver = driver_result.scalar_one_or_none()
-    driver_name = html.escape(driver.full_name) if driver else "Driver"
-    driver_email = html.escape(driver.email) if driver else ""
+    name = driver.full_name if driver else "Driver"
+    email = driver.email if driver else ""
+    if redact_name is not None:
+        name = redact_name(name) or ""
+    if redact_email is not None:
+        email = redact_email(email) or ""
+    driver_name = html.escape(name)
+    driver_email = html.escape(email)
 
     seller_name = html.escape(invoice.seller_legal_name) if invoice.seller_legal_name else "(legal name not configured)"
     seller_gstin = html.escape(invoice.seller_gstin) if invoice.seller_gstin else "(GSTIN not configured)"

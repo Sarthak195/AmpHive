@@ -29,6 +29,7 @@ import logging
 import os
 import smtplib
 from email.message import EmailMessage
+from typing import Optional
 
 logger = logging.getLogger("amphive.email")
 
@@ -38,8 +39,9 @@ def frontend_origin() -> str:
     return os.getenv("FRONTEND_ORIGIN", "https://amphive.app").rstrip("/")
 
 
-def _send_via_smtp(to_addr: str, subject: str, body: str) -> None:
-    """Blocking STARTTLS send. Caller decides threading + error policy."""
+def _send_via_smtp(to_addr: str, subject: str, body: str, html: Optional[str] = None) -> None:
+    """Blocking STARTTLS send. Caller decides threading + error policy. An
+    `html` part makes the message multipart/alternative (plain text first)."""
     host = os.environ["SMTP_HOST"]
     port = int(os.getenv("SMTP_PORT", "587"))
     user = os.getenv("SMTP_USER", "")
@@ -51,6 +53,8 @@ def _send_via_smtp(to_addr: str, subject: str, body: str) -> None:
     msg["To"] = to_addr
     msg["Subject"] = subject
     msg.set_content(body)
+    if html:
+        msg.add_alternative(html, subtype="html")
 
     with smtplib.SMTP(host, port, timeout=15) as smtp:
         smtp.starttls()
@@ -69,6 +73,17 @@ def _console_fallback_shows_body() -> bool:
     return os.getenv("EMAIL_CONSOLE_FALLBACK", "").strip().lower() in (
         "full", "1", "true", "yes", "on",
     )
+
+
+def smtp_configured() -> bool:
+    return bool(os.getenv("SMTP_HOST"))
+
+
+def send_email_or_raise(to_addr: str, subject: str, body: str, html: Optional[str] = None) -> None:
+    """Blocking SMTP send that RAISES on failure, for callers that must retry
+    (the monthly insights email). Unlike send_email there is no console
+    fallback: check smtp_configured() first."""
+    _send_via_smtp(to_addr, subject, body, html)
 
 
 def send_email(to_addr: str, subject: str, body: str) -> None:

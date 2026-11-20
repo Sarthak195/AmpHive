@@ -23,6 +23,7 @@ from backend.schemas import (
     CpoPlugUpdateRequest,
 )
 from backend.services.audit import try_record_audit
+from backend.services.money import to_money
 from backend.services.plug_hours import (
     access_note_of,
     amenities_of,
@@ -31,6 +32,12 @@ from backend.services.plug_hours import (
     normalize_amenities,
     normalize_hours,
 )
+from backend.services.reservations import (
+    RESERVATION_NO_SHOW_FEE_MAX_COINS,
+    no_show_fee_of,
+    reservation_mode_of,
+)
+from backend.services.routines import disable_closed_routines, send_disabled_notices
 
 from ._common import (
     DEFAULT_LIST_LIMIT,
@@ -102,6 +109,9 @@ async def cpo_list_plugs(
             "max_session_minutes": max_minutes_of(plug),
             "amenities": amenities_of(plug),
             "access_note": redact_for(user, access_note_of(plug)),
+            # [C8] Booking mode: instant or approval.
+            "reservation_mode": reservation_mode_of(plug),
+            "no_show_fee_coins": float(no_show_fee_of(plug)),
             "last_seen_at": plug.last_seen_at.isoformat() if plug.last_seen_at else None,
             "created_at": plug.created_at.isoformat() if plug.created_at else None,
         }
@@ -293,9 +303,28 @@ async def cpo_update_plug(
         plug.max_session_minutes = req.max_session_minutes or None
     if "access_note" in fields:
         plug.access_note = (req.access_note or "").strip() or None
+    if req.reservation_mode is not None:
+        # [C8] Requests already PENDING stay pending until answered or expired.
+        plug.reservation_mode = req.reservation_mode
+    if req.no_show_fee_coins is not None:
+        # [C8] Server-side cap; existing bookings keep the fee they were shown.
+        fee = to_money(req.no_show_fee_coins)
+        if fee > RESERVATION_NO_SHOW_FEE_MAX_COINS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"The no-show fee can be at most {RESERVATION_NO_SHOW_FEE_MAX_COINS} coins.",
+            )
+        plug.no_show_fee_coins = fee
+
+    # [Plug hours] Routines whose start time the new hours close would fail
+    # every occurrence: turn them off now, in this request.
+    disabled_routines = (
+        await disable_closed_routines(db, plug) if "opening_hours" in fields else []
+    )
 
     await db.commit()
     await db.refresh(plug)
+    await send_disabled_notices(plug.id, disabled_routines)
 
     logger.info(f"CPO plug updated: {plug.id} ({plug.name}) by {user.email}")
 

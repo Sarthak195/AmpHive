@@ -38,6 +38,7 @@ import {
   Printer,
   QrCode,
   Search,
+  Share2,
   Users,
   PlugZap,
   Wrench,
@@ -55,12 +56,19 @@ import PlugHoursEditor from '../../components/PlugHoursEditor';
 import { useToast } from '../../components/ui';
 import api from '../../api/client';
 import { useConfig } from '../../contexts/ConfigContext';
+import { driverOrigin } from '../../utils/appHost';
 import { useSession } from '../../contexts/SessionContext';
 import usePoll from '../../hooks/usePoll';
 import { getPlugAvailability, AVAILABILITY_STATES, AVAILABILITY_LABELS } from '../../utils/plugAvailability';
 import { apiErrorCopy } from '../../utils/statusCopy';
 import { hoursFormFromPlug, hoursPatch } from '../../utils/plugHours';
 import './CpoChargers.css';
+
+// [C8] How a booking on this charger is confirmed.
+const RESERVATION_MODE_OPTIONS = [
+  { value: 'instant', label: 'Instant (booked at once)' },
+  { value: 'approval', label: 'Needs my approval' },
+];
 
 const QUEUED_OPTIONS = [
   { value: '', label: 'Inherit tenant default' },
@@ -338,6 +346,8 @@ export default function CpoChargers() {
     tariff_id: '',
     rated_power_w: '',
     connector_type: '',
+    reservation_mode: 'instant',
+    no_show_fee_coins: '',
   });
   // [Plug hours] Opening hours, max session length, amenities, access note.
   const [hoursForm, setHoursForm] = useState(() => hoursFormFromPlug(null));
@@ -356,6 +366,8 @@ export default function CpoChargers() {
       tariff_id: plug.tariff_id != null ? String(plug.tariff_id) : '',
       rated_power_w: plug.rated_power_w ?? '',
       connector_type: plug.connector_type ?? '',
+      reservation_mode: plug.reservation_mode || 'instant',
+      no_show_fee_coins: plug.no_show_fee_coins ? String(plug.no_show_fee_coins) : '',
     });
     setHoursForm(hoursFormFromPlug(plug));
     setEditError('');
@@ -403,6 +415,14 @@ export default function CpoChargers() {
       if (editForm.connector_type !== (editingPlug.connector_type ?? '')) {
         body.connector_type = editForm.connector_type;
       }
+      if (editForm.reservation_mode !== (editingPlug.reservation_mode || 'instant')) {
+        body.reservation_mode = editForm.reservation_mode;
+      }
+      // [C8] Blank or 0 = no no-show fee.
+      const newFee = editForm.no_show_fee_coins === '' ? 0 : Number(editForm.no_show_fee_coins);
+      if (newFee !== (Number(editingPlug.no_show_fee_coins) || 0)) {
+        body.no_show_fee_coins = newFee;
+      }
       Object.assign(body, hoursPatch(hoursForm, editingPlug));
 
       if (Object.keys(body).length > 0) {
@@ -429,6 +449,8 @@ export default function CpoChargers() {
 
   /* ---- QR modal ---------------------------------------------------------- */
   const [qrPlug, setQrPlug] = useState(null);
+  /* Printable QR to the public network status page (/map on the driver origin). */
+  const [shareOpen, setShareOpen] = useState(false);
 
   /* ---- table columns ------------------------------------------------------ */
   const columns = [
@@ -543,10 +565,16 @@ export default function CpoChargers() {
         title="Chargers"
         sub="Manage your smart chargers, their groups, and pricing."
         actions={
-          <button data-write type="button" className="btn btn-primary" onClick={openAdd}>
-            <Plus size={16} aria-hidden="true" />
-            Add charger
-          </button>
+          <>
+            <button type="button" className="btn btn-quiet" onClick={() => setShareOpen(true)}>
+              <Share2 size={16} aria-hidden="true" />
+              Share network status
+            </button>
+            <button data-write type="button" className="btn btn-primary" onClick={openAdd}>
+              <Plus size={16} aria-hidden="true" />
+              Add charger
+            </button>
+          </>
         }
       />
 
@@ -971,6 +999,47 @@ export default function CpoChargers() {
                   How long power must stay on before a queued charge auto-starts.
                 </p>
               </div>
+              <div className="field">
+                <label className="field-label" htmlFor="cpo-chargers-edit-resv-mode">
+                  Reservations
+                </label>
+                <select
+                  id="cpo-chargers-edit-resv-mode"
+                  className="select"
+                  value={editForm.reservation_mode}
+                  onChange={(e) => setEditForm({ ...editForm, reservation_mode: e.target.value })}
+                >
+                  {RESERVATION_MODE_OPTIONS.map((o) => (
+                    <option key={o.value} value={o.value}>
+                      {o.label}
+                    </option>
+                  ))}
+                </select>
+                <p className="field-help">
+                  With approval, a booking waits in Reservations until you approve or decline it.
+                  An unanswered request expires at its start time.
+                </p>
+              </div>
+              <div className="field">
+                <label className="field-label" htmlFor="cpo-chargers-edit-noshow">
+                  No-show fee (coins)
+                </label>
+                <input
+                  id="cpo-chargers-edit-noshow"
+                  className="input"
+                  type="number"
+                  min="0"
+                  step="1"
+                  placeholder="None"
+                  value={editForm.no_show_fee_coins}
+                  onChange={(e) => setEditForm({ ...editForm, no_show_fee_coins: e.target.value })}
+                />
+                <p className="field-help">
+                  Charged when a confirmed booking goes unused, and shown to drivers before they
+                  book. Never charged while this charger is offline or out of service, never more
+                  than the driver&apos;s available credit. Blank = no fee.
+                </p>
+              </div>
             </Section>
 
             <Section title="Hours and access">
@@ -1025,6 +1094,53 @@ export default function CpoChargers() {
             <p className="text-3 text-sm cpo-chargers-qr-footnote">
               Opens AmpHive with this charger prefilled — the driver still signs in and taps
               Start.
+            </p>
+          </>
+        )}
+      </Modal>
+
+      {/* Share network status: printable QR to the public /map page */}
+      <Modal
+        open={shareOpen}
+        onClose={() => setShareOpen(false)}
+        title="Network status QR code"
+        size="sm"
+        footer={
+          <>
+            <button type="button" className="btn btn-quiet" onClick={() => setShareOpen(false)}>
+              Close
+            </button>
+            <button type="button" className="btn btn-primary" onClick={() => window.print?.()}>
+              <Printer size={16} aria-hidden="true" />
+              Print
+            </button>
+          </>
+        }
+      >
+        {shareOpen && (
+          <>
+            <div className="print-area cpo-chargers-qr-sheet">
+              <div className="cpo-chargers-qr-brand">
+                <span className="brand-bolt">
+                  <Zap size={16} aria-hidden="true" />
+                </span>
+                <span>AmpHive</span>
+              </div>
+              <div className="cpo-chargers-qr-box">
+                <QRCodeSVG
+                  value={`${driverOrigin()}/map`}
+                  size={200}
+                  bgColor="#ffffff"
+                  fgColor="#0C0E07"
+                  level="M"
+                  marginSize={2}
+                />
+              </div>
+              <p className="cpo-chargers-qr-name">Live charger status</p>
+              <p className="cpo-chargers-qr-hint">Scan to see which chargers are free</p>
+            </div>
+            <p className="text-3 text-sm cpo-chargers-qr-footnote">
+              Opens the public network status page. No sign-in needed.
             </p>
           </>
         )}

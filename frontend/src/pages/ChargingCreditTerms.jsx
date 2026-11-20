@@ -72,6 +72,24 @@ export default function ChargingCreditTerms() {
             when the session ends</strong>, and any unused reservation is
             released. A GST tax invoice is available for every billed session.
           </p>
+          <p className="text-2">
+            Where the host has set an idle fee (shown before you start), the
+            per-minute fee for staying plugged in after the car looks fully
+            charged is also deducted when the session ends, as its own line in
+            your credit history. It never exceeds the stated maximum or the
+            amount reserved for the session.
+          </p>
+          <p className="text-2">
+            <strong>Reservation no-show fee.</strong> A host may set a no-show
+            fee on a charger. If so, it is shown before you book. It is deducted
+            from your credit only when a confirmed booking goes unused (no
+            charge started within 15 minutes of the slot starting), at most once
+            per booking, and never more than your available credit, so your
+            balance never goes below zero. It is not charged for a request the
+            host never approved, for a booking you cancel before the slot
+            starts, or when the charger was offline or out of service during
+            the slot.
+          </p>
         </section>
 
         <section className="card">

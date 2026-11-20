@@ -45,6 +45,7 @@ from backend.services.pricing import (
     _to_local,
     _zone,
     default_rate,
+    member_price_override,
 )
 
 # The mains voltage the telemetry layer assumes when a frame carries none.
@@ -193,7 +194,12 @@ async def estimate_charge(
         power_w, max_kwh, max_duration_min, hours_cap_min
     )
 
-    if tariff is None:
+    # [C9 member price] A member override is one flat rate for the whole
+    # charge, exactly as the start path freezes it.
+    override = await member_price_override(db, user_id, plug)
+    if override is not None:
+        slots, base = [], override
+    elif tariff is None:
         slots, base = [], default_rate()
     else:
         slots = (

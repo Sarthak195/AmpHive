@@ -38,6 +38,11 @@ ALWAYS_PUSH_TYPES = frozenset({
     "topup_credited",
     "topup_refunded",
     "promo_redeemed",
+    "reservation_no_show_fee",
+    # Booking changes (C8): an operator approved a PENDING request, so the
+    # slot is now held for the driver. reservation_declined is sent at
+    # severity warning, which always pushes.
+    "reservation_approved",
     # Safety and faults.
     "orphan_off",
     "charger_offline",
@@ -48,14 +53,17 @@ ALWAYS_PUSH_TYPES = frozenset({
     "gateway_fault",
     # F1 "your car looks fully charged" notice.
     "charge_full",
+    # C1 "Charging done, please stop and unplug": an idle fee is about to
+    # start, so it is about money (services/idle_fee.py).
+    "idle_fee_notice",
     # Charge routines (services/routines.py, C5).
     "routine_started",
     "routine_disabled",
     # A one-off scheduled or outage-queue auto-start: like routine_started, the
     # relay energizes with nobody at the plug, so it pushes once even in quiet
-    # hours. (session_started stays suppressible; rate_changed stays muted by
-    # quiet hours: it is forward-only and the session_stopped receipt, which
-    # always pushes, carries the totals.)
+    # hours. It is that start's only notice (the sweep suppresses
+    # session_started). rate_changed stays suppressible: it is forward-only and
+    # the session_stopped receipt, which always pushes, carries the totals.
     "queued_charge_started",
 })
 
@@ -66,12 +74,22 @@ _HHMM = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 
 
 class PushToggles(BaseModel):
-    """Per-type push switches, one per suppressible type, all on by default."""
+    """Per-type push switches, one per suppressible type, all on by default.
+    Field names are the notification type strings. Informational types only:
+    reservation_cancelled (an operator pulled the booking) and
+    reservation_ahead (your session will be stopped) are warnings and always
+    push, so they have no toggle."""
     model_config = ConfigDict(extra="forbid")
 
     session_started: bool = True
     nearly_done: bool = True
     power_dropped: bool = True
+    rate_changed: bool = True
+    plug_available: bool = True
+    reservation_booked: bool = True
+    reservation_started: bool = True
+    # The "your charge is queued / scheduled" creation confirmation.
+    queued: bool = True
 
 
 SUPPRESSIBLE_TYPES = frozenset(PushToggles.model_fields)

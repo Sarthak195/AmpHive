@@ -312,6 +312,7 @@ export const SessionProvider = ({ children }) => {
           plug_name: result.plug_name,
           started_at: startedAt,
           ...effectiveLimits,
+          auto_stop_when_full: Boolean(result.auto_stop_when_full ?? limits?.auto_stop_when_full),
         },
         ...prev,
       ]);

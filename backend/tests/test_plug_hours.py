@@ -182,6 +182,7 @@ def test_driver_fields_say_open_now_and_closing_time():
 def _start_patches(session_start, mqtt):
     return (
         patch.object(session_start, "check_circuit_admission", AsyncMock()),
+        patch.object(session_start, "member_price_override", AsyncMock(return_value=None)),
         patch.object(session_start, "resolve_rate_window",
                      AsyncMock(return_value=(Decimal("5.00"), None))),
         patch.object(session_start, "available_balance", AsyncMock(return_value=Decimal("500"))),
@@ -431,3 +432,128 @@ def test_driver_plug_routes_mask_the_access_note_for_a_viewer():
     driver = MagicMock(role=UserRole.DRIVER)
     assert "9876543210" not in _hours_fields(plug, TZ_NAME, now, viewer)["access_note"]
     assert _hours_fields(plug, TZ_NAME, now, driver)["access_note"] == "Ring 9876543210 at the gate"
+
+
+# --- [FX2] outage row expiring while the plug is closed ----------------------------
+
+async def _expire_outage_row(plug, tz_name=TZ_NAME):
+    qc = _qc(expires_in_min=-1)  # outage queue row (not_before None), past its TTL
+    results = [_s1n(qc), _s1n(plug)]
+    if plug.opening_hours:
+        results.append(_s1n(tz_name))
+    svc = SessionReaperService(_factory(_scan_db([1]), _row_db(*results)), AsyncMock())
+    with patch("backend.services.notifications.notify", AsyncMock()) as notify:
+        await svc.reap_queued_starts_once()
+    assert qc.status == QueuedChargeStatus.EXPIRED
+    assert notify.await_args.args[1] == "queued_charge_expired"
+    return notify.await_args.args[3]
+
+
+@pytest.mark.asyncio
+async def test_outage_row_expiring_while_closed_names_the_opening_hours():
+    plug = _plug(powered=False)
+    plug.opening_hours = _closed_today_hours()
+    body = await _expire_outage_row(plug)
+    assert "closed" in body
+    assert "Power didn't return" not in body
+
+
+@pytest.mark.asyncio
+async def test_outage_row_expiring_while_open_or_24x7_keeps_the_power_message():
+    plug = _plug(powered=False)
+    plug.opening_hours = [{"days": ALL, "start": 0, "end": 1440}]
+    assert "Power didn't return" in await _expire_outage_row(plug)
+    plug24 = _plug(powered=False)
+    plug24.opening_hours = None
+    assert "Power didn't return" in await _expire_outage_row(plug24)
+
+
+# --- [FX2] a CPO hours edit re-checks charge routines -------------------------------
+
+def _routine_row(start, weekdays=ALL, enabled=True, user_id=5):
+    from datetime import time
+
+    return MagicMock(id=3, user_id=user_id, plug_id=7, weekdays=weekdays,
+                     start_time=time(start // 60, start % 60), enabled=enabled,
+                     last_queued_charge_id=None)
+
+
+def _cpo_db_with_routines(plug, routines):
+    plug_result = MagicMock()
+    plug_result.scalar_one_or_none.return_value = plug
+    routine_result = MagicMock()
+    routine_result.scalars.return_value.all.return_value = list(routines)
+    db = MagicMock()
+    db.execute = AsyncMock(side_effect=[plug_result, routine_result])
+    db.commit = AsyncMock()
+    db.refresh = AsyncMock()
+    return db
+
+
+async def _edit_hours(routines, hours):
+    from backend.database.models import PlugStatus
+    from backend.routers.cpo import _plugs
+    from backend.schemas import CpoPlugUpdateRequest
+
+    plug = MagicMock(id=7, status=PlugStatus.AVAILABLE)
+    plug.name = "Bay 1"
+    with patch.object(_plugs, "_publish_gateway_roster", AsyncMock()), \
+         patch("backend.services.notifications.notify", AsyncMock()) as notify:
+        await _plugs.cpo_update_plug(
+            7, CpoPlugUpdateRequest(opening_hours=hours),
+            MagicMock(id=1, tenant_id=1), _cpo_db_with_routines(plug, routines),
+        )
+    return notify
+
+
+@pytest.mark.asyncio
+async def test_hours_edit_that_closes_a_routine_slot_disables_it_and_notifies_once():
+    closed_slot = _routine_row(7 * 60)           # 07:00 daily
+    open_slot = _routine_row(13 * 60, user_id=6)  # 13:00 daily
+    notify = await _edit_hours(
+        [closed_slot, open_slot], [{"days": ALL, "start": 12 * 60, "end": 20 * 60}]
+    )
+    assert closed_slot.enabled is False
+    assert open_slot.enabled is True
+    notify.assert_awaited_once()
+    args = notify.await_args
+    assert args.args[0] == 5 and args.args[1] == "routine_disabled"
+    assert "opening hours" in args.args[3]
+
+
+@pytest.mark.asyncio
+async def test_hours_edit_that_keeps_the_slot_open_changes_nothing():
+    routine = _routine_row(9 * 60, weekdays=MON)
+    notify = await _edit_hours([routine], [{"days": ALL, "start": 8 * 60, "end": 20 * 60}])
+    assert routine.enabled is True
+    notify.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_routine_query_skips_disabled_routines_and_other_edits_skip_the_check():
+    from backend.services.routines import disable_closed_routines
+
+    captured = []
+    result = MagicMock()
+    result.scalars.return_value.all.return_value = []
+    db = MagicMock()
+
+    async def _execute(stmt):
+        captured.append(str(stmt.compile(compile_kwargs={"literal_binds": True})))
+        return result
+
+    db.execute = _execute
+    plug = MagicMock(id=7, opening_hours=[{"days": ALL, "start": 0, "end": 60}])
+    assert await disable_closed_routines(db, plug) == []
+    assert "enabled IS true" in captured[0] and "plug_id = 7" in captured[0]
+
+    # An edit that leaves opening_hours alone never queries routines (the
+    # _cpo_db mock would hand back the plug for a second execute).
+    from backend.database.models import PlugStatus
+    from backend.routers.cpo import _plugs
+    from backend.schemas import CpoPlugUpdateRequest
+
+    plain = _cpo_db(MagicMock(id=7, status=PlugStatus.AVAILABLE))
+    with patch.object(_plugs, "_publish_gateway_roster", AsyncMock()):
+        await _plugs.cpo_update_plug(7, CpoPlugUpdateRequest(name="x"), MagicMock(id=1, tenant_id=1), plain)
+    assert plain.execute.await_count == 1

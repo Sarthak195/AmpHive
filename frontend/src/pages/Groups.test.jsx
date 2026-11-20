@@ -154,3 +154,32 @@ describe('leave a group', () => {
     expect(api.delete).not.toHaveBeenCalled();
   });
 });
+
+describe('[C9] invite link', () => {
+  it('accepts the invite token once and refreshes the list', async () => {
+    api.post.mockResolvedValue({ status: 'joined', group_id: 1, group_name: 'Sunrise Society' });
+    render(
+      <MemoryRouter initialEntries={['/groups?invite=tok123']}>
+        <Groups />
+      </MemoryRouter>
+    );
+
+    await waitFor(() =>
+      expect(api.post).toHaveBeenCalledWith('/api/groups/invites/accept', { token: 'tok123' })
+    );
+    expect(api.post).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(toast.ok).toHaveBeenCalledWith('Joined "Sunrise Society"'));
+  });
+
+  it('toasts a refused invite', async () => {
+    api.post.mockRejectedValue(new Error('Invalid or expired invite link.'));
+    render(
+      <MemoryRouter initialEntries={['/groups?invite=old']}>
+        <Groups />
+      </MemoryRouter>
+    );
+    await waitFor(() =>
+      expect(toast.error).toHaveBeenCalledWith('Invalid or expired invite link.')
+    );
+  });
+});

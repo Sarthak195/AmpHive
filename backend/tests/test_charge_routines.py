@@ -322,6 +322,34 @@ async def test_queued_gate_off_skips_and_tells_the_driver_once():
 
 
 @pytest.mark.asyncio
+async def test_second_gate_outage_is_noticed_even_when_nothing_queued_between():
+    """The gate coming back on re-arms the notice on the next materialize
+    pass, even when that occurrence is skipped for another reason (here the
+    driver's own WAITING row), so a second outage is noticed too."""
+    routine = _routine()
+    with _patched_zone(), patch("backend.services.notifications.notify", AsyncMock()) as notify:
+        # Day 0: gate off, the driver is told.
+        mdb = _db(*_head(routine, _tenant(enabled=False)), _one(_live_user()))
+        await svc.materialize_routines(_factory(_scan([routine]), mdb), now=_ist(MONDAY, 7, 31))
+        assert routine.gate_notified is True
+        # Day 1: gate on, but the occurrence is skipped (own WAITING row).
+        mdb = _db(*_head(routine), _one(_live_user()), _s1n(42))
+        assert await svc.materialize_routines(
+            _factory(_scan([routine]), mdb), now=_ist(MONDAY + timedelta(days=1), 7, 31)
+        ) == 0
+        mdb.add.assert_not_called()
+        assert routine.gate_notified is False
+        # Day 2: gate off again, a second notice.
+        mdb = _db(*_head(routine, _tenant(enabled=False)), _one(_live_user()))
+        await svc.materialize_routines(
+            _factory(_scan([routine]), mdb), now=_ist(MONDAY + timedelta(days=2), 7, 31)
+        )
+    assert notify.await_count == 2
+    assert [c.args[1] for c in notify.await_args_list] == ["routine_skipped", "routine_skipped"]
+    assert routine.gate_notified is True
+
+
+@pytest.mark.asyncio
 async def test_materialize_locks_the_plug_like_the_scheduled_path():
     """queue_charge's scheduled path takes the plug FOR UPDATE; the routine's
     other-driver check must run under the same lock."""
@@ -476,6 +504,43 @@ async def test_waiting_and_cancelled_rows_do_not_count():
     assert routine.consecutive_failures == 1
     assert routine.last_queued_charge_id is None
     notify.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("row_status, after", [
+    (QueuedChargeStatus.CANCELLED, []),
+    (QueuedChargeStatus.EXPIRED, []),
+    (QueuedChargeStatus.STARTED, ["routine_started"]),
+])
+async def test_hours_edit_disabled_routine_sends_nothing_after_its_one_start_notice(row_status, after):
+    """[Wave 4 FX2 x FX3] A routine an opening-hours edit turned off gets one
+    routine_disabled, then settle adds nothing: its withdrawn (CANCELLED) or
+    expired row is silent, and an occurrence that already started before the
+    edit keeps exactly one start notice (routine_started, with no reaper
+    queued_charge_started fallback on top)."""
+    routine = _routine(last_qc=11)
+    plug = _plug()
+    plug.opening_hours = [{"days": ALL_DAYS, "start": 12 * 60, "end": 20 * 60}]
+    routines = MagicMock()
+    routines.scalars.return_value.all.return_value = [routine]
+    edit_db = _db(routines, MagicMock())   # routine select, cancel_pending update
+    pending = await svc.disable_closed_routines(edit_db, plug)
+    assert routine.enabled is False
+
+    reaper_svc = SessionReaperService(None, AsyncMock())
+    if row_status == QueuedChargeStatus.STARTED:
+        # The sweep started the occurrence before the edit and stashed it.
+        reaper_svc._routine_starts[11] = (5, 1, 77, "Your scheduled charge started", "b")
+    scan, db = _settle_dbs(
+        routine, _qc(row_status, session_id=77),
+        with_name=row_status != QueuedChargeStatus.CANCELLED,
+    )
+    reaper_svc.db_session_factory = _factory(scan, db)
+    with patch("backend.services.notifications.notify", AsyncMock()) as notify:
+        await svc.send_disabled_notices(plug.id, pending)
+        await reaper_svc.settle_routines_once()
+    assert [c.args[1] for c in notify.await_args_list] == ["routine_disabled", *after]
+    assert reaper_svc._routine_starts == {}
 
 
 # --------------------------------------------------------------------------
@@ -707,6 +772,30 @@ def test_routine_write_routes_are_in_the_viewer_walk():
     } <= walked
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fn", ["materialize", "settle"])
+async def test_routine_select_is_for_update_skip_locked(fn):
+    """The routine row lock is what makes a double tick (or two workers) queue
+    one row: the first statement of both per-routine passes must compile to
+    FOR UPDATE SKIP LOCKED on Postgres, so dropping skip_locked fails here and
+    not only in CI's DB-gated tests."""
+    statements = []
+    db = AsyncMock()
+
+    async def _execute(stmt, *args, **kwargs):
+        statements.append(stmt)
+        return _s1n(None)
+
+    db.execute = AsyncMock(side_effect=_execute)
+    now = _ist(MONDAY, 7, 31)
+    if fn == "materialize":
+        assert await svc._materialize_one(_factory(db), 1, now) is False
+    else:
+        await svc._settle_one(_factory(db), 1)
+    sql = str(statements[0].compile(dialect=postgresql.dialect()))
+    assert "FOR UPDATE SKIP LOCKED" in sql
+
+
 # ===========================================================================
 # Tier 2: DB-gated (real Postgres, CI only)
 # ===========================================================================
@@ -878,3 +967,80 @@ async def test_db_three_failed_occurrences_disable_the_routine(factory):
     assert routine.enabled is False and routine.consecutive_failures == 3
     assert [c.args[1] for c in notify.await_args_list] == ["routine_disabled"]
     assert len(await _rows(factory, uid)) == 3
+
+
+async def _lock_routine_row(factory, routine_id):
+    """Hold the routine row FOR UPDATE in an open transaction, like a racing
+    worker mid-materialize. Returns the open session."""
+    from sqlalchemy import select
+
+    from backend.database.models import ChargeRoutine
+
+    db = factory()
+    await db.execute(select(ChargeRoutine).where(ChargeRoutine.id == routine_id).with_for_update())
+    return db
+
+
+@requires_db
+@pytest.mark.asyncio
+async def test_db_a_locked_routine_is_skipped_not_waited_for(factory):
+    rid, uid, _ = await _seed(factory)
+    holder = await _lock_routine_row(factory, rid)
+    try:
+        with _patched_zone():
+            # SKIP LOCKED returns at once; a plain FOR UPDATE would block here.
+            assert await asyncio.wait_for(svc._materialize_one(factory, rid, TUE_0001), 10) is False
+    finally:
+        await holder.rollback()
+        await holder.close()
+    assert await _rows(factory, uid) == []
+    assert (await _routine_row(factory, rid)).last_materialized_date is None
+    with _patched_zone(), patch("backend.services.notifications.notify", AsyncMock()):
+        assert await svc._materialize_one(factory, rid, TUE_0001) is True
+    assert len(await _rows(factory, uid)) == 1
+
+
+@requires_db
+@pytest.mark.asyncio
+async def test_db_concurrent_passes_for_one_due_routine_insert_one_row(factory):
+    rid, uid, _ = await _seed(factory)
+    with _patched_zone(), patch("backend.services.notifications.notify", AsyncMock()):
+        results = await asyncio.gather(
+            *[svc._materialize_one(factory, rid, TUE_0001) for _ in range(5)]
+        )
+    assert results.count(True) == 1
+    rows = await _rows(factory, uid)
+    assert len(rows) == 1 and rows[0].status == QueuedChargeStatus.WAITING
+    routine = await _routine_row(factory, rid)
+    assert routine.last_materialized_date == MONDAY
+    assert routine.last_queued_charge_id == rows[0].id
+
+
+@requires_db
+@pytest.mark.asyncio
+async def test_db_unique_index_race_takes_the_savepoint_branch(factory):
+    """A WAITING row for the same plug and user appears after the pre-checks
+    and before the insert: the partial unique index rejects the routine's
+    row, the savepoint rolls it back, the stamp still commits, nothing raises."""
+    from backend.database.models import QueuedCharge
+
+    rid, uid, pid = await _seed(factory)
+    tenant_id = (await _routine_row(factory, rid)).tenant_id
+
+    async def _driver_queues_it_now(db, user_id, plug):
+        db.add(QueuedCharge(tenant_id=tenant_id, user_id=user_id, plug_id=plug.id,
+                            max_kwh=5.0, status=QueuedChargeStatus.WAITING,
+                            expires_at=TUE_0001 + timedelta(hours=1)))
+        await db.flush()
+        return True
+
+    with _patched_zone(),             patch("backend.services.notifications.notify", AsyncMock()) as notify,             patch.object(svc, "has_group_access", _driver_queues_it_now),             patch.object(svc, "build_queued_charge", wraps=svc.build_queued_charge) as built:
+        assert await svc._materialize_one(factory, rid, TUE_0001) is False
+    built.assert_called_once()   # the insert was attempted, so the except branch ran
+    rows = await _rows(factory, uid)
+    assert len(rows) == 1 and rows[0].max_kwh == 5.0   # the driver's row, not the routine's
+    routine = await _routine_row(factory, rid)
+    assert routine.last_materialized_date == MONDAY
+    assert routine.last_queued_charge_id is None
+    assert routine.consecutive_failures == 0 and routine.enabled is True
+    notify.assert_not_awaited()

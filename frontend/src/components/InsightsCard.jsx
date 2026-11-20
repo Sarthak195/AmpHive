@@ -92,7 +92,10 @@ const InsightsCard = ({ series, impact, rate = 1 }) => {
             Estimates, not measurements. Assumes {a.ev_km_per_kwh} km per kWh against a petrol
             vehicle doing {a.ice_km_per_l} km/L ({a.petrol_co2_kg_per_l} kg CO₂ per litre, ₹
             {a.petrol_price_per_l}/L), less grid CO₂ at {a.grid_emission_factor_kg_per_kwh} kg/kWh.
-            Months are UTC.
+            Months are UTC.{' '}
+            {a.personalised
+              ? 'Using your vehicle figures from Account.'
+              : 'Set your vehicle in Account for closer figures.'}
           </p>
         </>
       )}

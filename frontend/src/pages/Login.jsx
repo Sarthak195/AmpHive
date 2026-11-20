@@ -66,6 +66,15 @@ const Login = () => {
     return code ? SIGN_IN_ERROR_COPY[code] || GOOGLE_FAILED : '';
   });
   const [busy, setBusy] = useState(false);
+  // The original destination: a safe ?next= param wins, else router
+  // state.from (ProtectedRoute / the QR-deep-link guard); null means Home.
+  // Shared by password sign-in and the Google button (which stashes it).
+  const returnTarget = () => {
+    const next = new URLSearchParams(location.search).get('next');
+    const from = location.state?.from;
+    const fromTarget = from ? `${from.pathname}${from.search || ''}${from.hash || ''}` : null;
+    return (next && isSafeInternalPath(next) ? next : null) || fromTarget;
+  };
   // A 403 means the account exists but its email is unverified — a distinct
   // state from the 401 "wrong credentials" error, with a resend affordance.
   const [unverified, setUnverified] = useState(false);
@@ -78,13 +87,7 @@ const Login = () => {
 
     try {
       await login(email, password);
-      // Return to the original destination: a safe ?next= param wins, else
-      // router state.from (ProtectedRoute / the QR-deep-link guard), else Home.
-      const next = new URLSearchParams(location.search).get('next');
-      const from = location.state?.from;
-      const fromTarget = from ? `${from.pathname}${from.search || ''}${from.hash || ''}` : null;
-      const target = (next && isSafeInternalPath(next) ? next : null) || fromTarget || '/';
-      navigate(target, { replace: true });
+      navigate(returnTarget() || '/', { replace: true });
     } catch (err) {
       if (err?.status === 403 && err.message === 'account_disabled') {
         setError(SIGN_IN_ERROR_COPY.account_disabled);
@@ -195,7 +198,7 @@ const Login = () => {
           allowlist of the driver + console origins) and register the callback
           route on both hosts. Until then, hiding the button is better than
           offering one that cannot work. */}
-      {!isCpoHost() && <GoogleSignInButton />}
+      {!isCpoHost() && <GoogleSignInButton returnTo={returnTarget()} />}
     </AuthShell>
   );
 };

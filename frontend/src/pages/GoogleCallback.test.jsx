@@ -34,12 +34,14 @@ const renderCallback = () =>
         <Route path="/auth/google/callback" element={<GoogleCallback />} />
         <Route path="/" element={<div>home page</div>} />
         <Route path="/login" element={<div>login page</div>} />
+        <Route path="/groups" element={<div>groups page</div>} />
       </Routes>
     </MemoryRouter>
   );
 
 beforeEach(() => {
   vi.clearAllMocks();
+  sessionStorage.clear();
   useAuth.mockReturnValue({ loginWithToken: loginWithTokenSpy });
   setHash('');
 });
@@ -98,6 +100,32 @@ describe('GoogleCallback', () => {
     expect(await screen.findByText(/already signed in with a different account/i)).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Return to app' })).toHaveAttribute('href', '/');
     expect(screen.queryByRole('link', { name: 'Back to sign in' })).not.toBeInTheDocument();
+  });
+
+  // The Google round trip is a full-page navigation, so Login stashes its
+  // return target (e.g. an emailed group invite link) in sessionStorage.
+  it('returns to the stashed path after sign-in and clears it', async () => {
+    api.post.mockResolvedValue({ token: 'fake.jwt.token' });
+    loginWithTokenSpy.mockResolvedValue(undefined);
+    sessionStorage.setItem('amphive.postLoginPath', '/groups?invite=tok123');
+    setHash('#code=abc123');
+
+    renderCallback();
+
+    expect(await screen.findByText('groups page')).toBeInTheDocument();
+    expect(sessionStorage.getItem('amphive.postLoginPath')).toBeNull();
+  });
+
+  it('ignores an unsafe stashed path and lands on Home', async () => {
+    api.post.mockResolvedValue({ token: 'fake.jwt.token' });
+    loginWithTokenSpy.mockResolvedValue(undefined);
+    sessionStorage.setItem('amphive.postLoginPath', '//evil.example/groups');
+    setHash('#code=abc123');
+
+    renderCallback();
+
+    expect(await screen.findByText('home page')).toBeInTheDocument();
+    expect(sessionStorage.getItem('amphive.postLoginPath')).toBeNull();
   });
 
   it('scrubs the code from the URL immediately, even when the exchange later rejects', async () => {

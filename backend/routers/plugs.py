@@ -3,6 +3,7 @@ Plugs routes — moved verbatim from main.py (2026-07-07, TD#7 split).
 """
 import asyncio
 import logging
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
@@ -54,11 +55,14 @@ from backend.services.photo_publish import (
     upload_object,
 )
 from backend.services.pricing import (
+    member_price_override,
+    member_price_overrides,
     resolve_price_display,
     resolve_price_display_batch,
     zone_name,
 )
 from backend.services.rate_limit import public_map_rate_limiter, rate_limit_dependency
+from backend.services.reservations import no_show_fee_of, reservation_mode_of
 from backend.services.session_lifecycle import (
     gateway_is_live,
     plug_is_powered,
@@ -220,18 +224,26 @@ def _sniff_image(data: bytes):
     return None
 
 
+_LOCAL_SPLIT_RE = re.compile(r"[._+-]")
+ANONYMOUS_AUTHOR = "AmpHive driver"
+
+
 def _author_display(full_name: Optional[str], email: Optional[str]) -> str:
-    """Privacy-preserving label for a public review: the driver's first name if
-    they have a real full_name, else their email local-part with the tail
-    masked (``sat***``). NEVER the full email or the user id, the reviews read
-    is unauthenticated."""
+    """Privacy-preserving label for a public review (the read is
+    unauthenticated): the first word of the driver's full_name when it is a
+    real name, else "AmpHive driver". Nothing derived from the email is ever
+    shown. A name is not real when it is empty, contains "@", or equals
+    (case-insensitively) the email local part or its first word split on
+    ``. _ - +`` (a Google signup without a name claim used to store exactly
+    that)."""
     name = (full_name or "").strip()
-    if name:
-        return name.split()[0]
-    local = (email or "").split("@")[0] or "driver"
-    if len(local) <= 3:
-        return local[0] + "***"
-    return local[:3] + "***"
+    if not name or "@" in name:
+        return ANONYMOUS_AUTHOR
+    local = (email or "").split("@")[0].strip().lower()
+    if local:
+        if name.lower() in (local, _LOCAL_SPLIT_RE.split(local)[0]):
+            return ANONYMOUS_AUTHOR
+    return name.split()[0]
 
 
 def _plug_review_response(review: PlugReview, *, author_display: str, is_mine: bool = False) -> PlugReviewResponse:
@@ -396,6 +408,14 @@ async def get_available_plugs(
          for plug, _, _, group_tariff_id, _, tenant in all_rows],
         at=now,
     )
+    # [C9 member price] The caller's own flat override beats the tariff (and
+    # its next-price hint) on that group's plugs. One bounded query.
+    overrides = await member_price_overrides(
+        db, user.id, [plug.group_id for plug, *_ in all_rows]
+    )
+    for plug, *_ in all_rows:
+        if plug.group_id in overrides:
+            price_display[plug.id] = (overrides[plug.group_id], None, None)
 
     # [Reviews] avg_rating + review_count for the whole list in one grouped
     # query: keeps this endpoint N+1-free (same shape as price_display above).
@@ -448,6 +468,8 @@ async def get_available_plugs(
                 thumbnail_url=photo_thumbs.get(plug.id),
                 **reservation_fields.get(plug.id, {}),
                 **_hours_fields(plug, tenant.timezone, now, user),
+                reservation_mode=reservation_mode_of(plug),
+                no_show_fee_coins=float(no_show_fee_of(plug)),
             )
         )
     return responses
@@ -604,6 +626,10 @@ async def get_plug(
     # (plug tariff -> group tariff -> tenant default -> env fallback;
     # services/pricing.py resolve_price_display).
     rate, changes_at, next_rate = await resolve_price_display(db, plug)
+    # [C9 member price] The caller's own flat override wins on this plug.
+    override = await member_price_override(db, user.id, plug)
+    if override is not None:
+        rate, changes_at, next_rate = override, None, None
 
     # [Reservations] Same grouped helper the list uses, over this one plug.
     now = datetime.now(timezone.utc)
@@ -673,6 +699,8 @@ async def get_plug(
         **_hours_fields(
             plug, tenant.timezone if tenant is not None else None, now, user
         ),
+        reservation_mode=reservation_mode_of(plug),
+        no_show_fee_coins=float(no_show_fee_of(plug)),
     )
 
 
@@ -891,6 +919,13 @@ async def request_capacity(
 # (redesign/ui-v3 — plans/redesign-v3-contract.md §4 "Driver gaps")
 # ===========================================================================
 
+def _idle_fee_json(idle) -> Optional[dict]:
+    """[Idle fee C1] (grace_min, per_min, cap) as the JSON the SPA reads, or None."""
+    if idle is None:
+        return None
+    return {"grace_min": idle[0], "per_min": float(idle[1]), "cap": float(idle[2])}
+
+
 @router.get("/api/plugs/{plug_id}/tariff-preview")
 async def get_plug_tariff_preview(
     plug_id: int,
@@ -932,12 +967,23 @@ async def get_plug_tariff_preview(
 
     await ensure_plug_group_access(db, plug, user)
 
+    # [C9 member price] A member override is one flat price: no slots and no
+    # cheaper window to wait for.
+    override = await member_price_override(db, user.id, plug)
     tariff, tz_name = await _resolve_tariff_and_tz(db, plug)
+    from backend.services.idle_fee import tariff_terms
+    idle = tariff_terms(tariff)
+    if override is not None:
+        # [C1] The idle fee still applies to a member-priced session (the
+        # start path snapshots it from the tariff), so its terms are shown.
+        return {"base_price_per_kwh": float(override), "price_now": float(override),
+                "slots": [], "cheapest_window": None, "idle_fee": _idle_fee_json(idle)}
+
     if tariff is None:
         # Legacy env fallback — flat rate, no time-of-day structure.
         rate = float(default_rate())
         return {"base_price_per_kwh": rate, "price_now": rate, "slots": [],
-                "cheapest_window": None}
+                "cheapest_window": None, "idle_fee": None}
 
     slots = (
         await db.execute(select(TariffSlot).where(TariffSlot.tariff_id == tariff.id))
@@ -959,6 +1005,9 @@ async def get_plug_tariff_preview(
             "start_hhmm": cheapest[0].strftime("%H:%M"),
             "price_per_kwh": float(cheapest[1]),
         },
+        # [Idle fee C1] The plug's idle-fee terms, or null when there is none
+        # (the same values a session starting now would snapshot).
+        "idle_fee": _idle_fee_json(idle),
         "slots": [
             {
                 "days": [d for d in range(7) if (int(s.days_mask) >> d) & 1],
@@ -1010,6 +1059,53 @@ async def get_plug_charge_estimate(
         return await estimate_charge(db, plug, user.id, max_kwh, max_duration_min, start_at)
     except OverflowError:
         raise HTTPException(status_code=422, detail="Estimate window out of range.")
+
+
+@router.get("/api/plugs/{plug_id}/ready-by")
+async def get_plug_ready_by_plan(
+    plug_id: int,
+    ready_by: datetime,
+    max_kwh: Optional[float] = Query(default=None, gt=0, le=100.0),
+    max_duration_min: Optional[int] = Query(default=None, gt=0, le=1440),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    [F6R] DISPLAY-ONLY plan for a "ready by" charge: the cheapest single
+    contiguous window ending by ``ready_by`` (services/ready_by.py), as
+    ``{not_before, finish_at, duration_min, energy_kwh, cost_coins, ...}``.
+    Writes nothing; POST /api/sessions/queue/ready-by creates the scheduled
+    start. Same visibility as GET /api/plugs/{id}/estimate. Numbers and
+    timestamps only, so there is nothing for a cpo_viewer to mask. 409
+    ``ready_by_unreachable`` when the deadline cannot be met.
+    """
+    from backend.services.ready_by import plan_ready_by
+
+    if ready_by.tzinfo is None:
+        raise HTTPException(status_code=422, detail="ready_by must include a UTC offset.")
+    plug = (await db.execute(select(Plug).where(Plug.id == plug_id))).scalar_one_or_none()
+    if not plug:
+        raise HTTPException(status_code=404, detail=f"Plug with ID {plug_id} not found.")
+    await ensure_plug_group_access(db, plug, user)
+    plan = await plan_ready_by(
+        db, plug, user.id, ready_by,
+        max_kwh, max_duration_min * 60 if max_duration_min is not None else None,
+    )
+    return {
+        "not_before": plan["not_before"].isoformat(),
+        "finish_at": plan["finish_at"].isoformat(),
+        "ready_by": plan["ready_by"].isoformat(),
+        "duration_min": plan["duration_min"],
+        "energy_kwh": plan["energy_kwh"],
+        "cost_coins": plan["cost_coins"],
+        "rate_changes": plan["rate_changes"],
+        "basis": plan["basis"],
+        "power_w": plan["power_w"],
+        # [Idle fee C1] The plug's idle-fee terms (null when none); an
+        # auto-stop-when-full charge never pays them.
+        "idle_fee": _idle_fee_json(plan["idle_fee"]),
+        "is_estimate": True,
+    }
 
 
 # ===========================================================================
@@ -1326,7 +1422,8 @@ async def get_plug_photo_image(
     for a day (``Cache-Control: public, max-age=86400``; setting the header here
     makes security_headers_middleware leave its ``no-store`` default off).
     PENDING or REJECTED: only a CPO of the plug's tenant or an admin, with
-    ``private, no-store``; everyone else gets the same 404 as a missing photo.
+    ``private, no-store``; everyone else (a read-only cpo_viewer included)
+    gets the same 404 as a missing photo.
     """
     photo = (await db.execute(
         select(PlugPhoto).where(PlugPhoto.id == photo_id, PlugPhoto.plug_id == plug_id)
@@ -1338,6 +1435,12 @@ async def get_plug_photo_image(
     if photo.status == PlugPhotoStatus.APPROVED:
         cache_control = "public, max-age=86400"
     else:
+        # [F10] Unmoderated photos can show anything (people, plates, a house
+        # number), so a read-only cpo_viewer never sees them, even for its own
+        # tenant: moderation is a cpo/admin job. Named here on purpose; the
+        # role check below would already exclude the viewer role.
+        if is_cpo_viewer(user):
+            raise not_found
         role = user.role.value if user is not None else None
         if not (role == "admin" or (role == "cpo" and user is not None and user.tenant_id == photo.tenant_id)):
             raise not_found

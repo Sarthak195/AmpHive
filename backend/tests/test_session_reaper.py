@@ -203,3 +203,38 @@ async def test_reap_gateway_logs_once_swallows_db_errors():
     svc = SessionReaperService(_factory_yielding(db), AsyncMock())
 
     assert await svc.reap_gateway_logs_once() == 0
+
+
+@pytest.mark.asyncio
+async def test_insights_email_pass_runs_off_the_tick_and_never_overlaps():
+    """[F8V] A slow monthly email pass must not stall the reaper tick, and a
+    second pass is not started while the first is still running."""
+    import asyncio
+
+    from backend.services import session_reaper as sr
+
+    svc = SessionReaperService(MagicMock(), AsyncMock(), interval_sec=0.01)
+    release = asyncio.Event()
+    calls = []
+
+    async def slow_pass(now=None):
+        calls.append(1)
+        await release.wait()
+        return 0
+
+    svc.send_insights_emails_once = slow_pass
+    svc.reap_once = AsyncMock()
+    for name in (
+        "reap_routines_once", "reap_queued_starts_once", "settle_routines_once",
+        "reap_reprice_once", "reap_gateway_silence_once", "reap_gateway_logs_once",
+    ):
+        setattr(svc, name, AsyncMock(return_value=0))
+    svc._tick_count = sr.INSIGHTS_EMAIL_EVERY_N_TICKS - 1
+    svc.start(asyncio.get_running_loop())
+    try:
+        await asyncio.sleep(0.2)  # many ticks while the first pass is blocked
+        assert svc._tick_count > sr.INSIGHTS_EMAIL_EVERY_N_TICKS
+        assert calls == [1]
+    finally:
+        release.set()
+        await svc.stop()

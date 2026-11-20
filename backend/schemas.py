@@ -8,7 +8,7 @@ driver and CPO plug routes).
 import ipaddress
 import re
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
 
@@ -207,6 +207,26 @@ class QueueChargeRequest(BaseModel):
         return v
 
 
+class ReadyByRequest(BaseModel):
+    """[F6R] Body for POST /api/sessions/queue/ready-by: plan the cheapest ONE
+    contiguous window that ends by ``ready_by`` and schedule it through the
+    normal scheduled-start path. Needs an energy or time target (the limit the
+    scheduled row carries). ``ready_by`` must carry a UTC offset, like
+    ``not_before``."""
+    plug_id: int
+    ready_by: datetime
+    max_duration_seconds: Optional[int] = Field(default=None, gt=0, le=86400)
+    max_kwh: Optional[float] = Field(default=None, gt=0, le=100.0)
+    auto_stop_when_full: bool = False
+
+    @field_validator("ready_by")
+    @classmethod
+    def _aware_ready_by(cls, v):
+        if v.tzinfo is None:
+            raise ValueError("ready_by must include a UTC offset")
+        return v
+
+
 class SessionLimitsUpdateRequest(BaseModel):
     """PATCH a RUNNING session's stop conditions ("start now, set the target
     later"). Both optional — send whichever you're changing; the same bounds as
@@ -351,6 +371,12 @@ class PlugResponse(BaseModel):
     max_session_minutes: Optional[int] = None
     amenities: Optional[list[str]] = None
     access_note: Optional[str] = None
+    # [C8] "instant" or "approval": in approval mode a booking is a request the
+    # host approves or declines; the reserve dialog says so up front.
+    reservation_mode: str = "instant"
+    # [C8] Coins charged if a confirmed booking here goes unused (0 = none),
+    # shown in the reserve dialog before booking.
+    no_show_fee_coins: float = 0
 
 
 class PublicPlugResponse(BaseModel):
@@ -658,6 +684,11 @@ class CpoPlugUpdateRequest(BaseModel):
     max_session_minutes: Optional[int] = Field(default=None, ge=0, le=1440)
     amenities: Optional[list[str]] = Field(default=None, max_length=16)
     access_note: Optional[str] = Field(default=None, max_length=280)
+    # [C8] Booking mode; omit to leave unchanged.
+    reservation_mode: Optional[Literal["instant", "approval"]] = None
+    # [C8] No-show fee in coins (0 = none); omit to leave unchanged. The
+    # router rejects anything above RESERVATION_NO_SHOW_FEE_MAX_COINS.
+    no_show_fee_coins: Optional[float] = Field(default=None, ge=0, le=100000)
 
     @field_validator("local_ip")
     @classmethod
@@ -721,12 +752,21 @@ class CpoTariffCreateRequest(BaseModel):
     # (e.g. CreateOrderRequest.amount_inr) — the router normalizes it via
     # services/money.to_money before it ever touches the Numeric(12,2) column.
     price_per_kwh: float = Field(gt=0, le=1000)
+    # [Idle fee C1] Opt-in, 0 = off. The router requires a cap above 0 and a
+    # grace of at least services/idle_fee.IDLE_GRACE_FLOOR_MIN whenever the
+    # per-minute fee is above 0 (a grace left out then defaults to that floor).
+    idle_grace_min: Optional[int] = Field(default=None, ge=0, le=240)
+    idle_fee_per_min: float = Field(default=0, ge=0, le=100)
+    idle_fee_cap: float = Field(default=0, ge=0, le=10000)
 
 
 class CpoTariffUpdateRequest(BaseModel):
-    """Update an existing tariff's name and/or rate."""
+    """Update an existing tariff's name, rate and/or idle-fee terms."""
     name: Optional[str] = Field(default=None, min_length=1, max_length=100)
     price_per_kwh: Optional[float] = Field(default=None, gt=0, le=1000)
+    idle_grace_min: Optional[int] = Field(default=None, ge=0, le=240)
+    idle_fee_per_min: Optional[float] = Field(default=None, ge=0, le=100)
+    idle_fee_cap: Optional[float] = Field(default=None, ge=0, le=10000)
 
 
 class CpoTariffAssignRequest(BaseModel):
@@ -1019,6 +1059,8 @@ class ReservationResponse(BaseModel):
     plug_name: Optional[str] = None
     user_name: Optional[str] = None
     is_mine: Optional[bool] = None
+    # [C8] The no-show fee snapshotted when this booking was made.
+    no_show_fee_coins: float = 0
 
 
 class MyReservationsResponse(BaseModel):

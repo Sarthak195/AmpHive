@@ -6,7 +6,10 @@ start a session (the gate lives in routers/sessions.py, inside the
 plug-locked section of start_charging_session), and everyone with plug
 access can see the upcoming schedule.
 
-FREE in v1: no coin hold, no money movement anywhere in the lifecycle.
+No coin is held for a booking. [C8] The only money movement is the optional
+no-show fee the plug's CPO may set (default 0, capped): it is snapshotted onto
+the booking here, shown to the driver, and charged only by the reaper sweep
+services/reservations.py reap_reservation_no_shows_once.
 
 Policy (env, read via services/reservations.py so tests can monkeypatch the
 module attributes):
@@ -54,8 +57,11 @@ from backend.services.auth import get_current_user, is_cpo_viewer
 from backend.services.notifications import notify
 from backend.services.plug_hours import hours_of, window_is_open
 from backend.services.reservations import (
+    HOLD_STATUSES,
     expire_lapsed_reservations,
     format_window,
+    no_show_fee_of,
+    reservation_mode_of,
     user_can_access_plug,
 )
 
@@ -83,6 +89,7 @@ def _reservation_response(
         plug_name=plug_name,
         user_name=user_name,
         is_mine=(r.user_id == current_user_id) if current_user_id is not None else None,
+        no_show_fee_coins=float(no_show_fee_of(r)),
     )
 
 
@@ -159,7 +166,7 @@ async def create_reservation(
         .where(
             and_(
                 Reservation.user_id == user.id,
-                Reservation.status == ReservationStatus.BOOKED,
+                Reservation.status.in_(HOLD_STATUSES),
                 Reservation.end_at > now,
             )
         )
@@ -196,6 +203,15 @@ async def create_reservation(
             detail="This plug is under maintenance and cannot be reserved.",
         )
 
+    # [C8] An approval-mode request needs time for the host to answer: one
+    # starting now would expire (PENDING lapses at start_at) before anyone saw it.
+    needs_approval = reservation_mode_of(plug) == "approval"
+    if needs_approval and start_at <= now:
+        raise HTTPException(
+            status_code=400,
+            detail="This charger's bookings need host approval. Pick a start time in the future.",
+        )
+
     # [Plug hours] The whole booked window must fall inside the plug's opening
     # hours (tenant local time). Under the plug lock, like the checks around
     # it. A 24x7 plug (NULL hours) skips this, with no extra query.
@@ -211,7 +227,7 @@ async def create_reservation(
                 detail="This charger is closed during part of that slot. Pick a time within its opening hours.",
             )
 
-    # 4. Overlap check against BOOKED windows, under the plug lock.
+    # 4. Overlap check against BOOKED and PENDING windows, under the plug lock.
     await expire_lapsed_reservations(db, plug_id=plug.id, now=now)
 
     conflict_result = await db.execute(
@@ -219,7 +235,7 @@ async def create_reservation(
         .where(
             and_(
                 Reservation.plug_id == plug.id,
-                Reservation.status == ReservationStatus.BOOKED,
+                Reservation.status.in_(HOLD_STATUSES),
                 Reservation.start_at < end_at,
                 Reservation.end_at > start_at,
             )
@@ -248,19 +264,49 @@ async def create_reservation(
         tenant_id=tenant_id,
         start_at=start_at,
         end_at=end_at,
-        status=ReservationStatus.BOOKED,
+        status=ReservationStatus.PENDING if needs_approval else ReservationStatus.BOOKED,
+        # [C8] The fee the driver was shown; later plug edits don't change it.
+        no_show_fee_coins=no_show_fee_of(plug),
     )
     db.add(reservation)
     await db.commit()
     await db.refresh(reservation)
 
-    await notify(
-        user.id,
-        "reservation_booked",
-        "Reservation confirmed",
-        f"{plug.name} is booked for you: {format_window(start_at, end_at)}.",
-        plug_id=plug.id,
+    window = format_window(start_at, end_at)
+    fee_note = (
+        f" A {reservation.no_show_fee_coins} coin no-show fee applies if you don't use it."
+        if reservation.no_show_fee_coins > 0 else ""
     )
+    if needs_approval:
+        await notify(
+            user.id,
+            "reservation_requested",
+            "Reservation requested",
+            f"Your request for {plug.name} ({window}) is waiting for the host to approve it.{fee_note}",
+            plug_id=plug.id,
+        )
+        # The tenant's operators answer the request in the CPO console.
+        cpo_ids = (await db.execute(
+            select(User.id)
+            .where(and_(User.role == UserRole.CPO, User.tenant_id == tenant_id))
+            .limit(20)
+        )).scalars().all()
+        for cpo_id in cpo_ids:
+            await notify(
+                cpo_id,
+                "reservation_needs_approval",
+                "Reservation request",
+                f"A driver asked to reserve {plug.name} ({window}). Approve or decline it in Reservations.",
+                plug_id=plug.id,
+            )
+    else:
+        await notify(
+            user.id,
+            "reservation_booked",
+            "Reservation confirmed",
+            f"{plug.name} is booked for you: {window}.{fee_note}",
+            plug_id=plug.id,
+        )
 
     logger.info(
         "Reservation booked",
@@ -299,7 +345,7 @@ async def my_reservations(
         .where(
             and_(
                 Reservation.user_id == user.id,
-                Reservation.status == ReservationStatus.BOOKED,
+                Reservation.status.in_(HOLD_STATUSES),
                 Reservation.end_at > now,
             )
         )
@@ -317,7 +363,7 @@ async def my_reservations(
             and_(
                 Reservation.user_id == user.id,
                 or_(
-                    Reservation.status != ReservationStatus.BOOKED,
+                    Reservation.status.not_in(HOLD_STATUSES),
                     Reservation.end_at <= now,
                 ),
             )
@@ -340,14 +386,28 @@ async def cancel_reservation(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Cancel a BOOKED reservation. Allowed: the owner, or a cpo/admin of the
-    owning tenant. Anyone else gets 404 — existence isn't leaked by a 403,
-    same convention as the invoice/dispute endpoints. Only BOOKED can be
-    cancelled (409 otherwise — fulfilled/expired/cancelled are terminal).
-    Row-locked + status re-checked, so a cancel racing the session-start
-    fulfilment (which locks the plug, then updates this row in its own
-    transaction) settles exactly once.
+    Cancel a BOOKED reservation or withdraw a PENDING request. Allowed: the
+    owner, or a cpo/admin of the owning tenant. Anyone else gets 404
+    (existence isn't leaked by a 403, same convention as the invoice/dispute
+    endpoints). Only BOOKED/PENDING can be cancelled (409 otherwise:
+    fulfilled/expired/cancelled/declined are terminal).
+
+    [C8] Locks the PLUG row first, then the reservation row (the order the
+    session start, booking and the CPO approve/decline paths use), and lazily
+    expires the plug's lapsed holds before the status check, so a cancel
+    racing a CPO approve, or the session-start fulfilment, settles exactly
+    once, and a no-show past its grace reads as expired, not cancellable.
     """
+    # Plain column read (no entity load): the entity is first loaded below,
+    # under its row lock, so its status is never a stale identity-map copy.
+    plug_id = (await db.execute(
+        select(Reservation.plug_id).where(Reservation.id == reservation_id)
+    )).scalar_one_or_none()
+    if plug_id is None:
+        raise HTTPException(status_code=404, detail="Reservation not found.")
+    await db.execute(select(Plug.id).where(Plug.id == plug_id).with_for_update())
+    await expire_lapsed_reservations(db, plug_id=plug_id)
+
     result = await db.execute(
         select(Reservation)
         .where(Reservation.id == reservation_id)
@@ -365,7 +425,7 @@ async def cancel_reservation(
     if not (is_owner or is_tenant_operator):
         raise HTTPException(status_code=404, detail="Reservation not found.")
 
-    if reservation.status != ReservationStatus.BOOKED:
+    if reservation.status not in HOLD_STATUSES:
         raise HTTPException(
             status_code=409,
             detail=f"This reservation is already {reservation.status.value}.",
@@ -464,7 +524,7 @@ async def plug_reservations(
         .where(
             and_(
                 Reservation.plug_id == plug.id,
-                Reservation.status == ReservationStatus.BOOKED,
+                Reservation.status.in_(HOLD_STATUSES),
                 Reservation.end_at > now,
                 Reservation.start_at < horizon,
             )

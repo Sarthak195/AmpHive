@@ -257,11 +257,13 @@ class MQTTManager(
         # persisted plug.last_*_energy_kwh baseline stay exact either way).
         self._unmetered_alert_cooldown: Dict[int, float] = {}
         # [Charge complete] Per-plug low-draw state (services/mqtt/charge_full.py).
-        # In memory only: a restart clears it, which only delays detection.
+        # In memory: a restart clears it, which only delays detection; the
+        # notice is deduped on the session row (full_notified_at, 0051).
         self._charge_full = ChargeFullDetector()
-        # [Notification prefs C7] nearly_done / power_dropped once-per-session
-        # state (services/mqtt/session_events.py). In memory only: a restart
-        # clears it, so a session can see each notice once more at most.
+        # [Notification prefs C7] nearly_done / power_dropped detector state
+        # (services/mqtt/session_events.py). In memory; the once-per-session
+        # dedupe is on the session row (*_notified_at, 0051), so a restart
+        # neither repeats nor loses a notice.
         self._session_events = SessionEventDetector()
 
         self.client = mqtt.Client(client_id="amphive_backend_server", callback_api_version=mqtt.CallbackAPIVersion.VERSION2)

@@ -16,6 +16,9 @@ Deliberate boundaries
   charger and the operating organisation — that is the user's own transaction
   counterparty, which they are entitled to — but not the operator's staff
   accounts.
+* **Reviews, photos, promo redemptions and routines are the caller's own.**
+  Photos list status and dates only (the stored object name and bucket URI
+  are internal); promo redemptions never carry the code or its hint.
 * **No credentials.** Password hashes, token digests, JWTs and push-subscription
   keys are never exported. Push subscriptions appear as an endpoint *host* and a
   creation date, which is enough for the user to recognise the device without
@@ -34,17 +37,25 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database.models import (
     ApiToken,
+    CapacityRequest,
     ChargerGroup,
+    ChargeRoutine,
     ChargingSession,
     Gateway,
     GroupMembership,
     Invoice,
     LedgerTransaction,
     Notification,
+    OcppIdTag,
+    OfflineTopup,
     Plug,
+    PlugPhoto,
     PlugReport,
+    PlugReview,
     PlugWatch,
+    PromoRedemption,
     PushSubscription,
+    QueuedCharge,
     Reservation,
     SessionDispute,
     Tenant,
@@ -57,6 +68,9 @@ logger = logging.getLogger("amphive.api")
 # Per-collection ceiling. Generous for any real account, and the response says
 # plainly when it bit rather than pretending the export is complete.
 MAX_ROWS_PER_COLLECTION = 5000
+
+
+_WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 
 
 def _iso(value: Optional[datetime]) -> Optional[str]:
@@ -108,6 +122,11 @@ async def build_export(db: AsyncSession, user: User) -> dict:
         "organisation_id": user.tenant_id,
         # [C7] Push toggles and quiet hours; null = never changed (defaults).
         "notification_prefs": user.notification_prefs,
+        # [F8V] Insights assumptions (null = defaults) and the monthly email
+        # opt-in with the last month it was decided for.
+        "vehicle_profile": user.vehicle_profile,
+        "monthly_insights_email": user.monthly_insights_email,
+        "insights_email_month": user.insights_email_month,
     }
 
     # --- charging sessions (with the charger they ran on) -----------------
@@ -246,7 +265,15 @@ async def build_export(db: AsyncSession, user: User) -> dict:
     )
     note("group_memberships", truncated)
     group_memberships = [
-        {"group_id": m.group_id, "group_name": name, "joined_at": _iso(m.joined_at)}
+        {
+            "group_id": m.group_id,
+            "group_name": name,
+            "joined_at": _iso(m.joined_at),
+            # [C9] The operator's flat per-member price, null = the tariff.
+            "price_per_kwh_override": (
+                None if m.price_per_kwh_override is None else float(m.price_per_kwh_override)
+            ),
+        }
         for m, name in membership_rows
     ]
 
@@ -311,6 +338,136 @@ async def build_export(db: AsyncSession, user: User) -> dict:
         for (t,) in token_rows
     ]
 
+    # --- weekly charge routines (C5) ---------------------------------------
+    routine_rows, truncated = await _collect(
+        db,
+        select(ChargeRoutine, Plug.name)
+        .outerjoin(Plug, Plug.id == ChargeRoutine.plug_id)
+        .where(ChargeRoutine.user_id == user.id)
+        .order_by(ChargeRoutine.created_at.desc()),
+    )
+    note("charge_routines", truncated)
+    charge_routines = [
+        {
+            "id": r.id,
+            "charger_id": r.plug_id,
+            "charger": plug_name,
+            "weekdays": [d for i, d in enumerate(_WEEKDAYS) if r.weekdays & (1 << i)],
+            "start_time_local": r.start_time.strftime("%H:%M") if r.start_time else None,
+            "max_kwh": r.max_kwh,
+            "max_duration_seconds": r.max_duration_seconds,
+            "auto_stop_when_full": r.auto_stop_when_full,
+            "enabled": r.enabled,
+            "consecutive_failures": r.consecutive_failures,
+            "created_at": _iso(r.created_at),
+        }
+        for r, plug_name in routine_rows
+    ]
+
+    # --- queued / scheduled charges and capacity requests -------------------
+    queued_rows, truncated = await _collect(
+        db,
+        select(QueuedCharge, Plug.name)
+        .outerjoin(Plug, Plug.id == QueuedCharge.plug_id)
+        .where(QueuedCharge.user_id == user.id)
+        .order_by(QueuedCharge.created_at.desc()),
+    )
+    note("queued_charges", truncated)
+    queued_charges = [
+        {
+            "id": q.id,
+            "charger_id": q.plug_id,
+            "charger": plug_name,
+            "status": q.status.value,
+            "max_kwh": q.max_kwh,
+            "max_duration_seconds": q.max_duration_seconds,
+            "not_before": _iso(q.not_before),
+            "expires_at": _iso(q.expires_at),
+            "created_at": _iso(q.created_at),
+        }
+        for q, plug_name in queued_rows
+    ]
+
+    capacity_rows, truncated = await _collect(
+        db, select(CapacityRequest).where(CapacityRequest.user_id == user.id)
+    )
+    note("capacity_requests", truncated)
+    capacity_requests = [
+        {"charger_id": c.plug_id, "created_at": _iso(c.created_at)} for (c,) in capacity_rows
+    ]
+
+    # --- promo code redemptions (the code itself is never exported) --------
+    redemption_rows, truncated = await _collect(
+        db,
+        select(PromoRedemption, OfflineTopup.amount_coins, Tenant.name)
+        .join(OfflineTopup, OfflineTopup.id == PromoRedemption.offline_topup_id)
+        .outerjoin(Tenant, Tenant.id == OfflineTopup.tenant_id)
+        .where(PromoRedemption.user_id == user.id)
+        .order_by(PromoRedemption.created_at.desc()),
+    )
+    note("promo_redemptions", truncated)
+    promo_redemptions = [
+        {
+            "id": r.id,
+            "operator": tenant_name,
+            "amount_coins": float(amount),
+            "redeemed_at": _iso(r.created_at),
+        }
+        for r, amount, tenant_name in redemption_rows
+    ]
+
+    # --- charger reviews and photos the user wrote --------------------------
+    review_rows, truncated = await _collect(
+        db,
+        select(PlugReview, Plug.name)
+        .outerjoin(Plug, Plug.id == PlugReview.plug_id)
+        .where(PlugReview.driver_user_id == user.id)
+        .order_by(PlugReview.created_at.desc()),
+    )
+    note("charger_reviews", truncated)
+    charger_reviews = [
+        {
+            "id": r.id,
+            "charger_id": r.plug_id,
+            "charger": plug_name,
+            "rating": r.rating,
+            "body": r.body,
+            "created_at": _iso(r.created_at),
+            "updated_at": _iso(r.updated_at),
+        }
+        for r, plug_name in review_rows
+    ]
+
+    photo_rows, truncated = await _collect(
+        db,
+        select(PlugPhoto, Plug.name)
+        .outerjoin(Plug, Plug.id == PlugPhoto.plug_id)
+        .where(PlugPhoto.uploaded_by_user_id == user.id)
+        .order_by(PlugPhoto.created_at.desc()),
+    )
+    note("charger_photos", truncated)
+    charger_photos = [
+        {
+            "id": p.id,
+            "charger_id": p.plug_id,
+            "charger": plug_name,
+            "status": p.status.value,
+            "created_at": _iso(p.created_at),
+            "reviewed_at": _iso(p.reviewed_at),
+        }
+        for p, plug_name in photo_rows
+    ]
+
+    # --- bound OCPP idTags (C2): only a digest is stored, never the tag ----
+    id_tag_rows, truncated = await _collect(
+        db, select(OcppIdTag).where(OcppIdTag.user_id == user.id).order_by(OcppIdTag.created_at.desc())
+    )
+    note("ocpp_id_tags", truncated)
+    ocpp_id_tags = [
+        {"id": t.id, "operator_tenant_id": t.tenant_id, "created_at": _iso(t.created_at)}
+        for (t,) in id_tag_rows
+    ]
+
     return {
         "export_format": "amphive.user-data-export.v1",
         "generated_at": generated_at.isoformat(),
@@ -335,4 +492,11 @@ async def build_export(db: AsyncSession, user: User) -> dict:
         "notifications": notifications,
         "push_devices": push_devices,
         "api_tokens": api_tokens,
+        "charge_routines": charge_routines,
+        "queued_charges": queued_charges,
+        "capacity_requests": capacity_requests,
+        "promo_redemptions": promo_redemptions,
+        "charger_reviews": charger_reviews,
+        "charger_photos": charger_photos,
+        "ocpp_id_tags": ocpp_id_tags,
     }

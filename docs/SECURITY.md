@@ -1098,12 +1098,87 @@ and always push, even in quiet hours; a test pins that no allowlisted type can
 be given a toggle. A prefs read failure fails open (push sent). The feed row
 is never suppressed.
 
+Wave 4 added toggles only for informational types (`rate_changed`,
+`plug_available`, `reservation_booked`, `reservation_started`, `queued`).
+Booking changes made against the driver (`reservation_cancelled`,
+`reservation_ahead`) are severity warning and have no toggle, and
+`test_allowlist_names_the_safety_billing_and_routine_types` still asserts the
+allowlist and the toggles are disjoint.
+
 **Charge routines (C5).** Owner-only routes; another driver's routine is a 404
 (no existence oracle). A routine re-checks private-group access at every
 occurrence and never queues for a disabled or closed account. The materialize
 pass locks the routine row and then the plug row FOR UPDATE, so its check for
 another driver's WAITING row is serialized with the queue endpoint's
 scheduled path. Safety posture: SAFETY.md.
+
+### 8.13 2026-11-19 wave 4 R1 fixes (built on `release/2026-11-19-r1`, not deployed)
+
+**Data rights.** Account closure additionally deletes the user's `plug_reviews`
+and `plug_photos` and clears `users.notification_prefs`. Closure deletes the
+stored photo objects in a background task after the response; rejected photos
+are skipped because their object is deleted at rejection. A deletion that fails
+is logged and the object is left as an unreachable orphan (its row is gone, so
+it is never served). `promo_redemptions` are retained against the tombstone
+(usage count, linked to an offline top-up). The export now also lists charge
+routines, promo redemptions, the user's plug reviews and photos, queued charges
+and capacity requests; it never contains a promo code hash or hint, an API token
+digest, or a photo object name or bucket URI.
+
+**Review authors.** Public reviews never display anything derived from an
+email: `author_display` is the first word of a real `full_name`, else "AmpHive
+driver", and a Google signup without a name claim stores an empty `full_name`.
+Known limit: existing accounts whose `full_name` is an email local part (earlier
+Google signups) are not rewritten (no migration); the review rule hides it, but
+CPO screens (initials for a viewer) and the invoice Bill To still show it.
+
+**cpo_viewer.** `GET /api/sessions/{id}/invoice` gives a viewer an existing
+invoice of its own tenant only, and never issues one (issuing assigns the next
+invoice number, a write). The HTML Bill To name goes through `redact_name_for`
+(initials) and the email through `redact_for`; the JSON carries no name or email
+(it has `driver_user_id`, an integer, as `GET /api/cpo/invoices` already gives
+viewers). A missing session, another tenant's session and a session with no
+issued invoice all answer the same 404, so there is no existence oracle.
+Pending and rejected plug photos stay hidden from a viewer (image 404, and the
+CPO photo list returns approved photos only). The every-write-route walk on the
+merged tree asserts 403 `read_only_demo` on 74 write routes.
+
+### 8.14 2026-11-19 wave 4 R2 features (built on `release/2026-11-19-r2`, not deployed)
+
+Stacked on R1; migrations `0051` to `0056`. The full per-lane behaviour is in [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) section 0h. This section is the security view.
+
+**Group invites (C9).** The invite token is 256-bit (`secrets.token_urlsafe(32)`), stored only as a SHA-256 digest (`group_invites.token_hash`, UNIQUE), single-use (a conditional UPDATE consumes it) and expires after 7 days. Accepting needs a signed-in account whose verified email equals the invite email (case-insensitive); a different email or an unverified account is refused (403) without consuming the invite and without revealing the invited address. Creating an invite does no user lookup, so there is no account-enumeration oracle. Sends are capped per CPO user (`GROUP_INVITES_PER_DAY`, 20) and platform-wide (`GROUP_INVITES_GLOBAL_PER_DAY`, 50) to protect the mail server's reputation, and only a tenant that owns at least one claimed hardware gateway may send (becoming a CPO is self-serve, owning hardware is not; the Gateway row behind an OCPP charge point, which a CPO can mint itself while `OCPP_CSMS_ENABLED` is on, does not count). Invite addresses must match the viewer masker's pattern (ASCII local part, alphabetic TLD of 2+ letters), so `mask_pii` always masks them fully for a `cpo_viewer`; the group name is flattened and capped before it is mailed and never appears in the Subject line; the `group.invite` audit detail carries no address. Invite mail is not silenced by `BILLING_EMAILS`. Residuals: the caps are check-then-insert and per CPO user (two concurrent sends can overshoot by one; a tenant with several CPO users gets the cap per user); deleting a group cascades its invite rows and resets both counts (only a tenant that owns a gateway can use this); addresses outside the masker's character class cannot be invited by email (the access code still works).
+
+**Per-member price override (C9).** Only the owning tenant's CPO can set it (tenant-scoped group lookup, 404 across tenants), private groups only, and it applies only to that member on that group's plugs. It is frozen on the session at start (`member_price_override`), so a later tariff edit or revoke cannot reprice or stop a running session; the hold is sized at the override, so a low override cannot under-reserve. A flat price is never negative (`0 < x <= 1000`; a sub-cent value rounds to 0.00, a known nit shared with the tariff schema).
+
+**Idle fee (C1) and no-show fee (C8): money movements.** Both are driver ledger debits that can only shrink toward the driver's side:
+
+- *Idle fee* is settled once inside `finalize_charging_session`, under the user and session row locks that already serialize finalize; an existence check on the `idle_fee` ledger line guards a second write. It is capped by the terms copied onto the session at start (a tariff edit cannot raise a running session's fee), by the session's own hold minus the energy debit, and by the wallet (`debit_wallet_clamped`), so it can never overdraw or exceed the reservation. Idle time comes only from live telemetry and closes at the earlier of the plug's last live frame and the session's last frame, so a gateway outage or a reaper stop is never billed as idle. It is part of `coins_spent`, so the dispute route can refund it. Sessions that opted into auto-stop when full never pay it.
+- *No-show fee* is charged only by the reaper sweep, never by a request, once per reservation (UNIQUE `ledger_transactions.reservation_id`), at most the available balance, never negative, capped server-side by `RESERVATION_NO_SHOW_FEE_MAX_COINS`, snapshotted at booking (a later plug edit cannot raise it), and skipped on any signal that the plug or gateway may have been offline, in maintenance, closed, or in use (the safe direction), and when the holder could not have started (account disabled or closed, or no longer a member of the plug's private group). Cancelling inside the grace window avoids it. It has no session, so the dispute route cannot refund it: a wrong fee is returned by an admin balance adjustment after the driver contacts support (`/refunds` section 4).
+
+**Reservation approval authorization (C8).** `approve` and `decline` are tenant-scoped (`require_cpo_tenant` plus a `tenant_id` filter, 404 across tenants) and serialized on the plug row lock then the reservation row, the same order as booking, cancel and session start. A `cpo_viewer` gets 403 on both. A `pending` reservation never authorizes or blocks a start. Approval re-checks the plug's current opening hours (409 when closed), refuses a plug in `MAINTENANCE`, and refuses a requester who has since lost access to the plug's private group (409, the request stays `pending`). The `reservation_needs_approval` bell goes to the tenant's own CPOs only.
+
+**OCPP 1.6J central system (C2): a new WebSocket ingress, flag-gated, OFF by default and OFF in production.** `/ocpp/{charge_point_id}` is mounted only when `OCPP_CSMS_ENABLED` is set; no proxy route reaches it (Caddy and nginx are unchanged). With the flag off neither `routers/ocpp.py` nor `services/ocpp_adapter.py` is imported (pinned by `test_ocpp_csms.py`), so there is no new attack surface in production. Controls when it is on:
+
+- Subprotocol `ocpp1.6` required. OCPP security profile 1: HTTP Basic, the username must equal the path id. The password is generated server-side, returned once at registration and stored only as a bcrypt hash; the check runs in a worker thread and an unknown id pays the same bcrypt cost against a dummy hash (no timing oracle for registered ids).
+- Limits: a per-IP handshake limit (every handshake counts), a global connection cap, one connection per charge point, text frames only, a per-frame size cap, a per-connection message rate limit and an idle timeout (close codes 1003, 1008, 1009).
+- Pydantic payload models with OCPP length limits and capped list sizes; a validation error is never echoed back (it would embed the idTag).
+- Tenant scoping on every message: connectors resolve only to plugs of the charge point's own backing gateway, and transactions only to its own `ocpp_transactions` rows, so a charge point cannot meter or stop another's session (pinned by `test_ocpp_csms_db.py`).
+- idTags are per operator (`ocpp_id_tags` is unique on `(tenant_id, tag_hash)`): a charge point answers `Invalid` for any tag not enabled for its own tenant, so an operator that once read a card cannot open a billed session against the driver's balance and cannot use Authorize as a cross-tenant oracle. Only a SHA-256 digest is stored (a tag is not a secret, the card broadcasts it, so the digest is a lookup key and not a password hash). A closed or disabled account is refused at Authorize and StartTransaction.
+- Metered energy is bounded by `OCPP_MAX_CONNECTOR_KW` (default 50) times the time since the server-side session start (plus 0.1 kWh); a backwards register is ignored.
+- Nothing logs a password, an Authorization header, a clear idTag or a raw frame.
+- No actuation: the central system never sends a CALL and never switches anything. The shared backend stop paths still publish their usual MQTT OFF to the backing gateway's `amphive/gateways/ocpp-<id>/...` topic, but nothing subscribes there and no broker credentials exist for `ocpp-*` ids, so those publishes are inert. See [SAFETY.md](../SAFETY.md).
+- There is no GET route that returns charge point data, so a `cpo_viewer` sees nothing new; the three HTTP write routes are 403 for a viewer (pinned by mounting the router alone in `test_cpo_viewer_role.py`).
+
+Accepted residuals: profile 1 sends the password on every handshake, so TLS at the proxy is mandatory if the module is ever enabled (and a proxy route plus a matching uvicorn `--ws-max-size` are then needed; the size check runs after uvicorn buffers the frame, 16 MiB by default); `POST /api/ocpp/id-tags` answers 409 for a tag already bound at that operator (it reveals the binding only to someone who already holds the tag value) and 404 for an unknown charge point id (ids are printed on the charger, not secret); the module is validated only against a simulator, and its connected-charger keep-alive writes one UPDATE per 30 s per charge point.
+
+**Viewer masking of the new reads (F10).** Every non-GET route stays behind the global 403 `read_only_demo` guard; the route walk now also pins `PUT /api/me/vehicle`, `POST /api/sessions/queue/ready-by`, the member price route, group invite create, revoke and accept, reservation approve and decline, `PUT /api/cpo/plugs/{id}` and the tariff writes (the OCPP writes are pinned separately). New GETs: `GET /api/cpo/groups/{id}/invites` masks the invitee email for a `cpo_viewer` (always fully, by the invite address rule above); the CPO reservation list shows `pending` and `declined` rows through the same `redact_for` / `redact_name_for` masking of the driver email and name as before; `GET /api/cpo/plugs` and the tariff reads add only operator configuration (reservation mode, fee, idle terms), no personal data. `GET /api/me/vehicle` returns only the caller's own figures (a viewer may read their own).
+
+**Export and closure coverage of the new user tables.** `ocpp_id_tags` is in the data export (id, operator tenant, created_at; never a tag, only a digest exists) and hard-deleted on account closure. `group_invites` is operator-side: it is not in the user's export (the membership itself is exported under `group_memberships`), and on closure every invite the account accepted, or that was sent to its address, keeps its row (the send caps count it) with `email` rewritten to the tombstone address and a still-pending one revoked, in the same commit, so nothing links the tombstone back to the person. Outside closure the invite row keeps the invitee address as typed (lowercased) after it is accepted or revoked, and until the group is deleted (which cascades the row); only the closure scrub rewrites it. Closure also cancels `pending` reservations (not only `booked`). The new `users` columns from 0053 are covered too (fixed in the cross review): the export's `account` block carries `vehicle_profile`, `monthly_insights_email` and `insights_email_month`, and closure resets all four (`vehicle_profile` NULL, the opt-in false, the month NULL, the failure count 0); the monthly email pass also skips closed (`deleted_at`) and disabled accounts. Each exported `group_memberships` entry carries the C9 `price_per_kwh_override`. Tables are classified in `_USER_TABLES` and every `users` column in `_USER_COLUMNS` (`test_account_closure.py`), so a new personal column cannot slip past the export and closure.
+
+**Monthly insights email (F8V).** Opt-in (default off), sent only to the account's own address, no free text other than the escaped full name, never a notification (no push preference or quiet hour mutes it or is muted by it), claim-first so a retry or a second pass cannot duplicate it, and it touches no plug. It does not honour `BILLING_EMAILS` (a separate opt-in).
+
+**Durable notice state (DUR).** Not a new surface: the once-per-session notice claims and the gateway offline state move from process memory to the `charging_sessions` and `gateways` rows (claim-before-notify, so a crash can lose one notice but never repeat it). A DB error on a claim fails open and sends the notice.
 
 ---
 

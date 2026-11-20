@@ -181,6 +181,72 @@ def test_wave3_write_routes_are_in_the_viewer_walk():
     assert not expected & (PUBLIC_WRITES | VIEWER_EXEMPT)
 
 
+def test_wave4_write_routes_are_in_the_viewer_walk():
+    """Integration pin (release/2026-11-19-r2): the write routes added or
+    changed by F8V (vehicle profile), F6R (ready-by), C9 (member price and
+    invites), C8 (approve/decline) and C1 (idle terms on tariffs) are reached
+    by the route walk, so each answers 403 read_only_demo for a viewer. The
+    flag-gated OCPP routes are not mounted by default; see the test below."""
+    walked = {(m, p) for m, p, _ in _write_routes()}
+    expected = {
+        ("PUT", "/api/me/vehicle"),  # F8V
+        ("POST", "/api/sessions/queue/ready-by"),  # F6R
+        ("PUT", "/api/cpo/groups/{group_id}/members/{user_id}/price"),  # C9
+        ("POST", "/api/cpo/groups/{group_id}/invites"),  # C9
+        ("DELETE", "/api/cpo/groups/{group_id}/invites/{invite_id}"),  # C9
+        ("POST", "/api/groups/invites/accept"),  # C9
+        ("POST", "/api/cpo/reservations/{reservation_id}/approve"),  # C8
+        ("POST", "/api/cpo/reservations/{reservation_id}/decline"),  # C8
+        ("PUT", "/api/cpo/plugs/{plug_id}"),  # C8 reservation mode and fee
+        ("POST", "/api/cpo/tariffs"),  # C1 idle terms
+        ("PUT", "/api/cpo/tariffs/{tariff_id}"),  # C1 idle terms
+    }
+    assert expected <= walked, expected - walked
+    assert not expected & (PUBLIC_WRITES | VIEWER_EXEMPT)
+
+
+def test_viewer_gets_403_on_every_ocpp_write_route():
+    """[C2] The OCPP routes are mounted only with OCPP_CSMS_ENABLED, so the
+    default walk never sees them. Mount the router alone and walk its HTTP
+    write routes: each must answer 403 read_only_demo for a viewer (the
+    WebSocket ingress authenticates charge points, not users)."""
+    from fastapi import FastAPI
+
+    from backend.database.db import get_db
+    from backend.routers import ocpp
+    from backend.services.auth import create_access_token
+
+    app = FastAPI()
+    app.include_router(ocpp.router)
+    writes = {(m, r.path) for r in _walk(app.routes) for m in r.methods - SAFE}
+    assert writes == {
+        ("POST", "/api/cpo/ocpp/charge-points"),
+        ("POST", "/api/ocpp/id-tags"),
+        ("DELETE", "/api/ocpp/id-tags/{tag_id}"),
+    }
+
+    user = _viewer()
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = user
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=result)
+    db.commit = AsyncMock()
+
+    async def _db():
+        yield db
+
+    app.dependency_overrides[get_db] = _db
+    client = TestClient(app, raise_server_exceptions=False)
+    client.headers["Authorization"] = (
+        f"Bearer {create_access_token(user.id, user.role.value, user.email, 0)}"
+    )
+    for method, path in sorted(writes):
+        resp = client.request(method, _concrete(path), json={})
+        assert resp.status_code == 403, (method, path, resp.status_code, resp.text)
+        assert resp.json()["detail"] == "read_only_demo"
+    db.commit.assert_not_awaited()
+
+
 def test_viewer_may_sign_out(viewer_client):
     client, _ = viewer_client(_viewer())
     resp = client.post("/api/auth/logout")
@@ -586,7 +652,9 @@ def test_group_members_mask_driver_name_for_viewer(as_user, role, name, email):
     group = MagicMock()
     group.scalar_one_or_none.return_value = object()
     members = MagicMock()
-    member = SimpleNamespace(user_id=100, joined_at=datetime.now(timezone.utc))
+    member = SimpleNamespace(
+        user_id=100, joined_at=datetime.now(timezone.utc), price_per_kwh_override=None
+    )
     members.all.return_value = [(member, "driver1@example.com", "Driver One")]
     db.execute = AsyncMock(side_effect=[group, members])
 
@@ -660,29 +728,104 @@ def test_cpo_gateways_hide_vpn_ip_from_viewer(as_user, role, vpn_ip):
 
 # --- No existence oracle on {id} reads ---------------------------------------
 
-def _invoice_get(as_user, monkeypatch, role, session):
+def _invoice_get(as_user, monkeypatch, role, session, invoice=None, query=""):
     import backend.routers.sessions as sessions_router
 
     issue = AsyncMock(return_value=object())
     monkeypatch.setattr(sessions_router, "issue_invoice_for_session", issue)
     monkeypatch.setattr(sessions_router, "invoice_to_dict", lambda inv: {"ok": True})
+    lookup = AsyncMock(return_value=invoice)
+    monkeypatch.setattr(sessions_router, "get_invoice_by_session", lookup)
     client, db = as_user(_viewer(role=role))
     db.execute.return_value.scalar_one_or_none.return_value = session
-    resp = client.get("/api/sessions/9/invoice")
-    return resp, issue, db
+    resp = client.get(f"/api/sessions/9/invoice{query}")
+    return resp, issue, lookup
 
 
-def test_viewer_invoice_missing_and_foreign_answer_identically(as_user, monkeypatch):
+def test_viewer_invoice_missing_foreign_and_unissued_answer_identically(as_user, monkeypatch):
     foreign = SimpleNamespace(id=9, user_id=11, tenant_id=6)
     own = SimpleNamespace(id=9, user_id=11, tenant_id=5)
     answers = []
     for session in (None, foreign, own):
-        resp, issue, db = _invoice_get(as_user, monkeypatch, UserRole.CPO_VIEWER, session)
+        # own has no issued invoice: the lookup answers None.
+        resp, issue, _ = _invoice_get(as_user, monkeypatch, UserRole.CPO_VIEWER, session)
         answers.append((resp.status_code, resp.json()))
         issue.assert_not_awaited()
-        db.execute.assert_not_awaited()
     assert answers[0] == (404, {"detail": "Session not found."})
     assert answers[0] == answers[1] == answers[2]
+
+
+def test_viewer_gets_an_existing_invoice_of_own_tenant_and_never_issues(as_user, monkeypatch):
+    own = SimpleNamespace(id=9, user_id=11, tenant_id=5)
+    resp, issue, lookup = _invoice_get(
+        as_user, monkeypatch, UserRole.CPO_VIEWER, own, invoice=object()
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"ok": True}
+    lookup.assert_awaited_once()
+    issue.assert_not_awaited()
+
+
+def test_viewer_foreign_tenant_invoice_is_never_looked_up(as_user, monkeypatch):
+    foreign = SimpleNamespace(id=9, user_id=11, tenant_id=6)
+    resp, issue, lookup = _invoice_get(
+        as_user, monkeypatch, UserRole.CPO_VIEWER, foreign, invoice=object()
+    )
+    assert resp.status_code == 404
+    lookup.assert_not_awaited()
+    issue.assert_not_awaited()
+
+
+def _real_invoice():
+    from decimal import Decimal
+
+    from backend.database.models import Invoice
+
+    return Invoice(
+        id=3, tenant_id=5, session_id=9, driver_user_id=11, invoice_number="INV-0003",
+        seller_legal_name="Volt Co", seller_gstin="29ABCDE1234F1Z5",
+        amount_coins=Decimal("17.50"), taxable_value_inr=Decimal("14.83"),
+        gst_rate_pct=Decimal("18.00"), gst_amount_inr=Decimal("2.67"),
+        total_inr=Decimal("17.50"), energy_kwh=3.5, rate_coins_per_kwh=Decimal("5.00"),
+        issued_at=datetime(2026, 11, 1, 10, 0, tzinfo=timezone.utc),
+    )
+
+
+def _html_invoice(as_user, monkeypatch, role):
+    """GET ?format=html through the REAL render_invoice_html: the DB mock
+    answers session, then (for the viewer) the invoice lookup, then the
+    driver row the Bill To line is built from."""
+    import backend.routers.sessions as sessions_router
+
+    invoice = _real_invoice()
+    monkeypatch.setattr(sessions_router, "issue_invoice_for_session", AsyncMock(return_value=invoice))
+    monkeypatch.setattr(sessions_router, "get_invoice_by_session", AsyncMock(return_value=invoice))
+    client, db = as_user(_viewer(role=role))
+
+    def _row(value):
+        r = MagicMock()
+        r.scalar_one_or_none.return_value = value
+        return r
+
+    driver = SimpleNamespace(full_name="Real Name", email="driver@example.com")
+    db.execute = AsyncMock(side_effect=[
+        _row(SimpleNamespace(id=9, user_id=11, tenant_id=5)), _row(driver),
+    ])
+    return client.get("/api/sessions/9/invoice?format=html")
+
+
+def test_viewer_invoice_html_masks_the_bill_to_name_and_email(as_user, monkeypatch):
+    resp = _html_invoice(as_user, monkeypatch, UserRole.CPO_VIEWER)
+    assert resp.status_code == 200, resp.text
+    assert "INV-0003" in resp.text
+    assert "Real Name" not in resp.text and "driver@example.com" not in resp.text
+    assert "R. N." in resp.text and "d***@example.com" in resp.text
+
+
+def test_cpo_invoice_html_still_shows_the_full_bill_to(as_user, monkeypatch):
+    resp = _html_invoice(as_user, monkeypatch, UserRole.CPO)
+    assert resp.status_code == 200, resp.text
+    assert "Real Name (driver@example.com)" in resp.text
 
 
 def test_cpo_invoice_access_is_unchanged(as_user, monkeypatch):
@@ -899,3 +1042,46 @@ async def test_socket_connect_marks_a_viewer_read_only(monkeypatch):
     monkeypatch.setattr(sm.sio, "enter_room", AsyncMock())
     assert await sm.connect("sid1", {}, {"token": "t"}) is True
     assert save.await_args.args[1]["read_only"] is True
+
+
+# --- Pending plug photos stay hidden from a viewer --------------------------
+
+def _photo_get(as_user, monkeypatch, role, status):
+    import backend.routers.plugs as plugs_router
+    from backend.database.models import PlugPhotoStatus
+
+    download = MagicMock(return_value=b"image-bytes")
+    monkeypatch.setattr(plugs_router, "download_object", download)
+    photo = SimpleNamespace(
+        id=4, plug_id=1, tenant_id=5, object_name="plug-1/p.jpg", status=PlugPhotoStatus(status),
+    )
+    from backend.services.auth import get_current_user_optional
+
+    user = _viewer(role=role)
+    client, db = as_user(user)
+    # The image route authenticates through the optional dependency.
+    monkeypatch.setitem(
+        _api()[1].dependency_overrides, get_current_user_optional, lambda: user
+    )
+    db.execute.return_value.scalar_one_or_none.return_value = photo
+    return client.get("/api/plugs/1/photos/4/image"), download
+
+
+def test_viewer_cannot_load_a_pending_photo_even_in_its_own_tenant(as_user, monkeypatch):
+    resp, download = _photo_get(as_user, monkeypatch, UserRole.CPO_VIEWER, "pending")
+    assert resp.status_code == 404
+    assert resp.json() == {"detail": "Photo not found."}
+    download.assert_not_called()
+
+
+def test_viewer_cannot_load_a_rejected_photo(as_user, monkeypatch):
+    resp, download = _photo_get(as_user, monkeypatch, UserRole.CPO_VIEWER, "rejected")
+    assert resp.status_code == 404
+    download.assert_not_called()
+
+
+def test_cpo_still_loads_a_pending_photo_and_viewer_loads_an_approved_one(as_user, monkeypatch):
+    resp, _ = _photo_get(as_user, monkeypatch, UserRole.CPO, "pending")
+    assert resp.status_code == 200 and resp.headers["cache-control"] == "private, no-store"
+    resp, _ = _photo_get(as_user, monkeypatch, UserRole.CPO_VIEWER, "approved")
+    assert resp.status_code == 200 and "public" in resp.headers["cache-control"]

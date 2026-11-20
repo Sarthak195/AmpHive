@@ -9,6 +9,7 @@ tombstone. A closure that cascaded away a driver's charging sessions would take
 the operator's tax records and earnings history with it, which is precisely why
 this is an anonymise and not a DELETE.
 """
+import asyncio
 import os
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -28,7 +29,7 @@ requires_db = pytest.mark.skipif(
 ENUM_TYPES = [
     "gateway_status", "plug_status", "session_status", "tx_type", "user_role",
     "payout_status", "dispute_status", "plug_report_status", "reservation_status",
-    "queued_charge_status",
+    "queued_charge_status", "plug_photo_status",
 ]
 
 
@@ -378,3 +379,324 @@ async def test_export_never_leaks_another_users_rows(factory):
 
     assert "driver@example.com" not in json.dumps(doc)
     assert str(seeded["session_id"]) not in json.dumps(doc["charging_sessions"])
+
+
+# ===========================================================================
+# Wave 1-3 per-user tables: export + closure coverage
+# ===========================================================================
+
+# Every table with a foreign key to users, and what export and closure do with
+# it. A new such table fails the drift guard below until it is classified here
+# (and handled in services/data_export.py / services/account_closure.py).
+# Export: "exported" = build_export reads it; anything else is a reason it is
+# not (credential, operator-side record, or already covered by the ledger).
+# Closure: "purged" = close_account DELETEs it; "retained" = financial or audit
+# record kept against the tombstone; "revoked" = API tokens are revoked.
+_USER_TABLES = {
+    "api_tokens": ("exported", "revoked"),
+    "audit_logs": ("operator-side", "retained"),
+    "email_verification_tokens": ("credential", "purged"),
+    "password_reset_tokens": ("credential", "purged"),
+    "payouts": ("operator-side", "retained"),
+    "promo_codes": ("operator-side", "retained"),
+    "push_subscriptions": ("exported", "purged"),
+    "revoked_sessions": ("credential", "retained"),
+    "group_memberships": ("exported", "purged"),
+    "offline_topups": ("ledger", "retained"),
+    "capacity_requests": ("exported", "purged"),
+    "charging_sessions": ("exported", "retained"),
+    "plug_photos": ("exported", "purged"),
+    "plug_reports": ("exported", "retained"),
+    "plug_reviews": ("exported", "purged"),
+    "plug_watches": ("exported", "purged"),
+    "promo_redemptions": ("exported", "retained"),
+    "user_favorites": ("exported", "purged"),
+    "invoices": ("exported", "retained"),
+    "ledger_transactions": ("exported", "retained"),
+    "notifications": ("exported", "purged"),
+    "queued_charges": ("exported", "purged"),
+    "reservations": ("exported", "retained"),
+    "session_disputes": ("exported", "retained"),
+    "charge_routines": ("exported", "purged"),
+    # [C9] The inviting operator's record: kept for the send caps, but the
+    # address is rewritten to the tombstone and a pending invite is revoked.
+    "group_invites": ("operator-side", "retained"),
+    # [C2] Bound OCPP idTags (digest only), exported and hard-deleted.
+    "ocpp_id_tags": ("exported", "purged"),
+}
+
+
+def _model_for(table_name):
+    from backend.database.models import Base
+
+    for mapper in Base.registry.mappers:
+        if mapper.local_table.name == table_name:
+            return mapper.class_
+    raise AssertionError(table_name)
+
+
+def test_every_user_keyed_table_is_classified_for_export_and_closure():
+    import inspect
+
+    from backend.database.models import Base
+    from backend.services import account_closure, data_export
+
+    user_tables = {
+        t.name
+        for t in Base.metadata.sorted_tables
+        if any(fk.column.table.name == "users" for c in t.columns for fk in c.foreign_keys)
+    }
+    assert user_tables == set(_USER_TABLES), (
+        "classify the new per-user table in _USER_TABLES and handle it in "
+        "services/data_export.py and services/account_closure.py"
+    )
+
+    export_src = inspect.getsource(data_export)
+    closure_src = inspect.getsource(account_closure)
+    for table, (export, closure) in _USER_TABLES.items():
+        name = _model_for(table).__name__
+        if export == "exported":
+            assert name in export_src, f"{table} missing from the data export"
+        if closure == "purged":
+            assert name in closure_src, f"{table} missing from account closure"
+
+
+# Every users column: (export, closure). Export: "exported" = the account block
+# of services/data_export.py reads it, "internal" = bookkeeping, not personal
+# data. Closure: "scrubbed" = close_account's tombstone UPDATE resets it, "kept"
+# = needed on the tombstone (role, balance, ledger links). The per-table guard
+# above cannot see a new column on users itself.
+_USER_COLUMNS = {
+    "id": ("exported", "kept"),
+    "tenant_id": ("exported", "kept"),
+    "email": ("exported", "scrubbed"),
+    "hashed_password": ("internal", "scrubbed"),
+    "full_name": ("exported", "scrubbed"),
+    "role": ("exported", "kept"),
+    "coin_balance": ("exported", "kept"),
+    "token_version": ("internal", "scrubbed"),
+    "is_disabled": ("internal", "scrubbed"),
+    "email_verified": ("exported", "scrubbed"),
+    "auth_provider": ("exported", "scrubbed"),
+    "google_sub": ("exported", "scrubbed"),
+    "deleted_at": ("internal", "scrubbed"),
+    "created_at": ("exported", "kept"),
+    "notification_prefs": ("exported", "scrubbed"),
+    # [F8V] 0053_vehicle_profile.
+    "vehicle_profile": ("exported", "scrubbed"),
+    "monthly_insights_email": ("exported", "scrubbed"),
+    "insights_email_month": ("exported", "scrubbed"),
+    "insights_email_failures": ("internal", "scrubbed"),
+}
+
+
+def test_every_users_column_is_classified_for_export_and_closure():
+    import inspect
+
+    from backend.database.models import User
+    from backend.services import account_closure, data_export
+
+    assert {c.name for c in User.__table__.columns} == set(_USER_COLUMNS), (
+        "classify the new users column in _USER_COLUMNS and handle it in "
+        "services/data_export.py and services/account_closure.py"
+    )
+    export_src = inspect.getsource(data_export.build_export)
+    closure_src = inspect.getsource(account_closure.close_account)
+    for column, (export, closure) in _USER_COLUMNS.items():
+        if export == "exported":
+            assert f"user.{column}" in export_src, f"users.{column} missing from the data export"
+        if closure == "scrubbed":
+            assert f"{column}=" in closure_src, f"users.{column} not reset on account closure"
+
+
+async def _seed_wave_rows(factory, seeded):
+    from datetime import time
+
+    from sqlalchemy import select, update
+
+    from backend.database.models import (
+        ApiToken,
+        ChargeRoutine,
+        Gateway,
+        OfflineTopup,
+        Plug,
+        PlugPhoto,
+        PlugPhotoStatus,
+        PlugReview,
+        PromoCode,
+        PromoRedemption,
+        User,
+    )
+
+    uid = seeded["driver_id"]
+    async with factory() as db:
+        plug = (await db.execute(select(Plug).where(Plug.id == seeded["plug_id"]))).scalar_one()
+        tenant_id = (
+            await db.execute(select(Gateway.tenant_id).where(Gateway.id == plug.gateway_id))
+        ).scalar_one()
+        await db.execute(
+            update(User).where(User.id == uid).values(
+                notification_prefs={"quiet_hours": {"start": "22:00", "end": "07:00"}},
+                vehicle_profile={"km_per_kwh": 7.5, "petrol_price_per_l": 110.0},
+                monthly_insights_email=True,
+                insights_email_month="2026-10",
+            )
+        )
+        db.add(ChargeRoutine(
+            user_id=uid, plug_id=plug.id, tenant_id=tenant_id, weekdays=0b0100011,
+            start_time=time(6, 30), max_kwh=5.0, auto_stop_when_full=True,
+        ))
+        db.add(PlugReview(plug_id=plug.id, tenant_id=tenant_id, driver_user_id=uid,
+                          rating=4, body="Fast and tidy"))
+        db.add(PlugPhoto(plug_id=plug.id, tenant_id=tenant_id, uploaded_by_user_id=uid,
+                         url="gs://secret-bucket/p1.jpg", object_name="plug-1/p1.jpg"))
+        db.add(PlugPhoto(plug_id=plug.id, tenant_id=tenant_id, uploaded_by_user_id=uid,
+                         url="gs://secret-bucket/r1.jpg", object_name="plug-1/r1.jpg",
+                         status=PlugPhotoStatus.REJECTED))
+        db.add(ApiToken(user_id=uid, name="Home Assistant", token_prefix="amph_ab12",
+                        token_hash="f" * 64))
+        code = PromoCode(tenant_id=tenant_id, code_hash="e" * 64, code_hint="WXYZ",
+                         amount_coins=Decimal("25.00"), max_redemptions=5, per_user_limit=1)
+        db.add(code)
+        await db.flush()
+        topup = OfflineTopup(tenant_id=tenant_id, driver_user_id=uid,
+                             amount_coins=Decimal("25.00"), promo_code_id=code.id)
+        db.add(topup)
+        await db.flush()
+        db.add(PromoRedemption(code_id=code.id, user_id=uid, offline_topup_id=topup.id))
+        await db.commit()
+
+
+@requires_db
+@pytest.mark.asyncio
+async def test_export_lists_routines_reviews_photos_promos_and_tokens_without_secrets(factory):
+    import json
+
+    from sqlalchemy import select
+
+    from backend.database.models import User
+    from backend.services.data_export import build_export
+
+    seeded = await _seed_driver_with_history(factory)
+    await _seed_wave_rows(factory, seeded)
+
+    async with factory() as db:
+        user = (await db.execute(select(User).where(User.id == seeded["driver_id"]))).scalar_one()
+        doc = await build_export(db, user)
+
+    routine = doc["charge_routines"][0]
+    assert routine["charger"] == "Plug A"
+    assert routine["weekdays"] == ["monday", "tuesday", "saturday"]
+    assert routine["start_time_local"] == "06:30"
+    assert routine["max_kwh"] == 5.0
+    assert routine["auto_stop_when_full"] is True
+    assert routine["enabled"] is True
+    assert routine["consecutive_failures"] == 0
+    assert doc["charger_reviews"][0]["rating"] == 4
+    assert doc["charger_reviews"][0]["body"] == "Fast and tidy"
+    assert sorted(p["status"] for p in doc["charger_photos"]) == ["pending", "rejected"]
+    assert doc["promo_redemptions"][0]["amount_coins"] == 25.0
+    assert doc["promo_redemptions"][0]["operator"] == "Volt Co"
+    assert doc["api_tokens"][0]["name"] == "Home Assistant"
+    assert doc["account"]["notification_prefs"]["quiet_hours"]["start"] == "22:00"
+    assert doc["account"]["vehicle_profile"]["km_per_kwh"] == 7.5
+    assert doc["account"]["monthly_insights_email"] is True
+    assert doc["account"]["insights_email_month"] == "2026-10"
+
+    blob = json.dumps(doc)
+    for forbidden in ("f" * 64, "e" * 64, "WXYZ", "secret-bucket", "plug-1/p1.jpg"):
+        assert forbidden not in blob, f"{forbidden} must never appear in an export"
+
+
+@requires_db
+@pytest.mark.asyncio
+async def test_closure_purges_routines_reviews_photos_and_keeps_promo_redemptions(factory, monkeypatch):
+    from sqlalchemy import func, select
+
+    import backend.services.account_closure as closure
+    from backend.database.models import (
+        ChargeRoutine,
+        PlugPhoto,
+        PlugReview,
+        PromoRedemption,
+        User,
+    )
+
+    deleted = []
+    monkeypatch.setattr(closure, "delete_object", lambda name: deleted.append(name))
+
+    seeded = await _seed_driver_with_history(factory)
+    await _seed_wave_rows(factory, seeded)
+    uid = seeded["driver_id"]
+
+    async with factory() as db:
+        user = (await db.execute(select(User).where(User.id == uid))).scalar_one()
+        summary = await closure.close_account(db, user)
+
+    assert summary["purged"]["charge_routines"] == 1
+    assert summary["purged"]["plug_reviews"] == 1
+    assert summary["purged"]["plug_photos"] == 2
+    await asyncio.gather(*closure._pending)
+    # the rejected photo's object was deleted at rejection, so it is not retried
+    assert deleted == ["plug-1/p1.jpg"]
+
+    async with factory() as db:
+        for model, column in (
+            (ChargeRoutine, ChargeRoutine.user_id),
+            (PlugReview, PlugReview.driver_user_id),
+            (PlugPhoto, PlugPhoto.uploaded_by_user_id),
+        ):
+            assert (await db.execute(
+                select(func.count()).select_from(model).where(column == uid)
+            )).scalar_one() == 0
+        # The redemption is the promo's usage count: it stays against the tombstone.
+        assert (await db.execute(
+            select(func.count(PromoRedemption.id)).where(PromoRedemption.user_id == uid)
+        )).scalar_one() == 1
+        closed = (await db.execute(select(User).where(User.id == uid))).scalar_one()
+        assert closed.notification_prefs is None
+        assert closed.vehicle_profile is None
+        assert closed.monthly_insights_email is False
+        assert closed.insights_email_month is None
+
+
+@requires_db
+@pytest.mark.asyncio
+async def test_closure_survives_a_failing_photo_object_delete(factory, monkeypatch):
+    from sqlalchemy import select
+
+    import backend.services.account_closure as closure
+    from backend.database.models import User
+
+    def boom(name):
+        raise RuntimeError("bucket unreachable")
+
+    monkeypatch.setattr(closure, "delete_object", boom)
+    seeded = await _seed_driver_with_history(factory)
+    await _seed_wave_rows(factory, seeded)
+
+    async with factory() as db:
+        user = (await db.execute(select(User).where(User.id == seeded["driver_id"]))).scalar_one()
+        summary = await closure.close_account(db, user)
+    await asyncio.gather(*closure._pending)
+    assert summary["purged"]["plug_photos"] == 2
+
+
+# --- photo object deletion runs after the closure, off the response ---
+
+@pytest.mark.asyncio
+async def test_delete_photo_objects_logs_and_continues_after_a_failure(monkeypatch, caplog):
+    import backend.services.account_closure as closure
+
+    seen = []
+
+    def fake(name):
+        seen.append(name)
+        if name == "a.jpg":
+            raise RuntimeError("bucket unreachable")
+
+    monkeypatch.setattr(closure, "delete_object", fake)
+    with caplog.at_level("WARNING", logger="amphive.api"):
+        await closure._delete_photo_objects(7, ["a.jpg", "b.jpg"])
+    assert seen == ["a.jpg", "b.jpg"]
+    assert any(r.exc_info for r in caplog.records)
