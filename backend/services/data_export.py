@@ -122,6 +122,11 @@ async def build_export(db: AsyncSession, user: User) -> dict:
         "organisation_id": user.tenant_id,
         # [C7] Push toggles and quiet hours; null = never changed (defaults).
         "notification_prefs": user.notification_prefs,
+        # [F8V] Insights assumptions (null = defaults) and the monthly email
+        # opt-in with the last month it was decided for.
+        "vehicle_profile": user.vehicle_profile,
+        "monthly_insights_email": user.monthly_insights_email,
+        "insights_email_month": user.insights_email_month,
     }
 
     # --- charging sessions (with the charger they ran on) -----------------
@@ -260,7 +265,15 @@ async def build_export(db: AsyncSession, user: User) -> dict:
     )
     note("group_memberships", truncated)
     group_memberships = [
-        {"group_id": m.group_id, "group_name": name, "joined_at": _iso(m.joined_at)}
+        {
+            "group_id": m.group_id,
+            "group_name": name,
+            "joined_at": _iso(m.joined_at),
+            # [C9] The operator's flat per-member price, null = the tariff.
+            "price_per_kwh_override": (
+                None if m.price_per_kwh_override is None else float(m.price_per_kwh_override)
+            ),
+        }
         for m, name in membership_rows
     ]
 

@@ -318,6 +318,11 @@ async def close_account(db: AsyncSession, user: User) -> dict:
             is_disabled=True,
             deleted_at=now,
             notification_prefs=None,
+            # [F8V] Insights assumptions and the monthly email opt-in.
+            vehicle_profile=None,
+            monthly_insights_email=False,
+            insights_email_month=None,
+            insights_email_failures=0,
             token_version=User.token_version + 1,
         )
         .execution_options(synchronize_session=False)
