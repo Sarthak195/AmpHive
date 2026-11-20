@@ -97,6 +97,20 @@ def test_firmware_behind_current_and_unknown():
     assert st.check_firmware("garbage", rel)["status"] == "unknown"
 
 
+def test_firmware_wording_equal_vs_ahead_and_numeric_compare():
+    rel = ["2.9.0-direct", "2.10.0-direct"]
+    same = st.check_firmware("2.10.0-direct", rel)
+    assert same["status"] == "pass" and "the newest release" in same["detail"]
+    ahead = st.check_firmware("2.11.0-direct", rel)
+    assert ahead["status"] == "pass"
+    assert "newer than the newest release (2.10.0-direct)" in ahead["detail"]
+    assert "the newest release." not in ahead["detail"]
+    # Numeric per component, not lexical: 2.10.0 is ahead of 2.9.0.
+    dev = st.check_firmware("2.10.0-direct", ["2.9.0-direct"])
+    assert dev["status"] == "pass" and "newer than the newest release (2.9.0-direct)" in dev["detail"]
+    assert st.check_firmware("2.9.0-direct", ["2.10.0-direct"])["status"] == "warn"
+
+
 # --- plug telemetry / roster ---------------------------------------------
 
 def test_plug_telemetry_fresh_stale_and_silent():

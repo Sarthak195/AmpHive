@@ -16,10 +16,12 @@ So closure does two different things to two different classes of row:
 **Purged (hard DELETE)** — rows that are purely the person, carry no money and
 have no counterparty:
   push subscriptions, notifications, favourites, plug watches, group
-  memberships, capacity requests, queued charges, upcoming reservations, and
-  any outstanding password-reset / email-verification tokens. Personal API
-  tokens (F7) are revoked (revoked_at stamped) in the same commit, so none
-  outlives the account.
+  memberships, capacity requests, weekly charge routines, charger reviews,
+  charger photos (the rows, and the stored image objects best-effort after
+  the commit), queued charges, upcoming reservations, and any outstanding
+  password-reset / email-verification tokens. Personal API tokens (F7) are
+  revoked (revoked_at stamped) in the same commit, so none outlives the
+  account. The tombstone's notification_prefs are cleared.
 
 **Retained but detached (anonymised)** — the `users` row itself is kept as a
 tombstone so the financial rows still resolve, with every identifier scrubbed:
@@ -30,7 +32,8 @@ tombstone so the financial rows still resolve, with every identifier scrubbed:
   (every outstanding JWT dies immediately), `deleted_at` stamped.
 
 The financial rows (charging_sessions, ledger_transactions, invoices,
-offline_topups, session_disputes, plug_reports, payouts, audit_logs) then point
+offline_topups, promo_redemptions, session_disputes, plug_reports, payouts,
+audit_logs) then point
 at a tombstone that identifies nobody.
 
 Charging credit
@@ -49,6 +52,7 @@ Closure is refused (409) while it would leave the platform inconsistent:
   * the caller is the last operator of a tenant that still owns gateways or has
     unsettled earnings — deleting them would orphan live hardware and money.
 """
+import asyncio
 import logging
 import secrets
 from datetime import datetime, timezone
@@ -66,6 +70,9 @@ from backend.database.models import (
     LedgerTransaction,
     Notification,
     PasswordResetToken,
+    PlugPhoto,
+    PlugPhotoStatus,
+    PlugReview,
     PlugWatch,
     PushSubscription,
     QueuedCharge,
@@ -81,6 +88,7 @@ from backend.database.models import (
 from backend.services.api_tokens import revoke_user_api_tokens
 from backend.services.auth import hash_password
 from backend.services.money import ZERO_MONEY, to_money
+from backend.services.photo_publish import delete_object
 
 logger = logging.getLogger("amphive.api")
 
@@ -89,6 +97,22 @@ logger = logging.getLogger("amphive.api")
 # person, and is unmistakably not a real address to anyone reading the table.
 TOMBSTONE_EMAIL_DOMAIN = "deleted.amphive.invalid"
 TOMBSTONE_NAME = "Deleted user"
+
+
+# Strong refs for in-flight background deletions; discarded on completion.
+_pending: set[asyncio.Task] = set()
+
+
+async def _delete_photo_objects(user_id: int, object_names: list[str]) -> None:
+    for object_name in object_names:
+        try:
+            await asyncio.to_thread(delete_object, object_name)
+        except Exception:
+            logger.warning(
+                "Could not delete a closed account's plug photo object",
+                extra={"user_id": user_id, "object_name": object_name},
+                exc_info=True,
+            )
 
 
 class AccountClosureRefused(Exception):
@@ -217,6 +241,19 @@ async def close_account(db: AsyncSession, user: User) -> dict:
     )
 
     # --- 3. Purge the purely-personal rows --------------------------------
+    # Photo object names are read first: once the rows are gone the bytes in
+    # the private bucket would otherwise be unreachable orphans.
+    photo_objects = list(
+        (
+            await db.execute(
+                select(PlugPhoto.object_name).where(
+                    PlugPhoto.uploaded_by_user_id == user_id,
+                    # A rejected photo's object was already deleted at rejection.
+                    PlugPhoto.status != PlugPhotoStatus.REJECTED,
+                )
+            )
+        ).scalars()
+    )
     purged: dict[str, int] = {}
     for label, model, column in (
         ("push_subscriptions", PushSubscription, PushSubscription.user_id),
@@ -224,6 +261,8 @@ async def close_account(db: AsyncSession, user: User) -> dict:
         ("favorites", UserFavorite, UserFavorite.user_id),
         ("plug_watches", PlugWatch, PlugWatch.user_id),
         ("charge_routines", ChargeRoutine, ChargeRoutine.user_id),
+        ("plug_reviews", PlugReview, PlugReview.driver_user_id),
+        ("plug_photos", PlugPhoto, PlugPhoto.uploaded_by_user_id),
         ("group_memberships", GroupMembership, GroupMembership.user_id),
         ("capacity_requests", CapacityRequest, CapacityRequest.user_id),
         ("password_reset_tokens", PasswordResetToken, PasswordResetToken.user_id),
@@ -253,12 +292,24 @@ async def close_account(db: AsyncSession, user: User) -> dict:
             email_verified=False,
             is_disabled=True,
             deleted_at=now,
+            notification_prefs=None,
             token_version=User.token_version + 1,
         )
         .execution_options(synchronize_session=False)
     )
 
     await db.commit()
+
+    # Best-effort, AFTER the commit and AFTER the response: a slow or hung
+    # storage call (120 s timeout each) must never hold a closure that has
+    # already been committed. An object that survives is only reachable through
+    # the (now deleted) photo row's id, so it cannot be served.
+    if photo_objects:
+        task = asyncio.get_running_loop().create_task(
+            _delete_photo_objects(user_id, photo_objects)
+        )
+        _pending.add(task)
+        task.add_done_callback(_pending.discard)
 
     summary = {
         "user_id": user_id,

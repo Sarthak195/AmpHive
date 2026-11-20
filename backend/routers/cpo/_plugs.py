@@ -31,6 +31,7 @@ from backend.services.plug_hours import (
     normalize_amenities,
     normalize_hours,
 )
+from backend.services.routines import disable_closed_routines, send_disabled_notices
 
 from ._common import (
     DEFAULT_LIST_LIMIT,
@@ -294,8 +295,15 @@ async def cpo_update_plug(
     if "access_note" in fields:
         plug.access_note = (req.access_note or "").strip() or None
 
+    # [Plug hours] Routines whose start time the new hours close would fail
+    # every occurrence: turn them off now, in this request.
+    disabled_routines = (
+        await disable_closed_routines(db, plug) if "opening_hours" in fields else []
+    )
+
     await db.commit()
     await db.refresh(plug)
+    await send_disabled_notices(plug.id, disabled_routines)
 
     logger.info(f"CPO plug updated: {plug.id} ({plug.name}) by {user.email}")
 

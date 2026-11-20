@@ -1,12 +1,16 @@
 """DB-free tests for the C3 pre-start estimate (services/estimate.py and
 GET /api/plugs/{id}/estimate). The estimate is display only."""
+import itertools
+import os
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import pytest_asyncio
 from fastapi import HTTPException
+from sqlalchemy import select
 
 from backend.database.models import UserRole
 from backend.routers.plugs import get_plug_charge_estimate
@@ -259,3 +263,172 @@ async def test_estimate_for_a_closed_plug_is_409_like_the_start():
         await _estimate(plug, max_kwh=None, max_duration_min=60, start_at=_at(20))
     assert exc.value.status_code == 409
     assert "closed" in exc.value.detail
+
+
+# --- route validation over HTTP (FastAPI's own Query rules) -------------------
+
+
+@pytest.fixture
+def estimate_client():
+    from fastapi.testclient import TestClient
+
+    import backend.main as main
+    from backend.database.db import get_db
+    from backend.services.auth import get_current_user
+
+    api = main.app.other_asgi_app
+    db = AsyncMock()
+
+    async def _db():
+        yield db
+
+    api.dependency_overrides[get_db] = _db
+    api.dependency_overrides[get_current_user] = lambda: _user()
+    yield TestClient(main.app, raise_server_exceptions=False), db
+    for dep in (get_db, get_current_user):
+        api.dependency_overrides.pop(dep, None)
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "max_kwh=0",
+        "max_kwh=-1",
+        "max_kwh=100.01",
+        "max_kwh=abc",
+        "max_duration_min=0",
+        "max_duration_min=-5",
+        "max_duration_min=1441",
+        "max_duration_min=1.5",
+        "max_duration_min=abc",
+        "max_kwh=5&start_at=not-a-date",
+        "start_at=2026-11-18T10:00:00Z",  # no limit at all
+        "",
+    ],
+)
+def test_estimate_rejects_bad_input_with_422_before_touching_the_database(estimate_client, query):
+    client, db = estimate_client
+    resp = client.get(f"/api/plugs/3/estimate?{query}")
+    assert resp.status_code == 422
+    db.execute.assert_not_called()
+
+
+# --- DB-gated: the real history query (CI only) -------------------------------
+
+TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL")
+requires_db = pytest.mark.skipif(
+    not TEST_DATABASE_URL,
+    reason="needs TEST_DATABASE_URL pointing at a throwaway Postgres (CI service)",
+)
+ENUM_TYPES = [
+    "gateway_status", "plug_status", "session_status", "tx_type", "user_role",
+    "payout_status", "queued_charge_status",
+]
+_n = itertools.count(1)
+
+
+@pytest_asyncio.fixture()
+async def factory():
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+    from sqlalchemy.pool import NullPool
+
+    from backend.database.models import Base
+
+    engine = create_async_engine(TEST_DATABASE_URL, poolclass=NullPool)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+        await conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
+        for enum_name in ENUM_TYPES:
+            await conn.execute(text(f"DROP TYPE IF EXISTS {enum_name} CASCADE"))
+        await conn.run_sync(Base.metadata.create_all)
+    yield async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    await engine.dispose()
+
+
+async def _seed_history_world(factory):
+    """One tenant, two plugs on one gateway, two drivers. Returns ids."""
+    from backend.database.models import (
+        Gateway,
+        GatewayStatus,
+        Plug,
+        PlugStatus,
+        Tenant,
+        User,
+    )
+
+    n = next(_n)
+    async with factory() as db:
+        tenant = Tenant(name=f"T{n}", timezone="Asia/Kolkata")
+        db.add(tenant)
+        await db.flush()
+        me = User(email=f"me{n}@example.com", hashed_password="x",
+                  full_name="Me", role=UserRole.DRIVER)
+        other = User(email=f"other{n}@example.com", hashed_password="x",
+                     full_name="Other", role=UserRole.DRIVER)
+        gw = Gateway(id=f"gw-e{n}", tenant_id=tenant.id, name="GW",
+                     vpn_ip=f"10.8.0.{n}", status=GatewayStatus.ONLINE)
+        db.add_all([me, other, gw])
+        await db.flush()
+        plug = Plug(gateway_id=gw.id, name="Bay", local_ip="10.0.2.1", status=PlugStatus.AVAILABLE)
+        plug2 = Plug(gateway_id=gw.id, name="Bay 2", local_ip="10.0.2.2", status=PlugStatus.AVAILABLE)
+        db.add_all([plug, plug2])
+        await db.commit()
+        return {"tenant": tenant.id, "me": me.id, "other": other.id,
+                "plug": plug.id, "plug2": plug2.id}
+
+
+async def _add_session(factory, w, *, user="me", plug="plug", ended_days_ago,
+                       seconds, kwh, status=None):
+    from backend.database.models import ChargingSession, SessionStatus
+
+    ended = NOW - timedelta(days=ended_days_ago)
+    async with factory() as db:
+        db.add(ChargingSession(
+            tenant_id=w["tenant"], user_id=w[user], plug_id=w[plug],
+            started_at=ended - timedelta(seconds=seconds),
+            ended_at=None if status == SessionStatus.ACTIVE else ended,
+            energy_kwh=kwh, status=status or SessionStatus.COMPLETED,
+        ))
+        await db.commit()
+
+
+async def _basis(factory, w):
+    from backend.database.models import Plug
+
+    async with factory() as db:
+        plug = (await db.execute(select(Plug).where(Plug.id == w["plug"]))).scalar_one()
+        return await resolve_power_basis(db, plug, w["me"], NOW)
+
+
+@requires_db
+@pytest.mark.asyncio
+async def test_db_history_picks_the_callers_latest_completed_session_here(factory):
+    from backend.database.models import SessionStatus
+
+    w = await _seed_history_world(factory)
+    # Everything below must be ignored by the query ...
+    await _add_session(factory, w, ended_days_ago=40, seconds=3600, kwh=3.0)        # too old
+    await _add_session(factory, w, user="other", ended_days_ago=1, seconds=3600, kwh=3.0)
+    await _add_session(factory, w, plug="plug2", ended_days_ago=1, seconds=3600, kwh=3.0)
+    await _add_session(factory, w, ended_days_ago=0, seconds=3600, kwh=3.0,
+                       status=SessionStatus.ACTIVE)                                  # not completed
+    # ... and an older completed session loses to the newer one.
+    await _add_session(factory, w, ended_days_ago=9, seconds=3600, kwh=2.0)         # 2000 W
+    await _add_session(factory, w, ended_days_ago=5, seconds=3600, kwh=1.0)         # 1000 W
+    assert await _basis(factory, w) == (1000.0, "recent_session")
+
+
+@requires_db
+@pytest.mark.asyncio
+async def test_db_history_minimum_length_and_energy_and_rated_cap(factory):
+    w = await _seed_history_world(factory)
+    assert await _basis(factory, w) == (16 * 230.0, "rated_power")                   # no history
+    await _add_session(factory, w, ended_days_ago=3, seconds=3600, kwh=1.0)
+    await _add_session(factory, w, ended_days_ago=2, seconds=299, kwh=1.0)          # 4m59s: too short
+    assert await _basis(factory, w) == (16 * 230.0, "rated_power")
+    await _add_session(factory, w, ended_days_ago=1, seconds=300, kwh=0.1)          # exactly 5 min
+    power, basis = await _basis(factory, w)
+    assert basis == "recent_session" and round(power) == 1200
+    await _add_session(factory, w, ended_days_ago=0.5, seconds=3600, kwh=10.0)      # 10 kW: capped
+    assert await _basis(factory, w) == (16 * 230.0, "recent_session")

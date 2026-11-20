@@ -38,6 +38,7 @@ import {
   Printer,
   QrCode,
   Search,
+  Share2,
   Users,
   PlugZap,
   Wrench,
@@ -55,6 +56,7 @@ import PlugHoursEditor from '../../components/PlugHoursEditor';
 import { useToast } from '../../components/ui';
 import api from '../../api/client';
 import { useConfig } from '../../contexts/ConfigContext';
+import { driverOrigin } from '../../utils/appHost';
 import { useSession } from '../../contexts/SessionContext';
 import usePoll from '../../hooks/usePoll';
 import { getPlugAvailability, AVAILABILITY_STATES, AVAILABILITY_LABELS } from '../../utils/plugAvailability';
@@ -429,6 +431,8 @@ export default function CpoChargers() {
 
   /* ---- QR modal ---------------------------------------------------------- */
   const [qrPlug, setQrPlug] = useState(null);
+  /* Printable QR to the public network status page (/map on the driver origin). */
+  const [shareOpen, setShareOpen] = useState(false);
 
   /* ---- table columns ------------------------------------------------------ */
   const columns = [
@@ -543,10 +547,16 @@ export default function CpoChargers() {
         title="Chargers"
         sub="Manage your smart chargers, their groups, and pricing."
         actions={
-          <button data-write type="button" className="btn btn-primary" onClick={openAdd}>
-            <Plus size={16} aria-hidden="true" />
-            Add charger
-          </button>
+          <>
+            <button type="button" className="btn btn-quiet" onClick={() => setShareOpen(true)}>
+              <Share2 size={16} aria-hidden="true" />
+              Share network status
+            </button>
+            <button data-write type="button" className="btn btn-primary" onClick={openAdd}>
+              <Plus size={16} aria-hidden="true" />
+              Add charger
+            </button>
+          </>
         }
       />
 
@@ -1025,6 +1035,53 @@ export default function CpoChargers() {
             <p className="text-3 text-sm cpo-chargers-qr-footnote">
               Opens AmpHive with this charger prefilled — the driver still signs in and taps
               Start.
+            </p>
+          </>
+        )}
+      </Modal>
+
+      {/* Share network status: printable QR to the public /map page */}
+      <Modal
+        open={shareOpen}
+        onClose={() => setShareOpen(false)}
+        title="Network status QR code"
+        size="sm"
+        footer={
+          <>
+            <button type="button" className="btn btn-quiet" onClick={() => setShareOpen(false)}>
+              Close
+            </button>
+            <button type="button" className="btn btn-primary" onClick={() => window.print?.()}>
+              <Printer size={16} aria-hidden="true" />
+              Print
+            </button>
+          </>
+        }
+      >
+        {shareOpen && (
+          <>
+            <div className="print-area cpo-chargers-qr-sheet">
+              <div className="cpo-chargers-qr-brand">
+                <span className="brand-bolt">
+                  <Zap size={16} aria-hidden="true" />
+                </span>
+                <span>AmpHive</span>
+              </div>
+              <div className="cpo-chargers-qr-box">
+                <QRCodeSVG
+                  value={`${driverOrigin()}/map`}
+                  size={200}
+                  bgColor="#ffffff"
+                  fgColor="#0C0E07"
+                  level="M"
+                  marginSize={2}
+                />
+              </div>
+              <p className="cpo-chargers-qr-name">Live charger status</p>
+              <p className="cpo-chargers-qr-hint">Scan to see which chargers are free</p>
+            </div>
+            <p className="text-3 text-sm cpo-chargers-qr-footnote">
+              Opens the public network status page. No sign-in needed.
             </p>
           </>
         )}

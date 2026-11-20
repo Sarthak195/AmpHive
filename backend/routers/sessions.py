@@ -1264,8 +1264,10 @@ async def dispute_session(
 # ===========================================================================
 from fastapi.responses import HTMLResponse  # noqa: E402
 
+from backend.routers.cpo._common import redact_for, redact_name_for  # noqa: E402
 from backend.services.invoices import (  # noqa: E402
     SessionNotInvoiceableError,
+    get_invoice_by_session,
     invoice_to_dict,
     issue_invoice_for_session,
     render_invoice_html,
@@ -1291,14 +1293,12 @@ async def get_session_invoice(
     minimal printable invoice (inline CSS, no PDF dependency — meant to be
     saved/printed via the browser's own print dialog) instead of JSON.
 
-    [F10] A read-only cpo_viewer always gets the same 404 as a missing
-    session, decided before any lookup: issuing writes the invoice on first
-    read and the HTML prints the driver's name and email, and a 403 for an
-    existing session (vs 404 for a missing one) would be an existence oracle.
-    The CPO console lists invoices through GET /api/cpo/invoices instead.
+    [F10] A read-only cpo_viewer gets an EXISTING invoice of a session in its
+    own tenant and never issues one (issuing assigns the next number, a write),
+    with the HTML's Bill To name and email masked. A missing session, another
+    tenant's session and a session without an issued invoice all answer the
+    same 404, so there is no existence oracle.
     """
-    if is_cpo_viewer(user):
-        raise HTTPException(status_code=404, detail="Session not found.")
     session_result = await db.execute(
         select(ChargingSession).where(ChargingSession.id == session_id)
     )
@@ -1306,7 +1306,11 @@ async def get_session_invoice(
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found.")
 
-    if user.role == UserRole.DRIVER:
+    viewer = is_cpo_viewer(user)
+    if viewer:
+        if user.tenant_id is None or session.tenant_id != user.tenant_id:
+            raise HTTPException(status_code=404, detail="Session not found.")
+    elif user.role == UserRole.DRIVER:
         if session.user_id != user.id:
             raise HTTPException(status_code=404, detail="Session not found.")
     elif user.role == UserRole.CPO:
@@ -1315,12 +1319,24 @@ async def get_session_invoice(
     elif user.role != UserRole.ADMIN:
         raise HTTPException(status_code=403, detail="Access denied.")
 
-    try:
-        invoice = await issue_invoice_for_session(db, session_id)
-    except SessionNotInvoiceableError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+    if viewer:
+        # Read-only: look the invoice up, never issue one.
+        invoice = await get_invoice_by_session(db, session_id)
+        if invoice is None:
+            raise HTTPException(status_code=404, detail="Session not found.")
+    else:
+        try:
+            invoice = await issue_invoice_for_session(db, session_id)
+        except SessionNotInvoiceableError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
 
     if format == "html":
+        if viewer:
+            return HTMLResponse(content=await render_invoice_html(
+                db, invoice,
+                redact_name=lambda n: redact_name_for(user, n),
+                redact_email=lambda e: redact_for(user, e),
+            ))
         return HTMLResponse(content=await render_invoice_html(db, invoice))
 
     return invoice_to_dict(invoice)

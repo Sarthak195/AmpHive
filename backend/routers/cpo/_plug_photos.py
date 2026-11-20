@@ -23,6 +23,7 @@ from backend.database.db import get_db
 from backend.database.models import PlugPhoto, PlugPhotoStatus, User
 from backend.routers.plugs import photo_image_path
 from backend.schemas import PlugPhotoResponse
+from backend.services.auth import is_cpo_viewer
 from backend.services.photo_publish import PhotoPublishError, delete_object
 
 from ._common import logger, require_cpo_tenant
@@ -50,10 +51,14 @@ async def cpo_list_plug_photos(
     """
     Driver photos submitted for the CPO's own plugs, for moderation. Defaults to
     the PENDING queue; pass status_filter=approved|rejected (or empty for all).
-    Tenant-scoped via the denormalized tenant_id, newest first.
+    Tenant-scoped via the denormalized tenant_id, newest first. A cpo_viewer
+    only ever sees APPROVED photos (their image route 404s anything else), so a
+    pending or rejected filter answers an empty list for them.
     """
     limit = max(1, min(limit, 500))
     conditions = [PlugPhoto.tenant_id == user.tenant_id]
+    if is_cpo_viewer(user):
+        conditions.append(PlugPhoto.status == PlugPhotoStatus.APPROVED)
     if status_filter:
         try:
             conditions.append(PlugPhoto.status == PlugPhotoStatus(status_filter))

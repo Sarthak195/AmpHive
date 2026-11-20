@@ -122,6 +122,9 @@ def check_firmware(fw: Optional[str], active_versions: Iterable[str]) -> Dict[st
     if version_sort_key(fw)[:3] < version_sort_key(newest)[:3]:
         return _check("firmware", label, WARN, f"Running {fw}; {newest} is available.",
                       "Use Update firmware on the gateways page.")
+    if version_sort_key(fw)[:3] > version_sort_key(newest)[:3]:
+        return _check("firmware", label, PASS,
+                      f"Running {fw}, newer than the newest release ({newest}).")
     return _check("firmware", label, PASS, f"Running {fw}, the newest release.")
 
 
