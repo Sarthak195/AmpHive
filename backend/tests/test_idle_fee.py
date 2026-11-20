@@ -499,10 +499,20 @@ async def test_finalize_settles_once_capped_by_the_hold_left_db_free(monkeypatch
 
 @pytest.mark.asyncio
 async def test_terms_lookup_failure_means_no_fee_not_a_failed_start():
+    savepoint = MagicMock()
+    savepoint.__aenter__ = AsyncMock(return_value=None)
+    savepoint.__aexit__ = AsyncMock(return_value=False)   # the error propagates out
     db = MagicMock()
+    db.begin_nested = MagicMock(return_value=savepoint)
     db.execute = AsyncMock(side_effect=RuntimeError("db down"))
     plug = SimpleNamespace(tariff_id=1, group_id=None, gateway_id="gw-1")
     assert await idle_fee.resolve_idle_terms(db, plug) is None
+    # The lookup ran inside the savepoint, which was exited with the error
+    # (so a real session rolls back to it and the transaction stays usable).
+    db.begin_nested.assert_called_once_with()
+    savepoint.__aenter__.assert_awaited_once()
+    assert savepoint.__aexit__.await_args.args[0] is RuntimeError
+
 
 
 def test_tariff_route_validation():
@@ -737,3 +747,21 @@ async def test_dispute_can_refund_the_idle_fee(factory, _no_hardware):
         await cpo_resolve_dispute(dispute_id, CpoDisputeResolveRequest(action="approve"), cpo, db)
     # The default refund is the whole coins_spent, idle fee included.
     assert await _balance(factory, w["driver_id"]) == Decimal("200.00")
+
+
+@requires_db
+@pytest.mark.asyncio
+async def test_db_error_in_terms_lookup_does_not_poison_the_session(factory):
+    from sqlalchemy import text
+
+    async with factory() as db:
+        plug = SimpleNamespace(tariff_id=1, group_id=None, gateway_id="gw-1")
+
+        async def _bad_sql(_db, _plug):
+            await _db.execute(text("SELECT * FROM no_such_table_for_idle_fee"))
+
+        with patch("backend.services.pricing._resolve_tariff_and_tz", _bad_sql):
+            assert await idle_fee.resolve_idle_terms(db, plug) is None
+        # Without the savepoint the transaction is aborted here and this raises
+        # InFailedSQLTransactionError.
+        assert (await db.execute(text("SELECT 1"))).scalar_one() == 1
