@@ -67,7 +67,7 @@ const mockApiRoutes = ({ gateways = GATEWAYS, releases = RELEASES } = {}) => {
         overall: 'warn',
         checks: [
           { key: 'online', label: 'Gateway online', status: 'pass', detail: 'Connected, last heard 5 s ago.', fix_hint: null, observed_at: null },
-          { key: 'wifi', label: 'Wi-Fi signal (at boot)', status: 'warn', detail: '-75 dBm at boot, 1 h ago.', fix_hint: 'Move the gateway closer to the router or add an access point.', observed_at: null },
+          { key: 'wifi', label: 'Wi-Fi signal (live)', status: 'warn', detail: '-75 dBm live, 2 min ago.', fix_hint: 'Move the gateway closer to the router or add an access point.', observed_at: null },
         ],
       });
     }
@@ -111,7 +111,8 @@ describe('CpoGateways', () => {
 
     await user.click(screen.getAllByRole('button', { name: 'Logs' })[0]);
     expect(await screen.findByText('Commissioning checklist')).toBeInTheDocument();
-    expect(screen.getByText('Wi-Fi signal (at boot)')).toBeInTheDocument();
+    expect(screen.getByText('Wi-Fi signal (live)')).toBeInTheDocument();
+    expect(screen.getByText('-75 dBm live, 2 min ago.')).toBeInTheDocument();
     expect(screen.getByText(/Move the gateway closer/)).toBeInTheDocument();
     const selftestCalls = () => api.get.mock.calls.filter((c) => c[0].endsWith('/selftest')).length;
     expect(selftestCalls()).toBe(1);

@@ -2,7 +2,8 @@ import asyncio
 import logging
 import os
 import re
-from typing import Callable, Dict, Optional
+from datetime import datetime
+from typing import Callable, Dict, Optional, Tuple
 
 import paho.mqtt.client as mqtt
 
@@ -234,6 +235,11 @@ class MQTTManager(
         # Per-gateway monotonic timestamp of the last last_seen_at refresh
         # (see GATEWAY_SEEN_BUMP_INTERVAL_SEC). Only touched on the paho thread.
         self._gateway_seen_bumped: Dict[str, float] = {}
+        # [Live Wi-Fi] Per-gateway (rssi_dbm, received_at) from telemetry
+        # "wifi_rssi" (fw >= 2.10.0). Written on the paho thread, read by the
+        # selftest route; one tuple swap per write, so a read is never torn.
+        # In memory only: a restart forgets it until the next report (<= 5 min).
+        self._live_wifi_rssi: Dict[str, Tuple[int, datetime]] = {}
         # Session ids already sent a low-balance warning (once per session).
         # Only touched on the event loop. Bounded by an occasional full clear —
         # worst case a long-running session gets one repeat warning.

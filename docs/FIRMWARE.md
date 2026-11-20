@@ -862,7 +862,9 @@ burst. 2.7.1 adds:
 The first capture showed the cause: the board heard the AP at -81 to -89 dBm.
 Placement fixes that, not firmware.
 
-**Current source: fw `2.9.0-direct`: SET_INTERVAL wakes the poll loop
+**Current source: fw `2.10.0-direct`: live Wi-Fi signal on telemetry (2026-11-19; built and signed locally with ESP-IDF v5.3.3, not flashed, published or OTA'd).** The telemetry task adds `"wifi_rssi":<dBm>` (from `esp_wifi_sta_get_ap_info`) to the first online telemetry frame after boot and then to at most one frame every `WIFI_RSSI_REPORT_INTERVAL_S` (300 s). This is one gateway-wide timer, not one per plug. The timer advances only when the AP read succeeded and esp-mqtt accepted the publish, so a failed read or publish retries on the next frame. Offline-buffered and resync frames never carry the field. The field rides the existing telemetry topic: no new topic, no broker ACL change, and no retained status republish (that would trigger reconnect reconciliation). The backend keeps the latest value in memory for the C10 commissioning checklist and writes no DB row. Backend and firmware can ship in either order: an older backend ignores the field, and a newer backend falls back to the GATEWAY_BOOT value for fw <= 2.9.0. A gateway with no plug, or whose plugs send no frame, reports no live value.
+
+**fw `2.9.0-direct`: SET_INTERVAL wakes the poll loop
 (2026-11-15; not yet built, flashed or published).** The telemetry task slept
 `vTaskDelay(telemetry_interval_ms)`, so after a session's `SET_INTERVAL 1000`
 the 1 s cadence began only when the current idle sleep (up to 10 s) ended. 2.9.0

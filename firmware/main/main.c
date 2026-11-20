@@ -71,6 +71,12 @@ static float default_plug_cap_a = DEFAULT_PLUG_CAP_A;
 // while keeping NVS wear modest (same order as the offline-log cadence).
 #define SESSION_PERSIST_INTERVAL_S  30
 
+// Live Wi-Fi signal (fw 2.10.0): one telemetry frame per this interval carries
+// "wifi_rssi" (dBm, the current AP link) so the commissioning checklist can show
+// a live reading instead of the boot-time one. Riding the existing telemetry
+// frame needs no new topic, no broker ACL change and no DB row per report.
+#define WIFI_RSSI_REPORT_INTERVAL_S 300
+
 // ── Transport selection ──────────────────────────────────────────────────────
 // 1: DIRECT MQTT (default since 1.3.0) — plain outbound TLS to the broker's
 //    PUBLIC IP. No overlay: survives symmetric NAT/CGNAT (the device only
@@ -2192,20 +2198,39 @@ static void telemetry_task(void *pvParameters) {
                 if (have_state) {
                     snprintf(relay_kv, sizeof(relay_kv), "\"relay\":%s,", telemetry.device_on ? "true" : "false");
                 }
-                char payload[384];
+                /* Live Wi-Fi signal, gateway-wide: at most one frame per
+                   WIFI_RSSI_REPORT_INTERVAL_S carries it (the first frame after
+                   boot too). The clock only advances once a frame carrying it
+                   was accepted, so a failed read or publish retries next frame. */
+                static bool     rssi_ever_sent = false;
+                static uint32_t rssi_sent_s = 0;
+                char rssi_kv[24] = "";    // "wifi_rssi":<dBm>, or nothing
+                uint32_t rssi_now_s = now_seconds();
+                if (!rssi_ever_sent || rssi_now_s - rssi_sent_s >= WIFI_RSSI_REPORT_INTERVAL_S) {
+                    wifi_ap_record_t ap;
+                    if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+                        snprintf(rssi_kv, sizeof(rssi_kv), "\"wifi_rssi\":%d,", (int)ap.rssi);
+                    }
+                }
+                char payload[416];
                 snprintf(payload, sizeof(payload),
-                         "{\"plug_id\":%d,\"watts\":%.1f,\"kwh\":%.4f,\"voltage\":%.1f,\"current\":%.2f,%s\"status\":\"%s\",\"session_id\":\"%s\",\"today_kwh\":%.3f,\"month_kwh\":%.3f}",
+                         "{\"plug_id\":%d,\"watts\":%.1f,\"kwh\":%.4f,\"voltage\":%.1f,\"current\":%.2f,%s%s\"status\":\"%s\",\"session_id\":\"%s\",\"today_kwh\":%.3f,\"month_kwh\":%.3f}",
                          plug_id,
                          telemetry.power_w,
                          session_kwh,
                          telemetry.voltage_v,
                          telemetry.current_a,
                          relay_kv,
+                         rssi_kv,
                          sess_active ? "occupied" : "available",
                          sess_active ? sid : "",
                          telemetry.today_energy_kwh >= 0.0f ? telemetry.today_energy_kwh : 0.0f,
                          telemetry.month_energy_kwh >= 0.0f ? telemetry.month_energy_kwh : 0.0f);
-                esp_mqtt_client_publish(mqtt_client, telemetry_topic, payload, 0, 0, 0);
+                if (esp_mqtt_client_publish(mqtt_client, telemetry_topic, payload, 0, 0, 0) >= 0 &&
+                    rssi_kv[0] != '\0') {
+                    rssi_ever_sent = true;
+                    rssi_sent_s = rssi_now_s;
+                }
             } else if (send_frame) {
                 /* Offline: buffer the reading for later resync (session-relative
                    kwh, matching the online payload). */

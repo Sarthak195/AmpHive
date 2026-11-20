@@ -29,7 +29,7 @@ import os
 import time
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 logger = logging.getLogger("amphive.mqtt")
 
@@ -71,6 +71,19 @@ def _parse_optional_nonneg_float(v: Any) -> Optional[float]:
     return f if math.isfinite(f) and f >= 0 else None
 
 
+def parse_wifi_rssi(v: Any) -> Optional[int]:
+    """The optional telemetry "wifi_rssi" (fw >= 2.10.0, dBm, sent on at most
+    one frame per 5 min) as an int, or None when missing or unusable: a bool
+    (JSON false would read as 0 dBm), a string, a non-integral or non-finite
+    number, or anything outside -127..0."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    if isinstance(v, float) and not (math.isfinite(v) and v.is_integer()):
+        return None
+    rssi = int(v)
+    return rssi if -127 <= rssi <= 0 else None
+
+
 class MQTTTelemetryMixin:
     """Inbound telemetry handling: TelemetryStore feed, DB persistence, and
     the balance/limit auto-stop mirrors that ride on each persisted frame."""
@@ -91,7 +104,8 @@ class MQTTTelemetryMixin:
             "voltage": 230.0,
             "current": 5.2,
             "status": "occupied" | "available",
-            "session_id": "42"   # optional; echoed from the ON command, "" when idle
+            "session_id": "42",  # optional; echoed from the ON command, "" when idle
+            "wifi_rssi": -61     # optional, fw >= 2.10.0, at most one frame per 5 min
         }
 
         Actions:
@@ -99,6 +113,13 @@ class MQTTTelemetryMixin:
         2. Persist energy_kwh / peak_power_w to the active ChargingSession row
            and update the plug's current_power_w.
         """
+        # [Live Wi-Fi] Gateway-wide, so captured before any per-plug early
+        # return. In memory only (no DB write); a frame without it keeps the
+        # last value. Read by the commissioning checklist (C10).
+        rssi = parse_wifi_rssi(payload.get("wifi_rssi"))
+        if rssi is not None:
+            self._live_wifi_rssi[gateway_id] = (rssi, datetime.now(timezone.utc))
+
         plug_id = payload.get("plug_id")
         if plug_id is None:
             logger.warning(
@@ -294,6 +315,11 @@ class MQTTTelemetryMixin:
                     self._persist_gateway_seen(gateway_id),
                     self.event_loop,
                 )
+
+    def live_wifi_rssi(self, gateway_id: str) -> Optional[Tuple[int, datetime]]:
+        """The newest telemetry-reported Wi-Fi RSSI and when it arrived, or None
+        (firmware older than 2.10.0, or nothing since this process started)."""
+        return self._live_wifi_rssi.get(gateway_id)
 
     def _should_bump_gateway_seen(self, gateway_id: str) -> bool:
         """Rate-limit last_seen_at refreshes to one per gateway per
