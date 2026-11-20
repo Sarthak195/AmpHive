@@ -1157,6 +1157,7 @@ async def test_db_hours_edit_holding_the_plug_and_a_tick_do_not_deadlock(factory
     finally:
         for t in ticks:
             t.cancel()
+        await asyncio.gather(*ticks, return_exceptions=True)
     assert out["status"] == "updated"
     assert queued is False
     routine = await _routine_row(factory, rid)
@@ -1181,7 +1182,7 @@ async def test_db_tick_holding_the_plug_then_hours_edit_cancels_its_row(factory,
         await release.wait()
         return True
 
-    edit = None
+    tick = edit = None
     try:
         with _patched_zone(), \
                 patch("backend.services.notifications.notify", AsyncMock()), \
@@ -1201,8 +1202,10 @@ async def test_db_tick_holding_the_plug_then_hours_edit_cancels_its_row(factory,
             assert (await asyncio.wait_for(edit, 15))["status"] == "updated"
     finally:
         release.set()
-        if edit is not None:
-            edit.cancel()
+        left = [t for t in (tick, edit) if t is not None]
+        for t in left:
+            t.cancel()
+        await asyncio.gather(*left, return_exceptions=True)
     routine = await _routine_row(factory, rid)
     assert routine.enabled is False and routine.last_materialized_date == MONDAY
     rows = await _rows(factory, uid)
