@@ -99,7 +99,7 @@ Legend: ✅ present · 🟡 partial · ❌ absent.
 | Configurable per-kWh tariff per site/CPO | all networks; specs §5.1, FL 1.2 | 🟡 backend live: `Tariff` model + resolution chain (plug → group → tenant default → env) snapshotted per session, CPO CRUD/assign API; no CPO-portal UI yet | Should-do |
 | Time-of-day / peak / off-peak pricing | ChargePoint, Tata, Statiq | ❌ | Aspirational |
 | Per-minute billing | ChargePoint, EA | ❌ | Aspirational |
-| Idle / occupancy fee (car parked, not charging) | Tesla, ChargePoint, EA; FL 1.2 | ❌ | Aspirational |
+| Idle / occupancy fee (car parked, not charging) | Tesla, ChargePoint, EA; FL 1.2 | ✅ (built 2026-11-19 on `release/2026-11-19-r2`, not deployed) C1: opt-in per tariff (grace of at least 15 min, per-minute rate, per-session cap), counted only on live telemetry after the charge-complete signal, settled once at finalize as an `idle_fee` ledger line; see [IDLE_FEE.md](IDLE_FEE.md) | Shipped as an opt-in; off until a CPO sets it |
 | Flat session start fee | EA, Statiq; FL 1.2 | ❌ | Aspirational |
 | Prepaid wallet top-up (UPI/cards/netbanking) | Indian norm | ✅ Razorpay | — |
 | Pay-per-use *without* pre-funding a wallet | ChargePoint, Tata (post-paid/direct) | ❌ (must pre-load coins) | Should-do |
@@ -120,7 +120,7 @@ Legend: ✅ present · 🟡 partial · ❌ absent.
 | Session start/stop confirmation | all | ✅ (2026-07-11) session alerts | — |
 | Low-balance / wallet warning | Indian wallet apps; specs §4 | ✅ (2026-07-11) low-balance alerts | — |
 | Fault / safety alert to driver | ChargePoint, EA | ✅ (2026-07-11) fault alerts via `+/alarms` ingestion; `/cpo/faults` console | — |
-| Idle-fee warning before charging | Tesla, EA | ❌ | Aspirational |
+| Idle-fee warning before charging | Tesla, EA | ✅ (built 2026-11-19, not deployed) the terms show in the start dialog and the weekly routine form, and one always-pushed "Charging done, please stop and unplug" notice (`idle_fee_notice`) goes out when the car looks full | Shipped with C1 |
 | Channels: push / SMS / email | all; specs §4 | ✅ (2026-07-11) Web Push + feed | — |
 
 ## 5. Session start & control
@@ -131,7 +131,7 @@ Legend: ✅ present · 🟡 partial · ❌ absent.
 | Live session telemetry (kW, kWh, cost, time) | all | ✅ Socket.io | — |
 | QR-scan to start | Indian norm | ✅ (2026-07-12) printable per-plug QR (CPO Plugs) deep-links to `/?plug=<id>`, prefilled + auth-gated on Home; Plug-ID typing still works too | — |
 | RFID / tap card to start | ChargePoint, EA | ❌ | By design (app-first) |
-| Reserve / book a charger ahead | Statiq, ChargeZone, Tata | ✅ (2026-07-12) free bookable time slots (`reservations` table, `0016_reservations`): during the window only the holder can start (409 for anyone else, enforced under the plug row lock at session start); lazy no-show expiry (`RESERVATION_NO_SHOW_GRACE_MIN`, default 15 min); driver books/cancels + sees the plug schedule in-app; tenant-scoped CPO list. No coin hold in v1. **2026-07-13:** the reservation-start janitor (`SessionReaperService`) now nudges the holder when their window opens **and force-stops a walk-up whose session overran into the window** (the one case the start gate can't catch — that session started legally before it; env `RESERVATION_FORCE_STOP_WALKUP`), with an up-front warning to the walk-up at start time, so "reserved = it's actually yours" holds end-to-end | — |
+| Reserve / book a charger ahead | Statiq, ChargeZone, Tata | ✅ (2026-07-12) free bookable time slots (`reservations` table, `0016_reservations`): during the window only the holder can start (409 for anyone else, enforced under the plug row lock at session start); lazy no-show expiry (`RESERVATION_NO_SHOW_GRACE_MIN`, default 15 min); driver books/cancels + sees the plug schedule in-app; tenant-scoped CPO list. No coin hold in v1. **2026-07-13:** the reservation-start janitor (`SessionReaperService`) now nudges the holder when their window opens **and force-stops a walk-up whose session overran into the window** (the one case the start gate can't catch — that session started legally before it; env `RESERVATION_FORCE_STOP_WALKUP`), with an up-front warning to the walk-up at start time, so "reserved = it's actually yours" holds end-to-end | — **2026-11-19 (C8, built on `release/2026-11-19-r2`, not deployed):** a per-plug approval mode (a booking is `pending` until the CPO approves or declines it) and an optional capped no-show fee charged only by the reaper sweep, never when the plug or gateway may have been offline; see [RESERVATION_APPROVAL.md](RESERVATION_APPROVAL.md). |
 | Scheduled / delayed start (charge off-peak) | Tesla, ChargePoint | ❌ (reservations ≠ scheduled start: a booking holds the window, it never switches the plug on by itself) | Aspirational |
 | Stop at target kWh / % SoC | Tesla, EA | 🟡 (2026-07-12) user-set "stop at X" **shipped** for kWh, time, and ₹/coins (a coins cap converts to kWh client-side at the plug's own rate): optional collapsed-by-default limit control at session start, limits persisted on the session (Alembic `0015_session_limits`) and enforced by a backend auto-stop on the telemetry path (env `AUTO_STOP_ON_LIMITS`, ~1 s latency) + a reaper duration backstop, with live progress in the session monitor ("0.42 / 1.00 kWh · stops automatically"). **% SoC remains impossible by construction** — a metering smart plug cannot read the vehicle's state of charge (no ISO 15118 link; see "Plug & Charge" below), so the 🟡 is permanent unless the hardware class changes | — |
 | Plug & Charge / ISO 15118 autocharge | Tesla, EA, Ionity | ❌ | By design (smart plug, not ISO 15118 EVSE) |
@@ -175,7 +175,7 @@ design**, but the trade-offs should be explicit.
 
 | Standard | What it buys | AmpHive | Verdict |
 |----------|--------------|:-------:|---------|
-| **OCPP** (charger to network) | Works with any compliant EVSE; the universal CPO protocol | Partial: proprietary MQTT contract to the gateways, plus a read-only OCPP 1.6J virtual charge-point bridge (tools/ocpp_bridge, see [OCPP_BRIDGE.md](OCPP_BRIDGE.md)) that mirrors each plug's status, transactions and meter values into any OCPP back office | By design (smart plugs, not OCPP hardware). The bridge gives display-only interoperability with OCPP central systems; AmpHive still cannot onboard or control real OCPP EVSEs, and a full central system stays out of scope |
+| **OCPP** (charger to network) | Works with any compliant EVSE; the universal CPO protocol | Partial: proprietary MQTT contract to the gateways, plus a read-only OCPP 1.6J virtual charge-point bridge (tools/ocpp_bridge, see [OCPP_BRIDGE.md](OCPP_BRIDGE.md)) that mirrors each plug's status, transactions and meter values into any OCPP back office; plus a flag-off OCPP 1.6J central-system module (C2, [OCPP_CSMS.md](OCPP_CSMS.md)) that accepts simulator chargers | By design (smart plugs, not OCPP hardware). The bridge gives display-only interoperability with OCPP central systems; AmpHive still cannot onboard or control real OCPP EVSEs, and the C2 central system is a dev/portfolio module, off in production, validated only against a simulator and with no RemoteStart or RemoteStop |
 | **OCPI** (network ↔ network roaming) | A driver on network A charges on network B; eMSP roaming hubs | ❌ | By design (closed network) — caps AmpHive to an island; competitors increasingly roam |
 | Connector model (Type 2 / CCS2 / CHAdeMO) | DC fast + standard AC charging | ❌ AC wall-socket (Tapo P110) only | By design (this is the cost-disruption thesis) — but it structurally excludes DC-fast and most public-charging use cases |
 
@@ -185,7 +185,7 @@ turning ₹1,000 smart plugs into shared slow-AC charging where installing a
 interoperability; judged as *monetized shared outlets* those omissions are the
 point. Both framings should be stated so the interoperability gap reads as a
 strategic boundary, not an omission — and so a future "also ingest OCPP chargers"
-pivot is recognized as a large, deliberate scope expansion.
+pivot is recognized as a large, deliberate scope expansion. (2026-11: feature C2 took that step on purpose, but only as a flag-off development and portfolio module; see the scope-change note under "Consciously not pursuing".)
 
 ---
 
@@ -221,4 +221,4 @@ topic).
 **Strategic (larger bets):** PWA/native app · dynamic/ToU pricing + idle fees ·
 promo/referral/loyalty · localization · dynamic load balancing.
 
-**Consciously not pursuing (state it, don't drift into):** a full OCPP central system (accepting or controlling third-party OCPP chargers; only a read-only OCPP 1.6J virtual charge-point bridge exists, see [OCPP_BRIDGE.md](OCPP_BRIDGE.md)) · OCPI/ISO 15118 · DC-fast connectors · trip planning, unless the product pivots off the smart-plug thesis.
+**Consciously not pursuing (state it, don't drift into):** OCPI/ISO 15118 · DC-fast connectors · trip planning, unless the product pivots off the smart-plug thesis. **Deliberate scope change (2026-11, feature C2):** this line used to exclude a full OCPP central system. That exclusion is reversed on purpose, but only as a development and portfolio module: an OCPP 1.6J central system (Core profile, flag `OCPP_CSMS_ENABLED`, OFF by default and OFF in production, no proxy route) lets a standard OCPP charger or simulator register as ordinary plugs and be billed through the same admission, hold and ledger path as the ESP32 gateways. It never actuates anything (no RemoteStart or RemoteStop) and is validated only against a simulator. See [OCPP_CSMS.md](OCPP_CSMS.md). The read-only virtual charge-point bridge ([OCPP_BRIDGE.md](OCPP_BRIDGE.md)) is unchanged.

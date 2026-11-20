@@ -379,6 +379,74 @@ No new routes and no migration. Changed behaviour (the invoice, notification-pre
 - `GET /api/sessions/{id}/invoice`: see its row (viewer read of an existing invoice).
 - `PUT /api/me/notification-prefs`: five new push toggles, see the C7 table.
 
+## Wave 4 R2 features (2026-11-19, `release/2026-11-19-r2`, built, not deployed)
+
+Stacked on R1. Migrations `0051` to `0056` (see [DATA_MODEL.md](DATA_MODEL.md)). Lane docs: [IDLE_FEE.md](IDLE_FEE.md), [RESERVATION_APPROVAL.md](RESERVATION_APPROVAL.md), [OCPP_CSMS.md](OCPP_CSMS.md). A `cpo_viewer` gets 403 `read_only_demo` on every write route below (global guard, pinned by the route walk); GETs mask personal data through the usual `_common` helpers.
+
+### Idle fee (C1, `0052_idle_fee`)
+
+- `POST /api/cpo/tariffs` and `PUT /api/cpo/tariffs/{id}` accept optional `idle_fee_per_min` (0..100), `idle_fee_cap` (0..10000) and `idle_grace_min` (0..240); all 0 = off. 400 when the fee is above 0 with no cap, or with a grace under 15 minutes; a grace left out when turning the fee on defaults to 15. `GET`/`POST`/`PUT /api/cpo/tariffs` responses carry `idle_grace_min`, `idle_fee_per_min`, `idle_fee_cap`.
+- `GET /api/plugs/{id}/tariff-preview` adds `idle_fee: {grace_min, per_min, cap}` or `null`. It is kept for a member-priced plug too (the `slots` list is then empty and there is no cheapest window).
+- `POST /api/sessions/stop` (receipt) and `GET /api/sessions/{id}` add `idle_fee_coins` (the idle-fee part of `coins_spent`). The wallet ledger can show `transaction_type` `idle_fee`.
+- New notification type `idle_fee_notice` (always pushed). Rules: [IDLE_FEE.md](IDLE_FEE.md).
+
+### Vehicle profile and monthly insights email (F8V, `0053_vehicle_profile`)
+
+| Method | Path | Auth | Body/Params | Behaviour |
+|--------|------|------|-------------|-----------|
+| GET | `/api/me/vehicle` | JWT (a `cpo_viewer` may read their own) | - | `{km_per_kwh, petrol_price_per_l, petrol_km_per_l (each a number, or null = default), monthly_insights_email (bool, default false), defaults: {km_per_kwh, petrol_price_per_l, petrol_km_per_l}, co2_avoided_kg_per_kwh (the effective net factor)}`. Only the caller's own figures. |
+| PUT | `/api/me/vehicle` | JWT (a `cpo_viewer` gets 403) | `{km_per_kwh 0.5-60, petrol_price_per_l 1-500, petrol_km_per_l 1-100 (all nullable; the body replaces the profile, all null clears it), monthly_insights_email? (bool, omitted = unchanged)}` | 422 on an out-of-range or unknown field. |
+
+`GET /api/me/stats`: `impact.assumptions` now carries `personalised` (bool) and uses the caller's figures; `impact.month` and `impact.lifetime` are computed from them. The monthly email is a background job (no route): see [ARCHITECTURE.md](ARCHITECTURE.md) session reaper and [DEPLOYMENT.md](DEPLOYMENT.md) "Wave 4 R2".
+
+### Ready-by planner (F6R, no migration)
+
+| Method | Path | Auth | Body/Params | Behaviour |
+|--------|------|------|-------------|-----------|
+| GET | `/api/plugs/{plug_id}/ready-by` | JWT (any authenticated role, the same visibility as `/estimate`) | query `ready_by` (ISO with a UTC offset), `max_kwh?` (0 < x <= 100), `max_duration_min?` (1..1440) | Display-only plan. 200 `{not_before, finish_at, ready_by, duration_min, energy_kwh, cost_coins, rate_changes[], basis, power_w, idle_fee, is_estimate}`. 409 detail `{code: 'ready_by_unreachable', message, earliest_finish_at?}` when T cannot be met; 400 `ready_by_out_of_range` (T must lie within the next 24 h, and also for an unrepresentable value); 422 `ready_by_needs_limit` (give `max_kwh` and/or `max_duration_min`); 422 when `ready_by` has no UTC offset. |
+| POST | `/api/sessions/queue/ready-by` | JWT (a `cpo_viewer` gets 403) | `{plug_id, ready_by (ISO with offset), max_kwh?, max_duration_seconds?, auto_stop_when_full?}` | Plans the cheapest single contiguous window that ends by `ready_by` and creates ONE scheduled queued charge through `POST /api/sessions/queue` (`not_before` = window start; `max_duration_seconds` = the driver's limit tightened to the deadline). 201 returns the queue response plus `planned_finish_at`, `estimated_cost_coins`, `ready_by`. Errors: those of `POST /api/sessions/queue` (`plug_unpowered`, `plug_in_use`, `plug_closed`, `plug_reserved`, `plug_scheduled`, `insufficient_balance`, `queue_limit`, `already_queued`) plus the `ready_by_*` errors above. |
+
+A member override prices the plan as one flat rate. The plan assumes constant power; the finish can slip up to about 31 minutes past T (see [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) 0h).
+
+### Per-member price and group invites (C9, `0054_member_price_invites`)
+
+| Method | Path | Auth | Body/Params | Behaviour |
+|--------|------|------|-------------|-----------|
+| PUT | `/api/cpo/groups/{group_id}/members/{user_id}/price` | cpo/admin of the tenant | `{price_per_kwh_override: number (0 < x <= 1000) \| null}` | Sets or clears a member's flat price. Private groups only (400 for a public group; clearing is always allowed). 404 for another tenant's group or a non-member. Audited `group.member_price`. |
+| POST | `/api/cpo/groups/{group_id}/invites` | cpo/admin of the tenant | `{email}` | Emails a single-use 7-day invite to a private group (400 for a public group). 409 when the tenant owns no gateway ("Claim a charger first"); 429 when the CPO's daily cap (`GROUP_INVITES_PER_DAY`) or the platform-wide cap (`GROUP_INVITES_GLOBAL_PER_DAY`) is reached. Returns `{status: 'sent', invite_id, group_id, email, expires_at}`; the token is never returned. Audited `group.invite` (the detail carries no address). |
+| GET | `/api/cpo/groups/{group_id}/invites` | cpo/admin/cpo_viewer | - | Pending invites `[{id, email, created_at, expires_at}]`, newest first, at most 100. The email is masked for a `cpo_viewer`. |
+| DELETE | `/api/cpo/groups/{group_id}/invites/{invite_id}` | cpo/admin of the tenant | - | Revokes a pending invite (404 when it is not pending). Audited `group.invite_revoke`. |
+| POST | `/api/groups/invites/accept` | JWT (a `cpo_viewer` gets 403) | `{token}` | The account must be verified and its email must equal the invite email (case-insensitive). 400 for an unknown, used, revoked or expired token; 403 for an unverified account or a different email (the invite stays usable). Returns `{status: 'joined' \| 'already_member', group_id, group_name}`. Shares the group-join per-account rate limit. Audited `group.invite_accept`. |
+
+`GET /api/cpo/groups/{group_id}/members` also returns `price_per_kwh_override` (number or null). The plug list, plug detail, `tariff-preview` and the C3 `estimate` show the override to that member as one flat price; the public map keeps showing the tariff. A session priced by an override is frozen at start (never repriced).
+
+### Reservation approval and no-show fee (C8, `0055_reservation_approval`)
+
+| Method | Path | Auth | Body/Params | Behaviour |
+|--------|------|------|-------------|-----------|
+| POST | `/api/cpo/reservations/{reservation_id}/approve` | cpo/admin of the owning tenant | - | `pending` to `booked`. 404 for a missing or other-tenant reservation; 409 when it is no longer pending, and 409 (the request stays `pending`) when the plug's current opening hours have it closed during part of the slot. Response `{id, plug_id, status, start_at, end_at}`. The driver gets `reservation_approved` (always pushed). |
+| POST | `/api/cpo/reservations/{reservation_id}/decline` | cpo/admin of the owning tenant | - | `pending` to `declined`; never checks opening hours. Same 404 and 409 rules and response. The driver gets `reservation_declined`. |
+
+- `POST /api/reservations`: on a plug with `reservation_mode = approval` the reservation is created with status `pending` (400 when `start_at` is not in the future); the tenant's CPOs get a `reservation_needs_approval` bell (up to 20, quiet hours apply). `ReservationResponse` gains `no_show_fee_coins` (the fee snapshotted at booking).
+- `POST /api/reservations/{id}/cancel` also withdraws a `pending` request. A booking already past `start_at + RESERVATION_NO_SHOW_GRACE_MIN` now answers 409 (already expired); cancelling inside the grace window is allowed and avoids the fee.
+- `GET /api/reservations/my` (upcoming), `GET /api/plugs/{id}/reservations` and `GET /api/cpo/reservations?upcoming_only=true` include `pending`. The status filter accepts `pending` and `declined`.
+- `PlugResponse` gains `reservation_mode` (`instant` or `approval`) and `no_show_fee_coins` (float). `GET /api/cpo/plugs` gains the same two fields; `PUT /api/cpo/plugs/{id}` accepts `reservation_mode` and `no_show_fee_coins` (>= 0, 400 above `RESERVATION_NO_SHOW_FEE_MAX_COINS`).
+- The no-show fee has no route: the reaper sweep writes one `reservation_no_show_fee` ledger line (`reservation_id` UNIQUE) and a `reservation_no_show_fee` notice (always pushed). Rules: [RESERVATION_APPROVAL.md](RESERVATION_APPROVAL.md).
+
+### Notification types added in wave 4 R2
+
+`idle_fee_notice`, `reservation_approved`, `reservation_declined` and `reservation_no_show_fee` always push (see the C7 allowlist; `reservation_declined` is sent at severity `warning`). `reservation_needs_approval` is an ordinary CPO bell, subject to quiet hours.
+
+### OCPP 1.6J central system (C2, flag-gated, OFF by default and in production)
+
+Mounted only when `OCPP_CSMS_ENABLED` is set (`1`, `true`, `yes` or `on`); with it off these routes do not exist and their modules are never imported. Full contract: [OCPP_CSMS.md](OCPP_CSMS.md).
+
+- `WS /ocpp/{charge_point_id}`: subprotocol `ocpp1.6` (else HTTP 400); HTTP Basic with the username equal to `charge_point_id` and the password from registration (else 401); 429 on the per-IP handshake limit, 503 at the connection cap. Core-profile CALLs from the charger: BootNotification (Accepted, heartbeat interval), Heartbeat, StatusNotification (Faulted takes an AVAILABLE plug OFFLINE), Authorize (Accepted, Blocked or Invalid), StartTransaction (`transactionId` = the charging session id; 0 with Blocked or Invalid when refused), MeterValues, StopTransaction. Anything else answers CALLERROR `NotImplemented`. The central system sends no CALL. Close codes: 1003 binary frame, 1008 message rate limit, 1009 oversized frame.
+- `POST /api/cpo/ocpp/charge-points` (cpo/admin with a tenant): `{charge_point_id: [A-Za-z0-9_.-]{1,40}, name, connectors: 1-4}` -> 201 `{charge_point_id, gateway_id, websocket_path, subprotocol, password, connectors: [{connector_id, plug_id}]}`. The password is shown once (only a bcrypt hash is stored). 409 when the id is taken. Audited `ocpp.charge_point.create`.
+- `POST /api/ocpp/id-tags` (any signed-in user): `{id_tag (1-20 characters), charge_point_id}` -> 201 `{id, tenant_id}`. Enables the tag for that charge point's operator only. 404 for an unknown charge point; 409 when the tag is already bound at that operator, or the account already holds 10 tags.
+- `GET /api/ocpp/id-tags` -> `[{id, tenant_id, created_at}]` (the caller's own, newest first, at most 10; the clear tag is never stored, so there is none to show).
+- `DELETE /api/ocpp/id-tags/{id}` -> 204 (own tags only), else 404.
+
 ## Payments — Razorpay (`services/payments.py`)
 
 | Method | Path | Auth | Body | Behaviour |
@@ -597,9 +665,17 @@ access control. It lives in its **own** router (`firmware_images.py`), **not**
 | `GRID_EMISSION_FACTOR_KG_PER_KWH` / `PETROL_CO2_KG_PER_L` / `PETROL_PRICE_PER_L` / `ICE_KM_PER_L` / `EV_KM_PER_KWH` | `0.71` / `2.31` / `100` / `15` / `6` | **(F8, 2026-11-17)** Estimate factors for the insights CO2 and petrol figures (India CEA grid average; INR petrol price), read once at import in `services/insights.py`. A missing, malformed or non-positive value falls back to the default. Net CO2 avoided per kWh = `EV_KM_PER_KWH / ICE_KM_PER_L * PETROL_CO2_KG_PER_L - GRID_EMISSION_FACTOR_KG_PER_KWH` (about 0.214 with the defaults) |
 | `OPERATOR_ALERTS` | on | **(F3, 2026-11-17)** Kill switch for operator alerts (`off` disables) |
 | `OPERATOR_ALERT_EMAIL` | unset | **(F3)** Also send operator alerts as plain text to this address via `services/email.send_email` (needs the `SMTP_*` vars); unset = bell and push only |
-| `GATEWAY_OFFLINE_ALERT_COOLDOWN_SEC` / `OPERATOR_ALERT_COOLDOWN_SEC` | `10800` / `3600` | **(F3)** Per-gateway offline-alert cooldown / per (gateway, plug, event) safety-fault cooldown. In process memory: a backend restart resets them and can re-alert once |
+| `GATEWAY_OFFLINE_ALERT_COOLDOWN_SEC` / `OPERATOR_ALERT_COOLDOWN_SEC` | `10800` / `3600` | **(F3)** Per-gateway offline-alert cooldown / per (gateway, plug, event) safety-fault cooldown. Since 0051 (wave 4 R2, built, not deployed) the offline cooldown is durable on the `gateways` row and the fault cooldown is rebuilt from `gateway_events` after a restart; before it, a restart reset them and could re-alert once |
 | `STATUS_RATE_LIMIT` | `20/60` | **(F11, 2026-11-17)** Per-IP limit on the public `GET /api/status`, `"<requests>/<window sec>"` |
 | `CHARGE_FULL_ACTIVE_W` / `CHARGE_FULL_IDLE_W` | `200` / `30` | **(F1, 2026-11-17-w2)** Charge-complete detection: the session must have drawn at least the active watts once, then stay below the idle watts. Empty values fall back to the defaults |
 | `CHARGE_FULL_GRACE_MIN` / `CHARGE_FULL_MINUTES` | `5` / `10` | **(F1)** Startup grace before detection starts, and how long power must stay below the idle threshold before the car "looks full" |
 | `API_TOKEN_RATE_LIMIT` | `60/60` | **(F7, 2026-11-17-w2)** Per personal API token limit on `GET /api/me/meter`, in process |
 | `PROMO_REDEEM_RATE_LIMIT` / `PROMO_REDEEM_ACCOUNT_RATE_LIMIT` | `20/3600` / `10/3600` | **(F12, 2026-11-17-w2)** `POST /api/wallet/redeem` limits per IP and per account |
+| `INSIGHTS_EMAIL_EVERY_N_TICKS` | `15` | **(F8V, wave 4 R2)** Run the monthly insights email pass every N session-reaper ticks (60 s each). Needs `SMTP_HOST`; with it unset the pass is a silent no-op |
+| `GROUP_INVITES_PER_DAY` / `GROUP_INVITES_GLOBAL_PER_DAY` | `20` / `50` | **(C9, wave 4 R2)** Group invite emails per CPO user and platform-wide in any 24 h (429 beyond either). Not in the compose files, so the defaults apply |
+| `RESERVATION_NO_SHOW_FEE_MAX_COINS` / `RESERVATION_NO_SHOW_SWEEP_MAX_LAG_MIN` | `100` / `10` | **(C8, wave 4 R2)** Per-plug cap on `no_show_fee_coins`, and how recently a window's grace must have lapsed for the no-show sweep to charge it. Not in the compose files |
+| `OCPP_CSMS_ENABLED` | off | **(C2, wave 4 R2)** Mounts the OCPP 1.6J central system. Keep it unset in production |
+| `OCPP_HEARTBEAT_INTERVAL_SEC` / `OCPP_IDLE_TIMEOUT_SEC` | `60` / 3 x heartbeat | **(C2)** Heartbeat interval sent in BootNotification, and the idle connection close |
+| `OCPP_MAX_CONNECTIONS` / `OCPP_MAX_MESSAGE_BYTES` | `20` / `8192` | **(C2)** Concurrent charge point connections (503 beyond), and the per-frame size cap (close 1009) |
+| `OCPP_MESSAGE_RATE_LIMIT` / `OCPP_HANDSHAKE_RATE_LIMIT` | `60/60` / `10/60` | **(C2)** Messages per connection per window (close 1008), and handshakes per client IP (429) |
+| `OCPP_MAX_CONNECTOR_KW` | `50` | **(C2)** Plausibility bound on a session's metered energy (kW times elapsed time) |

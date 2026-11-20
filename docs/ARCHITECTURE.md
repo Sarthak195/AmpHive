@@ -123,6 +123,14 @@ POST /api/sessions/stop              (JWT required)
   • set plug AVAILABLE
 ```
 
+### Background work added in wave 4 R2 (not deployed)
+
+- **Startup.** After `MQTTManager.start()` the lifespan calls `operator_alerts.rearm_offline_rechecks()`, which re-arms the "Gateway still offline" re-checks a restart dropped (derived from the `gateways` rows; never raises; at least `GATEWAY_OFFLINE_NOTIFY_DELAY_SEC` later).
+- **Session reaper (60 s tick, single process).** Gains the no-show sweep `reap_reservation_no_shows_once` (one bounded indexed query, at most 50 rows per tick) and, every `INSIGHTS_EMAIL_EVERY_N_TICKS` (default 15) ticks, `services/insights_email.send_monthly_insights` (the F8V monthly email: previous UTC month, once per opted-in driver, claim-first, a silent no-op without `SMTP_HOST`).
+- **Ready-by planner.** `services/ready_by.py` is a pure window search (`choose_window`) plus `plan_ready_by`; it only plans, and creation goes through `queue_charge`, so there is no second start path.
+- **Operator alerts.** `alert_safety_fault(..., event_id=)` receives the id of the `gateway_events` row that `services/mqtt/alarms.py` just committed; the notice claims and the offline state live on the session and gateway rows (migration 0051).
+- **OCPP.** With `OCPP_CSMS_ENABLED` unset (production) neither `routers/ocpp.py` nor `services/ocpp_adapter.py` is imported. See [OCPP_CSMS.md](OCPP_CSMS.md).
+
 ### Auth & wallet
 - **Auth:** stateless JWT (HS256, 7-day expiry), `Authorization: Bearer`.
   Passwords hashed with bcrypt. Accounts are created as `driver`; a driver

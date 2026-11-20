@@ -24,8 +24,8 @@ ORM: SQLAlchemy 2.0 `DeclarativeBase` with `mapped_column`. Enums use
 | `GatewayStatus` (`gateway_status`) | `online`, `offline` |
 | `PlugStatus` (`plug_status`) | `available`, `occupied`, `offline`, `maintenance` |
 | `SessionStatus` (`session_status`) | `active`, `completed`, `paid`, `cancelled` |
-| `TransactionType` (`tx_type`) | `topup`, `session_debit`, `refund`, `cpo_topup` (2026-07-21, `0026_offline_topups` — first migration in this repo to `ALTER TYPE ... ADD VALUE` an existing enum rather than create one), `account_closure` (2026-08-18, `0038_account_closure`, same `ALTER TYPE` idiom — the forfeit line written when a closing account's remaining charging credit is zeroed, so the running balance stays reconcilable by summing `amount`) |
-| `ReservationStatus` (`reservation_status`) | `booked`, `cancelled`, `fulfilled`, `expired` (2026-07-12, `0016_reservations`) |
+| `TransactionType` (`tx_type`) | `topup`, `session_debit`, `refund`, `cpo_topup` (2026-07-21, `0026_offline_topups` — first migration in this repo to `ALTER TYPE ... ADD VALUE` an existing enum rather than create one), `account_closure` (2026-08-18, `0038_account_closure`, same `ALTER TYPE` idiom — the forfeit line written when a closing account's remaining charging credit is zeroed, so the running balance stays reconcilable by summing `amount`) Wave 4 R2 (built, not deployed): `idle_fee` (`0052_idle_fee`) and `reservation_no_show_fee` (`0055_reservation_approval`), both `ALTER TYPE ... ADD VALUE IF NOT EXISTS`. |
+| `ReservationStatus` (`reservation_status`) | `booked`, `cancelled`, `fulfilled`, `expired` (2026-07-12, `0016_reservations`), `pending`, `declined` (wave 4 R2, `0055_reservation_approval`, built, not deployed) |
 
 ## 2. Tables
 
@@ -435,10 +435,107 @@ full column list of each:
   SET NULL, the occurrence's row until its outcome is settled; `created_at`.
   Account closure deletes the user's routines.
 
-The ORM declares **36 tables** as of `0050_charge_routines` (`__tablename__`
-count, rechecked 2026-11-19). Prod, at `0050_charge_routines` since 2026-11-19, has
-36 (35 at `0047_promo_codes`, 32 at `0043_email_ci_unique`). All
-are applied via Alembic per §4 below.
+The ORM declares **40 tables** on `release/2026-11-19-r2` (`__tablename__`
+count, rechecked 2026-11-20; 36 as of `0050_charge_routines`, the four new ones
+are `group_invites`, `ocpp_charge_points`, `ocpp_id_tags` and
+`ocpp_transactions`). Prod, at `0050_charge_routines` since 2026-11-19, has
+36 (35 at `0047_promo_codes`, 32 at `0043_email_ci_unique`); the R2 tables
+exist in prod only after that release is deployed. All are applied via Alembic
+per §4 below.
+
+### Wave 4 R2 schema (`release/2026-11-19-r2`, migrations `0051` to `0056`, built, not deployed)
+
+Every change is additive (`ADD COLUMN IF NOT EXISTS`, `CREATE TABLE IF NOT EXISTS`,
+`ALTER TYPE ... ADD VALUE IF NOT EXISTS`), with no backfill, no GRANT (the owner
+role's default privileges cover new tables) and no index on a hot table.
+
+**`0051_durable_notice_state`** (lane DUR). Five nullable `TIMESTAMPTZ` columns,
+no default, no index:
+
+- `charging_sessions.full_notified_at`, `nearly_done_notified_at`,
+  `power_dropped_notified_at`: once-per-session notice claims
+  (`UPDATE ... WHERE col IS NULL AND status = 'active'`), written only when a
+  detector fires. `full_notified_at` is also the durable "judged fully charged"
+  marker (the C1 idle fee reads it).
+- `gateways.offline_notified_at`: an operator "Gateway offline" alert is
+  outstanding (cleared by the back-online follow-up; it only counts while
+  `last_seen_at <= offline_notified_at`). `gateways.last_operator_alert_at`: the
+  time of the last offline alert (the cooldown start; a pending re-check is
+  re-armed from it at startup). Both are written under the gateway row lock.
+
+**`0052_idle_fee`** (lane C1). `tx_type` gains `idle_fee`.
+
+- `tariffs.idle_grace_min` INTEGER NOT NULL DEFAULT 0, `idle_fee_per_min`
+  NUMERIC(12,2) NOT NULL DEFAULT 0, `idle_fee_cap` NUMERIC(12,2) NOT NULL
+  DEFAULT 0: the opt-in terms (0 = off; when on, the routes require a cap above
+  0 and a grace of at least 15).
+- `charging_sessions.idle_grace_min` INTEGER, `idle_fee_per_min` NUMERIC(12,2),
+  `idle_fee_cap` NUMERIC(12,2): the terms copied at start (NULL = no fee).
+  `idle_started_at` TIMESTAMPTZ (the open idle stretch), `idle_seconds` INTEGER
+  NOT NULL DEFAULT 0 (banked idle seconds; **-1 = voided** by a renewed draw),
+  `idle_fee_coins` NUMERIC(12,2) (collected at finalize, also included in
+  `coins_spent`).
+- Downgrade drops the columns and leaves the enum value.
+
+**`0053_vehicle_profile`** (lane F8V). Four `users` columns: `vehicle_profile`
+JSONB NULL (`services/insights.VehicleProfile`: `km_per_kwh`,
+`petrol_price_per_l`, `petrol_km_per_l`; NULL = defaults),
+`monthly_insights_email` BOOLEAN NOT NULL DEFAULT false (opt-in),
+`insights_email_month` VARCHAR(7) NULL (the last `YYYY-MM` claimed, sent or
+skipped as empty: the idempotency stamp, compared as a string),
+`insights_email_failures` SMALLINT NOT NULL DEFAULT 0 (send failures for the
+pending month; 3 gives the month up).
+
+**`0054_member_price_invites`** (lane C9).
+
+- `group_memberships.price_per_kwh_override` NUMERIC(12,2) NULL: the member's
+  own flat price on the group's plugs. `charging_sessions.member_price_override`
+  BOOLEAN NULL: true when the session rate is a member override frozen at start
+  (never repriced).
+- `group_invites`: `id`; `group_id` FK `charger_groups` ON DELETE CASCADE;
+  `tenant_id` FK `tenants` ON DELETE CASCADE; `email` VARCHAR(255) (lowercased);
+  `token_hash` VARCHAR(64) UNIQUE (the SHA-256 of the mailed token, the raw
+  token is never stored); `invited_by_user_id` FK `users` SET NULL;
+  `created_at`; `expires_at` (created + 7 days); `accepted_at`;
+  `accepted_by_user_id` FK `users` SET NULL; `revoked_at`. A newer invite for
+  the same group and email revokes the older one. Indexes:
+  `ix_group_invites_group_id`, `ix_group_invites_inviter_created`
+  (`invited_by_user_id`, `created_at`, the per-CPO daily cap) and
+  `ix_group_invites_created_at` (the platform-wide cap). Account closure keeps
+  the row but rewrites `email` to the tombstone address and revokes a pending
+  invite; the table is not in the data export.
+
+**`0055_reservation_approval`** (lane C8). `reservation_status` gains `pending`
+and `declined`; `tx_type` gains `reservation_no_show_fee` (enum labels cannot be
+removed on downgrade).
+
+- `plugs.reservation_mode` VARCHAR(16) NOT NULL DEFAULT 'instant';
+  `plugs.no_show_fee_coins` NUMERIC(12,2) NOT NULL DEFAULT 0.
+- `reservations.no_show_fee_coins` NUMERIC(12,2) NOT NULL DEFAULT 0 (the fee at
+  booking time); `reservations.no_show_checked_at` TIMESTAMPTZ NULL (set when
+  the no-show sweep settles the row, charged or skipped, or when a pending
+  request lapses). Partial index `idx_reservations_no_show_due` ON
+  `reservations(start_at) WHERE no_show_checked_at IS NULL AND
+  no_show_fee_coins > 0`.
+- `ledger_transactions.reservation_id` INTEGER NULL UNIQUE REFERENCES
+  `reservations(id)` ON DELETE SET NULL: the no-show fee's idempotency key.
+
+**`0056_ocpp_charge_points`** (lane C2, no enum change; the tables stay empty
+while `OCPP_CSMS_ENABLED` is off). Detail in [OCPP_CSMS.md](OCPP_CSMS.md).
+
+- `ocpp_charge_points`: `charge_point_id` VARCHAR(40) UNIQUE (`[A-Za-z0-9_.-]`),
+  `tenant_id` FK `tenants` CASCADE, `gateway_id` UNIQUE FK `gateways` (the
+  backing gateway, never marked online), `password_hash` (bcrypt), `vendor`,
+  `model`, `firmware_version`, `last_boot_at`, `created_at`.
+- `ocpp_id_tags`: `id`, `user_id` FK `users` (indexed), `tenant_id` FK `tenants`
+  ON DELETE CASCADE (the operator the tag is enabled for), `tag_hash`
+  VARCHAR(64) (SHA-256 hex; a lookup key, not a password hash), `created_at`;
+  UNIQUE `uq_ocpp_id_tags_tenant_tag` (`tenant_id`, `tag_hash`). Listed in the
+  user data export (id, operator tenant, created_at) and hard-deleted on
+  account closure.
+- `ocpp_transactions`: `session_id` PK FK `charging_sessions` (the OCPP
+  `transactionId`), `charge_point_id` FK (indexed), `connector_id`,
+  `id_tag_hash`, `meter_start_wh`, `created_at`.
 
 ## 3. Relationships
 
@@ -472,7 +569,7 @@ joined via `access_code`.
   arrived via `0005_gateway_events` (2026-07-10), `audit_logs` via
   `0007_audit_log` (2026-07-12), and `notifications` + `push_subscriptions`
   via `0008_notifications` (2026-07-11, renumbered from 0007 at merge); it's
-  **36 tables** once `0050_charge_routines` is applied (35 at `0047`, deployed 2026-11-19; 32 at `0043`); see "Tables added since" in §2 above for the rest.)
+  **36 tables** once `0050_charge_routines` is applied (35 at `0047`, deployed 2026-11-19; 32 at `0043`), **40** once `0056_ocpp_charge_points` is applied (wave 4 R2, not deployed); see "Tables added since" in §2 above for the rest.)
 - **Wave 2 chain (2026-11-17, `release/2026-11-17-w2`, deployed 2026-11-19).**
   `0043_email_ci_unique` -> `0044_session_auto_stop_full` (two nullable
   booleans, IF NOT EXISTS) -> `0045_cpo_viewer_role` (enum value, downgrade is
@@ -490,6 +587,21 @@ joined via `access_code`.
   table). One head, no branch point (checked offline with `ScriptDirectory`).
   All three were written against `0047` on their branches and rechained at
   integration. The owner role's default privileges cover the new table.
+- **Wave 4 R2 chain (2026-11-19, `release/2026-11-19-r2`, built, not deployed).**
+  `0050_charge_routines` -> `0051_durable_notice_state` (five nullable
+  timestamptz columns) -> `0052_idle_fee` (`tx_type` value, three `tariffs`
+  and six `charging_sessions` columns) -> `0053_vehicle_profile` (four `users`
+  columns) -> `0054_member_price_invites` (two columns, table `group_invites`,
+  three indexes) -> `0055_reservation_approval` (three enum values, five
+  columns, one partial index) -> `0056_ocpp_charge_points` (three tables).
+  Every lane wrote its revision against `0050` and the integrator rechained
+  them (`ccbd096`); one head, no branch point. Everything is `IF NOT EXISTS`
+  and reversible, except that Postgres cannot drop the four new enum labels
+  (`idle_fee`, `reservation_no_show_fee`, `pending`, `declined`): a downgrade
+  leaves them, which is harmless, but an older Python enum cannot map a ledger
+  row or reservation that already uses one. The enum additions share the one
+  upgrade transaction, which PG 12+ allows because no later revision uses a
+  new value. No GRANT is needed.
 - **New schema change** = new revision: `alembic -c backend/alembic.ini
   revision --autogenerate -m "..."` (autogenerate needs a reachable database —
   use the CI postgres or the VM; dev boxes run no DB by policy).
