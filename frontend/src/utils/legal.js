@@ -15,7 +15,7 @@
 export const SUPPORT_EMAIL = 'support@amphive.app';
 
 // Human-readable date shown on every legal page.
-export const LAST_UPDATED = '18 August 2026';
+export const LAST_UPDATED = '20 November 2026';
 
 // The public origin used for canonical URLs and structured data. The driver
 // app is the canonical, indexable surface; the host console is noindex.

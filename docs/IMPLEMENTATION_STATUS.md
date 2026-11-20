@@ -15,6 +15,17 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 
 Wave 3 (0f below) is deployed on top of that earlier state (alembic `0048` to `0050`). Wave 4 (0g and 0h below) is deployed on top of wave 3 (alembic `0051` to `0056`).
 
+## 0i - 2026-11-20 batch 5 hardening (fix/b5-release, not deployed)
+
+Thin deploy: no migration, no env var, no VM step (alembic head stays `0056_ocpp_charge_points`). Fixes:
+
+- **Routine lock order (FX2 limit).** One global order now holds: the plug row before `charge_routines` rows. The materialize tick reads the routine's `plug_id` unlocked, locks the plug FOR UPDATE, then locks the routine with SKIP LOCKED (enabled re-checked, plug matched), so it cannot deadlock with a CPO hours edit. A skipped routine is retried on the next reaper pass. Concurrent ticks on one plug now queue behind the plug lock instead of skipping (still one row). Two DB-gated deadlock tests were added (CI only).
+- **C1 idle terms lookup.** `resolve_idle_terms` runs its tariff lookup in a savepoint, so a DB error cannot abort the start transaction; the start continues with no idle terms.
+- **C9 member price body.** `PUT /api/cpo/groups/{group_id}/members/{user_id}/price` now requires `price_per_kwh_override` (explicit null clears) and rejects extra keys with 422. Sub-cent rounding is unchanged.
+- **F8V env guard.** `INSIGHTS_EMAIL_EVERY_N_TICKS` falls back to 15 when empty.
+- **Copy.** The outage-expiry notice no longer contains an em-dash. `LAST_UPDATED` in `frontend/src/utils/legal.js` is now `20 November 2026` (idle-fee and no-show-fee copy went live 2026-11-20).
+- **mypy.** `routers/ocpp.py` and `services/ocpp_adapter.py` are in the pyproject mypy files list (the stale "39 files" comment in ci.yml is not edited).
+
 ## 0h - 2026-11-19 wave 4 R2 features (built, deployed 2026-11-20)
 
 Branch `release/2026-11-19-r2`, at `4fd4a70`, stacked on R1 (`release/2026-11-19-r1` at `8402c41`, PR #156, merged as `254a542`), so the deploy of R2 shipped R1 as well (R1 has no migration). R2 is PR #158 (merge `7fd62bb`). Seven lane branches merged with `--no-ff` in this order: `feat/w4-dur-notice-state`, `feat/w4-c1-idle-fee`, `feat/w4-f8v-vehicle-email`, `feat/w4-f6r-ready-by`, `feat/w4-c9-member-price`, `feat/w4-c8-approval`, `feat/w4-c2-ocpp-csms`. Every lane wrote its migration against `0050_charge_routines`; the integrator rechained them (`ccbd096`) into one line with a single head and no branch point:
