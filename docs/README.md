@@ -26,8 +26,8 @@ This folder is the **technical reference** for the AmpHive platform, and the
 | [MQTT_CONTRACT.md](MQTT_CONTRACT.md) | The exact MQTT topic/payload contract between the backend and the ESP32 gateway. |
 | [OCPP_BRIDGE.md](OCPP_BRIDGE.md) | Read-only OCPP 1.6J virtual charge-point bridge (tools/ocpp_bridge): presents AmpHive plugs to any OCPP central system for display, with the status mapping, virtual meter register and laptop demo. |
 | [CHARGE_COMPLETE.md](CHARGE_COMPLETE.md) | Charge-complete detection (F1): the "looks fully charged" rule, its tunables and the opt-in auto-stop. |
-| [IDLE_FEE.md](IDLE_FEE.md) | Idle fee (C1, wave 4 R2, not deployed): the opt-in per-tariff terms, what counts as idle, how it is settled and refunded. |
-| [RESERVATION_APPROVAL.md](RESERVATION_APPROVAL.md) | Reservation approval mode and the optional no-show fee (C8, wave 4 R2, not deployed). |
+| [IDLE_FEE.md](IDLE_FEE.md) | Idle fee (C1, wave 4 R2, deployed 2026-11-20): the opt-in per-tariff terms, what counts as idle, how it is settled and refunded. |
+| [RESERVATION_APPROVAL.md](RESERVATION_APPROVAL.md) | Reservation approval mode and the optional no-show fee (C8, wave 4 R2, deployed 2026-11-20). |
 | [OCPP_CSMS.md](OCPP_CSMS.md) | OCPP 1.6J central system (C2, wave 4 R2): flag-gated, off in production; contract, security, data model and known limits. |
 | [CPO_VIEWER.md](CPO_VIEWER.md) | Read-only CPO viewer role (F10): what a demo login can see, how writes are refused and PII masked, and the seed command. |
 | [HOME_ASSISTANT.md](HOME_ASSISTANT.md) | Personal read-only API tokens and `GET /api/me/meter` (F7) for Home Assistant and evcc. |

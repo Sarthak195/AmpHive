@@ -38,7 +38,7 @@ The knobs live in `backend/services/mqtt_manager.py` and are read at call time.
 
 1. The live telemetry snapshot carries `charge_full: true` until the session
    ends, so the session monitor shows a "Your car looks fully charged" banner.
-2. One `notify()` to the driver (type `charge_full`, bell + web push). On a session with an idle fee (C1, wave 4 R2, not deployed) the notice is `idle_fee_notice` instead, "Charging done, please stop and unplug", also always pushed; see [IDLE_FEE.md](IDLE_FEE.md).
+2. One `notify()` to the driver (type `charge_full`, bell + web push). On a session with an idle fee (C1, wave 4 R2, deployed 2026-11-20) the notice is `idle_fee_notice` instead, "Charging done, please stop and unplug", also always pushed; see [IDLE_FEE.md](IDLE_FEE.md).
 3. Only when `charging_sessions.auto_stop_when_full` is true: the session is
    stopped with `finalize_charging_session(db, session_id,
    expected_user_id=<driver>, reason="auto-stopped: charge complete")`, the same
@@ -62,7 +62,7 @@ car is full" toggle in the charge setup modal (default off). Migration
 
 Detector state is in memory. A backend restart clears it: the idle timer starts
 over, so detection is only delayed (the "has charged" check uses the persisted
-peak power). Since migration 0051 (wave 4 R2, built, not deployed) the notice
+peak power). Since migration 0051 (wave 4 R2, built, deployed 2026-11-20) the notice
 itself is claimed once per session on `charging_sessions.full_notified_at`, so a
 session that had already fired is not notified a second time after a restart
 (before 0051 it could repeat one notification); an auto-stopped session is no

@@ -24,8 +24,8 @@ ORM: SQLAlchemy 2.0 `DeclarativeBase` with `mapped_column`. Enums use
 | `GatewayStatus` (`gateway_status`) | `online`, `offline` |
 | `PlugStatus` (`plug_status`) | `available`, `occupied`, `offline`, `maintenance` |
 | `SessionStatus` (`session_status`) | `active`, `completed`, `paid`, `cancelled` |
-| `TransactionType` (`tx_type`) | `topup`, `session_debit`, `refund`, `cpo_topup` (2026-07-21, `0026_offline_topups`, first migration in this repo to `ALTER TYPE ... ADD VALUE` an existing enum rather than create one), `account_closure` (2026-08-18, `0038_account_closure`, same `ALTER TYPE` idiom, the forfeit line written when a closing account's remaining charging credit is zeroed, so the running balance stays reconcilable by summing `amount`) Wave 4 R2 (built, not deployed): `idle_fee` (`0052_idle_fee`) and `reservation_no_show_fee` (`0055_reservation_approval`), both `ALTER TYPE ... ADD VALUE IF NOT EXISTS`. |
-| `ReservationStatus` (`reservation_status`) | `booked`, `cancelled`, `fulfilled`, `expired` (2026-07-12, `0016_reservations`), `pending`, `declined` (wave 4 R2, `0055_reservation_approval`, built, not deployed) |
+| `TransactionType` (`tx_type`) | `topup`, `session_debit`, `refund`, `cpo_topup` (2026-07-21, `0026_offline_topups`, first migration in this repo to `ALTER TYPE ... ADD VALUE` an existing enum rather than create one), `account_closure` (2026-08-18, `0038_account_closure`, same `ALTER TYPE` idiom, the forfeit line written when a closing account's remaining charging credit is zeroed, so the running balance stays reconcilable by summing `amount`) Wave 4 R2 (built, deployed 2026-11-20): `idle_fee` (`0052_idle_fee`) and `reservation_no_show_fee` (`0055_reservation_approval`), both `ALTER TYPE ... ADD VALUE IF NOT EXISTS`. |
+| `ReservationStatus` (`reservation_status`) | `booked`, `cancelled`, `fulfilled`, `expired` (2026-07-12, `0016_reservations`), `pending`, `declined` (wave 4 R2, `0055_reservation_approval`, built, deployed 2026-11-20) |
 
 ## 2. Tables
 
@@ -73,7 +73,7 @@ user`, an unusable random `hashed_password`, `google_sub` NULL,
 `auth_provider` `deleted`, `is_disabled` true, `email_verified` false,
 `token_version` bumped (every outstanding JWT dies on its next request).
 The financial rows survive, pointing at a row that identifies nobody.
-Since wave 4 (not deployed) closure also deletes the user's `plug_reviews`
+Since wave 4 (deployed 2026-11-20) closure also deletes the user's `plug_reviews`
 and `plug_photos` (stored image objects deleted in a background task after
 the response, best-effort; rejected photos skipped, their object is deleted
 at rejection; a failed deletion leaves an unreachable orphan object) and
@@ -415,8 +415,8 @@ full column list of each:
   `idx_promo_redemptions_code_user` (`code_id`, `user_id`). Limits are
   COUNT(*) of these rows, taken under the `promo_codes` row lock.
 
-- **`charge_routines`** (`0050_charge_routines.py`, C5, wave 3, not
-  deployed; down_revision `0049_plug_hours`) - a driver's recurring weekly
+- **`charge_routines`** (`0050_charge_routines.py`, C5, wave 3,
+  deployed 2026-11-19; down_revision `0049_plug_hours`) - a driver's recurring weekly
   charge. Columns: `id` SERIAL PK; `user_id` FK users CASCADE (indexed
   `ix_charge_routines_user_id`); `plug_id` FK plugs CASCADE; `tenant_id` FK
   tenants CASCADE, denormalized from plug -> gateway -> tenant like
@@ -435,15 +435,15 @@ full column list of each:
   SET NULL, the occurrence's row until its outcome is settled; `created_at`.
   Account closure deletes the user's routines.
 
-The ORM declares **40 tables** on `release/2026-11-19-r2` (`__tablename__`
+The ORM declares **40 tables** on `main` (`__tablename__`
 count, rechecked 2026-11-20; 36 as of `0050_charge_routines`, the four new ones
 are `group_invites`, `ocpp_charge_points`, `ocpp_id_tags` and
-`ocpp_transactions`). Prod, at `0050_charge_routines` since 2026-11-19, has
-36 (35 at `0047_promo_codes`, 32 at `0043_email_ci_unique`); the R2 tables
-exist in prod only after that release is deployed. All are applied via Alembic
+`ocpp_transactions`). Prod, at `0056_ocpp_charge_points` since 2026-11-20, has
+40 (36 at `0050_charge_routines`, 35 at `0047_promo_codes`, 32 at
+`0043_email_ci_unique`); the R2 tables were created by the 2026-11-20 deploy. All are applied via Alembic
 per §4 below.
 
-### Wave 4 R2 schema (`release/2026-11-19-r2`, migrations `0051` to `0056`, built, not deployed)
+### Wave 4 R2 schema (`release/2026-11-19-r2`, migrations `0051` to `0056`, built, deployed 2026-11-20)
 
 Every change is additive (`ADD COLUMN IF NOT EXISTS`, `CREATE TABLE IF NOT EXISTS`,
 `ALTER TYPE ... ADD VALUE IF NOT EXISTS`), with no backfill, no GRANT (the owner
@@ -569,7 +569,7 @@ joined via `access_code`.
   arrived via `0005_gateway_events` (2026-07-10), `audit_logs` via
   `0007_audit_log` (2026-07-12), and `notifications` + `push_subscriptions`
   via `0008_notifications` (2026-07-11, renumbered from 0007 at merge); it's
-  **36 tables** once `0050_charge_routines` is applied (35 at `0047`, deployed 2026-11-19; 32 at `0043`), **40** once `0056_ocpp_charge_points` is applied (wave 4 R2, not deployed); see "Tables added since" in §2 above for the rest.)
+  **36 tables** once `0050_charge_routines` is applied (35 at `0047`, deployed 2026-11-19; 32 at `0043`), **40** once `0056_ocpp_charge_points` is applied (wave 4 R2, deployed 2026-11-20); see "Tables added since" in §2 above for the rest.)
 - **Wave 2 chain (2026-11-17, `release/2026-11-17-w2`, deployed 2026-11-19).**
   `0043_email_ci_unique` -> `0044_session_auto_stop_full` (two nullable
   booleans, IF NOT EXISTS) -> `0045_cpo_viewer_role` (enum value, downgrade is
@@ -587,7 +587,7 @@ joined via `access_code`.
   table). One head, no branch point (checked offline with `ScriptDirectory`).
   All three were written against `0047` on their branches and rechained at
   integration. The owner role's default privileges cover the new table.
-- **Wave 4 R2 chain (2026-11-19, `release/2026-11-19-r2`, built, not deployed).**
+- **Wave 4 R2 chain (2026-11-19, `release/2026-11-19-r2`, built, deployed 2026-11-20).**
   `0050_charge_routines` -> `0051_durable_notice_state` (five nullable
   timestamptz columns) -> `0052_idle_fee` (`tx_type` value, three `tariffs`
   and six `charging_sessions` columns) -> `0053_vehicle_profile` (four `users`
