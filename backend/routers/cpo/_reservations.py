@@ -21,13 +21,14 @@ from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database.db import get_db
-from backend.database.models import Plug, Reservation, ReservationStatus, Tenant, User
+from backend.database.models import Plug, PlugStatus, Reservation, ReservationStatus, Tenant, User
 from backend.services.notifications import notify
 from backend.services.plug_hours import hours_of, window_is_open
 from backend.services.reservations import (
     HOLD_STATUSES,
     expire_lapsed_reservations,
     format_window,
+    user_can_access_plug,
 )
 
 from ._common import (
@@ -151,6 +152,22 @@ async def _answer_request(
         raise HTTPException(
             status_code=409,
             detail=f"This request is already {reservation.status.value}.",
+        )
+
+    # [C8] Approval books the slot, so it applies the same plug checks as a
+    # direct booking (routers/reservations.py): no booking on a plug under
+    # maintenance, and none for a requester who has since lost access to a
+    # private-group plug (removed or left after asking). The request stays
+    # PENDING; decline it instead.
+    if approve and plug.status == PlugStatus.MAINTENANCE:
+        raise HTTPException(
+            status_code=409,
+            detail="This plug is under maintenance and cannot be reserved. Decline the request instead.",
+        )
+    if approve and not await user_can_access_plug(db, reservation.user_id, plug):
+        raise HTTPException(
+            status_code=409,
+            detail="The driver no longer has access to this plug's group. Decline the request instead.",
         )
 
     # [C8 + C4] Approval books the slot, so it obeys the plug's opening hours

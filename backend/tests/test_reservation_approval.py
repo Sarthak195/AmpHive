@@ -94,15 +94,17 @@ async def test_approval_respects_the_current_opening_hours(monkeypatch, open_now
 
     from fastapi import HTTPException
 
-    from backend.database.models import ReservationStatus
+    from backend.database.models import PlugStatus, ReservationStatus
     from backend.routers.cpo import _reservations as mod
 
     monkeypatch.setattr(mod, "expire_lapsed_reservations", AsyncMock())
     monkeypatch.setattr(mod, "window_is_open", MagicMock(return_value=open_now))
+    monkeypatch.setattr(mod, "user_can_access_plug", AsyncMock(return_value=True))
     sent = AsyncMock()
     monkeypatch.setattr(mod, "notify", sent)
     start = datetime(2026, 11, 20, 20, 0, tzinfo=timezone.utc)
-    plug = SimpleNamespace(id=5, name="Bay 1", opening_hours=[{"days": [0], "open": "08:00", "close": "18:00"}])
+    plug = SimpleNamespace(id=5, name="Bay 1", status=PlugStatus.AVAILABLE,
+                           opening_hours=[{"days": [0], "open": "08:00", "close": "18:00"}])
     reservation = SimpleNamespace(
         id=9, user_id=3, status=ReservationStatus.PENDING,
         start_at=start, end_at=start + timedelta(hours=1),
@@ -124,6 +126,47 @@ async def test_approval_respects_the_current_opening_hours(monkeypatch, open_now
 
     # Declining a request outside the hours is always possible.
     reservation.status = ReservationStatus.PENDING
+    db = _approve_db(plug, reservation)
+    out = await mod._answer_request(db, user, 9, approve=False)
+    assert out["status"] == "declined"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["maintenance", "lost_access"])
+async def test_approval_refused_when_the_plug_or_requester_no_longer_qualifies(monkeypatch, case):
+    """[C8] Approval books the slot, so it applies a direct booking's checks:
+    a plug in MAINTENANCE, or a requester removed from (or who left) the
+    private group after asking, refuses the approval (409, still PENDING,
+    nothing sent). Declining still works."""
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+
+    from fastapi import HTTPException
+
+    from backend.database.models import PlugStatus, ReservationStatus
+    from backend.routers.cpo import _reservations as mod
+
+    monkeypatch.setattr(mod, "expire_lapsed_reservations", AsyncMock())
+    monkeypatch.setattr(mod, "user_can_access_plug", AsyncMock(return_value=case != "lost_access"))
+    sent = AsyncMock()
+    monkeypatch.setattr(mod, "notify", sent)
+    status = PlugStatus.MAINTENANCE if case == "maintenance" else PlugStatus.AVAILABLE
+    plug = SimpleNamespace(id=5, name="Bay 1", status=status, opening_hours=None, group_id=11)
+    start = datetime(2026, 11, 20, 20, 0, tzinfo=timezone.utc)
+    reservation = SimpleNamespace(
+        id=9, user_id=3, status=ReservationStatus.PENDING,
+        start_at=start, end_at=start + timedelta(hours=1),
+    )
+    user = SimpleNamespace(tenant_id=1)
+
+    db = _approve_db(plug, reservation)
+    with pytest.raises(HTTPException) as exc:
+        await mod._answer_request(db, user, 9, approve=True)
+    assert exc.value.status_code == 409
+    assert reservation.status == ReservationStatus.PENDING
+    db.commit.assert_not_awaited()
+    sent.assert_not_awaited()
+
     db = _approve_db(plug, reservation)
     out = await mod._answer_request(db, user, 9, approve=False)
     assert out["status"] == "declined"

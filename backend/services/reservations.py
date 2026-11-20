@@ -484,6 +484,19 @@ async def _window_skip_reason(
     from backend.services.pricing import _zone
 
     start_at, end_at = reservation.start_at, reservation.end_at
+
+    # Every start path refuses a disabled account and a private-group plug the
+    # caller is no longer a member of, before the reservation gate. A holder
+    # the operator removed (or who left, or was disabled) could not have
+    # started, so the empty window is not their no-show.
+    holder = (await db.execute(
+        select(User.is_disabled, User.deleted_at).where(User.id == reservation.user_id)
+    )).first()
+    if holder is None or holder.is_disabled or holder.deleted_at is not None:
+        return "holder account disabled or closed"
+    if not await user_can_access_plug(db, reservation.user_id, plug):
+        return "holder no longer has access to the plug"
+
     outage = (await db.execute(
         select(GatewayEvent.id)
         .where(

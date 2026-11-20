@@ -133,9 +133,11 @@ from backend.tests.test_reservations import (  # noqa: E402
     _cancel,
     _fake_user,
     _get_reservation,
+    _join_group,
     _now,
     _seed_gateway,
     _seed_plug,
+    _seed_private_group,
     _seed_reservation,
     _seed_tenant,
     _seed_user,
@@ -300,6 +302,54 @@ async def test_zero_fee_does_nothing(factory, notify_mock):
     assert await _ledger(factory, site.driver) == []
     assert (await _get_reservation(factory, site.resv_id)).no_show_checked_at is None
     assert notify_mock.await_count == 0
+
+
+@requires_db
+@pytest.mark.asyncio
+async def test_fee_skipped_when_holder_lost_private_group_access(factory, notify_mock):
+    """A holder the operator removed from (or who left) the plug's private
+    group is refused 403 by every start path, so the empty window is not a
+    no-show. Settled as skipped, never charged."""
+    from sqlalchemy import delete
+
+    from backend.database.models import GroupMembership, Plug
+
+    site = await _no_show_site(factory)
+    group_id = await _seed_private_group(factory, site.tenant_id)
+    await _update(factory, Plug, site.plug_id, group_id=group_id)
+    await _join_group(factory, site.driver, group_id)
+    async with factory() as db:
+        await db.execute(delete(GroupMembership).where(GroupMembership.user_id == site.driver))
+        await db.commit()
+
+    assert await policy.reap_reservation_no_shows_once(factory, now=site.now) == 0
+    assert await _ledger(factory, site.driver) == []
+    assert await _balance(factory, site.driver) == Decimal("500.00")
+    assert (await _get_reservation(factory, site.resv_id)).no_show_checked_at is not None
+    assert notify_mock.await_count == 0
+
+
+@requires_db
+@pytest.mark.asyncio
+async def test_fee_still_charged_to_a_current_private_group_member(factory, notify_mock):
+    from backend.database.models import Plug
+
+    site = await _no_show_site(factory)
+    group_id = await _seed_private_group(factory, site.tenant_id)
+    await _update(factory, Plug, site.plug_id, group_id=group_id)
+    await _join_group(factory, site.driver, group_id)
+    assert await policy.reap_reservation_no_shows_once(factory, now=site.now) == 1
+
+
+@requires_db
+@pytest.mark.asyncio
+async def test_fee_skipped_when_holder_account_disabled(factory, notify_mock):
+    from backend.database.models import User
+
+    site = await _no_show_site(factory)
+    await _update(factory, User, site.driver, is_disabled=True)
+    assert await policy.reap_reservation_no_shows_once(factory, now=site.now) == 0
+    assert await _ledger(factory, site.driver) == []
 
 
 @requires_db
