@@ -24,7 +24,7 @@ ORM: SQLAlchemy 2.0 `DeclarativeBase` with `mapped_column`. Enums use
 | `GatewayStatus` (`gateway_status`) | `online`, `offline` |
 | `PlugStatus` (`plug_status`) | `available`, `occupied`, `offline`, `maintenance` |
 | `SessionStatus` (`session_status`) | `active`, `completed`, `paid`, `cancelled` |
-| `TransactionType` (`tx_type`) | `topup`, `session_debit`, `refund`, `cpo_topup` (2026-07-21, `0026_offline_topups` — first migration in this repo to `ALTER TYPE ... ADD VALUE` an existing enum rather than create one), `account_closure` (2026-08-18, `0038_account_closure`, same `ALTER TYPE` idiom — the forfeit line written when a closing account's remaining charging credit is zeroed, so the running balance stays reconcilable by summing `amount`) Wave 4 R2 (built, not deployed): `idle_fee` (`0052_idle_fee`) and `reservation_no_show_fee` (`0055_reservation_approval`), both `ALTER TYPE ... ADD VALUE IF NOT EXISTS`. |
+| `TransactionType` (`tx_type`) | `topup`, `session_debit`, `refund`, `cpo_topup` (2026-07-21, `0026_offline_topups`, first migration in this repo to `ALTER TYPE ... ADD VALUE` an existing enum rather than create one), `account_closure` (2026-08-18, `0038_account_closure`, same `ALTER TYPE` idiom, the forfeit line written when a closing account's remaining charging credit is zeroed, so the running balance stays reconcilable by summing `amount`) Wave 4 R2 (built, not deployed): `idle_fee` (`0052_idle_fee`) and `reservation_no_show_fee` (`0055_reservation_approval`), both `ALTER TYPE ... ADD VALUE IF NOT EXISTS`. |
 | `ReservationStatus` (`reservation_status`) | `booked`, `cancelled`, `fulfilled`, `expired` (2026-07-12, `0016_reservations`), `pending`, `declined` (wave 4 R2, `0055_reservation_approval`, built, not deployed) |
 
 ## 2. Tables
