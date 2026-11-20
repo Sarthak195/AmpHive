@@ -238,3 +238,17 @@ async def test_insights_email_pass_runs_off_the_tick_and_never_overlaps():
     finally:
         release.set()
         await svc.stop()
+
+
+def test_insights_email_ticks_empty_env_falls_back_to_default(monkeypatch):
+    """An empty INSIGHTS_EMAIL_EVERY_N_TICKS (compose ${VAR} passthrough) uses 15."""
+    import importlib
+
+    from backend.services import session_reaper as mod
+
+    monkeypatch.setenv("INSIGHTS_EMAIL_EVERY_N_TICKS", "")
+    try:
+        assert importlib.reload(mod).INSIGHTS_EMAIL_EVERY_N_TICKS == 15
+    finally:
+        monkeypatch.delenv("INSIGHTS_EMAIL_EVERY_N_TICKS", raising=False)
+        importlib.reload(mod)
