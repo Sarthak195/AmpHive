@@ -939,10 +939,10 @@ async def test_schedule_rejects_when_another_driver_holds_the_socket():
 
 @pytest.mark.asyncio
 async def test_schedule_success_persists_not_before_and_grace_expiry():
-    now = datetime.now(timezone.utc)
-    nb = now.replace(hour=16, minute=30, second=0, microsecond=0)
-    if nb <= now + timedelta(minutes=1):
-        nb += timedelta(days=1)                   # next 16:30Z = 22:00 IST
+    # Relative to now: a fixed 16:30Z rolled to tomorrow between 16:29 and
+    # 16:30Z, just past the 24 h window (schedule_out_of_range).
+    nb = _soon().replace(second=0, microsecond=0)
+    local_hhmm = (nb + timedelta(hours=5, minutes=30)).strftime("%H:%M")
     db = _db(
         *_sched_prefix(),
         _s1n(None),                               # no overlapping booking
@@ -964,7 +964,7 @@ async def test_schedule_success_persists_not_before_and_grace_expiry():
     assert queued.max_duration_seconds == 3600
     assert resp["tenant_timezone"] == "Asia/Kolkata"
     body = notify.await_args.args[3]
-    assert "22:00" in body and "Asia/Kolkata" in body
+    assert local_hhmm in body and "Asia/Kolkata" in body
 
 
 @pytest.mark.asyncio
