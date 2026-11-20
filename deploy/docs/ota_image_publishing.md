@@ -124,11 +124,23 @@ so a reader gains nothing and a forger is rejected.
 
 ## Migration state — ROLLED OUT (2026-07-10, updated 2026-07-11)
 
-**Current fleet firmware: signed `2.0.0-direct`** (multi-plug roster
-provisioning — backend-pushed retained plug roster; captive-portal `plug_ip`
-field and provisional boot slot removed). Rollout log, newest first (NOTE: the
-`1.7.1`→`1.8.0`→`1.9.0` interim rollouts are not individually re-logged here —
-see git history / `docs/IMPLEMENTATION_STATUS.md`):
+**Current fleet firmware: signed `2.10.0-direct`** (live Wi-Fi signal on
+telemetry; release 7, OTA'd 2026-11-20). Rollout log, newest first (NOTE: the
+interim rollouts between `2.0.0` and `2.10.0` (2.1.0 to 2.9.0) are not
+individually re-logged here; see git history / `docs/IMPLEMENTATION_STATUS.md`
+and `docs/FIRMWARE.md`):
+
+- **2026-11-20: `2.9.0-direct` to signed `2.10.0-direct`** on the real gateway
+  `1cc3abb4fb54` (live Wi-Fi signal: `wifi_rssi` on at most one telemetry frame
+  every 5 min, PR #157). Built from `d921ccd` with ESP-IDF v5.3.3 (same signing
+  key, `sdkconfig` identical to 2.9.0); bin sha256
+  `2f542a2c004e000fcfa682e023fdd730ac03a2db15e3a4186e64bf3fdb011b4c`, 1,048,564
+  bytes. Published through the admin upload endpoint as release id 7
+  (`https://storage.googleapis.com/amphive-fw-2/amphive-gateway-2.10.0-direct.bin`,
+  public bytes verified), backend `d921ccd` deployed first. Events: `OTA_STARTED`
+  17:15:10Z, `OTA_OK_REBOOTING` 17:15:34Z, `GATEWAY_BOOT` 17:15:45Z on
+  `2.10.0-direct` (RSSI -4 dBm). The commissioning checklist passes 6 of 6 and
+  shows the Wi-Fi signal as live. **Fallback: release 6 (`2.9.0-direct`).**
 
 - **2026-07-15 — `1.9.0-direct` → signed `2.0.0-direct`** on the real gateway
   `1cc3abb4fb54` (multi-plug roster provisioning, PR #52). **Backend deployed
@@ -140,7 +152,7 @@ see git history / `docs/IMPLEMENTATION_STATUS.md`):
   then advanced on 2.0.0**, confirming idle telemetry flows from the retained
   roster (the device learned plug 1 @192.168.1.6 from `.../config`, not the
   removed provisional slot). Built with **ESP-IDF v5.3.3** — the field-consistent
-  toolchain. Published image: `amphive-gateway-2.0.0-direct.bin` (**current**).
+  toolchain. Published image: `amphive-gateway-2.0.0-direct.bin`.
 
 - **2026-07-12 — `1.7.0-direct` → `1.7.1-direct`** on the real gateway
   `1cc3abb4fb54` (multi-plug regression fix + on-device verification).
@@ -176,11 +188,13 @@ see git history / `docs/IMPLEMENTATION_STATUS.md`):
 
 **Do not push the older `amphive-gateway-1.4.0.bin`/`-1.5.0.bin`/`-1.6.0-direct.bin`
 (downgrade) or `-1.7.0-direct.bin` (liveness regression) still in the bucket** —
-`1.7.1-direct` is the good image.
+`2.10.0-direct` is the current image (`1.7.1-direct` was the good one after the 1.7.0 regression).
 
 Published images (`gs://amphive-fw-2`): `amphive-gateway-1.4.0.bin` (historic),
 `amphive-gateway-1.5.0.bin` (historic), `amphive-gateway-1.6.0-direct.bin`
 (historic), `amphive-gateway-1.7.0-direct.bin` (**pulled — regression**),
-`amphive-gateway-1.7.1-direct.bin` (**current**). See
+`amphive-gateway-1.7.1-direct.bin` (historic), `amphive-gateway-2.10.0-direct.bin`
+(release 7, **current**; the OTA fallback is release 6, `2.9.0-direct`). Images
+from `2.0.0` to `2.9.0` are not re-listed here (see the admin firmware list). See
 [docs/IMPLEMENTATION_STATUS.md](../../docs/IMPLEMENTATION_STATUS.md) for the
 canonical status row.

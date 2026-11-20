@@ -1112,7 +1112,7 @@ pass locks the routine row and then the plug row FOR UPDATE, so its check for
 another driver's WAITING row is serialized with the queue endpoint's
 scheduled path. Safety posture: SAFETY.md.
 
-### 8.13 2026-11-19 wave 4 R1 fixes (built on `release/2026-11-19-r1`, not deployed)
+### 8.13 2026-11-19 wave 4 R1 fixes (built on `release/2026-11-19-r1`, deployed 2026-11-20)
 
 **Data rights.** Account closure additionally deletes the user's `plug_reviews`
 and `plug_photos` and clears `users.notification_prefs`. Closure deletes the
@@ -1143,7 +1143,7 @@ Pending and rejected plug photos stay hidden from a viewer (image 404, and the
 CPO photo list returns approved photos only). The every-write-route walk on the
 merged tree asserts 403 `read_only_demo` on 74 write routes.
 
-### 8.14 2026-11-19 wave 4 R2 features (built on `release/2026-11-19-r2`, not deployed)
+### 8.14 2026-11-19 wave 4 R2 features (built on `release/2026-11-19-r2`, deployed 2026-11-20)
 
 Stacked on R1; migrations `0051` to `0056`. The full per-lane behaviour is in [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) section 0h. This section is the security view.
 

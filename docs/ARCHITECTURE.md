@@ -123,7 +123,7 @@ POST /api/sessions/stop              (JWT required)
   • set plug AVAILABLE
 ```
 
-### Background work added in wave 4 R2 (not deployed)
+### Background work added in wave 4 R2 (deployed 2026-11-20)
 
 - **Startup.** After `MQTTManager.start()` the lifespan calls `operator_alerts.rearm_offline_rechecks()`, which re-arms the "Gateway still offline" re-checks a restart dropped (derived from the `gateways` rows; never raises; at least `GATEWAY_OFFLINE_NOTIFY_DELAY_SEC` later).
 - **Session reaper (60 s tick, single process).** Gains the no-show sweep `reap_reservation_no_shows_once` (one bounded indexed query, at most 50 rows per tick) and, every `INSIGHTS_EMAIL_EVERY_N_TICKS` (default 15) ticks, `services/insights_email.send_monthly_insights` (the F8V monthly email: previous UTC month, once per opted-in driver, claim-first, a silent no-op without `SMTP_HOST`).

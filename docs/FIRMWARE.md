@@ -862,19 +862,18 @@ burst. 2.7.1 adds:
 The first capture showed the cause: the board heard the AP at -81 to -89 dBm.
 Placement fixes that, not firmware.
 
-**Current source: fw `2.10.0-direct`: live Wi-Fi signal on telemetry (2026-11-19; built and signed locally with ESP-IDF v5.3.3, not flashed, published or OTA'd).** The telemetry task adds `"wifi_rssi":<dBm>` (from `esp_wifi_sta_get_ap_info`) to the first online telemetry frame after boot and then to at most one frame every `WIFI_RSSI_REPORT_INTERVAL_S` (300 s). This is one gateway-wide timer, not one per plug. The timer advances only when the AP read succeeded and esp-mqtt accepted the publish, so a failed read or publish retries on the next frame. Offline-buffered and resync frames never carry the field. The field rides the existing telemetry topic: no new topic, no broker ACL change, and no retained status republish (that would trigger reconnect reconciliation). The backend keeps the latest value in memory for the C10 commissioning checklist and writes no DB row. Backend and firmware can ship in either order: an older backend ignores the field, and a newer backend falls back to the GATEWAY_BOOT value for fw <= 2.9.0. A gateway with no plug, or whose plugs send no frame, reports no live value.
+**Current source: fw `2.10.0-direct`: live Wi-Fi signal on telemetry (2026-11-19; built from `d921ccd` and signed with ESP-IDF v5.3.3, same signing key and an `sdkconfig` identical to 2.9.0; bin sha256 `2f542a2c004e000fcfa682e023fdd730ac03a2db15e3a4186e64bf3fdb011b4c`, 1,048,564 bytes). In the field since 2026-11-20: published as release 7 and OTA'd to gateway `1cc3abb4fb54` (OTA_STARTED 17:15:10Z, OTA_OK_REBOOTING 17:15:34Z, GATEWAY_BOOT 17:15:45Z on `2.10.0-direct`, RSSI -4 dBm); the commissioning checklist passes 6 of 6 and shows the signal as live. OTA fallback: release 6 (2.9.0-direct).** The telemetry task adds `"wifi_rssi":<dBm>` (from `esp_wifi_sta_get_ap_info`) to the first online telemetry frame after boot and then to at most one frame every `WIFI_RSSI_REPORT_INTERVAL_S` (300 s). This is one gateway-wide timer, not one per plug. The timer advances only when the AP read succeeded and esp-mqtt accepted the publish, so a failed read or publish retries on the next frame. Offline-buffered and resync frames never carry the field. The field rides the existing telemetry topic: no new topic, no broker ACL change, and no retained status republish (that would trigger reconnect reconciliation). The backend keeps the latest value in memory for the C10 commissioning checklist and writes no DB row. Backend and firmware can ship in either order: an older backend ignores the field, and a newer backend falls back to the GATEWAY_BOOT value for fw <= 2.9.0. A gateway with no plug, or whose plugs send no frame, reports no live value.
 
 **fw `2.9.0-direct`: SET_INTERVAL wakes the poll loop
-(2026-11-15; not yet built, flashed or published).** The telemetry task slept
+(2026-11-15; later built and published as release 6, now superseded in the field by 2.10.0-direct).** The telemetry task slept
 `vTaskDelay(telemetry_interval_ms)`, so after a session's `SET_INTERVAL 1000`
 the 1 s cadence began only when the current idle sleep (up to 10 s) ended. 2.9.0
 sleeps in `ulTaskNotifyTake` with the interval as the timeout and the handler
 notifies the task when the value changes (§3). No wire change, no backend
 change. The software gateway got the same wake (`agent/test_poll_wake.py`).
-The field gateway stays on 2.8.0 until 2.9.0 is built with ESP-IDF v5.3.3,
-signature-verified and rolled out.
+The field gateway moved off 2.8.0 to 2.9.0 and then to 2.10.0-direct (2026-11-20).
 
-**fw `2.8.0-direct` (in the field): boot report, plug reachability, offline log ring
+**fw `2.8.0-direct` (earlier field build): boot report, plug reachability, offline log ring
 (2026-10-20; USB-flashed to gw `1cc3abb4fb54`, not published for OTA).** Deploy
 the matching backend (branch `fix/connection-noise`, PR #130) **before**
 flashing or OTA-ing 2.8.0: an older backend stores the new events as untitled,

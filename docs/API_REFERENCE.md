@@ -133,7 +133,7 @@ Token: HS256 JWT, claims `sub`/`role`/`email`/`tv`/`auth_time`/`sid`/`iat`/`exp`
 | GET | `/api/me/stats` | JWT | - | **(redesign/ui-v3)** Current-UTC-calendar-month + lifetime charging aggregates for the caller → `{month:{energy_kwh, spend_coins, sessions}, lifetime:{…}}`. Only finished sessions count (status ≠ ACTIVE: `coins_spent` is only written at finalize). Lives in `routers/sessions.py`. **Response additions (F8, 2026-11-17, deployed 2026-11-19):** `series`: array of 12 `{month: 'YYYY-MM' (UTC calendar month), energy_kwh, spend_coins, sessions}`, oldest first, zero-filled. The series counts COMPLETED/PAID sessions only (same as the CPO analytics) and `spend_coins` is net of APPROVED dispute refunds, each taken off its own session's month and floored at 0. `month` and `lifetime` are unchanged: they use status != ACTIVE and gross `coins_spent`, so the series sum can differ slightly from `lifetime` (cancelled sessions with energy, refunds). `impact`: `{assumptions, month, lifetime}`, where each of `month` and `lifetime` is `{distance_km, grid_co2_kg, petrol_co2_kg, co2_avoided_kg, petrol_litres, petrol_equivalent_inr}`. These are ESTIMATES derived from the delivered kWh, never measured. |
 | GET | `/api/sessions/disputes/my` | JWT | — | **(redesign/ui-v3)** The caller's disputes, newest first — the driver-side mirror of the CPO's `GET /api/cpo/disputes` (which owns resolution) → `[{id, session_id, status, reason, resolution_note, refund_coins, created_at, resolved_at}]` |
 | POST | `/api/sessions/{session_id}/dispute` | JWT | path `session_id:int`; `{reason}` (10–1000 chars) | File a dispute against one of the caller's own **finished** sessions (404 if not owner, 409 if still ACTIVE). Coins-only remedy — no Razorpay money-out path (see `MARKET_GAP_ANALYSIS.md` §3 "Refunds"). At most one OPEN dispute per session (409, also DB partial-unique backstop). Reviewed by the owning CPO via `GET /api/cpo/disputes` / `POST /api/cpo/disputes/{id}/resolve`. → `DisputeResponse` `{id, session_id, tenant_id, driver_user_id, reason, status, resolution_note, refund_coins, created_at, resolved_at, resolved_by_user_id}` |
-| GET | `/api/sessions/{session_id}/invoice` | JWT | path `session_id:int`; query `format?` (`html`) | GST tax invoice for a finished, billed session: issued on first call, idempotent thereafter (`services/invoices.py issue_invoice_for_session`). Access: the owning driver, or a cpo/admin of the owning tenant; anyone else 404 (existence not leaked). 400 if the session isn't invoiceable yet. `?format=html` returns a minimal printable invoice (inline CSS) instead of JSON; otherwise the same row shape as `GET /api/cpo/invoices` items. **cpo_viewer (wave 4, not deployed):** returns the existing invoice of a session in the viewer's own tenant (JSON, or `?format=html` with the Bill To name reduced to initials and the email masked); never issues an invoice. A missing session, another tenant's session and a session with no issued invoice all return 404 'Session not found.' |
+| GET | `/api/sessions/{session_id}/invoice` | JWT | path `session_id:int`; query `format?` (`html`) | GST tax invoice for a finished, billed session: issued on first call, idempotent thereafter (`services/invoices.py issue_invoice_for_session`). Access: the owning driver, or a cpo/admin of the owning tenant; anyone else 404 (existence not leaked). 400 if the session isn't invoiceable yet. `?format=html` returns a minimal printable invoice (inline CSS) instead of JSON; otherwise the same row shape as `GET /api/cpo/invoices` items. **cpo_viewer (wave 4, deployed 2026-11-20):** returns the existing invoice of a session in the viewer's own tenant (JSON, or `?format=html` with the Bill To name reduced to initials and the email masked); never issues an invoice. A missing session, another tenant's session and a session with no issued invoice all return 404 'Session not found.' |
 
 **Charge-complete detection (F1, 2026-11-17, `release/2026-11-17-w2`, deployed 2026-11-19).** See [CHARGE_COMPLETE.md](CHARGE_COMPLETE.md).
 
@@ -220,7 +220,7 @@ Book a future `[start_at, end_at)` window on a plug (the private
 society/office use case — group members share one charger). During the
 window only the holder can start a session (the gate in
 `POST /api/sessions/start` above). **FREE in v1** — no coin hold. Statuses:
-`booked → cancelled | fulfilled | expired`; since wave 4 R2 (not deployed) an approval-mode plug adds `pending → booked | declined` (see "Wave 4 R2 features" below). Expiry is **lazy** (no
+`booked → cancelled | fulfilled | expired`; since wave 4 R2 (deployed 2026-11-20) an approval-mode plug adds `pending → booked | declined` (see "Wave 4 R2 features" below). Expiry is **lazy** (no
 background sweep): every read path and the start gate first flip BOOKED
 rows past `start_at + RESERVATION_NO_SHOW_GRACE_MIN` (or past `end_at`) to
 EXPIRED, so a no-show never blocks anyone. Overlap exclusion is enforced
@@ -311,7 +311,7 @@ the row. New notification types: `session_started`, `nearly_done`,
 scheduled auto-start `queued_charge_started`, a routine occurrence `routine_started`
 (or `queued_charge_started` if the routine was deleted before settle). The last five
 toggles (`rate_changed`, `plug_available`, `reservation_booked`,
-`reservation_started`, `queued`) were added in wave 4 (not deployed).
+`reservation_started`, `queued`) were added in wave 4 (deployed 2026-11-20).
 
 ### Plug hours, max session length, amenities and access note (C4)
 
@@ -326,7 +326,7 @@ toggles (`rate_changed`, `plug_available`, `reservation_booked`,
   closed on any selected weekday under the new hours is turned off in the
   same request (its pending queued row is cancelled), and its owner gets
   one `routine_disabled` notification naming the opening hours (wave 4,
-  not deployed).
+  deployed 2026-11-20).
 - `GET /api/cpo/plugs`: rows add `opening_hours`, `max_session_minutes`,
   `amenities`, `access_note` (`access_note` masked by `redact_for` for a
   `cpo_viewer`).
@@ -366,7 +366,7 @@ occurrences. Creating a routine, re-enabling it, or editing its weekdays or
 start time skips an occurrence whose start already passed, so the routine
 first runs at its next occurrence.
 
-## Wave 4 R1 fixes (2026-11-19, `release/2026-11-19-r1`, not deployed)
+## Wave 4 R1 fixes (2026-11-19, `release/2026-11-19-r1`, deployed 2026-11-20)
 
 No new routes and no migration. Changed behaviour (the invoice, notification-prefs and `PUT /api/cpo/plugs/{id}` rows above carry their parts):
 
@@ -377,7 +377,7 @@ No new routes and no migration. Changed behaviour (the invoice, notification-pre
 - `GET /api/sessions/{id}/invoice`: see its row (viewer read of an existing invoice).
 - `PUT /api/me/notification-prefs`: five new push toggles, see the C7 table.
 
-## Wave 4 R2 features (2026-11-19, `release/2026-11-19-r2`, built, not deployed)
+## Wave 4 R2 features (2026-11-19, `release/2026-11-19-r2`, built, deployed 2026-11-20)
 
 Stacked on R1. Migrations `0051` to `0056` (see [DATA_MODEL.md](DATA_MODEL.md)). Lane docs: [IDLE_FEE.md](IDLE_FEE.md), [RESERVATION_APPROVAL.md](RESERVATION_APPROVAL.md), [OCPP_CSMS.md](OCPP_CSMS.md). A `cpo_viewer` gets 403 `read_only_demo` on every write route below (global guard, pinned by the route walk); GETs mask personal data through the usual `_common` helpers.
 
@@ -508,7 +508,7 @@ scoped to the caller's `tenant_id`, so operators only ever see their own assets.
 | POST | `/api/cpo/gateways/{id}/ota` | cpo/admin | `{release_id}` **or** `{firmware_url}` (https, ≤512 chars; exactly one required) | **(feat/ota-version-picker, 2026-08-02)** Trigger an OTA firmware update — the version-picker flow (`release_id`, resolved against `GET /api/cpo/firmware-releases`) replaced hand-pasting a URL; `firmware_url` remains as an admin-only escape hatch (403 for a non-admin caller). Requires the gateway `ONLINE` (409 if offline — gates on the status flag, **not** telemetry freshness, so a gateway with an unreachable plug can still be updated) and ≥1 plug (409 — the OTA command rides a per-plug command topic); `release_id` also 404s if the release doesn't exist or was deactivated. Publishes the `OTA` command (502 on publish fail); the gateway downloads into its passive slot and reboots (rollback-protected), refusing mid-session. → `{status:"ota_triggered", gateway_id, firmware_url, release_version, message}` |
 | GET | `/api/cpo/plugs` | cpo/admin | — | All plugs across the tenant's gateways (status, power, group). |
 | POST | `/api/cpo/plugs` | cpo/admin | `{gateway_id, name, local_ip, plug_model?, group_id?}` | Register a plug (validates gateway + group ownership). |
-| PUT | `/api/cpo/plugs/{id}` | cpo/admin | `{name?, group_id?, status?, local_ip?, max_current_a?}` | Update a plug (`group_id:0` = unassign). Changing `local_ip` (e.g. after a DHCP change) or `max_current_a` re-publishes the gateway's retained plug roster to the device. **Wave 4 R2 (not deployed):** also accepts `reservation_mode` (`instant` or `approval`) and `no_show_fee_coins` (>= 0, 400 above `RESERVATION_NO_SHOW_FEE_MAX_COINS`); see "Wave 4 R2 features" below. |
+| PUT | `/api/cpo/plugs/{id}` | cpo/admin | `{name?, group_id?, status?, local_ip?, max_current_a?}` | Update a plug (`group_id:0` = unassign). Changing `local_ip` (e.g. after a DHCP change) or `max_current_a` re-publishes the gateway's retained plug roster to the device. **Wave 4 R2 (deployed 2026-11-20):** also accepts `reservation_mode` (`instant` or `approval`) and `no_show_fee_coins` (>= 0, 400 above `RESERVATION_NO_SHOW_FEE_MAX_COINS`); see "Wave 4 R2 features" below. |
 | POST | `/api/cpo/plugs/{id}/maintenance` | cpo/admin | path `id:int`; `{action, note?}` (`action` = `enter`\|`clear`, 400 otherwise) | Dedicated operator maintenance workflow (fault console) — distinct from the general status setter above. `enter` always succeeds; `clear` is refused (409) while the plug has an ACTIVE session. Always audited (`plug.maintenance_enter`/`plug.maintenance_clear`); emits the plug's new status over Socket.io, and a `clear` back to AVAILABLE fans out `plug_available` to any "notify me when free" watchers. → `{status:"updated", plug_id, action, plug_status}` |
 | GET | `/api/cpo/groups` | cpo/admin | — | Tenant's charger groups (with `plug_count`, `member_count`, `access_code`). |
 | POST | `/api/cpo/groups` | cpo/admin | `{name, is_public?}` | Create a group; private groups get a generated access code. |
@@ -664,7 +664,7 @@ access control. It lives in its **own** router (`firmware_images.py`), **not**
 | `GRID_EMISSION_FACTOR_KG_PER_KWH` / `PETROL_CO2_KG_PER_L` / `PETROL_PRICE_PER_L` / `ICE_KM_PER_L` / `EV_KM_PER_KWH` | `0.71` / `2.31` / `100` / `15` / `6` | **(F8, 2026-11-17)** Estimate factors for the insights CO2 and petrol figures (India CEA grid average; INR petrol price), read once at import in `services/insights.py`. A missing, malformed or non-positive value falls back to the default. Net CO2 avoided per kWh = `EV_KM_PER_KWH / ICE_KM_PER_L * PETROL_CO2_KG_PER_L - GRID_EMISSION_FACTOR_KG_PER_KWH` (about 0.214 with the defaults) |
 | `OPERATOR_ALERTS` | on | **(F3, 2026-11-17)** Kill switch for operator alerts (`off` disables) |
 | `OPERATOR_ALERT_EMAIL` | unset | **(F3)** Also send operator alerts as plain text to this address via `services/email.send_email` (needs the `SMTP_*` vars); unset = bell and push only |
-| `GATEWAY_OFFLINE_ALERT_COOLDOWN_SEC` / `OPERATOR_ALERT_COOLDOWN_SEC` | `10800` / `3600` | **(F3)** Per-gateway offline-alert cooldown / per (gateway, plug, event) safety-fault cooldown. Since 0051 (wave 4 R2, built, not deployed) the offline cooldown is durable on the `gateways` row and the fault cooldown is rebuilt from `gateway_events` after a restart; before it, a restart reset them and could re-alert once |
+| `GATEWAY_OFFLINE_ALERT_COOLDOWN_SEC` / `OPERATOR_ALERT_COOLDOWN_SEC` | `10800` / `3600` | **(F3)** Per-gateway offline-alert cooldown / per (gateway, plug, event) safety-fault cooldown. Since 0051 (wave 4 R2, built, deployed 2026-11-20) the offline cooldown is durable on the `gateways` row and the fault cooldown is rebuilt from `gateway_events` after a restart; before it, a restart reset them and could re-alert once |
 | `STATUS_RATE_LIMIT` | `20/60` | **(F11, 2026-11-17)** Per-IP limit on the public `GET /api/status`, `"<requests>/<window sec>"` |
 | `CHARGE_FULL_ACTIVE_W` / `CHARGE_FULL_IDLE_W` | `200` / `30` | **(F1, 2026-11-17-w2)** Charge-complete detection: the session must have drawn at least the active watts once, then stay below the idle watts. Empty values fall back to the defaults |
 | `CHARGE_FULL_GRACE_MIN` / `CHARGE_FULL_MINUTES` | `5` / `10` | **(F1)** Startup grace before detection starts, and how long power must stay below the idle threshold before the car "looks full" |
