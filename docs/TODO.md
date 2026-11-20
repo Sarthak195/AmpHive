@@ -20,7 +20,7 @@ been fixed by the 2026-07-08…11 work — see the shipped sections below).*
 - [x] C5 recurring weekly charge routines. (built 2026-11-19 on release/2026-11-17-w3, deployed 2026-11-19)
 - [x] Integration: a routine start sends only `routine_started`; the estimate applies the plug-hours clamp; no nearly_done / power_dropped after F1 judged the car full; the plugs/cpo import cycle; selftest labels masked for a viewer. (built 2026-11-19 on release/2026-11-17-w3, deployed 2026-11-19)
 - [x] Deploy wave 3 (migration deploy 0048 to 0050). Done 2026-11-19: PR #153, merge 0047a2b, prod alembic 0050_charge_routines; see docs/DEPLOYMENT.md "Features wave 3".
-- [ ] C10: add `wifi_rssi` to the firmware periodic status message so the checklist can show a live signal reading instead of the boot-time value.
+- [x] C10: live Wi-Fi signal on the commissioning checklist: fw 2.10.0-direct adds `wifi_rssi` to at most one telemetry frame every 5 min (telemetry, not the retained status message, which the backend treats as a reconnect); the backend holds it in memory and the checklist labels it live, falling back to the boot value. Remaining: OTA 2.10.0-direct to the field gateway.
 - [ ] C10 nit: `check_firmware` reports "Running X, the newest release" even when the gateway is ahead of every active release (a dev build).
 - [ ] C10 nit: the checklist's `run()` has no cancellation or sequence guard, so a slow earlier response can overwrite a newer one if the gateway changes or Re-check is pressed mid-request.
 - [ ] C3 nit: the estimate route's own validation is untested, and the history query is exercised only through mocks.

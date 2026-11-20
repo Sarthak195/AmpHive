@@ -264,9 +264,7 @@ pass|warn|fail, checks: [{key, label, status: pass|warn|fail|unknown, detail,
 fix_hint, observed_at}]}`. Checks:
 
 - `online`: by `GATEWAY_LIVENESS_WINDOW_SEC`.
-- `wifi`: the RSSI from the newest `GATEWAY_BOOT` event, with no age limit
-  (warn below -70 dBm, fail below -80; unknown without a fw >= 2.8.0 boot
-  report). It is the reading at the last boot, not live.
+- `wifi`: the live RSSI from telemetry `wifi_rssi` (fw >= 2.10.0-direct) while it is under 11 min old and not older than the newest `GATEWAY_BOOT` event: label `Wi-Fi signal (live)`, detail `<n> dBm live, <ago>.`. Otherwise the RSSI from the newest `GATEWAY_BOOT` event, with no age limit: label `Wi-Fi signal (at boot)`, detail `<n> dBm at boot, <ago>.`. Warn below -70 dBm, fail below -80. Unknown when there is neither a fresh live reading nor a fw >= 2.8.0 boot report. The live value is held in memory by the backend process, so for up to 5 minutes after a backend restart the check shows the boot value.
 - `firmware`: compared with the newest active release of the same `-suffix`
   variant.
 - `roster`.

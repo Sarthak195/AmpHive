@@ -44,7 +44,7 @@
 |-----------|-------|-----|----------|---------|
 | backend → gateway | `amphive/gateways/{gateway_id}/plugs/{plug_id}/commands` | 1 | no | `{"action":"ON"\|"OFF","max_duration_seconds":<int>,"max_kwh":<float>,"max_current_a":<float>,"session_id":"<str>","local_ip":"<str>"}` OR `{"action":"SET_LIMITS","max_kwh":<float>,"max_duration_seconds":<int>,"max_current_a":<float>,"local_ip":"<str>"}` OR `{"action":"SET_INTERVAL","interval_ms":<int>}` OR `{"action":"OTA","url":"<http(s)>"}` |
 | backend → gateway | `amphive/gateways/{gateway_id}/config` | 1 | yes | `{"v":1,"plugs":[{"plug_id":<int>,"local_ip":"<str>","max_current_a":<float\|null>}, ...]}` — the gateway's full plug roster (fw ≥ 2.0.0-direct) |
-| gateway → backend | `amphive/gateways/{gateway_id}/telemetry` | 0 | no | `{"plug_id":<int>,"watts":<f>,"kwh":<f>,"voltage":<f>,"current":<f>,"relay":<bool>,"status":"occupied"\|"available","session_id":"<str>","today_kwh":<f>,"month_kwh":<f>}` (`today_kwh`/`month_kwh` fw ≥ 2.4.0-direct; fw ≥ 2.8.0-direct omits `relay` from a session frame when the poll got no device-info reading, see the `relay` note below) |
+| gateway → backend | `amphive/gateways/{gateway_id}/telemetry` | 0 | no | `{"plug_id":<int>,"watts":<f>,"kwh":<f>,"voltage":<f>,"current":<f>,"relay":<bool>,"wifi_rssi":<int>,"status":"occupied"\|"available","session_id":"<str>","today_kwh":<f>,"month_kwh":<f>}` (`today_kwh`/`month_kwh` fw ≥ 2.4.0-direct; fw ≥ 2.8.0-direct omits `relay` from a session frame when the poll got no device-info reading, see the `relay` note below; `wifi_rssi` fw >= 2.10.0-direct, optional, see the `wifi_rssi` note below) |
 
 > `voltage`/`current` are the plug's **measured** volts/amps (a Tapo P110 exposes
 > both, ~2 dp). Because active power factor is < 1, `current` is **not**
@@ -62,6 +62,8 @@
 | gateway → backend | `amphive/gateways/{gateway_id}/logs` | 0 | no | raw WARN/ERROR log line as plain text (fw ≥ 2.1.0-direct). fw ≥ 2.8.0 holds lines while MQTT is down and replays them on reconnect as `[offline] <line>`; the backend strips that marker before reading the level letter. Field diagnostics — persisted as `gateway_logs` rows (see `services/mqtt/logs.py`), no notify/socket fan-out. Covered by the `amphive/gateways/%u/#` ACL. |
 | agent → backend | `amphive/gateways/{gateway_id}/discovery` | 1 | no | `{"unique_id":"<str>","provider":"<str>","model":"<str>","alias":"<str>","capabilities":["switch","power","energy"]}` |
 | backend → agent | `amphive/gateways/{gateway_id}/assign` | 1 | yes | `{"<unique_id>":<plug_id:int>, ...}` (full map for the gateway) |
+>
+> `wifi_rssi` (fw >= 2.10.0-direct) is the gateway's current Wi-Fi signal to its AP in dBm (an int). It is gateway-wide, not per plug, and is present on at most one telemetry frame every 5 minutes (the first frame after boot, then every 300 s). The backend (`parse_wifi_rssi` in `services/mqtt/telemetry.py`) accepts only an integer in -127..0 and ignores a missing, null, bool, string, non-integral or out-of-range value. It reads the field before any per-plug validation and keeps the latest value plus its receive time in memory on the MQTT manager (`live_wifi_rssi`), with no DB write. A frame without the field keeps the previous value, and a backend restart forgets it until the next report. The C10 checklist uses it (see API_REFERENCE.md).
 
 The backend subscribes with wildcards: `amphive/gateways/+/telemetry` (QoS 0),
 `amphive/gateways/+/status` (QoS 1), `amphive/gateways/+/discovery` (QoS 1),
