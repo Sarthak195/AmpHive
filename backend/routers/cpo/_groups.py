@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import and_, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -404,8 +404,12 @@ async def cpo_remove_group_member(
 
 class MemberPriceRequest(BaseModel):
     """A member's flat coins-per-kWh price on this group's plugs; null
-    clears it. Same bounds as a tariff's price_per_kwh."""
-    price_per_kwh_override: Optional[float] = Field(default=None, gt=0, le=1000)
+    clears it. Same bounds as a tariff's price_per_kwh. The key is REQUIRED
+    (an explicit null is the only way to clear) and unknown keys are rejected,
+    so an empty body or a misspelled key answers 422 instead of silently
+    clearing the member's price."""
+    model_config = ConfigDict(extra="forbid")
+    price_per_kwh_override: Optional[float] = Field(..., gt=0, le=1000)
 
 
 class GroupInviteRequest(BaseModel):
