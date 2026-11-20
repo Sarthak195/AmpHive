@@ -15,11 +15,12 @@ email). The decision lives in `services/notification_prefs.py`:
    quiet hours:
    - billing receipts and refunds: `session_stopped` (also carries safety
      cutoffs and the current-cap stop), `topup_credited`, `topup_refunded`,
-     `promo_redeemed`
+     `promo_redeemed`, `reservation_no_show_fee` (C8, wave 4 R2, not deployed)
    - safety and faults: `orphan_off`, `charger_offline`, `unmetered_consumption`
    - operator alerts: `gateway_offline`, `gateway_online`, `gateway_fault`
      (carries OVERCURRENT_CUTOFF, THERMAL_CUTOFF, UNAUTHORIZED_ON, OTA_FAILED)
-   - F1: `charge_full`
+   - F1: `charge_full`; C1 (wave 4 R2, not deployed): `idle_fee_notice` (sent in place of `charge_full` on a session with an idle fee)
+   - booking changes (C8, wave 4 R2, not deployed): `reservation_approved` (`reservation_declined` is severity `warning`)
    - charging routines: `routine_started`, `routine_disabled`
    - unattended auto-start: `queued_charge_started` (a one-off scheduled or
      outage-queue start; like `routine_started`, the relay energizes with
