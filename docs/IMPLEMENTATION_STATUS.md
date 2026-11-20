@@ -54,7 +54,7 @@ Integration commits on top of the merges: `ccbd096` (rechain), `5fb3193` (cross-
 
 Migration line: `0051..0056`; 4 new tables (`group_invites`, `ocpp_charge_points`, `ocpp_id_tags`, `ocpp_transactions`, so 40 tables at head); 4 new enum values (`tx_type`: `idle_fee`, `reservation_no_show_fee`; `reservation_status`: `pending`, `declined`), added in the one upgrade transaction, which PG 12+ allows because no later revision uses a new value. Schema detail in [DATA_MODEL.md](DATA_MODEL.md).
 
-CI (local): pending
+CI (local, after the cross-review fix round, 2026-11-20): `ruff check backend/` all checks passed; `mypy` no issues in 43 source files; `pytest backend/tests` 1888 passed, 303 skipped (DB-gated, need `TEST_DATABASE_URL`), 0 failed; `pytest tools/tests` 107 passed; frontend `npm run lint` clean, `npm test` 100 files and 992 tests passed, `npm run build` succeeded. Alembic: single head `0056_ocpp_charge_points`.
 
 **Deploy (not done):** a migration deploy like wave 3 (DB backup first, rollback image = the live code plus the six new migration files tagged `pre-<new sha>`, backend and frontend together). The new optional env vars all default safely and are not in the compose files, so they run at their defaults; OCPP stays off. Details in [DEPLOYMENT.md](DEPLOYMENT.md) "Wave 4 R2".
 
