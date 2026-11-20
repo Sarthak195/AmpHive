@@ -225,21 +225,42 @@ async def test_estimate_prices_the_whole_charge_at_the_override():
     assert out["rate_changes"] == []
 
 
-@pytest.mark.asyncio
-async def test_tariff_preview_shows_the_flat_override():
+async def _preview_with_override(tariff):
     from backend.routers import plugs as plugs_router
+    from backend.services import pricing
 
-    plug = SimpleNamespace(id=3, group_id=11)
+    plug = SimpleNamespace(id=3, group_id=11, gateway_id="gw-1")
     res = MagicMock()
     res.scalar_one_or_none.return_value = plug
     db = AsyncMock()
     db.execute = AsyncMock(return_value=res)
     user = SimpleNamespace(id=3, role=UserRole.DRIVER)
+    # The route imports the resolver from services/pricing inside the call,
+    # so the patch goes on that module.
     with patch.object(plugs_router, "ensure_plug_group_access", AsyncMock()), \
-         patch.object(plugs_router, "member_price_override", AsyncMock(return_value=Decimal("2.50"))):
-        out = await plugs_router.get_plug_tariff_preview(3, user=user, db=db)
+         patch.object(plugs_router, "member_price_override", AsyncMock(return_value=Decimal("2.50"))), \
+         patch.object(pricing, "_resolve_tariff_and_tz",
+                      AsyncMock(return_value=(tariff, "Asia/Kolkata"))):
+        return await plugs_router.get_plug_tariff_preview(3, user=user, db=db)
+
+
+@pytest.mark.asyncio
+async def test_tariff_preview_shows_the_flat_override():
+    out = await _preview_with_override(None)
     assert out == {"base_price_per_kwh": 2.5, "price_now": 2.5, "slots": [],
-                   "cheapest_window": None}
+                   "cheapest_window": None, "idle_fee": None}
+
+
+@pytest.mark.asyncio
+async def test_tariff_preview_override_carries_the_idle_terms():
+    # [C1 + C9] A member-priced session still snapshots the tariff's idle fee,
+    # so the preview shows those terms next to the flat member price.
+    tariff = SimpleNamespace(id=1, price_per_kwh=Decimal("10"), idle_fee_per_min=Decimal("1.50"),
+                             idle_fee_cap=Decimal("60"), idle_grace_min=20)
+    out = await _preview_with_override(tariff)
+    assert out["price_now"] == 2.5
+    assert out["slots"] == []
+    assert out["idle_fee"] == {"grace_min": 20, "per_min": 1.5, "cap": 60.0}
 
 
 # =============================================================================
