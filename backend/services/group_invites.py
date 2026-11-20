@@ -37,10 +37,17 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional, Set, Tuple
 
 from fastapi import HTTPException
-from sqlalchemy import and_, func, select, update
+from sqlalchemy import and_, exists, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.database.models import ChargerGroup, Gateway, GroupInvite, GroupMembership, User
+from backend.database.models import (
+    ChargerGroup,
+    Gateway,
+    GroupInvite,
+    GroupMembership,
+    OcppChargePoint,
+    User,
+)
 from backend.services.billing_emails import _sanitize_operator_note
 from backend.services.email import frontend_origin, send_email
 
@@ -104,8 +111,20 @@ async def invites_sent_last_day_global(db: AsyncSession, now: datetime) -> int:
 
 
 async def tenant_has_gateway(db: AsyncSession, tenant_id: int) -> bool:
+    """True when the tenant owns a claimed hardware gateway. The Gateway row
+    behind an OCPP charge point does not count: any CPO can mint one itself
+    while OCPP_CSMS_ENABLED is on, so it would not anchor the invite mail."""
     return (
-        await db.execute(select(Gateway.id).where(Gateway.tenant_id == tenant_id).limit(1))
+        await db.execute(
+            select(Gateway.id)
+            .where(
+                and_(
+                    Gateway.tenant_id == tenant_id,
+                    ~exists().where(OcppChargePoint.gateway_id == Gateway.id),
+                )
+            )
+            .limit(1)
+        )
     ).scalar() is not None
 
 

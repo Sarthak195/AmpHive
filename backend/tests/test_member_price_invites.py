@@ -790,6 +790,58 @@ async def test_db_daily_cap_counts_this_cpos_invites(factory, monkeypatch):
 
 @db_gated
 @pytest.mark.asyncio
+async def test_db_ocpp_backed_gateway_does_not_unlock_invites(factory):
+    """[C9 + C2] A Gateway row minted for a self-registered OCPP charge point
+    is not a claimed charger, so it never anchors invite mail."""
+    from backend.database.models import ChargerGroup, Gateway, OcppChargePoint, Tenant, User
+    from backend.services import group_invites
+
+    suffix = uuid.uuid4().hex[:8]
+    async with factory() as db:
+        tenant = Tenant(name=f"T-{suffix}")
+        db.add(tenant)
+        await db.flush()
+        gw = Gateway(id=f"ocpp-cp{suffix}", tenant_id=tenant.id, name="cp", vpn_ip=f"ocpp-cp{suffix}")
+        group = ChargerGroup(tenant_id=tenant.id, name="Family", is_public=False,
+                             access_code=suffix.upper())
+        cpo = User(email=f"cpo-{suffix}@example.com", hashed_password="x", full_name="Cpo",
+                   role=UserRole.CPO, tenant_id=tenant.id, email_verified=True)
+        db.add_all([gw, group, cpo])
+        await db.flush()
+        db.add(OcppChargePoint(charge_point_id=f"cp{suffix}", tenant_id=tenant.id,
+                               gateway_id=gw.id, password_hash="x"))
+        await db.commit()
+        assert await group_invites.tenant_has_gateway(db, tenant.id) is False
+        with pytest.raises(HTTPException) as exc:
+            await group_invites.create_invite(db, cpo, group, "a@example.com")
+        assert exc.value.status_code == 409
+
+        db.add(Gateway(id=f"hw-{suffix}", tenant_id=tenant.id, name="hw", vpn_ip=f"hw-{suffix}"))
+        await db.commit()
+        assert await group_invites.tenant_has_gateway(db, tenant.id) is True
+
+
+def test_invite_gateway_anchor_excludes_ocpp_backed_gateways():
+    """DB-free pin of the same rule: the anchor query skips any gateway that
+    backs an OCPP charge point."""
+    import asyncio
+
+    from backend.services import group_invites
+
+    seen = []
+
+    async def _execute(stmt):
+        seen.append(str(stmt.compile(compile_kwargs={"literal_binds": True})))
+        return _scalar(None)
+
+    db = SimpleNamespace(execute=_execute)
+    assert asyncio.run(group_invites.tenant_has_gateway(db, 1)) is False
+    assert "ocpp_charge_points" in seen[0]
+    assert "NOT (EXISTS" in seen[0]
+
+
+@db_gated
+@pytest.mark.asyncio
 async def test_db_limits_patch_resizes_the_hold_at_the_frozen_override(factory, monkeypatch):
     from sqlalchemy import select
 
