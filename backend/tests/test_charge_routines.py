@@ -195,8 +195,10 @@ def _live_user():
 
 
 def _head(routine, tenant=None):
-    """lock routine, plug, gateway, tenant: the head of _materialize_one."""
-    return (_s1n(routine), _s1(_plug()), _s1(_gateway()), _s1(tenant or _tenant()))
+    """routine's plug id (unlocked), lock plug, lock routine, gateway, tenant:
+    the head of _materialize_one (lock order plug then routine)."""
+    return (_s1n(routine.plug_id), _s1n(_plug()), _s1n(routine),
+            _s1(_gateway()), _s1(tenant or _tenant()))
 
 
 def _patched_zone():
@@ -268,16 +270,20 @@ def _scan(routines):
 
 
 @pytest.mark.asyncio
-async def test_locked_or_disabled_routine_queues_nothing():
-    """The row lock re-checks enabled with SKIP LOCKED: a routine turned off
-    since the scan (or held by another tick) is left alone."""
+@pytest.mark.parametrize("held", [False, True])
+async def test_locked_or_disabled_routine_queues_nothing(held):
+    """A routine turned off since the scan is left alone, and so is one held
+    by another transaction (the SKIP LOCKED row lock returns nothing): it is
+    not stamped, so the next tick retries it."""
     routine = _routine()
     now = _ist(MONDAY, 7, 31)
-    mdb = _db(_s1n(None))
+    mdb = _db(_s1n(1), _s1n(_plug()), _s1n(None)) if held else _db(_s1n(None))
     with _patched_zone():
         queued = await svc.materialize_routines(_factory(_scan([routine]), mdb), now=now)
     assert queued == 0
     mdb.add.assert_not_called()
+    mdb.commit.assert_not_awaited()
+    assert routine.last_materialized_date is None
 
 
 @pytest.mark.asyncio
@@ -360,6 +366,28 @@ async def test_materialize_locks_the_plug_like_the_scheduled_path():
     plug_stmt = mdb.execute.call_args_list[1].args[0]
     sql = str(plug_stmt.compile(dialect=postgresql.dialect()))
     assert sql.startswith("SELECT plugs.") and sql.endswith("FOR UPDATE")
+
+
+@pytest.mark.asyncio
+async def test_materialize_locks_the_plug_before_the_routine():
+    """[Lock order] plugs before charge_routines: the CPO hours edit UPDATEs
+    the plug and then its routines, so a tick that held the routine while
+    waiting on the plug could deadlock with it. The first statement takes no
+    lock, the plug is locked FOR UPDATE next, and only then the routine
+    (SKIP LOCKED, which never waits)."""
+    routine = _routine()
+    mdb = _db(*_head(routine), _one(_live_user()), _s1n(42))
+    with _patched_zone():
+        await svc.materialize_routines(_factory(_scan([routine]), mdb), now=_ist(MONDAY, 7, 31))
+    sqls = [str(c.args[0].compile(dialect=postgresql.dialect()))
+            for c in mdb.execute.call_args_list]
+    assert "FOR UPDATE" not in sqls[0] and "charge_routines" in sqls[0]
+    plug_at = next(i for i, q in enumerate(sqls) if q.startswith("SELECT plugs.") and "FOR UPDATE" in q)
+    routine_at = next(i for i, q in enumerate(sqls) if "FOR UPDATE SKIP LOCKED" in q)
+    assert plug_at < routine_at
+    assert "charge_routines" in sqls[routine_at]
+    # Nothing else locks a charge_routines row, and nothing waits on one.
+    assert [i for i, q in enumerate(sqls) if "charge_routines" in q and "FOR UPDATE" in q] == [routine_at]
 
 
 @pytest.mark.asyncio
@@ -781,10 +809,13 @@ async def test_routine_select_is_for_update_skip_locked(fn):
     not only in CI's DB-gated tests."""
     statements = []
     db = AsyncMock()
+    # materialize: the plug id read and the plug lock come first (lock order
+    # plug then routine), then the routine row lock returns nothing.
+    results = iter([_s1n(1), _s1n(_plug())] if fn == "materialize" else [])
 
     async def _execute(stmt, *args, **kwargs):
         statements.append(stmt)
-        return _s1n(None)
+        return next(results, _s1n(None))
 
     db.execute = AsyncMock(side_effect=_execute)
     now = _ist(MONDAY, 7, 31)
@@ -792,8 +823,8 @@ async def test_routine_select_is_for_update_skip_locked(fn):
         assert await svc._materialize_one(_factory(db), 1, now) is False
     else:
         await svc._settle_one(_factory(db), 1)
-    sql = str(statements[0].compile(dialect=postgresql.dialect()))
-    assert "FOR UPDATE SKIP LOCKED" in sql
+    sql = str(statements[-1].compile(dialect=postgresql.dialect()))
+    assert "charge_routines" in sql and "FOR UPDATE SKIP LOCKED" in sql
 
 
 # ===========================================================================
