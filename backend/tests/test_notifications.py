@@ -512,6 +512,7 @@ async def test_cutoff_alarm_finalizes_active_session(event_type, should_finalize
                 r.scalar_one_or_none.return_value = owned_plug  # plug-ownership check
             else:
                 r.scalar_one_or_none.return_value = 42          # session-id lookup
+                r.first.return_value = (42, 3)                  # (session id, driver)
             return r
 
         async def commit(self):

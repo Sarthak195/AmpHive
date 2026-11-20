@@ -345,7 +345,27 @@ describe('ChargeSetupModal: cheapest window', () => {
     api.get.mockReset();
     api.get.mockResolvedValue(PREVIEW);
     renderModal({ plug: { ...PLUG, id: 9 } });
-    expect(api.get).not.toHaveBeenCalled();
+    await waitFor(() => expect(api.get).toHaveBeenCalledWith('/api/plugs/9/tariff-preview'));
+    expect(screen.queryByRole('button', { name: /Cheapest/ })).not.toBeInTheDocument();
+  });
+});
+
+describe('ChargeSetupModal: idle fee terms', () => {
+  it('shows the plug tariff idle fee terms, and says auto-stop avoids it', async () => {
+    api.get.mockResolvedValue({ price_now: 10, idle_fee: { grace_min: 15, per_min: 2, cap: 30 } });
+    renderModal();
+    const terms = await screen.findByTestId('idle-fee-terms');
+    expect(terms).toHaveTextContent(/more than 15 min after it looks full/);
+    expect(terms).toHaveTextContent(/Stop and unplug in time/);
+    await userEvent.click(screen.getByLabelText('Stop automatically when the car is full'));
+    expect(terms).toHaveTextContent(/Not charged: this session stops itself/);
+  });
+
+  it('shows nothing when the tariff has no idle fee', async () => {
+    api.get.mockResolvedValue({ price_now: 10, idle_fee: null });
+    renderModal();
+    await waitFor(() => expect(api.get).toHaveBeenCalledWith('/api/plugs/7/tariff-preview'));
+    expect(screen.queryByTestId('idle-fee-terms')).not.toBeInTheDocument();
   });
 });
 
@@ -364,7 +384,7 @@ describe('ChargeSetupModal: estimate line', () => {
     api.get.mockResolvedValue(EST);
     renderModal();
     expect(screen.queryByTestId('charge-estimate')).not.toBeInTheDocument();
-    expect(api.get).not.toHaveBeenCalled();
+    expect(api.get).not.toHaveBeenCalledWith(expect.stringContaining('/estimate'));
 
     await userEvent.click(screen.getByRole('button', { name: '1h' }));
     const line = await screen.findByTestId('charge-estimate');
@@ -383,5 +403,75 @@ describe('ChargeSetupModal: estimate line', () => {
       expect(api.get).toHaveBeenCalledWith('/api/plugs/7/estimate?max_kwh=5'),
     );
     expect(screen.queryByTestId('charge-estimate')).not.toBeInTheDocument();
+  });
+});
+
+describe('ChargeSetupModal: ready by', () => {
+  const SCHED_PLUG = { ...PLUG, schedule_available: true, tenant_timezone: 'Asia/Kolkata' };
+  const PLAN = {
+    not_before: '2026-11-17T16:30:00+00:00',
+    finish_at: '2026-11-17T18:30:00+00:00',
+    energy_kwh: 4.0,
+    cost_coins: '16.00',
+    is_estimate: true,
+  };
+
+  it('is hidden unless the plug is schedulable', () => {
+    renderModal();
+    expect(screen.queryByRole('button', { name: 'Ready by' })).not.toBeInTheDocument();
+  });
+
+  it('previews the planned window and confirms with the deadline instant', async () => {
+    api.get.mockImplementation((url) =>
+      url.includes('/ready-by') ? Promise.resolve(PLAN) : Promise.resolve(null)
+    );
+    const { onConfirm } = renderModal({ plug: SCHED_PLUG });
+    await userEvent.click(screen.getByRole('button', { name: 'Ready by' }));
+    fireEvent.change(screen.getByLabelText('Ready-by time'), { target: { value: '08:00' } });
+    fireEvent.change(screen.getByLabelText('Energy limit (kWh)'), { target: { value: '4' } });
+
+    const line = await screen.findByTestId('ready-by-plan');
+    expect(line).toHaveTextContent(/starts 10:00/i);
+    expect(line).toHaveTextContent(/4\.0 kWh by 12:00/i);
+    const url = api.get.mock.calls.find(([u]) => u.includes('/ready-by'))[0];
+    expect(url).toMatch(/^\/api\/plugs\/7\/ready-by\?ready_by=.*&max_kwh=4/);
+    // The plain estimate is not fetched in this mode.
+    expect(api.get.mock.calls.some(([u]) => u.includes('/estimate'))).toBe(false);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Schedule charge' }));
+    const [plugId, limits, notBefore, readyBy] = onConfirm.mock.calls[0];
+    expect(plugId).toBe(7);
+    expect(limits).toEqual({ max_kwh: 4 });
+    expect(notBefore).toBeNull();
+    // 08:00 IST is 02:30 UTC.
+    expect(readyBy).toMatch(/T02:30:00\.000Z$/);
+  });
+
+  it('shows the refusal when the deadline cannot be met', async () => {
+    api.get.mockRejectedValue(
+      Object.assign(new Error('That is too soon for this charge.'), {
+        code: 'ready_by_unreachable',
+        status: 409,
+      })
+    );
+    renderModal({ plug: SCHED_PLUG });
+    await userEvent.click(screen.getByRole('button', { name: 'Ready by' }));
+    fireEvent.change(screen.getByLabelText('Ready-by time'), { target: { value: '08:00' } });
+    fireEvent.change(screen.getByLabelText('Energy limit (kWh)'), { target: { value: '4' } });
+    expect(await screen.findByTestId('ready-by-error')).toBeInTheDocument();
+    expect(screen.queryByTestId('ready-by-plan')).not.toBeInTheDocument();
+  });
+
+  it('needs a ready-by time and a limit', async () => {
+    renderModal({ plug: SCHED_PLUG });
+    await userEvent.click(screen.getByRole('button', { name: 'Ready by' }));
+    expect(screen.getByRole('button', { name: 'Schedule charge' })).toBeDisabled();
+  });
+
+  it('does not preselect an 8 h limit, so a time alone is not enough', async () => {
+    renderModal({ plug: SCHED_PLUG });
+    await userEvent.click(screen.getByRole('button', { name: 'Ready by' }));
+    fireEvent.change(screen.getByLabelText('Ready-by time'), { target: { value: '07:00' } });
+    expect(screen.getByRole('button', { name: 'Schedule charge' })).toBeDisabled();
   });
 });

@@ -215,6 +215,7 @@ def _membership(user_id=7):
     m.user_id = user_id
     m.group_id = 12
     m.joined_at = datetime(2026, 7, 1, 9, 0, tzinfo=timezone.utc)
+    m.price_per_kwh_override = None
     return m
 
 
@@ -235,6 +236,7 @@ async def test_list_group_members_shape():
             "email": "driver@amphive.test",
             "full_name": "Dee River",
             "joined_at": "2026-07-01T09:00:00+00:00",
+            "price_per_kwh_override": None,
         }
     ]
 

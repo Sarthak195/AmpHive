@@ -38,6 +38,11 @@ ALWAYS_PUSH_TYPES = frozenset({
     "topup_credited",
     "topup_refunded",
     "promo_redeemed",
+    "reservation_no_show_fee",
+    # Booking changes (C8): an operator approved a PENDING request, so the
+    # slot is now held for the driver. reservation_declined is sent at
+    # severity warning, which always pushes.
+    "reservation_approved",
     # Safety and faults.
     "orphan_off",
     "charger_offline",
@@ -48,6 +53,9 @@ ALWAYS_PUSH_TYPES = frozenset({
     "gateway_fault",
     # F1 "your car looks fully charged" notice.
     "charge_full",
+    # C1 "Charging done, please stop and unplug": an idle fee is about to
+    # start, so it is about money (services/idle_fee.py).
+    "idle_fee_notice",
     # Charge routines (services/routines.py, C5).
     "routine_started",
     "routine_disabled",

@@ -138,6 +138,32 @@ describe('create tariff', () => {
   });
 });
 
+describe('idle fee terms', () => {
+  it('sends the idle fee only when set, and refuses one with no cap', async () => {
+    renderPage();
+    await tariffsTable();
+
+    await userEvent.click(screen.getByRole('button', { name: /new tariff/i }));
+    await userEvent.type(screen.getByLabelText('Name'), 'Busy bay');
+    await userEvent.type(screen.getByLabelText('Base rate (coins/kWh)'), '6');
+    await userEvent.type(screen.getByLabelText('Idle fee (coins/min)'), '2');
+    await userEvent.click(screen.getByRole('button', { name: 'Create tariff' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(/maximum idle fee/);
+    expect(api.post).not.toHaveBeenCalledWith('/api/cpo/tariffs', expect.anything());
+
+    await userEvent.type(screen.getByLabelText('Most idle fee per session (coins)'), '30');
+    await userEvent.click(screen.getByRole('button', { name: 'Create tariff' }));
+    await waitFor(() =>
+      expect(api.post).toHaveBeenCalledWith('/api/cpo/tariffs', {
+        name: 'Busy bay',
+        price_per_kwh: 6,
+        idle_fee_per_min: 2,
+        idle_fee_cap: 30,
+      })
+    );
+  });
+});
+
 describe('edit tariff', () => {
   it('prefills the form and PUTs the change', async () => {
     renderPage();

@@ -11,14 +11,20 @@
  * as typed and never converted through the browser's zone. Each run is an
  * ordinary scheduled charge, so a time or energy limit is required, exactly
  * like scheduling a single charge. A read-only cpo_viewer sees nothing.
+ *
+ * [Idle fee C1] When a charger is chosen, its tariff-preview `idle_fee` terms
+ * (if any) are shown, the same line as ChargeSetupModal: each run snapshots
+ * the plug's terms when it starts. Best-effort: a failed fetch hides it.
  */
 
 import { useCallback, useEffect, useState } from 'react';
 import { Repeat } from 'lucide-react';
 import ConfirmDialog from './ui/ConfirmDialog';
+import Money from './ui/Money';
 import { useToast } from './ui';
 import api from '../api/client';
 import { useAuth } from '../contexts/AuthContext';
+import { useConfig } from '../contexts/ConfigContext';
 import { apiErrorCopy } from '../utils/statusCopy';
 import './ChargeRoutines.css';
 
@@ -46,6 +52,7 @@ const EMPTY = { plugId: '', mask: 31, time: '07:00', hours: '', kwh: '', autoSto
 export default function ChargeRoutines({ className = 'card', titleClassName = 'account-card-title' }) {
   const { user } = useAuth();
   const toast = useToast();
+  const { coin_inr_rate } = useConfig();
   const [routines, setRoutines] = useState([]);
   const [maxRoutines, setMaxRoutines] = useState(5);
   const [plugs, setPlugs] = useState([]);
@@ -53,6 +60,7 @@ export default function ChargeRoutines({ className = 'card', titleClassName = 'a
   const [busy, setBusy] = useState(false);
   const [deleting, setDeleting] = useState(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
+  const [idleFee, setIdleFee] = useState(null);
 
   const isViewer = user?.role === 'cpo_viewer';
 
@@ -78,6 +86,21 @@ export default function ChargeRoutines({ className = 'card', titleClassName = 'a
       }
     })();
   }, [isViewer, load]);
+
+  useEffect(() => {
+    setIdleFee(null);
+    if (isViewer || form.plugId === '') return undefined;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await api.get(`/api/plugs/${form.plugId}/tariff-preview`);
+        if (!cancelled && res?.idle_fee) setIdleFee(res.idle_fee);
+      } catch {
+        /* best-effort hint: hide on failure */
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [isViewer, form.plugId]);
 
   if (isViewer) return null;
 
@@ -290,6 +313,14 @@ export default function ChargeRoutines({ className = 'card', titleClassName = 'a
             />
             Stop automatically when the car is full
           </label>
+          {idleFee && (
+            <p className="field-hint text-sm" data-testid="routine-idle-fee">
+              Idle fee: <Money coins={idleFee.per_min} rate={coin_inr_rate} /> per minute if the car stays
+              plugged in more than {idleFee.grace_min} min after it looks full, at most{' '}
+              <Money coins={idleFee.cap} rate={coin_inr_rate} />.{' '}
+              {form.autoStop ? 'Not charged: these runs stop themselves.' : 'Stop and unplug in time, or tick the box above.'}
+            </p>
+          )}
 
           <div>
             <button type="submit" className="btn btn-quiet" disabled={!canSave}>

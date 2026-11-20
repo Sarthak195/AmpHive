@@ -138,6 +138,33 @@ describe('CpoReservations — list view', () => {
 
     await waitFor(() => expect(toast.error).toHaveBeenCalledWith('already fulfilled'));
   });
+
+  it('[C8] offers Approve and Decline on a pending request and posts the answer', async () => {
+    mockRoutes({
+      reservations: {
+        total: 1,
+        items: [
+          {
+            id: 7, plug_id: 1, plug_name: 'Garage plug', user_name: 'Asha', user_email: null,
+            start_at: '2030-07-21T09:00:00Z', end_at: '2030-07-21T10:00:00Z', status: 'pending', session_id: null,
+          },
+        ],
+      },
+    });
+    render(<CpoReservations />);
+    await screen.findByText('Garage plug');
+    const table = screen.getByRole('table');
+    expect(within(table).getByText('Awaiting approval')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Cancel' })).toBeNull();
+
+    api.post.mockResolvedValue({ id: 7, status: 'booked' });
+    await userEvent.click(screen.getByRole('button', { name: 'Approve' }));
+    await waitFor(() => expect(api.post).toHaveBeenCalledWith('/api/cpo/reservations/7/approve', {}));
+    await waitFor(() => expect(toast.ok).toHaveBeenCalledWith('Request approved.'));
+
+    await userEvent.click(screen.getByRole('button', { name: 'Decline' }));
+    await waitFor(() => expect(api.post).toHaveBeenCalledWith('/api/cpo/reservations/7/decline', {}));
+  });
 });
 
 describe('CpoReservations — Day view', () => {

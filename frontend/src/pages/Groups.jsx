@@ -4,10 +4,15 @@
  * GET /api/groups/my), and leave a private group (DELETE
  * /api/groups/{id}/leave — redesign/ui-v3 contract §4 "Driver gaps"; public
  * groups have no membership to leave, so the action is private-only).
+ *
+ * [C9] An emailed invite lands here as /groups?invite=<token> (a logged-out
+ * invitee comes back through Login, which keeps the query string). The token
+ * is posted once to POST /api/groups/invites/accept and then dropped from the
+ * URL so a reload or a shared screenshot does not carry it.
  */
 
-import { useCallback, useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
 import { Users } from 'lucide-react';
 import PageHeader from '../components/ui/PageHeader';
 import EmptyState from '../components/ui/EmptyState';
@@ -32,6 +37,10 @@ export default function Groups() {
   const [leaveTarget, setLeaveTarget] = useState(null);
   const [leaving, setLeaving] = useState(false);
 
+  const [searchParams, setSearchParams] = useSearchParams();
+  const inviteToken = searchParams.get('invite');
+  const inviteHandled = useRef(false);
+
   const fetchGroups = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -48,6 +57,25 @@ export default function Groups() {
   useEffect(() => {
     fetchGroups();
   }, [fetchGroups]);
+
+  useEffect(() => {
+    if (!inviteToken || inviteHandled.current) return;
+    inviteHandled.current = true;
+    setSearchParams({}, { replace: true });
+    (async () => {
+      try {
+        const result = await api.post('/api/groups/invites/accept', { token: inviteToken });
+        toast.ok(
+          result.status === 'already_member'
+            ? `You're already in "${result.group_name}".`
+            : `Joined "${result.group_name}"`
+        );
+        await fetchGroups();
+      } catch (err) {
+        toast.error(apiErrorCopy(err));
+      }
+    })();
+  }, [inviteToken, setSearchParams, toast, fetchGroups]);
 
   const handleJoin = async (e) => {
     e.preventDefault();

@@ -70,7 +70,7 @@ function SessionDetailModal({ open, session, rate, onClose, onDispute }) {
   const {
     session_id, plug_id, plug_name, status, energy_kwh, peak_power_w,
     price_per_kwh, coins_spent, shortfall_coins, balance_remaining,
-    duration_sec, started_at, reason,
+    duration_sec, started_at, reason, idle_fee_coins,
   } = session;
 
   const invoiceable = canInvoiceSession(session);
@@ -150,6 +150,14 @@ function SessionDetailModal({ open, session, rate, onClose, onDispute }) {
               <span className="num">
                 <Money coins={price_per_kwh} rate={rate} />
                 /kWh
+              </span>
+            </Row>
+          )}
+          {/* [C1] The idle fee is already inside "Charged"; shown on its own line. */}
+          {Number(idle_fee_coins) > 0 && (
+            <Row label="Idle fee (included)">
+              <span className="num">
+                <Money coins={idle_fee_coins} rate={rate} />
               </span>
             </Row>
           )}

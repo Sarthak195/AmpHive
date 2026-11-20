@@ -86,3 +86,5 @@
 .resv-block-fulfilled { background: var(--info-dot); }
 .resv-block-cancelled { background: var(--danger-dot); opacity: 0.55; }
 .resv-block-expired { background: var(--warn-dot); opacity: 0.65; }
+.resv-block-pending { background: var(--warn-dot); }
+.resv-block-declined { background: var(--danger-dot); opacity: 0.55; }

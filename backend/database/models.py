@@ -88,6 +88,16 @@ class TransactionType(str, enum.Enum):
     # Added via ALTER TYPE in migration 0038_account_closure (same pattern as
     # 0026_offline_topups).
     ACCOUNT_CLOSURE = "account_closure"
+    # [Idle fee C1] The capped per-minute fee for a car left plugged in after
+    # it looked fully charged, settled once at finalize as its own line
+    # (services/idle_fee.py). Added via ALTER TYPE in migration 0052_idle_fee.
+    IDLE_FEE = "idle_fee"
+    # [C8] A capped no-show fee for a confirmed reservation the holder never
+    # used, charged only by the reaper sweep
+    # (services/reservations.py reap_reservation_no_shows_once), at most the
+    # driver's available balance. Added via ALTER TYPE in migration
+    # 0055_reservation_approval.
+    RESERVATION_NO_SHOW_FEE = "reservation_no_show_fee"
 
 # --- SQLAlchemy Model Classes ---
 
@@ -252,6 +262,16 @@ class User(Base):
     # no quiet hours). Gates Web Push only, never the in-app feed row.
     # Alembic revision 0048_notification_prefs.
     notification_prefs: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    # [F8V] The driver's own insights assumptions (km per kWh, petrol price and
+    # petrol km per litre), the JSON dump of services/insights.VehicleProfile.
+    # NULL = every default. The monthly insights email is opt-in (default off);
+    # insights_email_month is the last "YYYY-MM" decided (claimed, sent or
+    # skipped as empty) and insights_email_failures counts send failures for the
+    # pending month. Alembic revision 0053_vehicle_profile.
+    vehicle_profile: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    monthly_insights_email: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"), nullable=False)
+    insights_email_month: Mapped[Optional[str]] = mapped_column(String(7), nullable=True)
+    insights_email_failures: Mapped[int] = mapped_column(SmallInteger, default=0, server_default=text("0"), nullable=False)
 
     # Relationships
     tenant: Mapped[Optional[Tenant]] = relationship("Tenant", back_populates="users")
@@ -320,6 +340,14 @@ class Gateway(Base):
     # make a dead gateway look freshly seen.
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+    # [Operator alerts F3] Durable alert state (services/operator_alerts.py),
+    # written only on an alert decision under this row's lock, never per frame.
+    # offline_notified_at: a "Gateway offline" alert is outstanding (cleared by
+    # the "back online" follow-up). last_operator_alert_at: when the last
+    # offline alert went out (cooldown; a pending "still offline" re-check is
+    # re-armed from it at startup). Alembic revision 0051_durable_notice_state.
+    offline_notified_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_operator_alert_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # Relationships
     tenant: Mapped[Optional[Tenant]] = relationship("Tenant", back_populates="gateways")
@@ -415,6 +443,15 @@ class Plug(Base):
     max_session_minutes: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     amenities: Mapped[Optional[list]] = mapped_column(JSONB(none_as_null=True), nullable=True)
     access_note: Mapped[Optional[str]] = mapped_column(String(280), nullable=True)
+    # [C8 approval mode] "instant" (a booking is BOOKED at once) or "approval"
+    # (it starts PENDING until the tenant's CPO approves it). VARCHAR, not a
+    # native enum, like plug_model / connector_type; validated by the schema.
+    # Alembic revision 0055_reservation_approval.
+    reservation_mode: Mapped[str] = mapped_column(String(16), default="instant", server_default=text("'instant'"), nullable=False)
+    # [C8] Coins charged when a confirmed booking is a no-show. 0 = no fee.
+    # Capped server-side (RESERVATION_NO_SHOW_FEE_MAX_COINS) on write and again
+    # when charged; snapshotted onto each reservation at booking time.
+    no_show_fee_coins: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal("0"), server_default=text("0"), nullable=False)
 
     # Relationships
     gateway: Mapped[Gateway] = relationship("Gateway", back_populates="plugs")
@@ -593,6 +630,38 @@ class ChargingSession(Base):
     # 0044_session_auto_stop_full.
     auto_stop_when_full: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
 
+    # [Durable notice state] Once-per-session notices, claimed with
+    # UPDATE ... WHERE col IS NULL when the in-memory detector fires (a state
+    # transition, never per frame), so a backend restart neither repeats nor
+    # loses them. full_notified_at is also the durable "judged fully charged"
+    # marker (services/mqtt/charge_full.py). Alembic revision
+    # 0051_durable_notice_state.
+    full_notified_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    nearly_done_notified_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    power_dropped_notified_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # [Idle fee C1] Terms snapshotted from the plug's tariff at start (NULL =
+    # no fee, the default), so a tariff edit never changes a running session.
+    # Idle time is tracked as transitions only (services/idle_fee.py):
+    # idle_started_at opens a stretch of low draw after the car looked full,
+    # idle_seconds banks closed parts of it (-1 = voided: the car drew again
+    # after the signal, so no fee for this session). idle_fee_coins is what finalize
+    # collected (also included in coins_spent). Alembic revision 0052_idle_fee.
+    idle_grace_min: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    idle_fee_per_min: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
+    idle_fee_cap: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
+    idle_started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    idle_seconds: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    idle_fee_coins: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
+
+    # [C9 member price] True when rate_coins_per_kwh is the member's own flat
+    # GroupMembership.price_per_kwh_override, frozen at start. Such a session
+    # never reprices: mark_tenant_sessions_for_reprice skips it and
+    # reprice_session_if_due returns early, so a tariff edit or a later change
+    # or removal of the override never moves it. NULL = an ordinary tariff
+    # session. Alembic revision 0054_member_price_invites.
+    member_price_override: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+
     # Hot-path composite indexes (Alembic revision 0024_session_ledger_indexes):
     # plug_id/status backs "is this plug's session still active", user_id/status
     # backs a driver's active/past sessions, tenant_id/started_at backs CPO
@@ -637,6 +706,10 @@ class LedgerTransaction(Base):
     razorpay_payment_id: Mapped[Optional[str]] = mapped_column(String(64), unique=True, nullable=True)
     balance_after: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)  # money
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+    # [C8] The reservation a RESERVATION_NO_SHOW_FEE row charged for. UNIQUE
+    # is the fee's idempotency key (the razorpay_payment_id pattern above):
+    # a second charge for the same booking fails the INSERT. NULL elsewhere.
+    reservation_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("reservations.id", ondelete="SET NULL"), unique=True, nullable=True)
 
     # Relationships
     user: Mapped[User] = relationship("User", back_populates="transactions")
@@ -702,6 +775,12 @@ class GroupMembership(Base):
     user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     group_id: Mapped[int] = mapped_column(Integer, ForeignKey("charger_groups.id", ondelete="CASCADE"), nullable=False)
     joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+    # [C9 member price] The member's own flat coins-per-kWh price on this
+    # group's plugs, set by the CPO in the members list. Beats the plug, group
+    # and tenant tariffs (and their time-of-day slots) for this member only;
+    # frozen onto the session at start (services/pricing.py
+    # member_price_override). NULL = the normal tariff chain.
+    price_per_kwh_override: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
 
     # Relationships
     user: Mapped[User] = relationship("User", back_populates="group_memberships")
@@ -1232,6 +1311,13 @@ class Tariff(Base):
     price_per_kwh: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), onupdate=text("CURRENT_TIMESTAMP"), nullable=False)
+    # [Idle fee C1] Opt-in, 0 = off: once the car looks full and idle_grace_min
+    # more minutes pass, idle_fee_per_min coins per whole idle minute, at most
+    # idle_fee_cap per session. Snapshotted onto the session at start.
+    # Alembic revision 0052_idle_fee.
+    idle_grace_min: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    idle_fee_per_min: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal("0.00"), server_default="0", nullable=False)
+    idle_fee_cap: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal("0.00"), server_default="0", nullable=False)
 
 
 class TariffSlot(Base):
@@ -1595,6 +1681,14 @@ class ReservationStatus(str, enum.Enum):
     CANCELLED = "cancelled"    # withdrawn by the owner or the tenant's cpo/admin
     FULFILLED = "fulfilled"    # the holder started a session inside the window
     EXPIRED = "expired"        # no-show: grace after start_at lapsed unfulfilled
+    # [C8 approval mode] A request on a plug whose reservation_mode is
+    # "approval": blocks overlapping bookings (and counts toward the per-user
+    # cap) but never authorizes or blocks a session start. The tenant's CPO
+    # approves (-> BOOKED) or declines (-> DECLINED); one still PENDING at
+    # start_at lazily flips to EXPIRED. Added via ALTER TYPE in migration
+    # 0055_reservation_approval (the 0026/0038 pattern).
+    PENDING = "pending"
+    DECLINED = "declined"
 
 
 class Reservation(Base):
@@ -1605,8 +1699,9 @@ class Reservation(Base):
     session, enforced under the plug row lock in
     routers/sessions.py start_charging_session).
 
-    FREE in v1: no coin hold, no money movement anywhere in the lifecycle —
-    the hold is purely on the plug's time.
+    No coin hold: the hold is purely on the plug's time. [C8] The only money
+    movement is the optional, capped no-show fee (no_show_fee_coins below),
+    charged solely by the reaper sweep, never by the lazy expiry.
 
     Lifecycle: BOOKED -> CANCELLED | FULFILLED (session_id set, linking the
     session that consumed the window) | EXPIRED. Expiry is LAZY — there is no
@@ -1615,6 +1710,11 @@ class Reservation(Base):
     or past end_at) wherever reservations are read (the session-start gate,
     the booking overlap check, every list endpoint), so a stale hold never
     blocks anyone.
+
+    [C8] On a plug in "approval" mode a booking starts PENDING ->
+    BOOKED (CPO approves) | DECLINED (CPO declines) | CANCELLED (driver
+    withdraws) | EXPIRED (still pending at start_at). PENDING blocks
+    overlapping bookings but never authorizes or blocks a session start.
 
     Design notes:
     - tenant_id is denormalized from plug -> gateway -> tenant (mirrors
@@ -1651,12 +1751,24 @@ class Reservation(Base):
     # its 60 s ticks and across a restart (services/session_reaper.py
     # reap_reservation_starts_once — the follow-up the module header foretold).
     started_notified_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    # [C8] The plug's no-show fee when this booking was made (what the driver
+    # was shown), and when the no-show sweep settled it (charged or skipped).
+    # A request that lapses while still PENDING is stamped at expiry, so it
+    # is never a fee candidate.
+    no_show_fee_coins: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal("0"), server_default=text("0"), nullable=False)
+    no_show_checked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (
         # The hot shape: "reservations on this plug around time T" — the
         # session-start gate, the overlap check, and the per-plug schedule
         # all filter on plug_id + a start_at range.
         Index("idx_reservations_plug_start", "plug_id", "start_at"),
+        # [C8] The no-show sweep's candidates: unsettled rows with a fee.
+        Index(
+            "idx_reservations_no_show_due",
+            "start_at",
+            postgresql_where=text("no_show_checked_at IS NULL AND no_show_fee_coins > 0"),
+        ),
     )
 
 
@@ -2013,3 +2125,116 @@ class ApiToken(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
     last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class GroupInvite(Base):
+    """[C9] A CPO's email invite to one of its private charger groups.
+
+    The raw token (secrets.token_urlsafe(32)) is mailed to the invitee and
+    NEVER stored: only its SHA-256 hex digest lives here (same scheme as
+    EmailVerificationToken). Single-use (accepted_at, consumed by a
+    conditional UPDATE), expiring (expires_at, 7 days) and bound to `email`
+    (stored lowercased): accepting needs a signed-in account whose VERIFIED
+    email equals it, and creates the GroupMembership. A newer invite for the
+    same group and email supersedes the older one (revoked_at). invited_by +
+    created_at back the per-CPO daily send cap, created_at alone the
+    platform-wide one. Alembic revision
+    0054_member_price_invites.
+    """
+    __tablename__ = "group_invites"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    group_id: Mapped[int] = mapped_column(Integer, ForeignKey("charger_groups.id", ondelete="CASCADE"), nullable=False, index=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    email: Mapped[str] = mapped_column(String(255), nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    invited_by_user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    accepted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    accepted_by_user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        Index("ix_group_invites_inviter_created", "invited_by_user_id", "created_at"),
+        Index("ix_group_invites_created_at", "created_at"),
+    )
+
+
+class OcppChargePoint(Base):
+    """[C2] An OCPP 1.6J charge point registered with the flag-gated central
+    system (services/ocpp_adapter.py, OCPP_CSMS_ENABLED, off by default).
+
+    A charge point is backed by an ordinary Gateway row (gateway_id,
+    "ocpp-<charge_point_id>") and each of its connectors by an ordinary Plug
+    on that gateway (Plug.unique_id "ocpp:<charge_point_id>:<connector>"), so
+    pricing, caps, groups, opening hours, reservations, holds, the ledger and
+    the CPO views all apply unchanged. The backing gateway is never marked
+    ONLINE: gateway_is_live() stays false for it, so the app's own start
+    paths (walk-up, queued, routine) refuse its connectors and only the
+    charger's own StartTransaction can begin a session there.
+
+    password_hash is a bcrypt hash (services/auth.hash_password) of the
+    per-charge-point HTTP Basic password; the clear password is shown once at
+    creation and never stored or logged. vendor/model/firmware_version come
+    from BootNotification. Alembic revision 0056_ocpp_charge_points.
+    """
+    __tablename__ = "ocpp_charge_points"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    charge_point_id: Mapped[str] = mapped_column(String(40), unique=True, nullable=False)
+    tenant_id: Mapped[int] = mapped_column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    gateway_id: Mapped[str] = mapped_column(String(50), ForeignKey("gateways.id", ondelete="CASCADE"), unique=True, nullable=False)
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    vendor: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    model: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    firmware_version: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    last_boot_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+
+
+class OcppIdTag(Base):
+    """[C2] An OCPP idTag (an RFID card UID or similar) a driver bound to
+    their own account AND enabled for one operator (tenant_id). Only the
+    SHA-256 hex digest is stored (tag_hash), so Authorize and
+    StartTransaction resolve a tag with one indexed equality on
+    (tenant_id, tag_hash) and the clear tag is never stored or logged. A tag
+    is not a secret credential (the card broadcasts it), so the unsalted
+    digest is a lookup key, not a password hash.
+
+    tenant_id scopes every use: a charge point only ever resolves tags its
+    own tenant was enabled for, so another operator's charger that read the
+    card cannot open a billed session against it (it gets Invalid). One card
+    used at several operators is one row per operator. Alembic revision
+    0056_ocpp_charge_points.
+    """
+    __tablename__ = "ocpp_id_tags"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    tenant_id: Mapped[int] = mapped_column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    tag_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "tag_hash", name="uq_ocpp_id_tags_tenant_tag"),
+    )
+
+
+class OcppTransaction(Base):
+    """[C2] The OCPP side of one ChargingSession begun by StartTransaction.
+    The OCPP transactionId IS charging_sessions.id (session_id).
+    meter_start_wh is the charger's absolute energy register at start, so
+    MeterValues and StopTransaction feed session-relative energy into the
+    existing telemetry persist path. charge_point_id scopes every later
+    message: a charge point can only meter or stop its own transactions.
+    Alembic revision 0056_ocpp_charge_points.
+    """
+    __tablename__ = "ocpp_transactions"
+
+    session_id: Mapped[int] = mapped_column(Integer, ForeignKey("charging_sessions.id", ondelete="CASCADE"), primary_key=True)
+    charge_point_id: Mapped[int] = mapped_column(Integer, ForeignKey("ocpp_charge_points.id", ondelete="CASCADE"), nullable=False, index=True)
+    connector_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    id_tag_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    meter_start_wh: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)

@@ -181,6 +181,72 @@ def test_wave3_write_routes_are_in_the_viewer_walk():
     assert not expected & (PUBLIC_WRITES | VIEWER_EXEMPT)
 
 
+def test_wave4_write_routes_are_in_the_viewer_walk():
+    """Integration pin (release/2026-11-19-r2): the write routes added or
+    changed by F8V (vehicle profile), F6R (ready-by), C9 (member price and
+    invites), C8 (approve/decline) and C1 (idle terms on tariffs) are reached
+    by the route walk, so each answers 403 read_only_demo for a viewer. The
+    flag-gated OCPP routes are not mounted by default; see the test below."""
+    walked = {(m, p) for m, p, _ in _write_routes()}
+    expected = {
+        ("PUT", "/api/me/vehicle"),  # F8V
+        ("POST", "/api/sessions/queue/ready-by"),  # F6R
+        ("PUT", "/api/cpo/groups/{group_id}/members/{user_id}/price"),  # C9
+        ("POST", "/api/cpo/groups/{group_id}/invites"),  # C9
+        ("DELETE", "/api/cpo/groups/{group_id}/invites/{invite_id}"),  # C9
+        ("POST", "/api/groups/invites/accept"),  # C9
+        ("POST", "/api/cpo/reservations/{reservation_id}/approve"),  # C8
+        ("POST", "/api/cpo/reservations/{reservation_id}/decline"),  # C8
+        ("PUT", "/api/cpo/plugs/{plug_id}"),  # C8 reservation mode and fee
+        ("POST", "/api/cpo/tariffs"),  # C1 idle terms
+        ("PUT", "/api/cpo/tariffs/{tariff_id}"),  # C1 idle terms
+    }
+    assert expected <= walked, expected - walked
+    assert not expected & (PUBLIC_WRITES | VIEWER_EXEMPT)
+
+
+def test_viewer_gets_403_on_every_ocpp_write_route():
+    """[C2] The OCPP routes are mounted only with OCPP_CSMS_ENABLED, so the
+    default walk never sees them. Mount the router alone and walk its HTTP
+    write routes: each must answer 403 read_only_demo for a viewer (the
+    WebSocket ingress authenticates charge points, not users)."""
+    from fastapi import FastAPI
+
+    from backend.database.db import get_db
+    from backend.routers import ocpp
+    from backend.services.auth import create_access_token
+
+    app = FastAPI()
+    app.include_router(ocpp.router)
+    writes = {(m, r.path) for r in _walk(app.routes) for m in r.methods - SAFE}
+    assert writes == {
+        ("POST", "/api/cpo/ocpp/charge-points"),
+        ("POST", "/api/ocpp/id-tags"),
+        ("DELETE", "/api/ocpp/id-tags/{tag_id}"),
+    }
+
+    user = _viewer()
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = user
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=result)
+    db.commit = AsyncMock()
+
+    async def _db():
+        yield db
+
+    app.dependency_overrides[get_db] = _db
+    client = TestClient(app, raise_server_exceptions=False)
+    client.headers["Authorization"] = (
+        f"Bearer {create_access_token(user.id, user.role.value, user.email, 0)}"
+    )
+    for method, path in sorted(writes):
+        resp = client.request(method, _concrete(path), json={})
+        assert resp.status_code == 403, (method, path, resp.status_code, resp.text)
+        assert resp.json()["detail"] == "read_only_demo"
+    db.commit.assert_not_awaited()
+
+
 def test_viewer_may_sign_out(viewer_client):
     client, _ = viewer_client(_viewer())
     resp = client.post("/api/auth/logout")
@@ -586,7 +652,9 @@ def test_group_members_mask_driver_name_for_viewer(as_user, role, name, email):
     group = MagicMock()
     group.scalar_one_or_none.return_value = object()
     members = MagicMock()
-    member = SimpleNamespace(user_id=100, joined_at=datetime.now(timezone.utc))
+    member = SimpleNamespace(
+        user_id=100, joined_at=datetime.now(timezone.utc), price_per_kwh_override=None
+    )
     members.all.return_value = [(member, "driver1@example.com", "Driver One")]
     db.execute = AsyncMock(side_effect=[group, members])
 

@@ -5,6 +5,13 @@ the driver side (routers/reservations.py) — this is the CPO's tenant-scoped
 view of the schedule (plus cancel via the shared
 POST /api/reservations/{id}/cancel, which admits the owning tenant's
 cpo/admin).
+
+[C8] On a plug in approval mode a booking arrives PENDING; the tenant's
+cpo/admin answers it here with approve (-> BOOKED) or decline (-> DECLINED),
+and the driver is notified either way. Both lock the plug row and then the
+reservation row (the cancel path's order), so an approve racing the driver's
+own cancel settles exactly once. A cpo_viewer never reaches them: the global
+read-only guard answers 403 to every non-GET.
 """
 from datetime import datetime, timezone
 from typing import Optional
@@ -14,8 +21,15 @@ from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database.db import get_db
-from backend.database.models import Plug, Reservation, ReservationStatus, User
-from backend.services.reservations import expire_lapsed_reservations
+from backend.database.models import Plug, PlugStatus, Reservation, ReservationStatus, Tenant, User
+from backend.services.notifications import notify
+from backend.services.plug_hours import hours_of, window_is_open
+from backend.services.reservations import (
+    HOLD_STATUSES,
+    expire_lapsed_reservations,
+    format_window,
+    user_can_access_plug,
+)
 
 from ._common import (
     _require_tenant_id,
@@ -69,7 +83,7 @@ async def cpo_list_reservations(
                 detail=f"Invalid status '{status}'. Must be one of: {valid}.",
             )
     if upcoming_only:
-        conditions.append(Reservation.status == ReservationStatus.BOOKED)
+        conditions.append(Reservation.status.in_(HOLD_STATUSES))
         conditions.append(Reservation.end_at > now)
 
     total = (
@@ -106,3 +120,114 @@ async def cpo_list_reservations(
             for r, plug_name, user_email, user_name in rows.all()
         ],
     }
+
+
+async def _answer_request(
+    db: AsyncSession, user: User, reservation_id: int, approve: bool
+) -> dict:
+    """Approve or decline one of the tenant's PENDING requests. 404 for a
+    missing or other-tenant reservation (existence not leaked); 409 once it is
+    no longer PENDING (already answered, withdrawn, or expired at start_at)."""
+    tenant_id = _require_tenant_id(user)
+    plug_id = (await db.execute(
+        select(Reservation.plug_id).where(
+            and_(Reservation.id == reservation_id, Reservation.tenant_id == tenant_id)
+        )
+    )).scalar_one_or_none()
+    if plug_id is None:
+        raise HTTPException(status_code=404, detail="Reservation not found.")
+
+    # Plug row lock first, then the reservation row: the same order as the
+    # driver cancel, booking and session-start paths. The entity is loaded for
+    # the first time under its own lock, so its status is never stale.
+    plug = (await db.execute(
+        select(Plug).where(Plug.id == plug_id).with_for_update()
+    )).scalar_one()
+    plug_name = plug.name
+    await expire_lapsed_reservations(db, plug_id=plug_id)
+    reservation = (await db.execute(
+        select(Reservation).where(Reservation.id == reservation_id).with_for_update()
+    )).scalar_one()
+    if reservation.status != ReservationStatus.PENDING:
+        raise HTTPException(
+            status_code=409,
+            detail=f"This request is already {reservation.status.value}.",
+        )
+
+    # [C8] Approval books the slot, so it applies the same plug checks as a
+    # direct booking (routers/reservations.py): no booking on a plug under
+    # maintenance, and none for a requester who has since lost access to a
+    # private-group plug (removed or left after asking). The request stays
+    # PENDING; decline it instead.
+    if approve and plug.status == PlugStatus.MAINTENANCE:
+        raise HTTPException(
+            status_code=409,
+            detail="This plug is under maintenance and cannot be reserved. Decline the request instead.",
+        )
+    if approve and not await user_can_access_plug(db, reservation.user_id, plug):
+        raise HTTPException(
+            status_code=409,
+            detail="The driver no longer has access to this plug's group. Decline the request instead.",
+        )
+
+    # [C8 + C4] Approval books the slot, so it obeys the plug's opening hours
+    # as a direct booking does: hours narrowed after the request was made
+    # refuse the approval (the request stays PENDING; decline it instead).
+    if approve and hours_of(plug) is not None:
+        tz_name = (await db.execute(
+            select(Tenant.timezone).where(Tenant.id == tenant_id)
+        )).scalar_one_or_none()
+        if not window_is_open(plug, tz_name, reservation.start_at, reservation.end_at):
+            raise HTTPException(
+                status_code=409,
+                detail="The charger is closed during part of this slot under its current opening hours. Decline the request instead.",
+            )
+
+    reservation.status = ReservationStatus.BOOKED if approve else ReservationStatus.DECLINED
+    await db.commit()
+
+    window = format_window(reservation.start_at, reservation.end_at)
+    if approve:
+        await notify(
+            reservation.user_id,
+            "reservation_approved",
+            "Reservation approved",
+            f"{plug_name} is booked for you: {window}.",
+            plug_id=plug_id,
+        )
+    else:
+        await notify(
+            reservation.user_id,
+            "reservation_declined",
+            "Reservation declined",
+            f"The host declined your request for {plug_name} ({window}).",
+            severity="warning",
+            plug_id=plug_id,
+        )
+    return {
+        "id": reservation.id,
+        "plug_id": plug_id,
+        "status": reservation.status.value,
+        "start_at": reservation.start_at.isoformat(),
+        "end_at": reservation.end_at.isoformat(),
+    }
+
+
+@router.post("/api/cpo/reservations/{reservation_id}/approve")
+async def cpo_approve_reservation(
+    reservation_id: int,
+    user: User = Depends(require_cpo_tenant),
+    db: AsyncSession = Depends(get_db),
+):
+    """[C8] Approve a PENDING request: it becomes an ordinary BOOKED hold."""
+    return await _answer_request(db, user, reservation_id, approve=True)
+
+
+@router.post("/api/cpo/reservations/{reservation_id}/decline")
+async def cpo_decline_reservation(
+    reservation_id: int,
+    user: User = Depends(require_cpo_tenant),
+    db: AsyncSession = Depends(get_db),
+):
+    """[C8] Decline a PENDING request: the slot is released at once."""
+    return await _answer_request(db, user, reservation_id, approve=False)

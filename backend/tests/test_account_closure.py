@@ -418,6 +418,11 @@ _USER_TABLES = {
     "reservations": ("exported", "retained"),
     "session_disputes": ("exported", "retained"),
     "charge_routines": ("exported", "purged"),
+    # [C9] The inviting operator's record: kept for the send caps, but the
+    # address is rewritten to the tombstone and a pending invite is revoked.
+    "group_invites": ("operator-side", "retained"),
+    # [C2] Bound OCPP idTags (digest only), exported and hard-deleted.
+    "ocpp_id_tags": ("exported", "purged"),
 }
 
 
@@ -456,6 +461,54 @@ def test_every_user_keyed_table_is_classified_for_export_and_closure():
             assert name in closure_src, f"{table} missing from account closure"
 
 
+# Every users column: (export, closure). Export: "exported" = the account block
+# of services/data_export.py reads it, "internal" = bookkeeping, not personal
+# data. Closure: "scrubbed" = close_account's tombstone UPDATE resets it, "kept"
+# = needed on the tombstone (role, balance, ledger links). The per-table guard
+# above cannot see a new column on users itself.
+_USER_COLUMNS = {
+    "id": ("exported", "kept"),
+    "tenant_id": ("exported", "kept"),
+    "email": ("exported", "scrubbed"),
+    "hashed_password": ("internal", "scrubbed"),
+    "full_name": ("exported", "scrubbed"),
+    "role": ("exported", "kept"),
+    "coin_balance": ("exported", "kept"),
+    "token_version": ("internal", "scrubbed"),
+    "is_disabled": ("internal", "scrubbed"),
+    "email_verified": ("exported", "scrubbed"),
+    "auth_provider": ("exported", "scrubbed"),
+    "google_sub": ("exported", "scrubbed"),
+    "deleted_at": ("internal", "scrubbed"),
+    "created_at": ("exported", "kept"),
+    "notification_prefs": ("exported", "scrubbed"),
+    # [F8V] 0053_vehicle_profile.
+    "vehicle_profile": ("exported", "scrubbed"),
+    "monthly_insights_email": ("exported", "scrubbed"),
+    "insights_email_month": ("exported", "scrubbed"),
+    "insights_email_failures": ("internal", "scrubbed"),
+}
+
+
+def test_every_users_column_is_classified_for_export_and_closure():
+    import inspect
+
+    from backend.database.models import User
+    from backend.services import account_closure, data_export
+
+    assert {c.name for c in User.__table__.columns} == set(_USER_COLUMNS), (
+        "classify the new users column in _USER_COLUMNS and handle it in "
+        "services/data_export.py and services/account_closure.py"
+    )
+    export_src = inspect.getsource(data_export.build_export)
+    closure_src = inspect.getsource(account_closure.close_account)
+    for column, (export, closure) in _USER_COLUMNS.items():
+        if export == "exported":
+            assert f"user.{column}" in export_src, f"users.{column} missing from the data export"
+        if closure == "scrubbed":
+            assert f"{column}=" in closure_src, f"users.{column} not reset on account closure"
+
+
 async def _seed_wave_rows(factory, seeded):
     from datetime import time
 
@@ -483,7 +536,10 @@ async def _seed_wave_rows(factory, seeded):
         ).scalar_one()
         await db.execute(
             update(User).where(User.id == uid).values(
-                notification_prefs={"quiet_hours": {"start": "22:00", "end": "07:00"}}
+                notification_prefs={"quiet_hours": {"start": "22:00", "end": "07:00"}},
+                vehicle_profile={"km_per_kwh": 7.5, "petrol_price_per_l": 110.0},
+                monthly_insights_email=True,
+                insights_email_month="2026-10",
             )
         )
         db.add(ChargeRoutine(
@@ -543,6 +599,9 @@ async def test_export_lists_routines_reviews_photos_promos_and_tokens_without_se
     assert doc["promo_redemptions"][0]["operator"] == "Volt Co"
     assert doc["api_tokens"][0]["name"] == "Home Assistant"
     assert doc["account"]["notification_prefs"]["quiet_hours"]["start"] == "22:00"
+    assert doc["account"]["vehicle_profile"]["km_per_kwh"] == 7.5
+    assert doc["account"]["monthly_insights_email"] is True
+    assert doc["account"]["insights_email_month"] == "2026-10"
 
     blob = json.dumps(doc)
     for forbidden in ("f" * 64, "e" * 64, "WXYZ", "secret-bucket", "plug-1/p1.jpg"):
@@ -596,6 +655,9 @@ async def test_closure_purges_routines_reviews_photos_and_keeps_promo_redemption
         )).scalar_one() == 1
         closed = (await db.execute(select(User).where(User.id == uid))).scalar_one()
         assert closed.notification_prefs is None
+        assert closed.vehicle_profile is None
+        assert closed.monthly_insights_email is False
+        assert closed.insights_email_month is None
 
 
 @requires_db

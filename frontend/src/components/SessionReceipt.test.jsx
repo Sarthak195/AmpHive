@@ -90,6 +90,14 @@ describe('SessionReceipt — summary', () => {
     expect(screen.getByText('≈ 0.25 kg')).toBeInTheDocument(); // 1.234 kWh x 0.2
   });
 
+  it("uses the driver's own CO2 factor from their vehicle profile when saved", async () => {
+    api.get.mockImplementation(async (url) =>
+      url === '/api/me/vehicle' ? { co2_avoided_kg_per_kwh: 0.5 } : { points: [] });
+    renderReceipt();
+    expect(api.get).toHaveBeenCalledWith('/api/me/vehicle');
+    expect(await screen.findByText('≈ 0.62 kg')).toBeInTheDocument(); // 1.234 kWh x 0.5
+  });
+
   it('renders nothing when there is no receipt', () => {
     useSession.mockReturnValue({ receipt: null, dismissReceipt: dismissSpy });
     renderReceipt();
@@ -106,6 +114,26 @@ describe('SessionReceipt — summary', () => {
     expect(screen.getByText('−₹6.17')).toBeInTheDocument();
     expect(screen.getByText('₹93.83')).toBeInTheDocument(); // balance after
     expect(screen.queryByText(/couldn't be collected/i)).not.toBeInTheDocument();
+  });
+
+  it('[C1] shows the idle fee as its own line only when one was charged', () => {
+    useSession.mockReturnValue({
+      receipt: { ...RECEIPT, coins_spent: 16.17, idle_fee_coins: 10 },
+      dismissReceipt: dismissSpy,
+    });
+    renderReceipt();
+    expect(screen.getByText('Idle fee (included)')).toBeInTheDocument();
+    expect(screen.getByText('₹10.00')).toBeInTheDocument();
+    expect(screen.getByText('−₹16.17')).toBeInTheDocument();
+  });
+
+  it('[C1] has no idle fee line without an idle fee', () => {
+    useSession.mockReturnValue({
+      receipt: { ...RECEIPT, idle_fee_coins: 0 },
+      dismissReceipt: dismissSpy,
+    });
+    renderReceipt();
+    expect(screen.queryByText('Idle fee (included)')).not.toBeInTheDocument();
   });
 
   it('explains an uncollected shortfall in plain language', () => {

@@ -163,6 +163,12 @@ export const api = {
   // start on a POWERED plug instead, and then needs a time or energy limit.
   queueCharge: (body) =>
     apiRequest('/api/sessions/queue', { method: 'POST', body: JSON.stringify(body) }),
+  // [Ready by] Plan the cheapest single window ending by ready_by (ISO with an
+  // offset) and schedule it. Body: { plug_id, ready_by, max_kwh?,
+  // max_duration_seconds?, auto_stop_when_full? }; 409 ready_by_unreachable
+  // carries earliest_finish_at.
+  queueReadyBy: (body) =>
+    apiRequest('/api/sessions/queue/ready-by', { method: 'POST', body: JSON.stringify(body) }),
   // The signed-in driver's WAITING queued charges (with expiry).
   listQueuedCharges: () => apiRequest('/api/sessions/queued', { method: 'GET' }),
   // Cancel a WAITING queued charge (owner-only).

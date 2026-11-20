@@ -278,11 +278,18 @@ const CpoPricing = () => {
   const [formPrice, setFormPrice] = useState('');
   const [formBusy, setFormBusy] = useState(false);
   const [formError, setFormError] = useState('');
+  // [Idle fee C1] Opt-in idle fee terms; 0 / empty = off.
+  const [formIdlePerMin, setFormIdlePerMin] = useState('');
+  const [formIdleGrace, setFormIdleGrace] = useState('');
+  const [formIdleCap, setFormIdleCap] = useState('');
 
   const openCreate = () => {
     setEditingTariff(null);
     setFormName('');
     setFormPrice('');
+    setFormIdlePerMin('');
+    setFormIdleGrace('');
+    setFormIdleCap('');
     setFormError('');
     setFormOpen(true);
   };
@@ -291,8 +298,29 @@ const CpoPricing = () => {
     setEditingTariff(t);
     setFormName(t.name);
     setFormPrice(String(t.price_per_kwh));
+    setFormIdlePerMin(Number(t.idle_fee_per_min) > 0 ? String(t.idle_fee_per_min) : '');
+    setFormIdleGrace(Number(t.idle_fee_per_min) > 0 ? String(t.idle_grace_min) : '');
+    setFormIdleCap(Number(t.idle_fee_per_min) > 0 ? String(t.idle_fee_cap) : '');
     setFormError('');
     setFormOpen(true);
+  };
+
+  // The idle fields to send: only when the fee is being set or changed, so a
+  // plain rename or rate edit sends exactly what it always did.
+  const idleFields = () => {
+    const perMin = Number(formIdlePerMin) || 0;
+    const cap = Number(formIdleCap) || 0;
+    const grace = formIdleGrace === '' ? null : parseInt(formIdleGrace, 10);
+    const was = editingTariff
+      ? [Number(editingTariff.idle_fee_per_min) || 0, Number(editingTariff.idle_fee_cap) || 0,
+        Number(editingTariff.idle_grace_min) || 0]
+      : [0, 0, 0];
+    const changed = perMin !== was[0] || (perMin > 0 && (cap !== was[1] || (grace ?? was[2]) !== was[2]));
+    if (!changed) return {};
+    if (perMin === 0) return { idle_fee_per_min: 0 };
+    const out = { idle_fee_per_min: perMin, idle_fee_cap: cap };
+    if (grace != null) out.idle_grace_min = grace;
+    return out;
   };
 
   const submitTariffForm = async (e) => {
@@ -308,13 +336,22 @@ const CpoPricing = () => {
       setFormError('Enter a rate greater than 0.');
       return;
     }
+    const idle = idleFields();
+    if (idle.idle_fee_per_min > 0 && !(idle.idle_fee_cap > 0)) {
+      setFormError('Set a maximum idle fee above 0, or clear the idle fee.');
+      return;
+    }
+    if (idle.idle_grace_min != null && idle.idle_fee_per_min > 0 && !(idle.idle_grace_min >= 15)) {
+      setFormError('The idle fee grace must be at least 15 minutes.');
+      return;
+    }
     setFormBusy(true);
     try {
       if (editingTariff) {
-        await api.put(`/api/cpo/tariffs/${editingTariff.id}`, { name, price_per_kwh: price });
+        await api.put(`/api/cpo/tariffs/${editingTariff.id}`, { name, price_per_kwh: price, ...idle });
         toast.ok(`Saved "${name}".`);
       } else {
-        await api.post('/api/cpo/tariffs', { name, price_per_kwh: price });
+        await api.post('/api/cpo/tariffs', { name, price_per_kwh: price, ...idle });
         toast.ok(`Created "${name}".`);
       }
       setFormOpen(false);
@@ -944,6 +981,55 @@ const CpoPricing = () => {
             />
             <p className="field-help">Applies whenever no time-of-day slot below covers the hour.</p>
           </div>
+          <fieldset className="field">
+            <legend className="field-label">Idle fee (optional)</legend>
+            <label className="field-label" htmlFor="tariff-idle-per-min">
+              Idle fee (coins/min)
+            </label>
+            <input
+              id="tariff-idle-per-min"
+              className="input"
+              type="number"
+              step="0.01"
+              min="0"
+              max="100"
+              value={formIdlePerMin}
+              onChange={(e) => setFormIdlePerMin(e.target.value)}
+            />
+            <label className="field-label" htmlFor="tariff-idle-grace">
+              Free minutes after the car looks full
+            </label>
+            <input
+              id="tariff-idle-grace"
+              className="input"
+              type="number"
+              step="1"
+              min="15"
+              max="240"
+              placeholder="15"
+              value={formIdleGrace}
+              onChange={(e) => setFormIdleGrace(e.target.value)}
+            />
+            <label className="field-label" htmlFor="tariff-idle-cap">
+              Most idle fee per session (coins)
+            </label>
+            <input
+              id="tariff-idle-cap"
+              className="input"
+              type="number"
+              step="0.01"
+              min="0"
+              max="10000"
+              value={formIdleCap}
+              onChange={(e) => setFormIdleCap(e.target.value)}
+            />
+            <p className="field-help">
+              Charged per whole minute a car stays plugged in, still drawing near zero, after it
+              looks fully charged and the free minutes pass. Empty or 0 turns it off. At least 15
+              free minutes: a car pausing its own charge can look full. Running sessions keep the
+              terms they started with; drivers who pick auto-stop never pay it.
+            </p>
+          </fieldset>
           {formError && (
             <p className="field-error" role="alert">
               {formError}

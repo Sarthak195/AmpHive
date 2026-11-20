@@ -37,6 +37,7 @@ from backend.database.models import (
     User,
 )
 from backend.services.caps import check_circuit_admission
+from backend.services.idle_fee import resolve_idle_terms
 from backend.services.money import ZERO_MONEY, energy_cost, to_money
 from backend.services.plug_hours import (
     clamp_start_duration,
@@ -44,7 +45,11 @@ from backend.services.plug_hours import (
     hours_of,
     max_minutes_of,
 )
-from backend.services.pricing import max_rate_over_window, resolve_rate_window
+from backend.services.pricing import (
+    max_rate_over_window,
+    member_price_override,
+    resolve_rate_window,
+)
 from backend.services.session_lifecycle import set_plug_telemetry_interval
 from backend.services.wallet import available_balance
 
@@ -127,6 +132,7 @@ async def begin_active_session(
     covering_reservation=None,
     auto_stop_when_full: bool = False,
     announce_start: bool = True,
+    actuate: bool = True,
 ) -> ChargingSession:
     """
     Admit and start an ACTIVE charging session on an already-locked, already-
@@ -153,6 +159,12 @@ async def begin_active_session(
         opening hours.
       - HTTPException(402) — available balance below the start floor.
       - HTTPException(500) — the gateway ON publish failed (claim rolled back).
+
+    [C2 OCPP] actuate=False is for the flag-gated OCPP adapter only
+    (services/ocpp_adapter.py): an OCPP charger energizes itself and reports
+    StartTransaction, so the same admission, hold and claim run but no MQTT
+    command (ON or SET_INTERVAL) is published. Every other caller keeps the
+    default.
     """
     # [Plug hours] Under the caller's plug row lock: refuse a start while the
     # plug is closed, and shorten the session's own duration limit so it ends
@@ -193,7 +205,13 @@ async def begin_active_session(
     # (None for a flat tariff → the session stays one segment and bills exactly
     # as before). Snapshotted below so MQTTManager._persist_telemetry can close
     # out the segment forward-only when the boundary passes.
-    rate_coins_per_kwh, rate_valid_until = await resolve_rate_window(db, plug, at=now)
+    # [C9 member price] A member's own GroupMembership override wins: a flat
+    # rate frozen for the whole session (rate_valid_until None, never repriced).
+    member_override = await member_price_override(db, user.id, plug)
+    if member_override is not None:
+        rate_coins_per_kwh, rate_valid_until = member_override, None
+    else:
+        rate_coins_per_kwh, rate_valid_until = await resolve_rate_window(db, plug, at=now)
 
     # Size the session's authorization hold (MARKET_GAP_ANALYSIS.md §3): reserve
     # this session's worst-case cost up front — the smaller of (a) what's
@@ -224,7 +242,7 @@ async def begin_active_session(
     # boundary raises the rate mid-charge, finalize's min(final_cost, hold) must
     # not forgive the overage. With no slots configured max_rate_over_window
     # returns the flat rate, so this is identical to the old sizing.
-    max_rate = await max_rate_over_window(
+    max_rate = member_override if member_override is not None else await max_rate_over_window(
         db, plug, now, max_duration_seconds or 24 * 3600
     )
     # [Opt-in charging limits] No energy cap (max_kwh is None, the new default)
@@ -235,10 +253,14 @@ async def begin_active_session(
     # "unlimited" session needs balance-exhaustion auto-stop to still work off
     # of (services/mqtt/telemetry.py _maybe_auto_stop_on_exhaustion treats
     # hold_coins as an opaque threshold either way).
+    # [Idle fee C1] The tariff's idle terms (None = no fee). A driver who opted
+    # into auto-stop when full never accrues one, so nothing is reserved for it.
+    idle_terms = None if auto_stop_when_full else await resolve_idle_terms(db, plug)
+    idle_fee_cap = idle_terms[2] if idle_terms is not None else ZERO_MONEY
     hold = (
         to_money(available)
         if max_kwh is None
-        else to_money(min(available, energy_cost(max_kwh, max_rate)))
+        else to_money(min(available, energy_cost(max_kwh, max_rate) + idle_fee_cap))
     )
 
     session = ChargingSession(
@@ -254,6 +276,7 @@ async def begin_active_session(
         settled_cost_coins=ZERO_MONEY,
         rate_segment_start_kwh=0.0,
         rate_valid_until=rate_valid_until,
+        member_price_override=True if member_override is not None else None,
         # [Session limits] Snapshot the request's stop conditions; the hold
         # sizing above already uses max_kwh, so a smaller user limit shrinks the
         # auth hold too.
@@ -263,6 +286,10 @@ async def begin_active_session(
         # pre-0044 row and an opted-out row read the same.
         auto_stop_when_full=True if auto_stop_when_full else None,
     )
+    if idle_terms is not None:
+        # [Idle fee C1] Snapshot the terms, like the rate: a tariff edit never
+        # changes what this session can be charged for idling.
+        session.idle_grace_min, session.idle_fee_per_min, session.idle_fee_cap = idle_terms
     db.add(session)
     if covering_reservation is not None:
         # [Reservations] The holder is starting inside their own window:
@@ -291,8 +318,8 @@ async def begin_active_session(
     # services/mqtt_manager.py firmware_duration/firmware_max_kwh for why
     # neither omitting these fields nor sending 0 is safe to encode "no
     # limit" on the gateway's local relay watchdog. An explicit limit passes
-    # through unchanged.
-    success = await asyncio.to_thread(lambda: state.mqtt_manager.send_plug_command(
+    # through unchanged. [C2 OCPP] actuate=False publishes nothing.
+    success = not actuate or await asyncio.to_thread(lambda: state.mqtt_manager.send_plug_command(
         gateway_id=plug.gateway_id,
         plug_id=plug.id,
         action="ON",
@@ -324,7 +351,8 @@ async def begin_active_session(
     # snapshotted rate so the live cost_coins preview matches what
     # finalize_charging_session will actually bill.
     state.telemetry_store.start_session(plug.id, rate_coins_per_kwh=rate_coins_per_kwh)
-    await set_plug_telemetry_interval(db, plug.id, 1000)
+    if actuate:
+        await set_plug_telemetry_interval(db, plug.id, 1000)
 
     # [Notification prefs C7] Once per session, only after the ON publish
     # succeeded (never on the CANCELLED rollback above). notify() never raises.

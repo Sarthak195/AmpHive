@@ -9,7 +9,7 @@
  * half). Register mode has moved to Signup — this page is sign-in only.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Routes, Route, useLocation } from 'react-router-dom';
 
@@ -217,6 +217,20 @@ describe('Google sign-in button (config-gated)', () => {
     useConfig.mockReturnValue({ google_login_enabled: false });
     renderLogin('/login');
     expect(screen.queryByRole('link', { name: /Continue with Google/i })).not.toBeInTheDocument();
+  });
+
+  it('stashes the return target (an invite link) for the Google callback on click', () => {
+    useConfig.mockReturnValue({ google_login_enabled: true });
+    sessionStorage.clear();
+    renderLogin({
+      pathname: '/login',
+      state: { from: { pathname: '/groups', search: '?invite=tok123' } },
+    });
+    const link = screen.getByRole('link', { name: /Continue with Google/i });
+    // jsdom cannot follow a real navigation; the React click handler still runs.
+    link.addEventListener('click', (e) => e.preventDefault());
+    fireEvent.click(link);
+    expect(sessionStorage.getItem('amphive.postLoginPath')).toBe('/groups?invite=tok123');
   });
 
   it('renders a top-level link to the backend redirect when enabled', () => {
