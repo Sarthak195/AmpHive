@@ -424,14 +424,15 @@ A member override prices the plan as one flat rate. The plan assumes constant po
 
 | Method | Path | Auth | Body/Params | Behaviour |
 |--------|------|------|-------------|-----------|
-| POST | `/api/cpo/reservations/{reservation_id}/approve` | cpo/admin of the owning tenant | - | `pending` to `booked`. 404 for a missing or other-tenant reservation; 409 when it is no longer pending, and 409 (the request stays `pending`) when the plug's current opening hours have it closed during part of the slot. Response `{id, plug_id, status, start_at, end_at}`. The driver gets `reservation_approved` (always pushed). |
+| POST | `/api/cpo/reservations/{reservation_id}/approve` | cpo/admin of the owning tenant | - | `pending` to `booked`. 404 for a missing or other-tenant reservation; 409 when it is no longer pending, and 409 (the request stays `pending`) when the plug's current opening hours have it closed during part of the slot, when the plug is in `MAINTENANCE`, or when the requester is no longer a member of the plug's private group. Response `{id, plug_id, status, start_at, end_at}`. The driver gets `reservation_approved` (always pushed). |
 | POST | `/api/cpo/reservations/{reservation_id}/decline` | cpo/admin of the owning tenant | - | `pending` to `declined`; never checks opening hours. Same 404 and 409 rules and response. The driver gets `reservation_declined`. |
 
 - `POST /api/reservations`: on a plug with `reservation_mode = approval` the reservation is created with status `pending` (400 when `start_at` is not in the future); the tenant's CPOs get a `reservation_needs_approval` bell (up to 20, quiet hours apply). `ReservationResponse` gains `no_show_fee_coins` (the fee snapshotted at booking).
 - `POST /api/reservations/{id}/cancel` also withdraws a `pending` request. A booking already past `start_at + RESERVATION_NO_SHOW_GRACE_MIN` now answers 409 (already expired); cancelling inside the grace window is allowed and avoids the fee.
 - `GET /api/reservations/my` (upcoming), `GET /api/plugs/{id}/reservations` and `GET /api/cpo/reservations?upcoming_only=true` include `pending`. The status filter accepts `pending` and `declined`.
 - `PlugResponse` gains `reservation_mode` (`instant` or `approval`) and `no_show_fee_coins` (float). `GET /api/cpo/plugs` gains the same two fields; `PUT /api/cpo/plugs/{id}` accepts `reservation_mode` and `no_show_fee_coins` (>= 0, 400 above `RESERVATION_NO_SHOW_FEE_MAX_COINS`).
-- The no-show fee has no route: the reaper sweep writes one `reservation_no_show_fee` ledger line (`reservation_id` UNIQUE) and a `reservation_no_show_fee` notice (always pushed). Rules: [RESERVATION_APPROVAL.md](RESERVATION_APPROVAL.md).
+- The no-show fee has no route: the reaper sweep writes one `reservation_no_show_fee` ledger line (`reservation_id` UNIQUE) and a `reservation_no_show_fee` notice (always pushed). It is skipped when the holder's account is disabled or closed, or they are no longer a member of the plug's private group. It cannot be disputed (no session); a wrong fee is returned with `POST /api/admin/users/{user_id}/adjust-balance` after a support request. Rules: [RESERVATION_APPROVAL.md](RESERVATION_APPROVAL.md).
+- `GET /api/auth/me/export` (cross-review fix): the `account` block gains `vehicle_profile` (object or null), `monthly_insights_email` (bool) and `insights_email_month` (`YYYY-MM` or null); each `group_memberships` entry gains `price_per_kwh_override` (number or null). Additive; `export_format` unchanged.
 
 ### Notification types added in wave 4 R2
 
