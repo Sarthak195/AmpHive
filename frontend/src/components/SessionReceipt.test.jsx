@@ -116,6 +116,26 @@ describe('SessionReceipt — summary', () => {
     expect(screen.queryByText(/couldn't be collected/i)).not.toBeInTheDocument();
   });
 
+  it('[C1] shows the idle fee as its own line only when one was charged', () => {
+    useSession.mockReturnValue({
+      receipt: { ...RECEIPT, coins_spent: 16.17, idle_fee_coins: 10 },
+      dismissReceipt: dismissSpy,
+    });
+    renderReceipt();
+    expect(screen.getByText('Idle fee (included)')).toBeInTheDocument();
+    expect(screen.getByText('₹10.00')).toBeInTheDocument();
+    expect(screen.getByText('−₹16.17')).toBeInTheDocument();
+  });
+
+  it('[C1] has no idle fee line without an idle fee', () => {
+    useSession.mockReturnValue({
+      receipt: { ...RECEIPT, idle_fee_coins: 0 },
+      dismissReceipt: dismissSpy,
+    });
+    renderReceipt();
+    expect(screen.queryByText('Idle fee (included)')).not.toBeInTheDocument();
+  });
+
   it('explains an uncollected shortfall in plain language', () => {
     useSession.mockReturnValue({
       receipt: { ...RECEIPT, shortfall_coins: 2.5 },

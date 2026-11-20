@@ -60,7 +60,7 @@ const SessionReceipt = () => {
   const {
     session_id, plug_name, energy_kwh, peak_power_w, coins_spent,
     shortfall_coins, balance_before, balance_remaining, duration_sec,
-    ended_at, reason, max_kwh,
+    ended_at, reason, max_kwh, idle_fee_coins,
   } = receipt;
 
   const chargedInr = coinsToINR(coins_spent ?? 0, coin_inr_rate);
@@ -135,6 +135,12 @@ const SessionReceipt = () => {
         {co2Kg != null && co2Kg >= 0.005 && (
           <Row label="CO₂ avoided (estimate)">
             <span className="num">≈ {co2Kg.toFixed(2)} kg</span>
+          </Row>
+        )}
+        {/* [C1] The idle fee is already inside "Charged"; shown on its own line. */}
+        {Number(idle_fee_coins) > 0 && (
+          <Row label="Idle fee (included)">
+            <span className="num"><Money coins={idle_fee_coins} rate={coin_inr_rate} /></span>
           </Row>
         )}
         <Row label="Charged" strong>
