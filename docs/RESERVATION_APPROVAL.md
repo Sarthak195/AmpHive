@@ -46,7 +46,13 @@ Rules:
 - Skipped when any signal says the charger may have been unusable: plug `OFFLINE` or
   `MAINTENANCE`, gateway not live, plug not powered or its `powered_since` later than `start_at`,
   a `GATEWAY_BOOT` or `PLUG_UNREACHABLE` event since `start_at`, or any session on the plug
-  overlapping the grace window.
+  overlapping the grace window. Also skipped when the holder could not have started: their
+  account is disabled or closed, or they are no longer a member of the plug's private group
+  (removed by the operator or left after booking; every start path answers 403 for that).
+- Approving a `PENDING` request applies a direct booking's checks again at approval time: 409
+  (request stays `PENDING`, decline it instead) when the plug is in `MAINTENANCE`, when the
+  requester has since lost access to the plug's private group, or when the slot falls outside
+  the plug's current opening hours.
 - Amount: `min(snapshot, server cap, available balance)`, where available = balance minus active
   session holds. Never negative; nothing happens when that is 0.
 - Ledger type `reservation_no_show_fee`; the driver gets `reservation_no_show_fee`, which is on
@@ -57,6 +63,14 @@ Rules:
 ## Known limits
 
 - The fee is a driver debit only. It is not counted in CPO earnings, payouts or GST invoices.
+- No self-service refund: the session dispute flow (`POST /api/sessions/{id}/dispute`) needs a
+  session, and the fee's ledger row carries only `reservation_id`. A wrongly charged fee is
+  returned by a platform admin balance adjustment (`routers/admin.py`) after the driver emails
+  support, as `/refunds` section 4 says. A CPO-side refund of a `reservation_no_show_fee` row is
+  an open item in `docs/TODO.md`.
+- Removing a member (or a member leaving) does not cancel their `BOOKED` or `PENDING`
+  reservations on that group's plugs and sends no notice. The fee is skipped for them, but the
+  slot stays held until it lapses.
 - The driver-facing copy says "15 minutes"; it does not read `RESERVATION_NO_SHOW_GRACE_MIN`.
 - There is no outage history table, so "offline in the window" is inferred from current liveness,
   `powered_since` and gateway events.

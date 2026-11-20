@@ -17,6 +17,9 @@
  *                                    reversed by the processor
  *   - cancel a reservation ......... POST /api/reservations/{id}/cancel — free,
  *                                    since a reservation costs nothing up front
+ *   - reservation no-show fee ...... [C8] optional, per charger; it has no
+ *                                    session, so no dispute: support email, then
+ *                                    an admin balance adjustment (routers/admin.py)
  *
  * Nothing here promises a cash refund of charging credit, because the credit is
  * a closed-loop instrument (see /charging-credit-terms) and the product has no
@@ -92,9 +95,22 @@ export default function Refunds() {
           <h2>4. The reservation you did not use</h2>
           <p className="text-2">
             Reserving a charger costs nothing up front, and cancelling a
-            reservation is free. If you do not turn up, the reservation simply
-            lapses after the grace period and the charger is released for
-            others — there is no no-show fee.
+            reservation is free. If you do not turn up,
+            the reservation lapses 15 minutes after the slot starts and the
+            charger is released for others.
+          </p>
+          <p className="text-2">
+            A host may set a no-show fee on a charger. If so, it is shown before
+            you book, and it is deducted from your charging credit only when a
+            confirmed booking goes unused, at most once per booking and never
+            more than your available credit. It is not charged when the charger
+            was offline, out of service or closed, when someone else was using
+            it, or when you no longer had access to it. A no-show fee is not
+            tied to a session, so the dispute flow above does not cover it: if
+            you think one was charged wrongly, email{' '}
+            <a href={`mailto:${SUPPORT_EMAIL}`}>{SUPPORT_EMAIL}</a> with the
+            charger and the booking time, and a wrongly charged fee is credited
+            back to your charging credit.
           </p>
         </section>
 
