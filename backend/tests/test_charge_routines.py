@@ -1075,3 +1075,135 @@ async def test_db_unique_index_race_takes_the_savepoint_branch(factory):
     assert routine.last_queued_charge_id is None
     assert routine.consecutive_failures == 0 and routine.enabled is True
     notify.assert_not_awaited()
+
+
+# --- [Lock order] CPO hours edit vs the materialize tick on one routine ---
+# The edit UPDATEs the plug and then the plug's routines; the tick used to
+# lock the routine and then the plug, an AB-BA deadlock. Both sides run on an
+# engine with lock_timeout 5s, so a regression fails (deadlock detected after
+# deadlock_timeout, or a lock timeout) instead of hanging.
+
+@pytest_asyncio.fixture()
+async def bounded(factory):
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+    from sqlalchemy.pool import NullPool
+
+    engine = create_async_engine(
+        TEST_DATABASE_URL, poolclass=NullPool,
+        connect_args={"server_settings": {"lock_timeout": "5s"}},
+    )
+    yield async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    await engine.dispose()
+
+
+async def _until_a_lock_wait(factory, timeout=5.0):
+    """Return once some backend is waiting on a row lock."""
+    from sqlalchemy import text
+
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        async with factory() as db:
+            waiting = (await db.execute(text(
+                "SELECT count(*) FROM pg_stat_activity "
+                "WHERE wait_event_type = 'Lock' AND datname = current_database()"
+            ))).scalar_one()
+        if waiting:
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError("no backend ever waited on a lock")
+
+
+def _hours_edit(tenant_id):
+    """The CPO PATCH body that closes a Monday 23:58 routine (08:00-20:00)."""
+    from types import SimpleNamespace
+
+    from backend.schemas import CpoPlugUpdateRequest, PlugHoursWindow
+
+    cpo = SimpleNamespace(id=0, tenant_id=tenant_id, email="cpo@example.com")
+    req = CpoPlugUpdateRequest(
+        opening_hours=[PlugHoursWindow(days=ALL_DAYS, start=8 * 60, end=20 * 60)]
+    )
+    return cpo, req
+
+
+@requires_db
+@pytest.mark.asyncio
+async def test_db_hours_edit_holding_the_plug_and_a_tick_do_not_deadlock(factory, bounded):
+    """The old interleaving: the edit has flushed its plug UPDATE when the
+    tick starts on the same routine, then the edit UPDATEs the routine. The
+    old tick held the routine while waiting on the plug (deadlock); now it
+    waits on the plug holding nothing, then sees the routine off."""
+    from backend.routers.cpo import _plugs
+
+    rid, uid, pid = await _seed(factory)
+    cpo, req = _hours_edit((await _routine_row(factory, rid)).tenant_id)
+    real_disable = _plugs.disable_closed_routines
+    ticks = []
+
+    async def _disable_mid_tick(db, plug):
+        await db.flush()   # the plug UPDATE (autoflush sends it here anyway)
+        ticks.append(asyncio.create_task(svc._materialize_one(bounded, rid, TUE_0001)))
+        await _until_a_lock_wait(factory)   # the tick is blocked on the plug
+        return await real_disable(db, plug)
+
+    try:
+        with _patched_zone(), \
+                patch("backend.services.notifications.notify", AsyncMock()), \
+                patch.object(_plugs, "disable_closed_routines", _disable_mid_tick), \
+                patch.object(_plugs, "_publish_gateway_roster", AsyncMock()):
+            async with bounded() as db:
+                out = await asyncio.wait_for(_plugs.cpo_update_plug(pid, req, cpo, db), 15)
+            queued = await asyncio.wait_for(ticks[0], 15)
+    finally:
+        for t in ticks:
+            t.cancel()
+    assert out["status"] == "updated"
+    assert queued is False
+    routine = await _routine_row(factory, rid)
+    assert routine.enabled is False and routine.last_materialized_date is None
+    assert await _rows(factory, uid) == []
+
+
+@requires_db
+@pytest.mark.asyncio
+async def test_db_tick_holding_the_plug_then_hours_edit_cancels_its_row(factory, bounded):
+    """The other interleaving: the tick holds plug and routine when the edit
+    arrives. The edit waits on the plug, then turns the routine off and
+    withdraws the row the tick just queued."""
+    from backend.routers.cpo import _plugs
+
+    rid, uid, pid = await _seed(factory)
+    cpo, req = _hours_edit((await _routine_row(factory, rid)).tenant_id)
+    holding, release = asyncio.Event(), asyncio.Event()
+
+    async def _pause_with_locks_held(db, user_id, plug):
+        holding.set()
+        await release.wait()
+        return True
+
+    edit = None
+    try:
+        with _patched_zone(), \
+                patch("backend.services.notifications.notify", AsyncMock()), \
+                patch.object(svc, "has_group_access", _pause_with_locks_held), \
+                patch.object(_plugs, "_publish_gateway_roster", AsyncMock()):
+            tick = asyncio.create_task(svc._materialize_one(bounded, rid, TUE_0001))
+            await asyncio.wait_for(holding.wait(), 10)
+
+            async def _edit():
+                async with bounded() as db:
+                    return await _plugs.cpo_update_plug(pid, req, cpo, db)
+
+            edit = asyncio.create_task(_edit())
+            await _until_a_lock_wait(factory)   # the edit is blocked on the plug
+            release.set()
+            assert await asyncio.wait_for(tick, 15) is True
+            assert (await asyncio.wait_for(edit, 15))["status"] == "updated"
+    finally:
+        release.set()
+        if edit is not None:
+            edit.cancel()
+    routine = await _routine_row(factory, rid)
+    assert routine.enabled is False and routine.last_materialized_date == MONDAY
+    rows = await _rows(factory, uid)
+    assert len(rows) == 1 and rows[0].status == QueuedChargeStatus.CANCELLED
