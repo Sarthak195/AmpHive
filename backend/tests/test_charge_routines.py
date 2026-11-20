@@ -1170,7 +1170,9 @@ async def test_db_hours_edit_holding_the_plug_and_a_tick_do_not_deadlock(factory
 async def test_db_tick_holding_the_plug_then_hours_edit_cancels_its_row(factory, bounded):
     """The other interleaving: the tick holds plug and routine when the edit
     arrives. The edit waits on the plug, then turns the routine off and
-    withdraws the row the tick just queued."""
+    withdraws the row the tick just queued. A behaviour test, not a
+    regression test: this interleaving did not deadlock before batch 5 either
+    (the hours-edit-first test above is the one that fails on the old order)."""
     from backend.routers.cpo import _plugs
 
     rid, uid, pid = await _seed(factory)

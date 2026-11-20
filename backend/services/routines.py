@@ -37,7 +37,8 @@ last_materialized_date is stamped in the same transaction as the insert, so
 a double tick (or two workers) queues one row. The QueuedCharge partial unique
 index is the backstop: losing it still stamps the date.
 
-Lock order: plugs before charge_routines, everywhere. The CPO plug PATCH
+Lock order between these two tables: plugs before charge_routines, everywhere.
+(Cycles through the users row remain and are listed in docs/TODO.md.) The CPO plug PATCH
 UPDATEs the plug and then the plug's routines (disable_closed_routines), so
 the tick takes the plug FOR UPDATE before the routine row. The tick then only
 ever waits on the plug while holding no routine lock (its routine lock is
