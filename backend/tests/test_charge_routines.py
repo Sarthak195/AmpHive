@@ -195,8 +195,10 @@ def _live_user():
 
 
 def _head(routine, tenant=None):
-    """lock routine, plug, gateway, tenant: the head of _materialize_one."""
-    return (_s1n(routine), _s1(_plug()), _s1(_gateway()), _s1(tenant or _tenant()))
+    """routine's plug id (unlocked), lock plug, lock routine, gateway, tenant:
+    the head of _materialize_one (lock order plug then routine)."""
+    return (_s1n(routine.plug_id), _s1n(_plug()), _s1n(routine),
+            _s1(_gateway()), _s1(tenant or _tenant()))
 
 
 def _patched_zone():
@@ -268,16 +270,20 @@ def _scan(routines):
 
 
 @pytest.mark.asyncio
-async def test_locked_or_disabled_routine_queues_nothing():
-    """The row lock re-checks enabled with SKIP LOCKED: a routine turned off
-    since the scan (or held by another tick) is left alone."""
+@pytest.mark.parametrize("held", [False, True])
+async def test_locked_or_disabled_routine_queues_nothing(held):
+    """A routine turned off since the scan is left alone, and so is one held
+    by another transaction (the SKIP LOCKED row lock returns nothing): it is
+    not stamped, so the next tick retries it."""
     routine = _routine()
     now = _ist(MONDAY, 7, 31)
-    mdb = _db(_s1n(None))
+    mdb = _db(_s1n(1), _s1n(_plug()), _s1n(None)) if held else _db(_s1n(None))
     with _patched_zone():
         queued = await svc.materialize_routines(_factory(_scan([routine]), mdb), now=now)
     assert queued == 0
     mdb.add.assert_not_called()
+    mdb.commit.assert_not_awaited()
+    assert routine.last_materialized_date is None
 
 
 @pytest.mark.asyncio
@@ -360,6 +366,28 @@ async def test_materialize_locks_the_plug_like_the_scheduled_path():
     plug_stmt = mdb.execute.call_args_list[1].args[0]
     sql = str(plug_stmt.compile(dialect=postgresql.dialect()))
     assert sql.startswith("SELECT plugs.") and sql.endswith("FOR UPDATE")
+
+
+@pytest.mark.asyncio
+async def test_materialize_locks_the_plug_before_the_routine():
+    """[Lock order] plugs before charge_routines: the CPO hours edit UPDATEs
+    the plug and then its routines, so a tick that held the routine while
+    waiting on the plug could deadlock with it. The first statement takes no
+    lock, the plug is locked FOR UPDATE next, and only then the routine
+    (SKIP LOCKED, which never waits)."""
+    routine = _routine()
+    mdb = _db(*_head(routine), _one(_live_user()), _s1n(42))
+    with _patched_zone():
+        await svc.materialize_routines(_factory(_scan([routine]), mdb), now=_ist(MONDAY, 7, 31))
+    sqls = [str(c.args[0].compile(dialect=postgresql.dialect()))
+            for c in mdb.execute.call_args_list]
+    assert "FOR UPDATE" not in sqls[0] and "charge_routines" in sqls[0]
+    plug_at = next(i for i, q in enumerate(sqls) if q.startswith("SELECT plugs.") and "FOR UPDATE" in q)
+    routine_at = next(i for i, q in enumerate(sqls) if "FOR UPDATE SKIP LOCKED" in q)
+    assert plug_at < routine_at
+    assert "charge_routines" in sqls[routine_at]
+    # Nothing else locks a charge_routines row, and nothing waits on one.
+    assert [i for i, q in enumerate(sqls) if "charge_routines" in q and "FOR UPDATE" in q] == [routine_at]
 
 
 @pytest.mark.asyncio
@@ -781,10 +809,13 @@ async def test_routine_select_is_for_update_skip_locked(fn):
     not only in CI's DB-gated tests."""
     statements = []
     db = AsyncMock()
+    # materialize: the plug id read and the plug lock come first (lock order
+    # plug then routine), then the routine row lock returns nothing.
+    results = iter([_s1n(1), _s1n(_plug())] if fn == "materialize" else [])
 
     async def _execute(stmt, *args, **kwargs):
         statements.append(stmt)
-        return _s1n(None)
+        return next(results, _s1n(None))
 
     db.execute = AsyncMock(side_effect=_execute)
     now = _ist(MONDAY, 7, 31)
@@ -792,8 +823,8 @@ async def test_routine_select_is_for_update_skip_locked(fn):
         assert await svc._materialize_one(_factory(db), 1, now) is False
     else:
         await svc._settle_one(_factory(db), 1)
-    sql = str(statements[0].compile(dialect=postgresql.dialect()))
-    assert "FOR UPDATE SKIP LOCKED" in sql
+    sql = str(statements[-1].compile(dialect=postgresql.dialect()))
+    assert "charge_routines" in sql and "FOR UPDATE SKIP LOCKED" in sql
 
 
 # ===========================================================================
@@ -1044,3 +1075,138 @@ async def test_db_unique_index_race_takes_the_savepoint_branch(factory):
     assert routine.last_queued_charge_id is None
     assert routine.consecutive_failures == 0 and routine.enabled is True
     notify.assert_not_awaited()
+
+
+# --- [Lock order] CPO hours edit vs the materialize tick on one routine ---
+# The edit UPDATEs the plug and then the plug's routines; the tick used to
+# lock the routine and then the plug, an AB-BA deadlock. Both sides run on an
+# engine with lock_timeout 5s, so a regression fails (deadlock detected after
+# deadlock_timeout, or a lock timeout) instead of hanging.
+
+@pytest_asyncio.fixture()
+async def bounded(factory):
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+    from sqlalchemy.pool import NullPool
+
+    engine = create_async_engine(
+        TEST_DATABASE_URL, poolclass=NullPool,
+        connect_args={"server_settings": {"lock_timeout": "5s"}},
+    )
+    yield async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    await engine.dispose()
+
+
+async def _until_a_lock_wait(factory, timeout=5.0):
+    """Return once some backend is waiting on a row lock."""
+    from sqlalchemy import text
+
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        async with factory() as db:
+            waiting = (await db.execute(text(
+                "SELECT count(*) FROM pg_stat_activity "
+                "WHERE wait_event_type = 'Lock' AND datname = current_database()"
+            ))).scalar_one()
+        if waiting:
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError("no backend ever waited on a lock")
+
+
+def _hours_edit(tenant_id):
+    """The CPO PATCH body that closes a Monday 23:58 routine (08:00-20:00)."""
+    from types import SimpleNamespace
+
+    from backend.schemas import CpoPlugUpdateRequest, PlugHoursWindow
+
+    cpo = SimpleNamespace(id=0, tenant_id=tenant_id, email="cpo@example.com")
+    req = CpoPlugUpdateRequest(
+        opening_hours=[PlugHoursWindow(days=ALL_DAYS, start=8 * 60, end=20 * 60)]
+    )
+    return cpo, req
+
+
+@requires_db
+@pytest.mark.asyncio
+async def test_db_hours_edit_holding_the_plug_and_a_tick_do_not_deadlock(factory, bounded):
+    """The old interleaving: the edit has flushed its plug UPDATE when the
+    tick starts on the same routine, then the edit UPDATEs the routine. The
+    old tick held the routine while waiting on the plug (deadlock); now it
+    waits on the plug holding nothing, then sees the routine off."""
+    from backend.routers.cpo import _plugs
+
+    rid, uid, pid = await _seed(factory)
+    cpo, req = _hours_edit((await _routine_row(factory, rid)).tenant_id)
+    real_disable = _plugs.disable_closed_routines
+    ticks = []
+
+    async def _disable_mid_tick(db, plug):
+        await db.flush()   # the plug UPDATE (autoflush sends it here anyway)
+        ticks.append(asyncio.create_task(svc._materialize_one(bounded, rid, TUE_0001)))
+        await _until_a_lock_wait(factory)   # the tick is blocked on the plug
+        return await real_disable(db, plug)
+
+    try:
+        with _patched_zone(), \
+                patch("backend.services.notifications.notify", AsyncMock()), \
+                patch.object(_plugs, "disable_closed_routines", _disable_mid_tick), \
+                patch.object(_plugs, "_publish_gateway_roster", AsyncMock()):
+            async with bounded() as db:
+                out = await asyncio.wait_for(_plugs.cpo_update_plug(pid, req, cpo, db), 15)
+            queued = await asyncio.wait_for(ticks[0], 15)
+    finally:
+        for t in ticks:
+            t.cancel()
+        await asyncio.gather(*ticks, return_exceptions=True)
+    assert out["status"] == "updated"
+    assert queued is False
+    routine = await _routine_row(factory, rid)
+    assert routine.enabled is False and routine.last_materialized_date is None
+    assert await _rows(factory, uid) == []
+
+
+@requires_db
+@pytest.mark.asyncio
+async def test_db_tick_holding_the_plug_then_hours_edit_cancels_its_row(factory, bounded):
+    """The other interleaving: the tick holds plug and routine when the edit
+    arrives. The edit waits on the plug, then turns the routine off and
+    withdraws the row the tick just queued."""
+    from backend.routers.cpo import _plugs
+
+    rid, uid, pid = await _seed(factory)
+    cpo, req = _hours_edit((await _routine_row(factory, rid)).tenant_id)
+    holding, release = asyncio.Event(), asyncio.Event()
+
+    async def _pause_with_locks_held(db, user_id, plug):
+        holding.set()
+        await release.wait()
+        return True
+
+    tick = edit = None
+    try:
+        with _patched_zone(), \
+                patch("backend.services.notifications.notify", AsyncMock()), \
+                patch.object(svc, "has_group_access", _pause_with_locks_held), \
+                patch.object(_plugs, "_publish_gateway_roster", AsyncMock()):
+            tick = asyncio.create_task(svc._materialize_one(bounded, rid, TUE_0001))
+            await asyncio.wait_for(holding.wait(), 10)
+
+            async def _edit():
+                async with bounded() as db:
+                    return await _plugs.cpo_update_plug(pid, req, cpo, db)
+
+            edit = asyncio.create_task(_edit())
+            await _until_a_lock_wait(factory)   # the edit is blocked on the plug
+            release.set()
+            assert await asyncio.wait_for(tick, 15) is True
+            assert (await asyncio.wait_for(edit, 15))["status"] == "updated"
+    finally:
+        release.set()
+        left = [t for t in (tick, edit) if t is not None]
+        for t in left:
+            t.cancel()
+        await asyncio.gather(*left, return_exceptions=True)
+    routine = await _routine_row(factory, rid)
+    assert routine.enabled is False and routine.last_materialized_date == MONDAY
+    rows = await _rows(factory, uid)
+    assert len(rows) == 1 and rows[0].status == QueuedChargeStatus.CANCELLED

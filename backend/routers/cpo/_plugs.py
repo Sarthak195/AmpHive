@@ -317,7 +317,9 @@ async def cpo_update_plug(
         plug.no_show_fee_coins = fee
 
     # [Plug hours] Routines whose start time the new hours close would fail
-    # every occurrence: turn them off now, in this request.
+    # every occurrence: turn them off now, in this request. Lock order is
+    # plug then routines (services/routines.py): the plug UPDATE may already
+    # be flushed here, and the routine tick also locks the plug first.
     disabled_routines = (
         await disable_closed_routines(db, plug) if "opening_hours" in fields else []
     )
