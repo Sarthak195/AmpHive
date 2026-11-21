@@ -533,6 +533,65 @@ def test_override_price_bounds_match_a_tariff():
             MemberPriceRequest(price_per_kwh_override=bad)
 
 
+def _price_client(db):
+    """The member-price PUT behind a real FastAPI app (so the 422 comes from the
+    request validation, not a hand-built model), auth and DB stubbed."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from backend.database.db import get_db
+    from backend.routers.cpo import _groups
+    from backend.routers.cpo._common import require_cpo_tenant
+
+    app = FastAPI()
+    app.include_router(_groups.router)
+    app.dependency_overrides[require_cpo_tenant] = lambda: SimpleNamespace(
+        id=2, tenant_id=1, role=UserRole.CPO
+    )
+
+    async def _db():
+        yield db
+
+    app.dependency_overrides[get_db] = _db
+    return TestClient(app)
+
+
+def _price_db(membership):
+    db = AsyncMock()
+    db.execute = AsyncMock(side_effect=[_scalar(PRIVATE_GROUP), _scalar(membership)])
+    return db
+
+
+@pytest.mark.parametrize("body", [{}, {"price_per_kwh_overide": 3.0},
+                                  {"price_per_kwh_override": 3.0, "extra": 1}])
+def test_member_price_put_rejects_empty_misspelled_or_extra_keys(body):
+    membership = SimpleNamespace(price_per_kwh_override=Decimal("3.00"))
+    db = _price_db(membership)
+    with patch("backend.routers.cpo._groups.try_record_audit", AsyncMock()):
+        resp = _price_client(db).put("/api/cpo/groups/11/members/9/price", json=body)
+    assert resp.status_code == 422
+    assert membership.price_per_kwh_override == Decimal("3.00")  # untouched
+    db.commit.assert_not_awaited()
+
+
+def test_member_price_put_explicit_null_clears_and_a_value_sets():
+    membership = SimpleNamespace(price_per_kwh_override=Decimal("3.00"))
+    with patch("backend.routers.cpo._groups.try_record_audit", AsyncMock()):
+        db = _price_db(membership)
+        resp = _price_client(db).put(
+            "/api/cpo/groups/11/members/9/price", json={"price_per_kwh_override": None}
+        )
+        assert resp.status_code == 200
+        assert membership.price_per_kwh_override is None
+
+        db = _price_db(membership)
+        resp = _price_client(db).put(
+            "/api/cpo/groups/11/members/9/price", json={"price_per_kwh_override": 4.5}
+        )
+        assert resp.status_code == 200
+        assert membership.price_per_kwh_override == Decimal("4.50")
+
+
 @pytest.mark.asyncio
 async def test_viewer_cannot_write_through_the_cpo_gate():
     from backend.routers.cpo._common import require_cpo_tenant

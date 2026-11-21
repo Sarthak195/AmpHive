@@ -36,6 +36,15 @@ Idempotency: the routine row is locked FOR UPDATE SKIP LOCKED and
 last_materialized_date is stamped in the same transaction as the insert, so
 a double tick (or two workers) queues one row. The QueuedCharge partial unique
 index is the backstop: losing it still stamps the date.
+
+Lock order between these two tables: plugs before charge_routines, everywhere.
+(Cycles through the users row remain and are listed in docs/TODO.md.) The CPO plug PATCH
+UPDATEs the plug and then the plug's routines (disable_closed_routines), so
+the tick takes the plug FOR UPDATE before the routine row. The tick then only
+ever waits on the plug while holding no routine lock (its routine lock is
+SKIP LOCKED and never waits), so it cannot deadlock with that edit. A routine
+skipped because another transaction holds it is not stamped, so the next
+tick (each reaper pass, inside MATERIALIZE_WINDOW) queues it.
 """
 import logging
 import os
@@ -219,19 +228,33 @@ async def _materialize_one(factory: Callable, routine_id: int, now: datetime) ->
     """One routine, one transaction. Returns True when a row was queued."""
     notice: Optional[Notice] = None
     async with factory() as db:
+        # Lock order is plug then routine (module docstring): read the
+        # routine's plug unlocked, lock the plug, then the routine.
+        plug_id = (await db.execute(
+            select(ChargeRoutine.plug_id)
+            .where(and_(ChargeRoutine.id == routine_id, ChargeRoutine.enabled.is_(True)))
+        )).scalar_one_or_none()
+        if plug_id is None:
+            return False  # disabled/deleted since the scan
+        # Plug FOR UPDATE, like queue_charge's scheduled path, so the
+        # other-driver check below is serialized with it. The reaper never
+        # locks charge_routines.
+        plug = (await db.execute(
+            select(Plug).where(Plug.id == plug_id).with_for_update()
+        )).scalar_one_or_none()
+        if plug is None:
+            return False
         routine = (await db.execute(
             select(ChargeRoutine)
-            .where(and_(ChargeRoutine.id == routine_id, ChargeRoutine.enabled.is_(True)))
+            .where(and_(
+                ChargeRoutine.id == routine_id,
+                ChargeRoutine.plug_id == plug_id,
+                ChargeRoutine.enabled.is_(True),
+            ))
             .with_for_update(skip_locked=True)
         )).scalar_one_or_none()
         if routine is None:
-            return False  # disabled/deleted since the scan, or another tick holds it
-        # Plug FOR UPDATE, like queue_charge's scheduled path, so the
-        # other-driver check below is serialized with it. Lock order is
-        # routine then plug; the reaper never locks charge_routines.
-        plug = (await db.execute(
-            select(Plug).where(Plug.id == routine.plug_id).with_for_update()
-        )).scalar_one()
+            return False  # disabled since, or another transaction holds it
         gateway = (await db.execute(
             select(Gateway).where(Gateway.id == plug.gateway_id)
         )).scalar_one()

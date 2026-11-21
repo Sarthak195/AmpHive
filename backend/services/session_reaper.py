@@ -86,7 +86,7 @@ GATEWAY_LOGS_RETENTION_DAYS = int(os.getenv("GATEWAY_LOGS_RETENTION_DAYS", "14")
 GATEWAY_LOGS_PRUNE_EVERY_N_TICKS = int(os.getenv("GATEWAY_LOGS_PRUNE_EVERY_N_TICKS", "60"))
 # [F8V] The monthly insights email pass runs every N ticks (about 15 minutes at
 # the default 60 s tick), so a failed send is retried a quarter hour later.
-INSIGHTS_EMAIL_EVERY_N_TICKS = max(1, int(os.getenv("INSIGHTS_EMAIL_EVERY_N_TICKS", "15")))
+INSIGHTS_EMAIL_EVERY_N_TICKS = max(1, int(os.getenv("INSIGHTS_EMAIL_EVERY_N_TICKS") or "15"))
 
 
 class SessionReaperService:
@@ -747,7 +747,7 @@ class SessionReaperService:
                             "Queued charge expired",
                             "The charger was closed until your request expired."
                             if closed_at_expiry
-                            else "Power didn't return in time — your queued charge expired.",
+                            else "Power didn't return in time, so your queued charge expired.",
                             severity="warning", plug_id=plug_id,
                         )
                         continue

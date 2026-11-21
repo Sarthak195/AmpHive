@@ -93,11 +93,16 @@ def tariff_terms(tariff) -> Optional[IdleTerms]:
 async def resolve_idle_terms(db, plug) -> Optional[IdleTerms]:
     """Idle terms of the tariff that bills this plug (the same plug -> group
     -> tenant default chain as the rate). A failed lookup is logged and means
-    no fee for that session: the fee is optional and never blocks a start."""
+    no fee for that session: the fee is optional and never blocks a start.
+
+    The lookup runs inside a SAVEPOINT: a database error rolls back only the
+    savepoint, so the request's transaction stays usable and the start's next
+    statement does not fail on an aborted transaction."""
     from backend.services.pricing import _resolve_tariff_and_tz
 
     try:
-        tariff, _tz = await _resolve_tariff_and_tz(db, plug)
+        async with db.begin_nested():
+            tariff, _tz = await _resolve_tariff_and_tz(db, plug)
     except Exception:
         logger.exception("Idle fee terms lookup failed; session starts with no idle fee")
         return None
