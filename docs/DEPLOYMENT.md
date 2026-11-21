@@ -645,6 +645,17 @@ It is a **migration deploy**: the backend boot runs `alembic upgrade head` throu
 6. **No new service, port, dependency, nginx, Caddy, compose or Dockerfile change, no firmware change, no manual VM step.** New routes live under `/api/me/*`, `/api/plugs/*`, `/api/sessions/*`, `/api/groups/*`, `/api/cpo/*` and `/api/ocpp/*` (the last only with the flag), already proxied. The reaper gains three cheap passes: the no-show sweep (one bounded indexed query plus at most 50 rows per 60 s tick), the monthly insights email pass (every 15th tick) and, once at startup, `operator_alerts.rearm_offline_rechecks()` (reads the small `gateways` table). The ready-by planner scans at most about 1440 minute-steps in a worker thread (about 75 ms measured on a worst-case tariff) and writes no telemetry frames.
 7. **Read-only smoke after the switch.** `GET /api/plugs/{id}/tariff-preview` carries `idle_fee: null`; `GET /api/me/vehicle` returns the defaults; `GET /api/plugs/{id}/ready-by` answers a display-only plan; `OCPP_CSMS_ENABLED` is unset in the running backend container's environment (do not probe `/ocpp/*` over HTTP: the frontend's SPA fallback can answer it with the app shell); `/admin/health` and the status page show no new offline gateway. Do not enable an idle fee, an approval mode or a no-show fee on the real plug without the operator's say-so.
 
+### Batch 5 hardening (2026-11-20, PR #161, deployed 2026-11-21)
+
+*Executed 2026-11-21 (PR #161, merge `61b7113`, main == `61b7113da2ac8f26f4e3e34579746b39ea1502bc`; the merge tree is identical to the CI-tested `5b5a4db`).* Thin deploy with the kit, no migration, no env var, no VM step; alembic stays `0056_ocpp_charge_points`. Features: [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) section 0i.
+
+- **CI first.** All 7 checks green on `5b5a4db`; backend 2223 passed and 1 skipped (the long-standing skip), so the new DB-gated lock-order and savepoint tests ran.
+- **Backend** 06:50:22Z: `BASE_REF=d921ccd0bccaf4d5c2ffe9ea76ab8c2e753a7c33 ./deploy_backend_thin.sh origin/main`. 10 backend files on top of the `d921ccd` image; base and new tree proofs 271 files, 0 missing, 0 differing, 0 extra; health 200 in-container, through Caddy and nginx, and via Cloudflare. `BASE_REF` is required: the script plans against its built-in default base before it reads the VM image label, so without it the plan spans migrations `0039` to `0056` and refuses (exit 2).
+- **Frontend** 06:53Z: `./deploy_frontend_thin.sh origin/main` (it reads the `d921ccd` label itself). Dist-only, 231 files, nginx config unchanged; the served `index.html` (`11a442b1389f`) equals the build, and the public bundle carries the new `LAST_UPDATED` "20 November 2026".
+- **Live checks.** The GET smoke passed (all 200, driver and CPO). A member-price `PUT` to a missing group with an empty body, an extra key or a misspelled key answers 422 (body validation, nothing read or written); a valid null answers 404. Soak 3 min 40 s, at least three 60 s reaper ticks (the routine materialize sweep runs inside them): 0 tracebacks, 0 lock or deadlock errors, 0 5xx, 0 restarts.
+
+*Rollback:* backend `./rollback_backend.sh 61b7113` (tag `pre-61b7113`, the `d921ccd` image, boots on 0056), frontend `./rollback_frontend.sh 61b7113` (the `d921ccd` dist). No data-shape change, so either rollback is safe at any time.
+
 ### Backend dependency lockfile — `backend/requirements.lock.txt`
 
 `backend/Dockerfile` installs `backend/requirements.lock.txt`, a fully-pinned

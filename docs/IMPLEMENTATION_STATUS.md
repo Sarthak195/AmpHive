@@ -9,13 +9,15 @@ with what the code actually does. Legend: ✅ works · 🟡 partial · 🟦 stub
 
 ---
 
-**Production state (2026-11-20, 17:11Z):** backend and frontend both `d921ccd` (main; PR #156 wave 4 R1 `254a542`, PR #158 wave 4 R2 `7fd62bb`, PR #157 fw 2.10.0-direct `d921ccd`), alembic head `0056_ocpp_charge_points` (OCPP off). Backend deployed 17:06:10Z, frontend 17:11Z, DB backup `amphive-20261120-170536.dump`. Rollback: backend `./rollback_backend.sh d921ccd` (tag `pre-d921ccd`, same image as `rollback-d921ccd-m0056`), frontend `./rollback_frontend.sh d921ccd`; see DEPLOYMENT.md "Wave 4 R2". Field gateway `1cc3abb4fb54` runs fw `2.10.0-direct` (OTA'd 2026-11-20 17:15Z, release 7; fallback release 6 is 2.9.0-direct).
+**Production state (2026-11-21, 06:53Z):** backend and frontend both `61b7113` (main; PR #161 batch 5 hardening, section 0i), a thin deploy on top of `d921ccd` with no migration: alembic head still `0056_ocpp_charge_points` (OCPP off). Backend 06:50:22Z, frontend 06:53Z. Rollback: backend `./rollback_backend.sh 61b7113` (tag `pre-61b7113` = the `d921ccd` image), frontend `./rollback_frontend.sh 61b7113`; see DEPLOYMENT.md "Batch 5 hardening". Field gateway `1cc3abb4fb54` still runs fw `2.10.0-direct` (release 7).
 
-**Previous production state (2026-11-19, 10:53Z, before wave 4):** backend and frontend both `0047a2b` (PR #153, wave 3 on top of wave 2 `3e7d26c` and wave 1 `63f41b7`), alembic head `0050_charge_routines`. Wave 3 deployed 2026-11-19: backend 10:46Z, frontend 10:53Z, DB backup `amphive-20261119-104547.dump`. Rollback: backend `./rollback_backend.sh 0047a2b` (tag `pre-0047a2b`, same image as `rollback-0047a2b-m0050`), frontend `./rollback_frontend.sh 0047a2b`; see DEPLOYMENT.md "Features wave 3". The read-only demo viewer account is seeded (one `cpo_viewer` on tenant 1; credentials kept outside the repo). State before wave 3, at 08:52Z: backend and frontend both `3e7d26c`, alembic head `0047_promo_codes`. Backups: `amphive-20261119-072134.dump`, `amphive-20261119-084706.dump`. Rollback: backend `./rollback_backend.sh 3e7d26c` (tag `pre-3e7d26c`, same image as `rollback-3e7d26c-m0047`), frontend `./rollback_frontend.sh 3e7d26c`; see DEPLOYMENT.md "Features wave 2". Details in sections 0d and 0e below.
+**Previous production state (2026-11-20, 17:11Z, before batch 5):** backend and frontend both `d921ccd` (main; PR #156 wave 4 R1 `254a542`, PR #158 wave 4 R2 `7fd62bb`, PR #157 fw 2.10.0-direct `d921ccd`), alembic head `0056_ocpp_charge_points` (OCPP off). Backend deployed 17:06:10Z, frontend 17:11Z, DB backup `amphive-20261120-170536.dump`. Rollback: backend `./rollback_backend.sh d921ccd` (tag `pre-d921ccd`, same image as `rollback-d921ccd-m0056`), frontend `./rollback_frontend.sh d921ccd`; see DEPLOYMENT.md "Wave 4 R2". Field gateway `1cc3abb4fb54` runs fw `2.10.0-direct` (OTA'd 2026-11-20 17:15Z, release 7; fallback release 6 is 2.9.0-direct).
+
+**Earlier production state (2026-11-19, 10:53Z, before wave 4):** backend and frontend both `0047a2b` (PR #153, wave 3 on top of wave 2 `3e7d26c` and wave 1 `63f41b7`), alembic head `0050_charge_routines`. Wave 3 deployed 2026-11-19: backend 10:46Z, frontend 10:53Z, DB backup `amphive-20261119-104547.dump`. Rollback: backend `./rollback_backend.sh 0047a2b` (tag `pre-0047a2b`, same image as `rollback-0047a2b-m0050`), frontend `./rollback_frontend.sh 0047a2b`; see DEPLOYMENT.md "Features wave 3". The read-only demo viewer account is seeded (one `cpo_viewer` on tenant 1; credentials kept outside the repo). State before wave 3, at 08:52Z: backend and frontend both `3e7d26c`, alembic head `0047_promo_codes`. Backups: `amphive-20261119-072134.dump`, `amphive-20261119-084706.dump`. Rollback: backend `./rollback_backend.sh 3e7d26c` (tag `pre-3e7d26c`, same image as `rollback-3e7d26c-m0047`), frontend `./rollback_frontend.sh 3e7d26c`; see DEPLOYMENT.md "Features wave 2". Details in sections 0d and 0e below.
 
 Wave 3 (0f below) is deployed on top of that earlier state (alembic `0048` to `0050`). Wave 4 (0g and 0h below) is deployed on top of wave 3 (alembic `0051` to `0056`).
 
-## 0i - 2026-11-20 batch 5 hardening (fix/b5-release, not deployed)
+## 0i - 2026-11-20 batch 5 hardening (PR #161, deployed 2026-11-21 as 61b7113)
 
 Thin deploy: no migration, no env var, no VM step (alembic head stays `0056_ocpp_charge_points`). Fixes:
 
@@ -71,7 +73,7 @@ Migration line: `0051..0056`; 4 new tables (`group_invites`, `ocpp_charge_points
 
 CI (local, after the cross-review fix round, 2026-11-20): `ruff check backend/` all checks passed; `mypy` no issues in 43 source files; `pytest backend/tests` 1888 passed, 303 skipped (DB-gated, need `TEST_DATABASE_URL`), 0 failed; `pytest tools/tests` 107 passed; frontend `npm run lint` clean, `npm test` 100 files and 992 tests passed, `npm run build` succeeded. Alembic: single head `0056_ocpp_charge_points`.
 
-**Deploy (not done):** a migration deploy like wave 3 (DB backup first, rollback image = the live code plus the six new migration files tagged `pre-<new sha>`, backend and frontend together). The new optional env vars all default safely and are not in the compose files, so they run at their defaults; OCPP stays off. Details in [DEPLOYMENT.md](DEPLOYMENT.md) "Wave 4 R2".
+**Deploy (done 2026-11-20 as `d921ccd`; plan as written):** a migration deploy like wave 3 (DB backup first, rollback image = the live code plus the six new migration files tagged `pre-<new sha>`, backend and frontend together). The new optional env vars all default safely and are not in the compose files, so they run at their defaults; OCPP stays off. Details in [DEPLOYMENT.md](DEPLOYMENT.md) "Wave 4 R2".
 
 ## 0g - 2026-11-19 wave 4 R1 fixes (built, deployed 2026-11-20)
 
@@ -91,7 +93,7 @@ Integration on the merged tree:
 
 CI commands on the merged tree (local, no database): backend 1691 passed / 251 DB-gated skips (they run only in CI), tools 107 passed, frontend 961 passed (99 files), ruff, mypy and eslint clean, build OK.
 
-**Deploy (not done):** thin backend layer and frontend rebuild via the usual path, backend first (an old backend answers 422 to a prefs PUT carrying a new toggle key, since `PushToggles` is `extra=forbid`). The backend runs a single uvicorn process, so there is one reaper and the in-memory start-notice fallback cannot be split across workers. Rollback: the previous images; an older backend reading prefs saved with the new keys falls back to defaults (quiet hours off) until the user saves again, with no data lost.
+**Deploy (done 2026-11-20 as `d921ccd`, with R2; plan as written):** thin backend layer and frontend rebuild via the usual path, backend first (an old backend answers 422 to a prefs PUT carrying a new toggle key, since `PushToggles` is `extra=forbid`). The backend runs a single uvicorn process, so there is one reaper and the in-memory start-notice fallback cannot be split across workers. Rollback: the previous images; an older backend reading prefs saved with the new keys falls back to defaults (quiet hours off) until the user saves again, with no data lost.
 
 ## 0f - 2026-11-19 features wave 3 (deployed 2026-11-19)
 
