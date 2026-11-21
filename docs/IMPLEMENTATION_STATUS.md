@@ -28,6 +28,8 @@ Thin deploy: no migration, no env var, no VM step (alembic head stays `0056_ocpp
 - **Copy.** The outage-expiry notice no longer contains an em-dash. `LAST_UPDATED` in `frontend/src/utils/legal.js` is now `20 November 2026` (idle-fee and no-show-fee copy went live 2026-11-20).
 - **mypy.** `routers/ocpp.py` and `services/ocpp_adapter.py` are in the pyproject mypy files list (the stale "39 files" comment in ci.yml is not edited).
 
+CI on PR #161 (`5b5a4db`): all 7 checks green; backend 2223 passed and 1 skipped (the long-standing skip), so the DB-gated lock-order and savepoint tests ran. Main CI on the merge `61b7113` is green too. Deployed 2026-11-21: see DEPLOYMENT.md "Batch 5 hardening".
+
 ## 0h - 2026-11-19 wave 4 R2 features (built, deployed 2026-11-20)
 
 Branch `release/2026-11-19-r2`, at `4fd4a70`, stacked on R1 (`release/2026-11-19-r1` at `8402c41`, PR #156, merged as `254a542`), so the deploy of R2 shipped R1 as well (R1 has no migration). R2 is PR #158 (merge `7fd62bb`). Seven lane branches merged with `--no-ff` in this order: `feat/w4-dur-notice-state`, `feat/w4-c1-idle-fee`, `feat/w4-f8v-vehicle-email`, `feat/w4-f6r-ready-by`, `feat/w4-c9-member-price`, `feat/w4-c8-approval`, `feat/w4-c2-ocpp-csms`. Every lane wrote its migration against `0050_charge_routines`; the integrator rechained them (`ccbd096`) into one line with a single head and no branch point:
